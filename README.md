@@ -1,5 +1,7 @@
 # NOVA - SN68
 
+> Competitive small-molecule miners: see [docs/COMPOUND_MINER.md](docs/COMPOUND_MINER.md) for the target-conditioned mechanism-0 search, exact validity gates, Boltz scoring, and live checkpoint workflow.
+
 ## High-throughput ML-driven drug screening.
 
 ### Accelerating drug discovery, powered by Bittensor.

@@ -34,6 +34,7 @@ from utils import (
 )
 from utils.btdr import QuicknetBittensorDrandTimelock
 from combinatorial_db.reactions import get_random_reaction_product
+from compound_miner.provider import from_challenge
 
 '''
 This example miner contains all logic necessary for submitting a response to the chain
@@ -233,13 +234,15 @@ def mutate_sequence(
     return "".join(seq_list)
 
 
-def dummy_get_candidate_products() -> Tuple[str, str]:
+def dummy_get_candidate_products(challenge_params: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """
     Returns a dummy candidate small molecule and nanobody.
     If n>1, items should be separated by ',' e.g. 'rxn:3:49485:2099:70633,rxn:3:49485:2099:70634'
     """
     try:
-        candidate_small_molecules = get_random_small_molecule() #'rxn:3:49485:2099:70633'
+        if challenge_params is None:
+            raise ValueError("challenge parameters are required for competitive molecule selection")
+        candidate_small_molecules = from_challenge(challenge_params)
     except Exception as e:
         bt.logging.error(f"Error getting candidate small molecule: {e}")
         candidate_small_molecules = "~"
@@ -395,7 +398,7 @@ async def run_miner(config: argparse.Namespace) -> None:
     bt.logging.info(f"Challenge params: {challenge_params}")
 
     # Update state with your results and other relevant info here
-    candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products()
+    candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
     state['candidate_small_molecules'] = candidate_small_molecules
     state['candidate_nanobodies'] = candidate_nanobodies
     state['last_submitted_block'] = current_block
@@ -423,7 +426,7 @@ async def run_miner(config: argparse.Namespace) -> None:
                 )
 
                 # Update state with your results and other relevant info here
-                candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products()
+                candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
                 state['candidate_small_molecules'] = candidate_small_molecules
                 state['candidate_nanobodies'] = candidate_nanobodies
                 state['last_submitted_block'] = current_block
@@ -437,7 +440,7 @@ async def run_miner(config: argparse.Namespace) -> None:
                 blocks_remaining = epoch_length - (current_block % epoch_length)
                 if (blocks_remaining > 20) and (current_block - state['last_submitted_block'] > 50):
                     bt.logging.info(f"Waiting for epoch to end... {blocks_remaining} blocks remaining.")
-                    candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products()
+                    candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
                     state['candidate_small_molecules'] = candidate_small_molecules
                     state['candidate_nanobodies'] = candidate_nanobodies
                     state['last_submitted_block'] = current_block

@@ -5,3 +5,9 @@ venv/
 *.log
 *.log.*
 combinatorial_db/molecules.sqlite
+artifacts/
+archives/
+history/
+models/
+*.sqlite-shm
+*.sqlite-wal
