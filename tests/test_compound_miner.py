@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import sqlite3
@@ -43,8 +44,7 @@ from tools.score_boltz_batch import balanced_partitions, record_key
 from neurons.miner.miner import initial_epoch_schedule
 
 
-@pytest.mark.asyncio
-async def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monkeypatch):
+def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monkeypatch):
     class FakeSubtensor:
         def __init__(self):
             self.blocks = iter((987, 1000))
@@ -58,8 +58,8 @@ async def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monke
         sleeps.append(seconds)
 
     monkeypatch.setattr("neurons.miner.miner.asyncio.sleep", fake_sleep)
-    current, boundary, remaining = await initial_epoch_schedule(
-        FakeSubtensor(), epoch_length=100
+    current, boundary, remaining = asyncio.run(
+        initial_epoch_schedule(FakeSubtensor(), epoch_length=100)
     )
 
     assert sleeps == [156]
@@ -67,8 +67,7 @@ async def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monke
     assert remaining == 100
 
 
-@pytest.mark.asyncio
-async def test_initial_epoch_schedule_keeps_mid_epoch_budget(monkeypatch):
+def test_initial_epoch_schedule_keeps_mid_epoch_budget(monkeypatch):
     class FakeSubtensor:
         async def get_current_block(self):
             return 940
@@ -77,8 +76,8 @@ async def test_initial_epoch_schedule_keeps_mid_epoch_budget(monkeypatch):
         raise AssertionError("mid-epoch startup must not sleep")
 
     monkeypatch.setattr("neurons.miner.miner.asyncio.sleep", unexpected_sleep)
-    current, boundary, remaining = await initial_epoch_schedule(
-        FakeSubtensor(), epoch_length=100
+    current, boundary, remaining = asyncio.run(
+        initial_epoch_schedule(FakeSubtensor(), epoch_length=100)
     )
 
     assert (current, boundary, remaining) == (940, 900, 60)
