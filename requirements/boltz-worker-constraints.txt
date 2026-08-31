@@ -5,3 +5,7 @@ torch==2.6.0
 numpy==1.26.4
 rdkit==2024.9.4
 pandas==2.2.3
+cuequivariance==0.6.1
+cuequivariance-torch==0.6.1
+cuequivariance-ops-cu12==0.6.1
+cuequivariance-ops-torch-cu12==0.6.1

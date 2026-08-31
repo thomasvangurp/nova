@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
 import math
@@ -147,6 +148,7 @@ def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict
         affinity_mw_correction=True,
         override=False,
         num_workers=0,
+        preprocessing_threads=inference["preprocessing_threads"],
     )
     elapsed = time.monotonic() - started
     results = []
@@ -184,6 +186,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=128)
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--shards-per-gpu", type=int, default=1)
+    parser.add_argument(
+        "--preprocessing-threads",
+        type=int,
+        default=1,
+        help="CPU input-packing workers per GPU scoring process",
+    )
     parser.add_argument("--partition-strategy", choices=("lpt", "roundrobin"), default="lpt")
     parser.add_argument("--msa", type=Path, default=Path("data/msa_files/P40261.a3m"))
     parser.add_argument("--output", type=Path, required=True)
@@ -250,15 +258,19 @@ def main() -> None:
         "affinity_only_output": not args.full_structure_output,
         "compress_pre_affinity": args.compress_pre_affinity,
         "in_memory_affinity": not args.disk_affinity_handoff,
+        "preprocessing_threads": args.preprocessing_threads,
     }
     started = time.monotonic()
     try:
         context = mp.get_context("spawn")
-        with context.Pool(len(worker_gpus)) as pool:
-            chunks = pool.map(
+        # ProcessPoolExecutor workers are non-daemonic, unlike
+        # multiprocessing.Pool workers. Boltz can therefore use its own CPU
+        # preprocessing pool inside each GPU worker when requested.
+        with ProcessPoolExecutor(max_workers=len(worker_gpus), mp_context=context) as pool:
+            chunks = list(pool.map(
                 score_worker,
                 [(index, gpu, partition, scratch, str(args.msa.resolve()), inference) for index, (gpu, partition) in enumerate(zip(worker_gpus, partitions)) if partition],
-            )
+            ))
         results = [item for chunk in chunks for item in chunk]
         payload = {
             "reaction": args.reaction,

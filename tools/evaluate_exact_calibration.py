@@ -113,31 +113,33 @@ def evaluate(
     public_reduced = [
         row for row in reduced if str(row.get("inchikey") or row["smiles"]) not in exact_key_set
     ]
-    base_x = np.vstack(
-        [
-            np.concatenate(
-                (
-                    molecule_features(row["smiles"], fingerprint_size=2048),
-                    np.eye(5, dtype=np.float32)[int(row["reaction"]) - 1],
+    predicted_reduced: np.ndarray | None = None
+    if public_reduced:
+        base_x = np.vstack(
+            [
+                np.concatenate(
+                    (
+                        molecule_features(row["smiles"], fingerprint_size=2048),
+                        np.eye(5, dtype=np.float32)[int(row["reaction"]) - 1],
+                    )
                 )
-            )
-            for row in public_reduced
-        ]
-    )
-    base_y = np.asarray([row["score"] for row in public_reduced], dtype=np.float64)
-    base = _tree(seed=771, trees=max(512, trees), minimum_leaf=2).fit(base_x, base_y)
-    predicted_reduced = base.predict(chemistry)
+                for row in public_reduced
+            ]
+        )
+        base_y = np.asarray([row["score"] for row in public_reduced], dtype=np.float64)
+        base = _tree(seed=771, trees=max(512, trees), minimum_leaf=2).fit(base_x, base_y)
+        predicted_reduced = base.predict(chemistry)
 
-    names = (
+    names = [
         "raw_reduced",
         "affine_reduced",
         "exact_morgan",
         "exact_tanimoto_kernel",
         "reduced_residual_morgan",
         "reduced_residual_tanimoto_kernel",
-        "diffusion_free_reduced",
-        "diffusion_free_residual_morgan",
-    )
+    ]
+    if predicted_reduced is not None:
+        names.extend(("diffusion_free_reduced", "diffusion_free_residual_morgan"))
     per_repeat: dict[str, list[dict[str, float]]] = {name: [] for name in names}
     prediction_sums = {name: np.zeros(len(exact), dtype=np.float64) for name in names}
 
@@ -188,19 +190,20 @@ def evaluate(
                 + residual_mean
             )
 
-            student_calibrator = Ridge(alpha=1e-3).fit(
-                _linear_features(predicted_reduced[train], reactions[train]), truth[train]
-            )
-            fold_predictions["diffusion_free_reduced"][validation] = student_calibrator.predict(
-                _linear_features(predicted_reduced[validation], reactions[validation])
-            )
+            if predicted_reduced is not None:
+                student_calibrator = Ridge(alpha=1e-3).fit(
+                    _linear_features(predicted_reduced[train], reactions[train]), truth[train]
+                )
+                fold_predictions["diffusion_free_reduced"][validation] = student_calibrator.predict(
+                    _linear_features(predicted_reduced[validation], reactions[validation])
+                )
 
-            student_correction = _tree(seed + 2, trees, minimum_leaf=4).fit(
-                chemistry[train], truth[train] - predicted_reduced[train]
-            )
-            fold_predictions["diffusion_free_residual_morgan"][validation] = (
-                predicted_reduced[validation] + student_correction.predict(chemistry[validation])
-            )
+                student_correction = _tree(seed + 2, trees, minimum_leaf=4).fit(
+                    chemistry[train], truth[train] - predicted_reduced[train]
+                )
+                fold_predictions["diffusion_free_residual_morgan"][validation] = (
+                    predicted_reduced[validation] + student_correction.predict(chemistry[validation])
+                )
 
         for name in names:
             metrics = _metrics(truth, fold_predictions[name], top_k, budget)

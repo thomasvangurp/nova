@@ -16,6 +16,18 @@ python -m pip install \
 # installed torchvision eagerly.
 python -m pip uninstall -y torchvision torchaudio || true
 
+# Populate the shared cache once. Starting multiple score workers against an
+# empty cache races two multi-gigabyte downloads to the same destination.
+if [[ "${NOVA_PREFETCH_BOLTZ_CACHE:-1}" == "1" ]]; then
+  python - <<'PY'
+from pathlib import Path
+
+from boltz.main import download_boltz2
+
+download_boltz2(Path.home() / ".boltz")
+PY
+fi
+
 python - <<'PY'
 import cuequivariance_torch
 import pandas
