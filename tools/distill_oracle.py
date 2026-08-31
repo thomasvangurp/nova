@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import gzip
 import hashlib
 import json
 import sys
@@ -34,6 +36,24 @@ def _deterministic_public_limit(examples, limit):
         examples,
         key=lambda value: hashlib.sha256(f"{value.target}\0{value.smiles}".encode()).digest(),
     )[:limit]
+
+
+def _public_targets(paths: list[Path], limit: int | None) -> dict[str, str]:
+    rows: dict[tuple[str, str], tuple[bytes, str]] = {}
+    for path in paths:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", newline="") as handle:
+            for row in csv.DictReader(handle):
+                target = row.get("target_accession", "")
+                sequence = row.get("protein_sequence", "")
+                smiles = row.get("canonical_smiles", "")
+                if target and sequence and smiles:
+                    digest = hashlib.sha256(f"{target}\0{smiles}".encode()).digest()
+                    rows[(target, smiles)] = (digest, sequence)
+    selected = sorted(rows.items(), key=lambda value: value[1][0])
+    if limit:
+        selected = selected[:limit]
+    return {target: value[1] for (target, _), value in selected}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -137,12 +157,7 @@ def main() -> None:
         targets = dict(TARGETS)
         if args.target_json:
             targets.update(json.loads(args.target_json.read_text()))
-        public = []
-        for path in args.public_csv:
-            public.extend(examples_from_public_csv(path))
-        for example in _deterministic_public_limit(public, args.public_limit):
-            if example.protein_sequence:
-                targets[example.target] = example.protein_sequence
+        targets.update(_public_targets(args.public_csv, args.public_limit))
         for value in args.target:
             accession, sequence = value.split("=", 1)
             targets[accession] = sequence

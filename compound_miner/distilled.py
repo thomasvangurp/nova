@@ -207,7 +207,12 @@ def cache_esm2_embeddings(
     with torch.inference_mode():
         for start in range(0, len(identifiers), batch_size):
             subset = identifiers[start : start + batch_size]
-            truncated = {identifier: targets[identifier][:1022] for identifier in subset}
+            truncated = {
+                identifier: "".join(
+                    value for value in targets[identifier].upper() if value in AA_INDEX
+                )[:1022]
+                for identifier in subset
+            }
             _, _, tokens = converter([(identifier, truncated[identifier]) for identifier in subset])
             output_values = model(tokens.to(selected_device), repr_layers=[12], return_contacts=False)["representations"][12]
             for row, identifier in enumerate(subset):

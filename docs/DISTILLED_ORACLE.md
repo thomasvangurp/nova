@@ -48,6 +48,22 @@ Spearman 0.596 and MAE 0.0146. Reduced labels are therefore useful for broad
 pretraining but cannot be treated as ground truth. Exact labels must anchor
 calibration and every frozen promotion holdout.
 
+A larger balanced check subsequently scored 65 molecules exactly, 13 from each
+reaction. Paired reduced-versus-exact fidelity was Spearman 0.791 overall, but
+varied from 0.973 on reaction 2 to 0.291 on reaction 5. With all 65 exact
+molecules and their scaffolds embargoed from training, the interaction adapter
+trained on the remaining 320 rows failed: exact Spearman 0.094 and top-20 recall
+0.55 at a 40/65 budget. Raw PSICHIC ranking was better at 0.329 and 0.90. The
+current adapter is therefore rejected for exact-score acquisition despite its
+good reduced-label scaffold holdout.
+
+Using 40 exact rows for calibration and reserving 25 exact rows for a scaffold-
+embargoed test still left the interaction adapter at Spearman 0.160. An offline
+Morgan-fingerprint ExtraTrees control reached 0.522 on that same small test,
+suggesting ligand topology plus exact calibration is currently more useful than
+the frozen interaction fingerprint alone. This 25-row result is a hypothesis
+for the next model arm, not promotion evidence.
+
 A deliberately small universal-base smoke train used 5,000 balanced BindingDB
 rows, held out 1,053 rows by entire protein target, and ran one public pretrain
 epoch. It reached target-holdout affinity Spearman 0.313 (MAE 1.60 pAffinity).
@@ -59,7 +75,13 @@ cached ESM features, and a proper multi-epoch GPU train. On a four-worker Mac
 CPU the complete smoke train took 106 seconds, predominantly RDKit packing
 rather than model inference.
 
-On RTX 4090, the independently timed warmed PSICHIC feature path processed 131 molecules at 98.4 molecules/s, including CPU ligand featurization. The warmed reduced Boltz path processed about 0.41 molecules/s on the matched workload. The representation path is therefore about 239 times faster before the negligible adapter head. The uncertainty-aware adapter alone exceeded 175,000 molecules/s on CPU for this small batch.
+On RTX 4090, the independently timed combined PSICHIC path processed 402
+molecules at 137.9 molecules/s after a separate warmup, including CPU ligand
+featurization. The warmed reduced Boltz path processed about 0.41 molecules/s
+on the matched workload. The representation path is therefore about 335 times
+faster before the negligible adapter head. Startup was reported separately at
+9.36 seconds. The uncertainty-aware adapter alone exceeded 175,000 molecules/s
+on CPU for the smaller bootstrap batch.
 
 ## Accuracy gates
 
