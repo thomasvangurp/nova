@@ -24,6 +24,9 @@ class BoltzWriter(BasePredictionWriter):
         output_format: Literal["pdb", "mmcif"] = "mmcif",
         boltz2: bool = False,
         write_embeddings: bool = False,
+        affinity_only: bool = False,
+        compress_pre_affinity: bool = True,
+        structure_sink: dict[str, StructureV2] | None = None,
     ) -> None:
         """Initialize the writer.
 
@@ -45,6 +48,9 @@ class BoltzWriter(BasePredictionWriter):
         self.boltz2 = boltz2
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.write_embeddings = write_embeddings
+        self.affinity_only = affinity_only
+        self.compress_pre_affinity = compress_pre_affinity
+        self.structure_sink = structure_sink
 
     def write_on_batch_end(
         self,
@@ -87,12 +93,6 @@ class BoltzWriter(BasePredictionWriter):
             else:
                 structure: Structure = Structure.load(path)
 
-            # Compute chain map with masked removed, to be used later
-            chain_map = {}
-            for i, mask in enumerate(structure.mask):
-                if mask:
-                    chain_map[len(chain_map)] = i
-
             # Remove masked chains completely
             structure = structure.remove_invalid_chains()
 
@@ -134,18 +134,6 @@ class BoltzWriter(BasePredictionWriter):
                         interfaces=interfaces,
                     )
 
-                # Update chain info
-                chain_info = []
-                for chain in new_structure.chains:
-                    old_chain_idx = chain_map[chain["asym_id"]]
-                    old_chain_info = record.chains[old_chain_idx]
-                    new_chain_info = replace(
-                        old_chain_info,
-                        chain_id=int(chain["asym_id"]),
-                        valid=True,
-                    )
-                    chain_info.append(new_chain_info)
-
                 # Save the structure
                 struct_dir = self.output_dir / record.id
                 struct_dir.mkdir(exist_ok=True)
@@ -157,6 +145,16 @@ class BoltzWriter(BasePredictionWriter):
 
                 # Create path name
                 outname = f"{record.id}_model_{idx_to_rank[model_idx]}"
+
+                if self.affinity_only:
+                    if self.boltz2 and record.affinity and idx_to_rank[model_idx] == 0:
+                        if self.structure_sink is not None:
+                            self.structure_sink[record.id] = new_structure
+                        else:
+                            path = struct_dir / f"pre_affinity_{record.id}.npz"
+                            save = np.savez_compressed if self.compress_pre_affinity else np.savez
+                            save(path, **asdict(new_structure))
+                    continue
 
                 # Save the structure
                 if self.output_format == "pdb":
@@ -176,8 +174,11 @@ class BoltzWriter(BasePredictionWriter):
                     np.savez_compressed(path, **asdict(new_structure))
 
                 if self.boltz2 and record.affinity and idx_to_rank[model_idx] == 0:
-                    path = struct_dir / f"pre_affinity_{record.id}.npz"
-                    np.savez_compressed(path, **asdict(new_structure))
+                    if self.structure_sink is not None:
+                        self.structure_sink[record.id] = new_structure
+                    else:
+                        path = struct_dir / f"pre_affinity_{record.id}.npz"
+                        np.savez_compressed(path, **asdict(new_structure))
                     np.array(atoms["coords"][:, None], dtype=Coords)
 
                 # Save confidence summary

@@ -82,6 +82,24 @@ def _load_metrics(prediction_directory: Path) -> dict[str, Any]:
     return result
 
 
+def balanced_partitions(
+    records: list[dict[str, Any]], workers: int
+) -> list[list[dict[str, Any]]]:
+    """Deterministic LPT scheduling for the quadratic token workload."""
+    partitions: list[list[dict[str, Any]]] = [[] for _ in range(workers)]
+    loads = [0 for _ in range(workers)]
+
+    def cost(record: dict[str, Any]) -> int:
+        ligand_tokens = int(record["heavy_atoms"])
+        return (258 + ligand_tokens) ** 2 + (200 + ligand_tokens) ** 2
+
+    for record in sorted(records, key=lambda item: (-cost(item), str(item["name"]))):
+        worker = min(range(workers), key=lambda index: (loads[index], index))
+        partitions[worker].append(record)
+        loads[worker] += cost(record)
+    return partitions
+
+
 def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict[str, Any]]) -> list[dict[str, Any]]:
     shard, gpu, records, scratch_root, msa_path, inference = arguments
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -109,11 +127,16 @@ def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict
         data=str(inputs),
         out_dir=str(outputs),
         recycling_steps=inference["recycling_steps"],
+        recycling_steps_affinity=inference["recycling_steps_affinity"],
         sampling_steps=inference["sampling_steps"],
         diffusion_samples=inference["diffusion_samples"],
         sampling_steps_affinity=inference["sampling_steps_affinity"],
         diffusion_samples_affinity=inference["diffusion_samples_affinity"],
         skip_affinity_structure=inference["skip_affinity_structure"],
+        skip_affinity_confidence=inference["skip_affinity_confidence"],
+        affinity_only_output=inference["affinity_only_output"],
+        compress_pre_affinity=inference["compress_pre_affinity"],
+        in_memory_affinity=inference["in_memory_affinity"],
         output_format="mmcif",
         seed=68,
         affinity_mw_correction=True,
@@ -137,9 +160,11 @@ def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict
                 "scorer": (
                     "boltz-2.2.1-r"
                     f"{inference['recycling_steps']}-s{inference['sampling_steps']}"
-                    f"-d{inference['diffusion_samples']}-as{inference['sampling_steps_affinity']}"
+                    f"-d{inference['diffusion_samples']}-ar{inference['recycling_steps_affinity']}"
+                    f"-as{inference['sampling_steps_affinity']}"
                     f"-ad{inference['diffusion_samples_affinity']}"
                     f"-skip{int(inference['skip_affinity_structure'])}"
+                    f"-skipconf{int(inference['skip_affinity_confidence'])}"
                 ),
                 "elapsed_seconds": elapsed / max(1, len(records)),
             }
@@ -154,15 +179,23 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=128)
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--shards-per-gpu", type=int, default=1)
+    parser.add_argument("--partition-strategy", choices=("lpt", "roundrobin"), default="lpt")
     parser.add_argument("--msa", type=Path, default=Path("data/msa_files/P40261.a3m"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--records-json", type=Path, help="Reuse the exact molecule set from an earlier score file")
+    parser.add_argument("--preserve-record-order", action="store_true")
     parser.add_argument("--recycling-steps", type=int, default=3)
+    parser.add_argument("--recycling-steps-affinity", type=int, default=5)
     parser.add_argument("--sampling-steps", type=int, default=100)
     parser.add_argument("--diffusion-samples", type=int, default=1)
     parser.add_argument("--sampling-steps-affinity", type=int, default=100)
     parser.add_argument("--diffusion-samples-affinity", type=int, default=3)
     parser.add_argument("--skip-affinity-structure", action="store_true")
+    parser.add_argument("--skip-affinity-confidence", action="store_true")
+    parser.add_argument("--full-structure-output", action="store_true")
+    parser.add_argument("--compress-pre-affinity", action="store_true")
+    parser.add_argument("--scratch-root", type=Path, help="Prefer a RAM-backed directory such as /dev/shm")
+    parser.add_argument("--disk-affinity-handoff", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
     args = parser.parse_args()
     if args.records_json:
@@ -171,7 +204,8 @@ def main() -> None:
         records = []
         for reaction in reactions:
             reaction_records = [item for item in source_records if int(item["reaction"]) == reaction]
-            reaction_records.sort(key=lambda item: (-float(item["score"]), str(item["name"])))
+            if not args.preserve_record_order:
+                reaction_records.sort(key=lambda item: (-float(item["score"]), str(item["name"])))
             records.extend(reaction_records[: args.limit])
         for record in records:
             if not isinstance(record["components"], str):
@@ -182,15 +216,26 @@ def main() -> None:
         raise SystemExit("archive shortlist is empty")
     gpus = [int(value) for value in args.gpus.split(",")]
     worker_gpus = [gpu for gpu in gpus for _ in range(args.shards_per_gpu)]
-    partitions = [records[index:: len(worker_gpus)] for index in range(len(worker_gpus))]
-    scratch = tempfile.mkdtemp(prefix="nova-boltz-")
+    if args.partition_strategy == "lpt":
+        partitions = balanced_partitions(records, len(worker_gpus))
+    else:
+        partitions = [records[index:: len(worker_gpus)] for index in range(len(worker_gpus))]
+    scratch = tempfile.mkdtemp(
+        prefix="nova-boltz-",
+        dir=str(args.scratch_root) if args.scratch_root else None,
+    )
     inference = {
         "recycling_steps": args.recycling_steps,
+        "recycling_steps_affinity": args.recycling_steps_affinity,
         "sampling_steps": args.sampling_steps,
         "diffusion_samples": args.diffusion_samples,
         "sampling_steps_affinity": args.sampling_steps_affinity,
         "diffusion_samples_affinity": args.diffusion_samples_affinity,
         "skip_affinity_structure": args.skip_affinity_structure,
+        "skip_affinity_confidence": args.skip_affinity_confidence,
+        "affinity_only_output": not args.full_structure_output,
+        "compress_pre_affinity": args.compress_pre_affinity,
+        "in_memory_affinity": not args.disk_affinity_handoff,
     }
     started = time.monotonic()
     try:
@@ -207,6 +252,7 @@ def main() -> None:
             "wall_seconds": time.monotonic() - started,
             "gpus": gpus,
             "shards_per_gpu": args.shards_per_gpu,
+            "partition_strategy": args.partition_strategy,
             "inference": inference,
             "scores": results,
         }

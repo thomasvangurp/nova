@@ -626,8 +626,11 @@ class Boltz2(LightningModule):
                 if coords_affinity.ndim == 3:
                     coords_affinity = coords_affinity[:, None]
             else:
-                argsort = torch.argsort(dict_out["iptm"], descending=True)
-                best_idx = argsort[0].item()
+                best_idx = (
+                    torch.argsort(dict_out["iptm"], descending=True)[0].item()
+                    if "iptm" in dict_out
+                    else 0
+                )
                 coords_affinity = dict_out["sample_atom_coords"].detach()[best_idx][
                     None, None
                 ]

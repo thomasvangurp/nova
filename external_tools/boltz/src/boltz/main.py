@@ -817,11 +817,13 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     devices: int = 1,
     accelerator: str = "gpu",
     recycling_steps: int = 3,
+    recycling_steps_affinity: int = 5,
     sampling_steps: int = 200,
     diffusion_samples: int = 1,
     sampling_steps_affinity: int = 200,
     diffusion_samples_affinity: int = 3,
     skip_affinity_structure: bool = False,
+    skip_affinity_confidence: bool = False,
     max_parallel_samples: Optional[int] = None,
     step_scale: Optional[float] = None,
     write_full_pae: bool = False,
@@ -847,6 +849,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     num_subsampled_msa: int = 1024,
     no_kernels: bool = False,
     write_embeddings: bool = False,
+    affinity_only_output: bool = False,
+    compress_pre_affinity: bool = True,
+    in_memory_affinity: bool = False,
 ) -> None:
     """Run predictions with Boltz."""
     # If cpu, write a friendly warning
@@ -1014,12 +1019,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     )
 
     # Create prediction writer
+    affinity_structures = {} if in_memory_affinity else None
     pred_writer = BoltzWriter(
         data_dir=processed.targets_dir,
         output_dir=out_dir / "predictions",
         output_format=output_format,
         boltz2=model == "boltz2",
         write_embeddings=write_embeddings,
+        affinity_only=affinity_only_output,
+        compress_pre_affinity=compress_pre_affinity,
+        structure_sink=affinity_structures,
     )
 
     # Set up trainer
@@ -1137,10 +1146,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             extra_mols_dir=processed.extra_mols_dir,
             override_method="other",
             affinity=True,
+            structure_overrides=affinity_structures,
         )
 
         predict_affinity_args = {
-            "recycling_steps": 5,
+            "recycling_steps": recycling_steps_affinity,
             "sampling_steps": sampling_steps_affinity,
             "diffusion_samples": diffusion_samples_affinity,
             "max_parallel_samples": 1,
@@ -1176,6 +1186,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             skip_run_structure=skip_affinity_structure,
         )
         model_module.eval()
+        if skip_affinity_confidence:
+            # With one diffusion sample confidence can only select index zero,
+            # so running the full confidence head is redundant.
+            model_module.confidence_prediction = False
 
         trainer.callbacks[0] = pred_writer
         trainer.predict(

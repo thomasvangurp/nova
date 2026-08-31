@@ -1,5 +1,9 @@
 # Competitive mechanism-0 molecule miner
 
+The experimental diffusion-free Boltz cascade is documented in
+[DISTILLED_ORACLE.md](DISTILLED_ORACLE.md). It is not promoted until it passes
+the frozen 1% teacher-budget and constrained-decision gates described there.
+
 The miner separates broad exploration from expensive structural scoring:
 
 1. Public P40261 leaderboard observations train a target-conditioned proxy on molecular fingerprints, descriptors, reagent-role effects, and reagent-pair effects.

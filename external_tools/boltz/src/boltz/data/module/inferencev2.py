@@ -32,6 +32,8 @@ def load_input(
     template_dir: Optional[Path] = None,
     extra_mols_dir: Optional[Path] = None,
     affinity: bool = False,
+    structure_override: Optional[StructureV2] = None,
+    msa_cache: Optional[dict[int, MSA]] = None,
 ) -> Input:
     """Load the given input data.
 
@@ -59,7 +61,9 @@ def load_input(
 
     """
     # Load the structure
-    if affinity:
+    if structure_override is not None:
+        structure = structure_override
+    elif affinity:
         structure = StructureV2.load(
             target_dir / record.id / f"pre_affinity_{record.id}.npz"
         )
@@ -71,7 +75,12 @@ def load_input(
         msa_id = chain.msa_id
         # Load the MSA for this chain, if any
         if msa_id != -1:
-            msa = MSA.load(msa_dir / f"{msa_id}.npz")
+            if msa_cache is not None and msa_id in msa_cache:
+                msa = msa_cache[msa_id]
+            else:
+                msa = MSA.load(msa_dir / f"{msa_id}.npz")
+                if msa_cache is not None:
+                    msa_cache[msa_id] = msa
             msas[chain.chain_id] = msa
 
     # Load templates
@@ -168,6 +177,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         extra_mols_dir: Optional[Path] = None,
         override_method: Optional[str] = None,
         affinity: bool = False,
+        structure_overrides: Optional[dict[str, StructureV2]] = None,
     ) -> None:
         """Initialize the training dataset.
 
@@ -200,6 +210,8 @@ class PredictionDataset(torch.utils.data.Dataset):
         self.extra_mols_dir = extra_mols_dir
         self.override_method = override_method
         self.affinity = affinity
+        self.structure_overrides = structure_overrides or {}
+        self.msa_cache: dict[int, MSA] = {}
         if self.affinity:
             self.cropper = AffinityCropper()
 
@@ -224,6 +236,8 @@ class PredictionDataset(torch.utils.data.Dataset):
             template_dir=self.template_dir,
             extra_mols_dir=self.extra_mols_dir,
             affinity=self.affinity,
+            structure_override=self.structure_overrides.get(record.id),
+            msa_cache=self.msa_cache,
         )
 
         # Tokenize structure
@@ -329,6 +343,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
         extra_mols_dir: Optional[Path] = None,
         override_method: Optional[str] = None,
         affinity: bool = False,
+        structure_overrides: Optional[dict[str, StructureV2]] = None,
     ) -> None:
         """Initialize the DataModule.
 
@@ -365,6 +380,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
         self.extra_mols_dir = extra_mols_dir
         self.override_method = override_method
         self.affinity = affinity
+        self.structure_overrides = structure_overrides
 
     def predict_dataloader(self) -> DataLoader:
         """Get the training dataloader.
@@ -385,6 +401,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
             extra_mols_dir=self.extra_mols_dir,
             override_method=self.override_method,
             affinity=self.affinity,
+            structure_overrides=self.structure_overrides,
         )
         return DataLoader(
             dataset,
@@ -429,5 +446,5 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
                 "record",
                 "affinity_mw",
             ]:
-                batch[key] = batch[key].to(device)
+                batch[key] = batch[key].to(device, non_blocking=True)
         return batch

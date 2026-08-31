@@ -9,5 +9,7 @@ artifacts/
 archives/
 history/
 models/
+data/public/*.csv
+data/public/*.csv.gz
 *.sqlite-shm
 *.sqlite-wal
