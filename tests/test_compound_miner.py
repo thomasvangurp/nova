@@ -48,7 +48,7 @@ from tools.run_epoch_search import (
 )
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
 from tools.score_boltz_batch import balanced_partitions, load_records, record_key
-from neurons.miner.miner import initial_epoch_schedule
+from neurons.miner.miner import _checkpoint_changed, initial_epoch_schedule
 
 
 def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monkeypatch):
@@ -88,6 +88,20 @@ def test_initial_epoch_schedule_keeps_mid_epoch_budget(monkeypatch):
     )
 
     assert (current, boundary, remaining) == (940, 900, 60)
+
+
+def test_unchanged_exact_checkpoint_preserves_commitment_slot():
+    checkpoint = "rxn:1:1:2,rxn:1:3:4"
+    state = {"last_committed_small_molecules": checkpoint}
+
+    assert not _checkpoint_changed(state, checkpoint)
+    assert _checkpoint_changed(state, "rxn:1:5:6,rxn:1:7:8")
+
+
+def test_placeholder_remains_eligible_for_nanobody_only_updates():
+    state = {"last_committed_small_molecules": "~"}
+
+    assert _checkpoint_changed(state, "~")
 
 
 def test_database_is_immutable(monkeypatch):

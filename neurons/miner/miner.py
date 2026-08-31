@@ -401,7 +401,7 @@ async def initial_epoch_schedule(
 # 5. RESPONSE SUBMISSION LOGIC
 # ----------------------------------------------------------------------------
 
-async def submit_response(state: Dict[str, Any]) -> None:
+async def submit_response(state: Dict[str, Any]) -> bool:
     """
     Encrypts and submits the current candidate product as a chain commitment and uploads
     the encrypted response to GitHub. If the chain accepts the commitment, we finalize it.
@@ -415,7 +415,7 @@ async def submit_response(state: Dict[str, Any]) -> None:
     candidate_nanobodies = state['candidate_nanobodies']
     if not candidate_small_molecules and not candidate_nanobodies:
         bt.logging.warning("No candidate small molecules or nanobodies to submit")
-        return
+        return False
 
     bt.logging.info(f"Starting submission process for small molecules: {candidate_small_molecules} and nanobodies: {candidate_nanobodies}")
     
@@ -453,7 +453,7 @@ async def submit_response(state: Dict[str, Any]) -> None:
         bt.logging.info(f"Chain commitment status: {commitment_status}")
     except MetadataError:
         bt.logging.info("Too soon to commit again. Will keep looking for better candidates.")
-        return
+        return False
 
     # 4) If chain commitment success, upload to GitHub
     if commitment_status:
@@ -467,6 +467,40 @@ async def submit_response(state: Dict[str, Any]) -> None:
                 bt.logging.error(f"Failed to upload file to GitHub for {commit_content}")
         except Exception as e:
             bt.logging.error(f"Failed to upload file for {commit_content}: {e}")
+        # The chain rate limit has been consumed even if the subsequent upload
+        # failed, so callers must not immediately retry the same checkpoint.
+        return True
+    return False
+
+
+def _checkpoint_changed(state: Dict[str, Any], candidate_small_molecules: str) -> bool:
+    """Return whether a molecule checkpoint deserves another chain slot.
+
+    Search publishes progressively better exact checkpoints during an epoch.
+    Recommitting an unchanged molecule list can consume the pallet's cooldown
+    immediately before a better checkpoint appears.  The placeholder ``~`` is
+    exempt because nanobody-only updates still need to remain possible.
+    """
+    return (
+        candidate_small_molecules == "~"
+        or candidate_small_molecules != state.get("last_committed_small_molecules")
+    )
+
+
+async def _submit_current_candidates(state: Dict[str, Any]) -> bool:
+    """Submit changed candidates and update cooldown state only on chain success."""
+    candidate_small_molecules = state["candidate_small_molecules"]
+    if not _checkpoint_changed(state, candidate_small_molecules):
+        bt.logging.debug(
+            "Exact molecule checkpoint is unchanged; preserving the next "
+            "commitment slot for a better anytime checkpoint."
+        )
+        return False
+    committed = await submit_response(state)
+    if committed:
+        state["last_submitted_block"] = await state["subtensor"].get_current_block()
+        state["last_committed_small_molecules"] = candidate_small_molecules
+    return committed
 
 
 # ----------------------------------------------------------------------------
@@ -512,6 +546,7 @@ async def run_miner(config: argparse.Namespace) -> None:
         'candidate_small_molecules': None,
         'candidate_nanobodies': None,
         'last_submitted_block': 0,
+        'last_committed_small_molecules': None,
     }
 
     bt.logging.info("Entering main miner loop...")
@@ -530,20 +565,23 @@ async def run_miner(config: argparse.Namespace) -> None:
     )
     challenge_params["epoch"] = block_to_check // epoch_length
     bt.logging.info(f"Challenge params: {challenge_params}")
-    await schedule_compound_search(
-        state,
-        challenge_params,
-        blocks_remaining=blocks_remaining,
-    )
+    # A hot code reload may leave the already-running epoch search in its own
+    # process group.  Skip only this initial launch so the replacement miner
+    # can adopt that search without starting a duplicate; boundary launches
+    # below remain enabled.
+    if os.environ.get("NOVA_SKIP_INITIAL_SEARCH", "0") != "1":
+        await schedule_compound_search(
+            state,
+            challenge_params,
+            blocks_remaining=blocks_remaining,
+        )
 
     # Update state with your results and other relevant info here
     candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
     state['candidate_small_molecules'] = candidate_small_molecules
     state['candidate_nanobodies'] = candidate_nanobodies
-    state['last_submitted_block'] = current_block
-    
     # Submit response
-    await submit_response(state)
+    await _submit_current_candidates(state)
     await asyncio.sleep(1)
 
     # 5) Main epoch-based loop
@@ -574,10 +612,8 @@ async def run_miner(config: argparse.Namespace) -> None:
                 candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
                 state['candidate_small_molecules'] = candidate_small_molecules
                 state['candidate_nanobodies'] = candidate_nanobodies
-                state['last_submitted_block'] = current_block
-                
                 # Submit response
-                await submit_response(state)
+                await _submit_current_candidates(state)
                 await asyncio.sleep(1)
                 
             else:
@@ -588,8 +624,7 @@ async def run_miner(config: argparse.Namespace) -> None:
                     candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
                     state['candidate_small_molecules'] = candidate_small_molecules
                     state['candidate_nanobodies'] = candidate_nanobodies
-                    state['last_submitted_block'] = current_block
-                    await submit_response(state)
+                    await _submit_current_candidates(state)
                     await asyncio.sleep(1)
                 await asyncio.sleep(1)
 
