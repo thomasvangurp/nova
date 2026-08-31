@@ -27,7 +27,7 @@ from compound_miner.provider import load_submission
 from compound_miner.selection import select_submission
 from compound_miner.types import Candidate, ScoredCandidate, parse_reaction_name
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
-from tools.score_boltz_batch import balanced_partitions
+from tools.score_boltz_batch import balanced_partitions, record_key
 
 
 def test_database_is_immutable(monkeypatch):
@@ -94,6 +94,12 @@ def test_boltz_partitions_are_complete_and_deterministic():
         for part in first
     ]
     assert max(costs) / min(costs) < 1.3
+
+
+def test_boltz_record_key_supports_resuming_score_portfolios():
+    assert record_key({"inchikey": "IK", "name": "name", "smiles": "CCO"}) == "IK"
+    assert record_key({"name": "name", "smiles": "CCO"}) == "name"
+    assert record_key({"smiles": "CCO"}) == "CCO"
 
 
 def test_distilled_oracle_batches_variable_molecules():

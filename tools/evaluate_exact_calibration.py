@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Evaluate small-data exact Boltz calibration without scaffold leakage.
+
+This deliberately distinguishes a reduced-Boltz upgrader (which receives the
+matched reduced score at inference) from a diffusion-free student (which does
+not). Every reported exact prediction is out of fold by Murcko scaffold.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from rdkit import Chem
+from rdkit.Chem.Scaffolds import MurckoScaffold
+from scipy.stats import spearmanr
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import StratifiedGroupKFold
+
+from compound_miner.features import molecule_features
+
+
+def _scores(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text())
+    rows = payload.get("scores", payload)
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"no score rows in {path}")
+    return rows
+
+
+def _scaffold(smiles: str) -> str:
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        raise ValueError(f"invalid SMILES: {smiles}")
+    value = MurckoScaffold.MurckoScaffoldSmiles(mol=molecule, includeChirality=False)
+    return value or Chem.MolToSmiles(molecule, canonical=True)
+
+
+def _linear_features(score: np.ndarray, reaction: np.ndarray) -> np.ndarray:
+    reaction_bits = np.eye(5, dtype=np.float32)[np.clip(reaction - 1, 0, 4)]
+    return np.column_stack((score, reaction_bits, reaction_bits * score[:, None]))
+
+
+def _tree(seed: int, trees: int, minimum_leaf: int) -> ExtraTreesRegressor:
+    return ExtraTreesRegressor(
+        n_estimators=trees,
+        min_samples_leaf=minimum_leaf,
+        max_features=0.55,
+        n_jobs=-1,
+        random_state=seed,
+    )
+
+
+def _spearman(truth: np.ndarray, prediction: np.ndarray) -> float:
+    value = spearmanr(truth, prediction).statistic
+    return float(value) if np.isfinite(value) else 0.0
+
+
+def _metrics(truth: np.ndarray, prediction: np.ndarray, top_k: int, budget: int) -> dict[str, float]:
+    actual = set(np.argsort(truth)[-min(top_k, len(truth)) :])
+    selected = set(np.argsort(prediction)[-min(budget, len(prediction)) :])
+    predicted_top = np.asarray(sorted(selected), dtype=np.int64)
+    return {
+        "mae": float(np.mean(np.abs(truth - prediction))),
+        "spearman": _spearman(truth, prediction),
+        "top_k": float(min(top_k, len(truth))),
+        "budget": float(min(budget, len(truth))),
+        "top_k_recall": float(len(actual & selected) / max(1, len(actual))),
+        "selected_oracle_mean": float(np.mean(truth[predicted_top])),
+        "oracle_top_mean": float(np.mean(np.sort(truth)[-min(budget, len(truth)) :])),
+    }
+
+
+def evaluate(
+    exact_path: Path,
+    reduced_path: Path,
+    repeats: int,
+    trees: int,
+    top_k: int,
+    budget: int,
+) -> dict[str, Any]:
+    exact = _scores(exact_path)
+    reduced = _scores(reduced_path)
+    reduced_by_key = {str(row.get("inchikey") or row["smiles"]): row for row in reduced}
+    exact_keys = [str(row.get("inchikey") or row["smiles"]) for row in exact]
+    missing = [key for key in exact_keys if key not in reduced_by_key]
+    if missing:
+        raise ValueError(f"{len(missing)} exact rows have no paired reduced score")
+
+    truth = np.asarray([row["score"] for row in exact], dtype=np.float64)
+    reduced_truth = np.asarray([reduced_by_key[key]["score"] for key in exact_keys], dtype=np.float64)
+    reactions = np.asarray([row["reaction"] for row in exact], dtype=np.int64)
+    scaffolds = np.asarray([_scaffold(row["smiles"]) for row in exact])
+    chemistry = np.vstack([molecule_features(row["smiles"], fingerprint_size=2048) for row in exact])
+    reaction_bits = np.eye(5, dtype=np.float32)[np.clip(reactions - 1, 0, 4)]
+    chemistry = np.column_stack((chemistry, reaction_bits))
+
+    # The diffusion-free base is denied all 65 paired exact molecules. This is
+    # stricter than merely hiding their exact labels and prevents identity
+    # leakage through their reduced labels.
+    exact_key_set = set(exact_keys)
+    public_reduced = [
+        row for row in reduced if str(row.get("inchikey") or row["smiles"]) not in exact_key_set
+    ]
+    base_x = np.vstack(
+        [
+            np.concatenate(
+                (
+                    molecule_features(row["smiles"], fingerprint_size=2048),
+                    np.eye(5, dtype=np.float32)[int(row["reaction"]) - 1],
+                )
+            )
+            for row in public_reduced
+        ]
+    )
+    base_y = np.asarray([row["score"] for row in public_reduced], dtype=np.float64)
+    base = _tree(seed=771, trees=max(512, trees), minimum_leaf=2).fit(base_x, base_y)
+    predicted_reduced = base.predict(chemistry)
+
+    names = (
+        "raw_reduced",
+        "affine_reduced",
+        "exact_morgan",
+        "reduced_residual_morgan",
+        "diffusion_free_reduced",
+        "diffusion_free_residual_morgan",
+    )
+    per_repeat: dict[str, list[dict[str, float]]] = {name: [] for name in names}
+    prediction_sums = {name: np.zeros(len(exact), dtype=np.float64) for name in names}
+
+    for repeat in range(repeats):
+        splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=91_003 + repeat)
+        fold_predictions = {name: np.empty(len(exact), dtype=np.float64) for name in names}
+        for fold, (train, validation) in enumerate(splitter.split(chemistry, reactions, scaffolds)):
+            seed = 17_003 + repeat * 101 + fold
+            fold_predictions["raw_reduced"][validation] = reduced_truth[validation]
+
+            calibrator = Ridge(alpha=1e-3).fit(
+                _linear_features(reduced_truth[train], reactions[train]), truth[train]
+            )
+            fold_predictions["affine_reduced"][validation] = calibrator.predict(
+                _linear_features(reduced_truth[validation], reactions[validation])
+            )
+
+            exact_model = _tree(seed, trees, minimum_leaf=3).fit(chemistry[train], truth[train])
+            fold_predictions["exact_morgan"][validation] = exact_model.predict(chemistry[validation])
+
+            correction = _tree(seed + 1, trees, minimum_leaf=4).fit(
+                chemistry[train], truth[train] - reduced_truth[train]
+            )
+            fold_predictions["reduced_residual_morgan"][validation] = (
+                reduced_truth[validation] + correction.predict(chemistry[validation])
+            )
+
+            student_calibrator = Ridge(alpha=1e-3).fit(
+                _linear_features(predicted_reduced[train], reactions[train]), truth[train]
+            )
+            fold_predictions["diffusion_free_reduced"][validation] = student_calibrator.predict(
+                _linear_features(predicted_reduced[validation], reactions[validation])
+            )
+
+            student_correction = _tree(seed + 2, trees, minimum_leaf=4).fit(
+                chemistry[train], truth[train] - predicted_reduced[train]
+            )
+            fold_predictions["diffusion_free_residual_morgan"][validation] = (
+                predicted_reduced[validation] + student_correction.predict(chemistry[validation])
+            )
+
+        for name in names:
+            metrics = _metrics(truth, fold_predictions[name], top_k, budget)
+            per_repeat[name].append(metrics)
+            prediction_sums[name] += fold_predictions[name]
+
+    models: dict[str, Any] = {}
+    for name in names:
+        values = per_repeat[name]
+        averaged = prediction_sums[name] / repeats
+        models[name] = {
+            "mean": {
+                key: float(np.mean([row[key] for row in values]))
+                for key in values[0]
+            },
+            "standard_deviation": {
+                key: float(np.std([row[key] for row in values], ddof=1)) if repeats > 1 else 0.0
+                for key in values[0]
+            },
+            "averaged_oof": _metrics(truth, averaged, top_k, budget),
+            "spearman_by_reaction": {
+                str(reaction): _spearman(truth[reactions == reaction], averaged[reactions == reaction])
+                for reaction in range(1, 6)
+            },
+        }
+
+    return {
+        "version": 1,
+        "exact_rows": len(exact),
+        "paired_reduced_rows": len(exact),
+        "diffusion_free_reduced_train_rows": len(public_reduced),
+        "unique_scaffolds": len(set(scaffolds)),
+        "split": f"{repeats}x repeated stratified five-fold Murcko-scaffold",
+        "models": models,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--exact", type=Path, required=True)
+    parser.add_argument("--reduced", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--trees", type=int, default=256)
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--budget", type=int, default=20)
+    args = parser.parse_args()
+    result = evaluate(args.exact, args.reduced, args.repeats, args.trees, args.top_k, args.budget)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+    temporary.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    temporary.replace(args.output)
+    print(json.dumps(result, indent=2, allow_nan=False))
+
+
+if __name__ == "__main__":
+    main()

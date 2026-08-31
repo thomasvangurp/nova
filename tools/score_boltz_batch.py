@@ -28,6 +28,11 @@ def record_id(smiles: str, seed: int = 68) -> int:
     return (int.from_bytes(digest[:8], "little") ^ seed) % (2**31 - 1)
 
 
+def record_key(record: dict[str, Any]) -> str:
+    """Stable identity for resuming a partly scored fixed portfolio."""
+    return str(record.get("inchikey") or record.get("name") or record["smiles"])
+
+
 def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any]]:
     """Build a fixed acquisition portfolio instead of trusting one weak proxy rank.
 
@@ -183,6 +188,11 @@ def main() -> None:
     parser.add_argument("--msa", type=Path, default=Path("data/msa_files/P40261.a3m"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--records-json", type=Path, help="Reuse the exact molecule set from an earlier score file")
+    parser.add_argument(
+        "--exclude-records-json",
+        type=Path,
+        help="Skip molecules already present in another score file",
+    )
     parser.add_argument("--preserve-record-order", action="store_true")
     parser.add_argument("--recycling-steps", type=int, default=3)
     parser.add_argument("--recycling-steps-affinity", type=int, default=5)
@@ -212,6 +222,10 @@ def main() -> None:
                 record["components"] = json.dumps(record["components"])
     else:
         records = load_records(args.archive, args.reaction, args.limit)
+    if args.exclude_records_json:
+        excluded_payload = json.loads(args.exclude_records_json.read_text())
+        excluded = {record_key(item) for item in excluded_payload["scores"]}
+        records = [item for item in records if record_key(item) not in excluded]
     if not records:
         raise SystemExit("archive shortlist is empty")
     gpus = [int(value) for value in args.gpus.split(",")]

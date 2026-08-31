@@ -64,6 +64,18 @@ suggesting ligand topology plus exact calibration is currently more useful than
 the frozen interaction fingerprint alone. This 25-row result is a hypothesis
 for the next model arm, not promotion evidence.
 
+The control was then expanded to ten repeated, stratified five-fold splits over
+all 65 exact labels, with Murcko scaffolds kept out of the corresponding train
+fold. Exact-only Morgan ExtraTrees averaged Spearman 0.561 (0.045 standard
+deviation) and reached 0.612 after averaging the repeated out-of-fold
+predictions, confirming that the earlier result was not unique to one split.
+Matched reduced Boltz remained stronger at Spearman 0.791 and recovered 80% of
+the exact top ten at a 20/65 budget. Affine and Morgan residual calibration made
+the paired reduced ranking worse with this little exact data. A genuinely
+diffusion-free Morgan model trained on the 255 non-exact reduced rows reached
+only 0.535. The next data gate is therefore 320 balanced exact labels, not
+promotion of the 65-label model.
+
 A deliberately small universal-base smoke train used 5,000 balanced BindingDB
 rows, held out 1,053 rows by entire protein target, and ran one public pretrain
 epoch. It reached target-holdout affinity Spearman 0.313 (MAE 1.60 pAffinity).
