@@ -33,9 +33,12 @@ def _write_exact_union(
     current_path: Path,
     destination: Path,
     reaction: int,
+    target: str,
 ) -> int:
     """Preserve exact incumbents while adding the newly reranked shortlist."""
     current_payload = json.loads(current_path.read_text())
+    if str(current_payload.get("target")) != target:
+        raise ValueError("new exact score artifact target does not match challenge")
     current = scored_candidates_from_payload(current_payload)
     incumbents = CandidateArchive(archive_path).top(
         reaction,
@@ -47,6 +50,7 @@ def _write_exact_union(
     combined = sorted(by_name.values(), key=lambda item: (-item.score, item.candidate.name))
     payload = {
         "reaction": reaction,
+        "target": target,
         "count": len(combined),
         "scorer": VALIDATOR_EXACT_SCORER,
         "sources": {
@@ -76,6 +80,8 @@ def _write_exact_union(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reaction", type=int, choices=range(1, 6), required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--epoch", type=int, required=True)
     parser.add_argument("--archive", type=Path, default=Path("archives/P40261.sqlite"))
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument(
@@ -86,7 +92,7 @@ def main() -> None:
     parser.add_argument("--shards-per-gpu", type=int, default=3)
     parser.add_argument("--preprocessing-threads", type=int, default=8)
     parser.add_argument("--reduced-limit", type=int, default=512)
-    parser.add_argument("--exact-limit", type=int, default=64)
+    parser.add_argument("--exact-limit", type=int, default=128)
     parser.add_argument("--scratch-root", type=Path)
     args = parser.parse_args()
 
@@ -108,6 +114,7 @@ def main() -> None:
             str(SCORE_TOOL),
             "--archive", str(args.archive),
             "--reaction", str(args.reaction),
+            "--target", args.target,
             "--limit", str(args.reduced_limit),
             "--recycling-steps", "1",
             "--sampling-steps", "20",
@@ -126,6 +133,7 @@ def main() -> None:
             str(SCORE_TOOL),
             "--archive", str(args.archive),
             "--reaction", str(args.reaction),
+            "--target", args.target,
             "--records-json", str(reduced),
             "--limit", str(args.exact_limit),
             "--recycling-steps", "3",
@@ -143,6 +151,7 @@ def main() -> None:
         exact_new,
         exact,
         args.reaction,
+        args.target,
     )
     qualification = [
         sys.executable,
@@ -155,12 +164,16 @@ def main() -> None:
         "--result", str(args.result),
         "--baselines", str(args.baselines),
         "--reaction", str(args.reaction),
+        "--target", args.target,
+        "--epoch", str(args.epoch),
     ]
     _run(qualification)
     print(
         json.dumps(
             {
                 "reaction": args.reaction,
+                "target": args.target,
+                "epoch": args.epoch,
                 "reduced": str(reduced.resolve()),
                 "exact": str(exact.resolve()),
                 "exact_new": str(exact_new.resolve()),

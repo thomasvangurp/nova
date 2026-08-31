@@ -37,6 +37,7 @@ from compound_miner.reservoir import CandidateReservoir
 from compound_miner.selection import select_submission
 from compound_miner.types import Candidate, ScoredCandidate, parse_reaction_name
 from tools.build_exact_checkpoint import _write_exact_union
+from tools.run_epoch_search import _write_dynamic_baselines
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
 from tools.score_boltz_batch import balanced_partitions, record_key
 
@@ -141,21 +142,30 @@ def test_exact_release_and_provider_are_atomic(tmp_path, monkeypatch):
     for index, candidate in enumerate(generated):
         scores.append(ScoredCandidate(candidate, 0.5, -1.0, 1.0 - index / 100.0, VALIDATOR_EXACT_SCORER, 0.1))
     exact = tmp_path / "exact.json"
-    exact.write_text(json.dumps({"scores": [item.as_dict() for item in scores]}))
+    exact.write_text(json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]}))
     baselines = tmp_path / "baselines.json"
     baselines.write_text(json.dumps({
         "schema_version": 1,
+        "target": "P40261",
         "reactions": {"2": {"epoch": 1, "uid": 1, "score": 0.0}},
     }))
     result = tmp_path / "result_rxn2.json"
     manifest = promote_exact_checkpoint(
-        exact, archive.path, result, baselines, reaction=2
+        exact,
+        archive.path,
+        result,
+        baselines,
+        reaction=2,
+        target="P40261",
+        epoch=1,
     )
     monkeypatch.setenv("NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json"))
-    names = load_submission(2).split(",")
+    names = load_submission(2, target="P40261", epoch=1).split(",")
     assert len(names) == len(set(names)) == 20
     assert json.loads(result.read_text())["molecules"][0]["score"] == 1.0
     assert manifest["status"] == "qualified"
+    with pytest.raises(ReleaseGateError, match="epoch does not match"):
+        load_submission(2, target="P40261", epoch=2)
 
 
 def test_provider_rejects_proxy_only_checkpoint(tmp_path, monkeypatch):
@@ -199,14 +209,31 @@ def test_exact_union_preserves_incumbent_scores(tmp_path):
     archive.add_candidates([incumbent])
     archive.add_scores([incumbent_score])
     current = tmp_path / "new.json"
-    current.write_text(json.dumps({"scores": [new_score.as_dict()]}))
+    current.write_text(json.dumps({"target": "P40261", "scores": [new_score.as_dict()]}))
     union = tmp_path / "union.json"
-    assert _write_exact_union(archive.path, current, union, reaction=5) == 2
+    assert _write_exact_union(
+        archive.path, current, union, reaction=5, target="P40261"
+    ) == 2
     payload = json.loads(union.read_text())
     assert [item["name"] for item in payload["scores"]] == [
         incumbent.name,
         new.name,
     ]
+
+
+def test_epoch_baseline_uses_best_prior_submission(tmp_path):
+    frame = pd.DataFrame(
+        [
+            {"reaction": 4, "epoch": 10, "uid": 1, "submission_score": 1.9},
+            {"reaction": 4, "epoch": 11, "uid": 2, "submission_score": 2.1},
+            {"reaction": 4, "epoch": 11, "uid": 2, "submission_score": 2.1},
+        ]
+    )
+    path = tmp_path / "baselines.json"
+    _write_dynamic_baselines(frame, "P40261", path)
+    payload = json.loads(path.read_text())
+    assert payload["target"] == "P40261"
+    assert payload["reactions"]["4"] == {"epoch": 11, "uid": 2, "score": 2.1}
 
 
 def test_exact_release_must_beat_frozen_baseline(tmp_path):
@@ -223,16 +250,23 @@ def test_exact_release_must_beat_frozen_baseline(tmp_path):
         for candidate in generated
     ]
     exact = tmp_path / "exact.json"
-    exact.write_text(json.dumps({"scores": [item.as_dict() for item in scores]}))
+    exact.write_text(json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]}))
     baselines = tmp_path / "baselines.json"
     baselines.write_text(json.dumps({
         "schema_version": 1,
+        "target": "P40261",
         "reactions": {"2": {"epoch": 1, "uid": 1, "score": 2.0}},
     }))
     result = tmp_path / "result.json"
     with pytest.raises(ReleaseGateError, match="misses frozen baseline"):
         promote_exact_checkpoint(
-            exact, tmp_path / "archive.sqlite", result, baselines, reaction=2
+            exact,
+            tmp_path / "archive.sqlite",
+            result,
+            baselines,
+            reaction=2,
+            target="P40261",
+            epoch=1,
         )
     assert not result.exists()
 

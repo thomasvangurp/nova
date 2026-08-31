@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compound_miner.targets import P40261_SEQUENCE
+from compound_miner.targets import TARGETS
 
 
 def record_id(smiles: str, seed: int = 68) -> int:
@@ -106,8 +106,19 @@ def balanced_partitions(
     return partitions
 
 
-def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict[str, Any]]) -> list[dict[str, Any]]:
-    shard, gpu, records, scratch_root, msa_path, inference = arguments
+def score_worker(
+    arguments: tuple[
+        int,
+        int,
+        list[dict[str, Any]],
+        str,
+        str,
+        str,
+        str,
+        dict[str, Any],
+    ]
+) -> list[dict[str, Any]]:
+    shard, gpu, records, scratch_root, target, sequence, msa_path, inference = arguments
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     from boltz.main import predict
@@ -121,13 +132,14 @@ def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict
         payload = {
             "version": 1,
             "sequences": [
-                {"protein": {"id": "A", "sequence": None, "msa": msa_path}},
+                {"protein": {"id": "A", "sequence": sequence, "msa": msa_path}},
                 {"ligand": {"id": "B", "smiles": record["smiles"]}},
             ],
             "properties": [{"affinity": {"binder": "B"}}],
         }
-        payload["sequences"][0]["protein"]["sequence"] = P40261_SEQUENCE
-        (inputs / f"{identifier}_P40261.yaml").write_text(yaml.safe_dump(payload, sort_keys=False))
+        (inputs / f"{identifier}_{target}.yaml").write_text(
+            yaml.safe_dump(payload, sort_keys=False)
+        )
     started = time.monotonic()
     predict(
         data=str(inputs),
@@ -154,7 +166,9 @@ def score_worker(arguments: tuple[int, int, list[dict[str, Any]], str, str, dict
     results = []
     for record in records:
         identifier = record_id(record["smiles"])
-        metrics = _load_metrics(outputs / "boltz_results_inputs" / "predictions" / f"{identifier}_P40261")
+        metrics = _load_metrics(
+            outputs / "boltz_results_inputs" / "predictions" / f"{identifier}_{target}"
+        )
         probability = float(metrics["affinity_probability_binary"])
         prediction = float(metrics["affinity_pred_value"])
         results.append(
@@ -183,6 +197,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--reaction", type=int, choices=range(0, 6), required=True, help="1-5, or 0 for a balanced batch from all reactions")
+    parser.add_argument("--target", default="P40261")
+    parser.add_argument("--sequence")
     parser.add_argument("--limit", type=int, default=128)
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--shards-per-gpu", type=int, default=1)
@@ -193,7 +209,7 @@ def main() -> None:
         help="CPU input-packing workers per GPU scoring process",
     )
     parser.add_argument("--partition-strategy", choices=("lpt", "roundrobin"), default="lpt")
-    parser.add_argument("--msa", type=Path, default=Path("data/msa_files/P40261.a3m"))
+    parser.add_argument("--msa", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--records-json", type=Path, help="Reuse the exact molecule set from an earlier score file")
     parser.add_argument(
@@ -217,6 +233,14 @@ def main() -> None:
     parser.add_argument("--disk-affinity-handoff", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
     args = parser.parse_args()
+    sequence = args.sequence or TARGETS.get(args.target)
+    if not sequence:
+        raise SystemExit(
+            f"no cached sequence for {args.target}; provide --sequence explicitly"
+        )
+    msa = args.msa or Path(f"data/msa_files/{args.target}.a3m")
+    if not msa.is_file():
+        raise SystemExit(f"MSA file does not exist: {msa}")
     if args.records_json:
         source_records = json.loads(args.records_json.read_text())["scores"]
         reactions = range(1, 6) if args.reaction == 0 else (args.reaction,)
@@ -272,11 +296,27 @@ def main() -> None:
         with ProcessPoolExecutor(max_workers=len(worker_gpus), mp_context=context) as pool:
             chunks = list(pool.map(
                 score_worker,
-                [(index, gpu, partition, scratch, str(args.msa.resolve()), inference) for index, (gpu, partition) in enumerate(zip(worker_gpus, partitions)) if partition],
+                [
+                    (
+                        index,
+                        gpu,
+                        partition,
+                        scratch,
+                        args.target,
+                        sequence,
+                        str(msa.resolve()),
+                        inference,
+                    )
+                    for index, (gpu, partition) in enumerate(
+                        zip(worker_gpus, partitions)
+                    )
+                    if partition
+                ],
             ))
         results = [item for chunk in chunks for item in chunk]
         payload = {
             "reaction": args.reaction,
+            "target": args.target,
             "count": len(results),
             "wall_seconds": time.monotonic() - started,
             "gpus": gpus,

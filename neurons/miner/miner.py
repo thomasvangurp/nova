@@ -9,6 +9,8 @@ import tempfile
 import traceback
 import base64
 import hashlib
+import subprocess
+from pathlib import Path
 
 from typing import Any, Dict, List, Optional, Tuple, cast
 from types import SimpleNamespace
@@ -283,6 +285,88 @@ def dummy_get_candidate_products(challenge_params: Optional[Dict[str, Any]] = No
     
     return candidate_small_molecules, candidate_nanobodies
 
+
+async def schedule_compound_search(
+    state: Dict[str, Any], challenge_params: Dict[str, Any], blocks_remaining: int
+) -> None:
+    """Start the challenge-bound search policy without blocking commitments."""
+    if os.environ.get("NOVA_LIVE_SEARCH", "0") != "1":
+        return
+    if blocks_remaining <= 25:
+        bt.logging.info(
+            f"Skipping compound search with only {blocks_remaining} blocks remaining"
+        )
+        return
+    previous = state.get("compound_search_process")
+    if previous is not None and previous.returncode is None:
+        previous.terminate()
+        try:
+            await asyncio.wait_for(previous.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            previous.kill()
+            await previous.wait()
+
+    targets = challenge_params.get("small_molecule_target") or []
+    if isinstance(targets, str):
+        targets = [targets]
+    if len(targets) != 1:
+        bt.logging.error(f"Cannot schedule compound search for targets={targets!r}")
+        return
+    reaction = int(str(challenge_params["allowed_reaction"]).split(":", 1)[1])
+    epoch = int(challenge_params["epoch"])
+    target = str(targets[0])
+    result_template = os.environ.get(
+        "NOVA_CANDIDATE_RESULT", "artifacts/result_rxn{reaction}.json"
+    )
+    result = result_template.format(reaction=reaction)
+    search_python = os.environ.get("NOVA_SEARCH_PYTHON", sys.executable)
+    deadline_seconds = max(60, (blocks_remaining - 15) * 12)
+    log_path = Path(BASE_DIR) / "artifacts" / "live" / "search" / (
+        f"{target}-epoch{epoch}-rxn{reaction}.log"
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    arguments = [
+        search_python,
+        str(Path(BASE_DIR) / "tools" / "run_epoch_search.py"),
+        "--target",
+        target,
+        "--epoch",
+        str(epoch),
+        "--reaction",
+        str(reaction),
+        "--result",
+        result,
+        "--deadline-seconds",
+        str(deadline_seconds),
+        "--gpus",
+        os.environ.get("NOVA_SEARCH_GPUS", "0,1"),
+        "--shards-per-gpu",
+        os.environ.get("NOVA_SEARCH_SHARDS_PER_GPU", "3"),
+        "--construction-workers",
+        os.environ.get("NOVA_SEARCH_CONSTRUCTION_WORKERS", "40"),
+        "--similarity-workers",
+        os.environ.get("NOVA_SEARCH_SIMILARITY_WORKERS", "32"),
+        "--proposals",
+        os.environ.get("NOVA_SEARCH_PROPOSALS", "250000"),
+        "--reduced-limit",
+        os.environ.get("NOVA_SEARCH_REDUCED_LIMIT", "1024"),
+        "--exact-limit",
+        os.environ.get("NOVA_SEARCH_EXACT_LIMIT", "128"),
+    ]
+    with log_path.open("ab", buffering=0) as log:
+        process = await asyncio.create_subprocess_exec(
+            *arguments,
+            cwd=BASE_DIR,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    state["compound_search_process"] = process
+    bt.logging.info(
+        f"Started compound search pid={process.pid} target={target} "
+        f"epoch={epoch} reaction={reaction} deadline_seconds={deadline_seconds}"
+    )
+
 # ----------------------------------------------------------------------------
 # 5. RESPONSE SUBMISSION LOGIC
 # ----------------------------------------------------------------------------
@@ -422,7 +506,13 @@ async def run_miner(config: argparse.Namespace) -> None:
         nanobody_target=config.nanobody_target,
         include_reaction=config.random_valid_reaction
     )
+    challenge_params["epoch"] = block_to_check // epoch_length
     bt.logging.info(f"Challenge params: {challenge_params}")
+    await schedule_compound_search(
+        state,
+        challenge_params,
+        blocks_remaining=next_boundary - current_block,
+    )
 
     # Update state with your results and other relevant info here
     candidate_small_molecules, candidate_nanobodies = dummy_get_candidate_products(challenge_params)
@@ -450,6 +540,12 @@ async def run_miner(config: argparse.Namespace) -> None:
                     small_molecule_target=config.small_molecule_target,
                     nanobody_target=config.nanobody_target,
                     include_reaction=config.random_valid_reaction
+                )
+                challenge_params["epoch"] = current_block // epoch_length
+                await schedule_compound_search(
+                    state,
+                    challenge_params,
+                    blocks_remaining=epoch_length,
                 )
 
                 # Update state with your results and other relevant info here

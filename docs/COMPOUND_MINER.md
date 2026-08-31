@@ -53,6 +53,7 @@ per-reaction baseline:
 
 ```bash
 python tools/build_exact_checkpoint.py \
+  --target P40261 --epoch 24837 \
   --reaction 5 \
   --archive archives/P40261.sqlite \
   --result artifacts/result_rxn5.json \
@@ -77,19 +78,35 @@ python tools/score_boltz_batch.py \
   --output artifacts/exact_scores.json
 
 python -m compound_miner.cli qualify-exact \
+  --target P40261 --epoch 24837 \
   --reaction 5 --scores artifacts/exact_scores.json \
   --reduced-scores artifacts/fast_scores.json \
   --archive archives/P40261.sqlite \
   --result artifacts/result_rxn5.json
 ```
 
-`artifacts/result_rxnN.json` is a release artifact, not a search scratch file.
+`artifacts/result_rxnN.json` is an ephemeral release buffer, not the strategy
+and not a reusable molecule list. It is bound to one target, epoch, and reaction.
+The miner rejects it as soon as any of those challenge fields changes.
 It embeds the exact scorer identity, hashes of the reduced and exact score
 artifacts, exact and selected counts, achieved score, and the frozen baseline.
 The provider rejects legacy files, proxy/reduced scores, incomplete exact
 shortlists, duplicate molecules, reaction mismatches, and baseline misses.
 Proxy search may still write an isolated diagnostic result, but that file cannot
 be submitted.
+
+In live mode the miner launches `tools/run_epoch_search.py` at each epoch
+boundary. That process refreshes public observations and historical novelty,
+refits the target-conditioned proxy, generates a fresh reaction-specific
+archive, applies reduced-Boltz acquisition, exact-reranks 128 leaders, and
+atomically publishes the first exact, constraint-valid epoch set. The best prior
+public score is recorded as a benchmark rather than used to suppress a viable
+submission; subsequent exact updates replace the buffer only when they improve
+its score. Set `NOVA_LIVE_SEARCH=1`, point
+`NOVA_SEARCH_PYTHON` at the full Boltz environment, and list the scoring GPUs in
+`NOVA_SEARCH_GPUS`. The commitment loop remains responsive and retries the
+provider every 50 blocks; it begins submitting the new portfolio as soon as the
+qualified buffer appears.
 
 Reaction 5 uses context-conditioned substitutions. A replacement component is
 ranked from its own role evidence and its observed interactions with each

@@ -91,10 +91,16 @@ def scored_candidates_from_payload(payload: dict[str, Any]) -> list[ScoredCandid
     return scored
 
 
-def load_frozen_baseline(path: str | Path, reaction: int) -> FrozenBaseline:
+def load_frozen_baseline(
+    path: str | Path, reaction: int, target: str = "P40261"
+) -> FrozenBaseline:
     payload = json.loads(Path(path).read_text())
     if int(payload.get("schema_version", 0)) != RELEASE_SCHEMA_VERSION:
         raise ReleaseGateError("unsupported baseline schema")
+    if str(payload.get("target")) != target:
+        raise ReleaseGateError(
+            f"baseline target {payload.get('target')!r} does not match {target!r}"
+        )
     item = (payload.get("reactions") or {}).get(str(reaction))
     if not isinstance(item, dict):
         raise ReleaseGateError(f"no frozen baseline for reaction {reaction}")
@@ -112,6 +118,8 @@ def release_manifest(
     exact_scores_path: str | Path,
     exact_count: int,
     baseline: FrozenBaseline,
+    target: str,
+    epoch: int,
     reduced_scores_path: str | Path | None = None,
 ) -> dict[str, Any]:
     values = list(selected)
@@ -120,6 +128,8 @@ def release_manifest(
     return {
         "schema_version": RELEASE_SCHEMA_VERSION,
         "status": "qualified" if gap >= 0 else "rejected",
+        "target": target,
+        "epoch": epoch,
         "reaction": reaction,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "scorer": VALIDATOR_EXACT_SCORER,
@@ -140,7 +150,11 @@ def release_manifest(
 
 
 def validate_release_payload(
-    payload: dict[str, Any], reaction: int, count: int = 20
+    payload: dict[str, Any],
+    reaction: int,
+    count: int = 20,
+    target: str | None = None,
+    epoch: int | None = None,
 ) -> None:
     release = payload.get("release")
     if not isinstance(release, dict):
@@ -151,6 +165,10 @@ def validate_release_payload(
         raise ReleaseGateError(f"release is not qualified: {release.get('status')!r}")
     if int(release.get("reaction", -1)) != reaction:
         raise ReleaseGateError("release reaction does not match challenge")
+    if target is not None and str(release.get("target")) != target:
+        raise ReleaseGateError("release target does not match challenge")
+    if epoch is not None and int(release.get("epoch", -1)) != epoch:
+        raise ReleaseGateError("release epoch does not match challenge")
     if not is_validator_exact_scorer(release.get("scorer")):
         raise ReleaseGateError("release was not produced by validator-matched Boltz")
     molecules = payload.get("molecules")
@@ -182,10 +200,16 @@ def promote_exact_checkpoint(
     result_path: str | Path,
     baseline_path: str | Path,
     reaction: int,
+    target: str,
+    epoch: int,
     reduced_scores_path: str | Path | None = None,
 ) -> dict[str, Any]:
     exact_path = Path(exact_scores_path)
     payload = json.loads(exact_path.read_text())
+    if str(payload.get("target")) != target:
+        raise ReleaseGateError(
+            f"exact score target {payload.get('target')!r} does not match {target!r}"
+        )
     scored = scored_candidates_from_payload(payload)
     wrong = [item.candidate.name for item in scored if item.candidate.reaction != reaction]
     if wrong:
@@ -199,13 +223,15 @@ def promote_exact_checkpoint(
     # remain useful parents for later search rounds, but cannot silently enter a
     # release whose manifest hashes only the current score file.
     selected = select_submission(scored)
-    baseline = load_frozen_baseline(baseline_path, reaction)
+    baseline = load_frozen_baseline(baseline_path, reaction, target)
     manifest = release_manifest(
         selected,
         reaction,
         exact_path,
         len(scored),
         baseline,
+        target,
+        epoch,
         reduced_scores_path,
     )
     if manifest["status"] != "qualified":

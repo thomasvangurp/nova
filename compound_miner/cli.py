@@ -92,6 +92,8 @@ def _parser() -> argparse.ArgumentParser:
         "--baselines", default="config/compound_release_baselines.json"
     )
     qualify.add_argument("--reaction", type=int, choices=range(1, 6), required=True)
+    qualify.add_argument("--target", required=True)
+    qualify.add_argument("--epoch", type=int, required=True)
 
     validate = subparsers.add_parser("validate-result")
     validate.add_argument("--result", required=True)
@@ -233,6 +235,8 @@ def main() -> None:
             result_path=args.result,
             baseline_path=args.baselines,
             reaction=args.reaction,
+            target=args.target,
+            epoch=args.epoch,
         )
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return

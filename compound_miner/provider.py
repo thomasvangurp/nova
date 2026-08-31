@@ -16,11 +16,22 @@ def result_path(reaction: int) -> Path:
     return path.resolve()
 
 
-def load_submission(reaction: int, count: int = 20) -> str:
+def load_submission(
+    reaction: int,
+    count: int = 20,
+    target: str | None = None,
+    epoch: int | None = None,
+) -> str:
     path = result_path(reaction)
     with path.open() as handle:
         payload = json.load(handle)
-    validate_release_payload(payload, reaction, count)
+    validate_release_payload(
+        payload,
+        reaction,
+        count,
+        target=target,
+        epoch=epoch,
+    )
     molecules = payload.get("molecules", [])
     if len(molecules) < count:
         raise ValueError(f"{path} contains {len(molecules)} candidates; need {count}")
@@ -40,4 +51,14 @@ def from_challenge(challenge_params: dict) -> str:
     allowed = str(challenge_params["allowed_reaction"])
     if not allowed.startswith("rxn:"):
         raise ValueError(f"invalid allowed reaction: {allowed}")
-    return load_submission(int(allowed.split(":", 1)[1]))
+    targets = challenge_params.get("small_molecule_target") or []
+    if isinstance(targets, str):
+        targets = [targets]
+    if len(targets) != 1:
+        raise ValueError(f"expected one small-molecule target, received {targets!r}")
+    epoch = challenge_params.get("epoch")
+    return load_submission(
+        int(allowed.split(":", 1)[1]),
+        target=str(targets[0]),
+        epoch=int(epoch) if epoch is not None else None,
+    )
