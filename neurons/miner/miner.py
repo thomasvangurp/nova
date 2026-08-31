@@ -353,6 +353,8 @@ async def schedule_compound_search(
         "--exact-limit",
         os.environ.get("NOVA_SEARCH_EXACT_LIMIT", "128"),
     ]
+    if os.environ.get("NOVA_SEARCH_DIVERSE_RETENTION", "0") == "1":
+        arguments.append("--diverse-retention")
     with log_path.open("ab", buffering=0) as log:
         process = await asyncio.create_subprocess_exec(
             *arguments,

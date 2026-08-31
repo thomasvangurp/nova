@@ -175,6 +175,11 @@ def main() -> None:
     parser.add_argument("--similarity-shortlist", type=int, default=50_000)
     parser.add_argument("--construction-workers", type=int, default=40)
     parser.add_argument("--similarity-workers", type=int, default=32)
+    parser.add_argument(
+        "--diverse-retention",
+        action="store_true",
+        help="Retain deterministic exploitation, uncertainty, and coverage lanes",
+    )
     parser.add_argument("--trees", type=int, default=256)
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--shards-per-gpu", type=int, default=3)
@@ -264,6 +269,7 @@ def main() -> None:
             result_path=None,
             construction_workers=args.construction_workers,
             similarity_workers=args.similarity_workers,
+            diverse_retention=args.diverse_retention,
         )
         _atomic_json(
             work / f"search_metrics_iteration_{iteration}.json", search_metrics

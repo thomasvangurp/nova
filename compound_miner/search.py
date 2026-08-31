@@ -17,6 +17,7 @@ from .database import ReactionDatabase
 from .features import molecule_features
 from .proxy import TargetProxy
 from .release import VALIDATOR_EXACT_SCORER
+from .reservoir import CandidateReservoir
 from .scorer import NIMScorer
 from .selection import select_submission
 from .types import Candidate, ScoredCandidate
@@ -189,6 +190,7 @@ class SearchEngine:
         result_path: str | Path | None = None,
         construction_workers: int = 1,
         similarity_workers: int = 1,
+        diverse_retention: bool = False,
     ) -> dict[str, float]:
         started = time.monotonic()
         exact_parents = self.archive.top(
@@ -254,9 +256,15 @@ class SearchEngine:
         predicted = self.proxy.predict(candidates, chemistry=chemistry)
         predicted.sort(key=lambda item: item.proxy_mean + 0.35 * item.proxy_std, reverse=True)
         predicted_at = time.monotonic()
+        if diverse_retention:
+            reservoir = CandidateReservoir(similarity_shortlist)
+            reservoir.add(predicted)
+            retained = reservoir.selected()
+        else:
+            retained = predicted[:similarity_shortlist]
         unique_shortlist = []
         seen_inchikeys: set[str] = set()
-        for item in predicted[:similarity_shortlist]:
+        for item in retained:
             if item.inchikey in seen_inchikeys:
                 continue
             seen_inchikeys.add(item.inchikey)
@@ -308,4 +316,5 @@ class SearchEngine:
             "novel": float(len(novel)),
             "exact_scored": float(min(len(novel), exact_shortlist) if self.scorer else 0),
             "submission_score": float(sum(item.score for item in selected)),
+            "diverse_retention": float(diverse_retention),
         }

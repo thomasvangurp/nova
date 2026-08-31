@@ -52,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--similarity-shortlist", type=int, default=800)
     search.add_argument("--construction-workers", type=int, default=1)
     search.add_argument("--similarity-workers", type=int, default=1)
+    search.add_argument("--diverse-retention", action="store_true")
     search.add_argument("--result")
     search.add_argument("--nim-url")
     search.add_argument("--nim-concurrency", type=int, default=8)
@@ -67,6 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     search_all.add_argument("--similarity-shortlist", type=int, default=800)
     search_all.add_argument("--construction-workers", type=int, default=1)
     search_all.add_argument("--similarity-workers", type=int, default=1)
+    search_all.add_argument("--diverse-retention", action="store_true")
     search_all.add_argument("--nim-url")
     search_all.add_argument("--nim-concurrency", type=int, default=8)
     search_all.add_argument("--proxy-only", action="store_true")
@@ -143,6 +145,7 @@ def main() -> None:
             result,
             args.construction_workers,
             args.similarity_workers,
+            args.diverse_retention,
         )
         print(json.dumps(metrics, indent=2))
         return
@@ -160,6 +163,7 @@ def main() -> None:
                     f"artifacts/result_rxn{reaction}.json",
                     args.construction_workers,
                     args.similarity_workers,
+                    args.diverse_retention,
                 )
                 measurements.append({"round": round_index + 1, "reaction": reaction, **result})
                 print(json.dumps(measurements[-1]), flush=True)
