@@ -619,11 +619,18 @@ class Boltz2(LightningModule):
             )
             z_affinity = z * cross_pair_mask[None, :, :, None]
 
-            argsort = torch.argsort(dict_out["iptm"], descending=True)
-            best_idx = argsort[0].item()
-            coords_affinity = dict_out["sample_atom_coords"].detach()[best_idx][
-                None, None
-            ]
+            if self.skip_run_structure:
+                # Affinity inference inputs contain the best coordinates from
+                # the preceding structure checkpoint in pre_affinity_*.npz.
+                coords_affinity = feats["coords"].detach()
+                if coords_affinity.ndim == 3:
+                    coords_affinity = coords_affinity[:, None]
+            else:
+                argsort = torch.argsort(dict_out["iptm"], descending=True)
+                best_idx = argsort[0].item()
+                coords_affinity = dict_out["sample_atom_coords"].detach()[best_idx][
+                    None, None
+                ]
             s_inputs = self.input_embedder(feats, affinity=True)
 
             with torch.autocast(autocast_device_type(s.device.type), enabled=False):
@@ -1078,7 +1085,11 @@ class Boltz2(LightningModule):
             if "keys_dict_out" in self.predict_args:
                 for key in self.predict_args["keys_dict_out"]:
                     pred_dict[key] = out[key]
-            pred_dict["coords"] = out["sample_atom_coords"]
+            pred_dict["coords"] = (
+                batch["coords"][0]
+                if self.skip_run_structure
+                else out["sample_atom_coords"]
+            )
             if self.confidence_prediction:
                 # pred_dict["confidence"] = out.get("ablation_confidence", None)
                 pred_dict["pde"] = out["pde"]

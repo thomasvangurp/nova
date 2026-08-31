@@ -13,18 +13,33 @@ from .database import ReactionDatabase
 from .proxy import TargetProxy
 from .scorer import NIMScorer
 from .selection import select_submission
-from .types import Candidate
+from .types import Candidate, ScoredCandidate
 from .validity import HistoricalIndex, ValidityGate
 
 
 class ProposalPolicy:
     """Mix target-conditioned component priors, local substitutions, and exploration."""
 
-    def __init__(self, history: pd.DataFrame, reaction: int, database: ReactionDatabase, rng: random.Random) -> None:
+    def __init__(
+        self,
+        history: pd.DataFrame,
+        reaction: int,
+        database: ReactionDatabase,
+        rng: random.Random,
+        exact_parents: list[ScoredCandidate] | None = None,
+    ) -> None:
         self.frame = history[history["reaction"] == reaction].sort_values("score", ascending=False)
         self.reaction = reaction
         self.database = database
         self.rng = rng
+        self.exact_parents = exact_parents or []
+        if self.exact_parents:
+            exact_scores = np.asarray([item.score for item in self.exact_parents])
+            exact_scores -= exact_scores.max()
+            weights = np.exp(np.clip(exact_scores / 0.02, -20, 0))
+            self.exact_parent_weights = (weights / weights.sum()).tolist()
+        else:
+            self.exact_parent_weights = []
         self.roles = database.reactions[reaction].roles
         self.weighted_ids: list[tuple[np.ndarray, np.ndarray]] = []
         for column in ("component_a", "component_b", "component_c")[: len(self.roles)]:
@@ -44,7 +59,17 @@ class ProposalPolicy:
 
     def propose(self) -> tuple[int, ...]:
         draw = self.rng.random()
-        if draw < 0.55 and not self.frame.empty:
+        if draw < 0.40 and self.exact_parents:
+            # Once validator-matched labels exist, search substitutions around
+            # those discoveries instead of continuing to trust the proxy.
+            parent = self.rng.choices(
+                self.exact_parents, weights=self.exact_parent_weights, k=1
+            )[0].candidate
+            components = list(parent.components)
+            index = self.rng.randrange(len(components))
+            components[index] = self._weighted_component(index)
+            return tuple(components)
+        if draw < 0.70 and not self.frame.empty:
             # Structural neighborhood: retain a successful context and substitute
             # one role using its target-conditioned prior.
             parent = self.frame.iloc[self.rng.randrange(min(len(self.frame), 3000))]
@@ -54,7 +79,7 @@ class ProposalPolicy:
             index = self.rng.randrange(len(components))
             components[index] = self._weighted_component(index)
             return tuple(components)
-        if draw < 0.9:
+        if draw < 0.92:
             return tuple(self._weighted_component(index) for index in range(len(self.roles)))
         return self.database.random_components(self.reaction, self.rng)
 
@@ -87,7 +112,10 @@ class SearchEngine:
         result_path: str | Path | None = None,
     ) -> dict[str, float]:
         started = time.monotonic()
-        policy = ProposalPolicy(self.history, reaction, self.database, self.rng)
+        exact_parents = self.archive.top(reaction, limit=100, scored_only=True)
+        policy = ProposalPolicy(
+            self.history, reaction, self.database, self.rng, exact_parents=exact_parents
+        )
         candidates: list[Candidate] = []
         seen: set[tuple[int, ...]] = set()
         for _ in range(proposals * 2):

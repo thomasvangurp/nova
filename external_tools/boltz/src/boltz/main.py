@@ -821,6 +821,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     diffusion_samples: int = 1,
     sampling_steps_affinity: int = 200,
     diffusion_samples_affinity: int = 3,
+    skip_affinity_structure: bool = False,
     max_parallel_samples: Optional[int] = None,
     step_scale: Optional[float] = None,
     write_full_pae: bool = False,
@@ -1168,6 +1169,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             msa_args=asdict(msa_args),
             steering_args=asdict(steering_args),
             affinity_mw_correction=affinity_mw_correction,
+            # The structure pass already persisted its best coordinates in the
+            # pre-affinity features.  Reusing them avoids the affinity
+            # checkpoint's second diffusion pass for high-throughput ranking.
+            # Default false preserves upstream/validator behavior exactly.
+            skip_run_structure=skip_affinity_structure,
         )
         model_module.eval()
 

@@ -17,6 +17,7 @@ from .proxy import TargetProxy, chronological_evaluation
 from .provider import load_submission
 from .scorer import NIMScorer
 from .search import SearchEngine
+from .selection import select_submission
 from .validity import HistoricalIndex, ValidityGate, maccs_entropy
 from .types import Candidate, ScoredCandidate
 
@@ -179,11 +180,16 @@ def main() -> None:
         archive = CandidateArchive(args.archive)
         archive.add_candidates(item.candidate for item in scored)
         archive.add_scores(scored)
-        reaction = int(payload["reaction"])
-        selected = select_submission(archive.top(reaction, scored_only=True))
-        result = args.result or f"artifacts/result_rxn{reaction}.json"
-        CandidateArchive.atomic_write_result(result, selected)
-        print(json.dumps({"reaction": reaction, "imported": len(scored), "submission_score": sum(item.score for item in selected), "result": str(Path(result).resolve())}))
+        reactions = sorted({item.candidate.reaction for item in scored})
+        summaries = []
+        for reaction in reactions:
+            selected = select_submission(archive.top(reaction, scored_only=True))
+            if args.result and len(reactions) > 1:
+                raise SystemExit("--result is only valid for a single-reaction score file")
+            result = args.result or f"artifacts/result_rxn{reaction}.json"
+            CandidateArchive.atomic_write_result(result, selected)
+            summaries.append({"reaction": reaction, "imported": sum(item.candidate.reaction == reaction for item in scored), "submission_score": sum(item.score for item in selected), "result": str(Path(result).resolve())})
+        print(json.dumps(summaries))
         return
     if args.command == "validate-result":
         database = ReactionDatabase()
