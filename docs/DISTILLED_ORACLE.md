@@ -76,6 +76,34 @@ diffusion-free Morgan model trained on the 255 non-exact reduced rows reached
 only 0.535. The next data gate is therefore 320 balanced exact labels, not
 promotion of the 65-label model.
 
+The corresponding outer-fold learning curve was still rising: with about 13,
+26, 40, and 52 exact training labels, ExtraTrees reached mean Spearman 0.205,
+0.382, 0.482, and 0.551; the fixed Tanimoto-kernel control reached 0.392,
+0.524, 0.564, and 0.572. This supports collecting the remaining 255 balanced
+exact labels rather than treating the 65-label performance as a plateau. The
+Tanimoto configuration and all gates were frozen before those labels were
+generated.
+
+Those learning-curve correlations are pooled across reactions and are not a
+promotion metric. On the 65-label repeated out-of-fold predictions, the macro
+within-reaction Spearman was only 0.104 for ExtraTrees and 0.014 for the
+Tanimoto kernel, versus 0.619 for matched reduced Boltz. Because a competition
+round exposes one reaction, the 320-label prospective gate treats per-reaction
+ranking and top-tail recall as primary; pooled correlation is diagnostic only.
+
+The prospective expansion then scored all 320 balanced molecules exactly (64
+per reaction) using the same r3/s100/d1/ar5/as100/ad3 scorer. All 255 new rows
+completed without failure. On ten repeated scaffold-held-out folds, exact-only
+Morgan improved to macro within-reaction Spearman 0.463, but recovered only 54%
+of the exact top ten at a 20/64 acquisition budget. It is still rejected as a
+replacement oracle. Matched reduced Boltz reached 0.909 macro within-reaction
+Spearman and recovered 100% of the exact top ten from its top 20 in every
+reaction. Its top 40 recovered 98% of the exact top 20; only reaction 5 missed
+two. Learned affine, Morgan, component, and Tanimoto residual corrections did
+not beat raw reduced scores. This prospectively promotes the reduced-Boltz
+shortlist followed by exact-Boltz reranking, while all learned corrections stay
+off.
+
 A deliberately small universal-base smoke train used 5,000 balanced BindingDB
 rows, held out 1,053 rows by entire protein target, and ran one public pretrain
 epoch. It reached target-holdout affinity Spearman 0.313 (MAE 1.60 pAffinity).
@@ -106,6 +134,14 @@ on the matched workload. The representation path is therefore about 335 times
 faster before the negligible adapter head. Startup was reported separately at
 9.36 seconds. The uncertainty-aware adapter alone exceeded 175,000 molecules/s
 on CPU for the smaller bootstrap batch.
+
+The 255-row exact expansion also removed a teacher-generation CPU bottleneck.
+Eight preprocessing processes per GPU reduced deterministic input packing from
+about 4 minutes 45 seconds to 41 seconds. This required replacing the outer
+daemonic multiprocessing pool with non-daemonic process executors. End-to-end
+exact scoring then completed in 1,654.6 seconds on two RTX 4090 cards, or 0.154
+molecules/second including packing and model startup. Cache downloads remain a
+separate one-time setup cost.
 
 ## Accuracy gates
 

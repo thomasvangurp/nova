@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from scipy.stats import spearmanr
@@ -22,7 +23,7 @@ from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import StratifiedGroupKFold
 
-from compound_miner.features import molecule_features
+from compound_miner.features import ComponentEncoder, molecule_features
 
 
 def _scores(path: Path) -> list[dict[str, Any]]:
@@ -95,6 +96,10 @@ def evaluate(
     truth = np.asarray([row["score"] for row in exact], dtype=np.float64)
     reduced_truth = np.asarray([reduced_by_key[key]["score"] for key in exact_keys], dtype=np.float64)
     reactions = np.asarray([row["reaction"] for row in exact], dtype=np.int64)
+    components = np.full((len(exact), 3), -1, dtype=np.int64)
+    for index, row in enumerate(exact):
+        values = row.get("components", [])
+        components[index, : min(3, len(values))] = values[:3]
     scaffolds = np.asarray([_scaffold(row["smiles"]) for row in exact])
     chemistry = np.vstack([molecule_features(row["smiles"], fingerprint_size=2048) for row in exact])
     fingerprint = chemistry[:, :2048]
@@ -134,9 +139,15 @@ def evaluate(
         "raw_reduced",
         "affine_reduced",
         "exact_morgan",
+        "exact_component_morgan",
+        "exact_morgan_by_reaction",
         "exact_tanimoto_kernel",
+        "exact_tanimoto_kernel_by_reaction",
         "reduced_residual_morgan",
+        "reduced_residual_component_morgan",
+        "reduced_residual_morgan_by_reaction",
         "reduced_residual_tanimoto_kernel",
+        "reduced_residual_tanimoto_kernel_by_reaction",
     ]
     if predicted_reduced is not None:
         names.extend(("diffusion_free_reduced", "diffusion_free_residual_morgan"))
@@ -160,6 +171,31 @@ def evaluate(
             exact_model = _tree(seed, trees, minimum_leaf=3).fit(chemistry[train], truth[train])
             fold_predictions["exact_morgan"][validation] = exact_model.predict(chemistry[validation])
 
+            def encoded_matrix(indices: np.ndarray, encoder: ComponentEncoder) -> np.ndarray:
+                return np.column_stack(
+                    (
+                        chemistry[indices],
+                        encoder.transform_rows(reactions[indices], components[indices]),
+                    )
+                )
+
+            component_frame = pd.DataFrame(
+                {
+                    "reaction": reactions[train],
+                    "component_a": components[train, 0],
+                    "component_b": components[train, 1],
+                    "component_c": components[train, 2],
+                    "score": truth[train],
+                }
+            )
+            component_encoder = ComponentEncoder().fit(component_frame)
+            component_model = _tree(seed + 30, trees, minimum_leaf=3).fit(
+                encoded_matrix(train, component_encoder), truth[train]
+            )
+            fold_predictions["exact_component_morgan"][validation] = component_model.predict(
+                encoded_matrix(validation, component_encoder)
+            )
+
             # Fixed before expanding the exact set. The small reaction term is
             # additive rather than a hard partition, so sparse reactions can
             # still borrow chemical-neighbour evidence from one another.
@@ -178,6 +214,16 @@ def evaluate(
             fold_predictions["reduced_residual_morgan"][validation] = (
                 reduced_truth[validation] + correction.predict(chemistry[validation])
             )
+            residual_frame = component_frame.copy()
+            residual_frame["score"] = truth[train] - reduced_truth[train]
+            residual_encoder = ComponentEncoder().fit(residual_frame)
+            residual_component_model = _tree(seed + 31, trees, minimum_leaf=3).fit(
+                encoded_matrix(train, residual_encoder), residual_frame["score"].to_numpy()
+            )
+            fold_predictions["reduced_residual_component_morgan"][validation] = (
+                reduced_truth[validation]
+                + residual_component_model.predict(encoded_matrix(validation, residual_encoder))
+            )
 
             residual = truth[train] - reduced_truth[train]
             residual_mean = float(np.mean(residual))
@@ -189,6 +235,53 @@ def evaluate(
                 + residual_model.predict(tanimoto[np.ix_(validation, train)])
                 + residual_mean
             )
+
+            # Live rounds are reaction-specific. Freeze separate low-data
+            # estimators now so the larger prospective set can test whether
+            # 64 exact labels per reaction are enough to learn local ranking.
+            for reaction in range(1, 6):
+                reaction_train = train[reactions[train] == reaction]
+                reaction_validation = validation[reactions[validation] == reaction]
+                if not len(reaction_validation):
+                    continue
+                reaction_tree = _tree(seed + 10 + reaction, trees, minimum_leaf=2).fit(
+                    chemistry[reaction_train], truth[reaction_train]
+                )
+                fold_predictions["exact_morgan_by_reaction"][reaction_validation] = (
+                    reaction_tree.predict(chemistry[reaction_validation])
+                )
+                reaction_mean = float(np.mean(truth[reaction_train]))
+                reaction_kernel = KernelRidge(alpha=1.0, kernel="precomputed").fit(
+                    tanimoto[np.ix_(reaction_train, reaction_train)],
+                    truth[reaction_train] - reaction_mean,
+                )
+                fold_predictions["exact_tanimoto_kernel_by_reaction"][reaction_validation] = (
+                    reaction_kernel.predict(tanimoto[np.ix_(reaction_validation, reaction_train)])
+                    + reaction_mean
+                )
+
+                reaction_residual = truth[reaction_train] - reduced_truth[reaction_train]
+                reaction_residual_tree = _tree(
+                    seed + 20 + reaction, trees, minimum_leaf=2
+                ).fit(chemistry[reaction_train], reaction_residual)
+                fold_predictions["reduced_residual_morgan_by_reaction"][reaction_validation] = (
+                    reduced_truth[reaction_validation]
+                    + reaction_residual_tree.predict(chemistry[reaction_validation])
+                )
+                reaction_residual_mean = float(np.mean(reaction_residual))
+                reaction_residual_kernel = KernelRidge(alpha=1.0, kernel="precomputed").fit(
+                    tanimoto[np.ix_(reaction_train, reaction_train)],
+                    reaction_residual - reaction_residual_mean,
+                )
+                fold_predictions[
+                    "reduced_residual_tanimoto_kernel_by_reaction"
+                ][reaction_validation] = (
+                    reduced_truth[reaction_validation]
+                    + reaction_residual_kernel.predict(
+                        tanimoto[np.ix_(reaction_validation, reaction_train)]
+                    )
+                    + reaction_residual_mean
+                )
 
             if predicted_reduced is not None:
                 student_calibrator = Ridge(alpha=1e-3).fit(
@@ -214,6 +307,15 @@ def evaluate(
     for name in names:
         values = per_repeat[name]
         averaged = prediction_sums[name] / repeats
+        by_reaction = {
+            str(reaction): _metrics(
+                truth[reactions == reaction],
+                averaged[reactions == reaction],
+                top_k,
+                budget,
+            )
+            for reaction in range(1, 6)
+        }
         models[name] = {
             "mean": {
                 key: float(np.mean([row[key] for row in values]))
@@ -224,10 +326,13 @@ def evaluate(
                 for key in values[0]
             },
             "averaged_oof": _metrics(truth, averaged, top_k, budget),
-            "spearman_by_reaction": {
-                str(reaction): _spearman(truth[reactions == reaction], averaged[reactions == reaction])
-                for reaction in range(1, 6)
-            },
+            "metrics_by_reaction": by_reaction,
+            "macro_within_reaction_spearman": float(
+                np.mean([metrics["spearman"] for metrics in by_reaction.values()])
+            ),
+            "macro_within_reaction_top_k_recall": float(
+                np.mean([metrics["top_k_recall"] for metrics in by_reaction.values()])
+            ),
         }
 
     return {
