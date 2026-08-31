@@ -3,7 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-python -m pip install -e "${repo_root}/external_tools/boltz[cuda]"
+python -m pip install \
+  -c "${repo_root}/requirements/boltz-worker-constraints.txt" \
+  -e "${repo_root}/external_tools/boltz[cuda]"
 python -m pip install \
   pytorch-lightning==2.5.5 \
   rdkit==2024.9.4 \
@@ -22,6 +24,8 @@ import rdkit
 import torch
 
 assert torch.cuda.is_available()
+assert torch.__version__.startswith("2.6.0"), torch.__version__
+assert torch.version.cuda == "12.6", torch.version.cuda
 print({
     "torch": torch.__version__,
     "cuda": torch.version.cuda,

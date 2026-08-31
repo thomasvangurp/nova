@@ -18,6 +18,7 @@ from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from scipy.stats import spearmanr
 from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import StratifiedGroupKFold
 
@@ -96,6 +97,12 @@ def evaluate(
     reactions = np.asarray([row["reaction"] for row in exact], dtype=np.int64)
     scaffolds = np.asarray([_scaffold(row["smiles"]) for row in exact])
     chemistry = np.vstack([molecule_features(row["smiles"], fingerprint_size=2048) for row in exact])
+    fingerprint = chemistry[:, :2048]
+    intersections = fingerprint @ fingerprint.T
+    bit_counts = fingerprint.sum(axis=1)
+    tanimoto = intersections / (
+        bit_counts[:, None] + bit_counts[None, :] - intersections + 1e-9
+    )
     reaction_bits = np.eye(5, dtype=np.float32)[np.clip(reactions - 1, 0, 4)]
     chemistry = np.column_stack((chemistry, reaction_bits))
 
@@ -125,7 +132,9 @@ def evaluate(
         "raw_reduced",
         "affine_reduced",
         "exact_morgan",
+        "exact_tanimoto_kernel",
         "reduced_residual_morgan",
+        "reduced_residual_tanimoto_kernel",
         "diffusion_free_reduced",
         "diffusion_free_residual_morgan",
     )
@@ -149,11 +158,34 @@ def evaluate(
             exact_model = _tree(seed, trees, minimum_leaf=3).fit(chemistry[train], truth[train])
             fold_predictions["exact_morgan"][validation] = exact_model.predict(chemistry[validation])
 
+            # Fixed before expanding the exact set. The small reaction term is
+            # additive rather than a hard partition, so sparse reactions can
+            # still borrow chemical-neighbour evidence from one another.
+            exact_kernel = tanimoto + 0.25 * (reactions[:, None] == reactions[None, :])
+            exact_mean = float(np.mean(truth[train]))
+            kernel_model = KernelRidge(alpha=1.0, kernel="precomputed").fit(
+                exact_kernel[np.ix_(train, train)], truth[train] - exact_mean
+            )
+            fold_predictions["exact_tanimoto_kernel"][validation] = (
+                kernel_model.predict(exact_kernel[np.ix_(validation, train)]) + exact_mean
+            )
+
             correction = _tree(seed + 1, trees, minimum_leaf=4).fit(
                 chemistry[train], truth[train] - reduced_truth[train]
             )
             fold_predictions["reduced_residual_morgan"][validation] = (
                 reduced_truth[validation] + correction.predict(chemistry[validation])
+            )
+
+            residual = truth[train] - reduced_truth[train]
+            residual_mean = float(np.mean(residual))
+            residual_model = KernelRidge(alpha=1.0, kernel="precomputed").fit(
+                tanimoto[np.ix_(train, train)], residual - residual_mean
+            )
+            fold_predictions["reduced_residual_tanimoto_kernel"][validation] = (
+                reduced_truth[validation]
+                + residual_model.predict(tanimoto[np.ix_(validation, train)])
+                + residual_mean
             )
 
             student_calibrator = Ridge(alpha=1e-3).fit(

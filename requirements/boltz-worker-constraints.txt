@@ -1,0 +1,7 @@
+# Keep teacher labels comparable with the pinned CUDA 12.6 worker image.
+# Without this constraint, pip resolves ``torch>=2.2`` to the newest release
+# and can silently replace both Torch and the CUDA runtime.
+torch==2.6.0
+numpy==1.26.4
+rdkit==2024.9.4
+pandas==2.2.3
