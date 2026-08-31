@@ -84,6 +84,7 @@ def _bounded(value: int, maximum: int) -> int:
     return max(0, min(int(value), maximum))
 
 
+@functools.lru_cache(maxsize=65_536)
 def molecule_graph(smiles: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None:

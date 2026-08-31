@@ -75,6 +75,18 @@ cached ESM features, and a proper multi-epoch GPU train. On a four-worker Mac
 CPU the complete smoke train took 106 seconds, predominantly RDKit packing
 rather than model inference.
 
+Two larger RTX 4090 graph/ESM ablations used 20,000 public rows, a whole-target
+public split (15,844 train / 4,156 validation), and the 402-row teacher set with
+a scaffold split (318 train / 84 validation). The two-member 128-wide arm
+improved public affinity MAE to 1.118 versus the 1.216 global-mean baseline, but
+its macro within-target Spearman was only 0.121. On the objective holdout it
+reached Spearman 0.258 and top-20 recall 0.40. A deeper 192-wide arm reached
+objective Spearman 0.302 and top-20 recall 0.50, but regressed public MAE to
+2.159. Both arms are rejected: neither is accurate enough for candidate
+acquisition, and added capacity did not repair the weak protein-ligand ranking.
+The next universal model should use explicit residue/atom cross-interaction or
+pair representations rather than only a pooled protein vector.
+
 On RTX 4090, the independently timed combined PSICHIC path processed 402
 molecules at 137.9 molecules/s after a separate warmup, including CPU ligand
 featurization. The warmed reduced Boltz path processed about 0.41 molecules/s
