@@ -40,6 +40,48 @@ from tools.build_exact_checkpoint import _write_exact_union
 from tools.run_epoch_search import _write_dynamic_baselines
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
 from tools.score_boltz_batch import balanced_partitions, record_key
+from neurons.miner.miner import initial_epoch_schedule
+
+
+@pytest.mark.asyncio
+async def test_initial_epoch_schedule_refreshes_budget_after_boundary_wait(monkeypatch):
+    class FakeSubtensor:
+        def __init__(self):
+            self.blocks = iter((987, 1000))
+
+        async def get_current_block(self):
+            return next(self.blocks)
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("neurons.miner.miner.asyncio.sleep", fake_sleep)
+    current, boundary, remaining = await initial_epoch_schedule(
+        FakeSubtensor(), epoch_length=100
+    )
+
+    assert sleeps == [156]
+    assert current == boundary == 1000
+    assert remaining == 100
+
+
+@pytest.mark.asyncio
+async def test_initial_epoch_schedule_keeps_mid_epoch_budget(monkeypatch):
+    class FakeSubtensor:
+        async def get_current_block(self):
+            return 940
+
+    async def unexpected_sleep(_seconds):
+        raise AssertionError("mid-epoch startup must not sleep")
+
+    monkeypatch.setattr("neurons.miner.miner.asyncio.sleep", unexpected_sleep)
+    current, boundary, remaining = await initial_epoch_schedule(
+        FakeSubtensor(), epoch_length=100
+    )
+
+    assert (current, boundary, remaining) == (940, 900, 60)
 
 
 def test_database_is_immutable(monkeypatch):

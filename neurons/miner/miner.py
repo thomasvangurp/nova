@@ -367,6 +367,36 @@ async def schedule_compound_search(
         f"epoch={epoch} reaction={reaction} deadline_seconds={deadline_seconds}"
     )
 
+
+async def initial_epoch_schedule(
+    subtensor: Any, epoch_length: int
+) -> Tuple[int, int, int]:
+    """Resolve the initial challenge boundary and its live search budget.
+
+    A miner starting just before an epoch boundary waits for the fresh epoch.
+    The chain height must then be read again: carrying the pre-sleep remaining
+    count into ``schedule_compound_search`` shortens a full epoch search to the
+    stale tail of the prior epoch.
+
+    Returns:
+        ``(current_block, challenge_boundary, blocks_remaining)``.
+    """
+    current_block = await subtensor.get_current_block()
+    next_boundary = ((current_block // epoch_length) + 1) * epoch_length
+    blocks_remaining = next_boundary - current_block
+
+    if blocks_remaining < 20:
+        bt.logging.info("Too close to epoch end, waiting for next epoch to start...")
+        await asyncio.sleep(12 * blocks_remaining)
+        current_block = await subtensor.get_current_block()
+        while current_block < next_boundary:
+            await asyncio.sleep(min(12, max(1, 12 * (next_boundary - current_block))))
+            current_block = await subtensor.get_current_block()
+
+    challenge_boundary = (current_block // epoch_length) * epoch_length
+    blocks_remaining = epoch_length - (current_block % epoch_length)
+    return current_block, challenge_boundary, blocks_remaining
+
 # ----------------------------------------------------------------------------
 # 5. RESPONSE SUBMISSION LOGIC
 # ----------------------------------------------------------------------------
@@ -487,17 +517,9 @@ async def run_miner(config: argparse.Namespace) -> None:
     bt.logging.info("Entering main miner loop...")
 
     # 3) If we start mid-epoch, obtain most recent proteins from block hash
-    current_block = await subtensor.get_current_block()
-    last_boundary = (current_block // epoch_length) * epoch_length
-    next_boundary = last_boundary + epoch_length
-
-    # If we start too close to epoch end, wait for next epoch
-    if next_boundary - current_block < 20:
-        bt.logging.info(f"Too close to epoch end, waiting for next epoch to start...")
-        block_to_check = next_boundary
-        await asyncio.sleep(12*(next_boundary - current_block))
-    else:
-        block_to_check = last_boundary
+    current_block, block_to_check, blocks_remaining = await initial_epoch_schedule(
+        subtensor, epoch_length
+    )
 
     block_hash = await subtensor.determine_block_hash(block_to_check)
     challenge_params = get_challenge_params_from_blockhash(
@@ -511,7 +533,7 @@ async def run_miner(config: argparse.Namespace) -> None:
     await schedule_compound_search(
         state,
         challenge_params,
-        blocks_remaining=next_boundary - current_block,
+        blocks_remaining=blocks_remaining,
     )
 
     # Update state with your results and other relevant info here
