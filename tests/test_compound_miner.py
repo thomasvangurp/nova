@@ -25,7 +25,10 @@ from compound_miner.distilled import (
     scaffold_split,
     target_split,
 )
-from compound_miner.interaction_student import RidgeInteractionEnsemble, scaffold_indices
+from compound_miner.interaction_student import (
+    RidgeInteractionEnsemble,
+    scaffold_indices,
+)
 from compound_miner.features import ComponentEncoder, molecule_features
 from compound_miner.proxy import _matrix
 from compound_miner.provider import load_submission
@@ -38,9 +41,13 @@ from compound_miner.reservoir import CandidateReservoir
 from compound_miner.selection import select_submission
 from compound_miner.types import Candidate, ScoredCandidate, parse_reaction_name
 from tools.build_exact_checkpoint import _write_exact_union
-from tools.run_epoch_search import _write_dynamic_baselines
+from tools.run_epoch_search import (
+    _can_start_iteration,
+    _promote_if_improved,
+    _write_dynamic_baselines,
+)
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
-from tools.score_boltz_batch import balanced_partitions, record_key
+from tools.score_boltz_batch import balanced_partitions, load_records, record_key
 from neurons.miner.miner import initial_epoch_schedule
 
 
@@ -94,7 +101,10 @@ def test_database_is_immutable(monkeypatch):
 def test_constructs_every_reaction(reaction):
     database = ReactionDatabase()
     rng = random.Random(68 + reaction)
-    candidates = [database.candidate(reaction, components) for components in database.sample_component_sets(reaction, 20, rng)]
+    candidates = [
+        database.candidate(reaction, components)
+        for components in database.sample_component_sets(reaction, 20, rng)
+    ]
     assert any(candidate is not None for candidate in candidates)
     for candidate in (value for value in candidates if value is not None):
         parsed_reaction, components = parse_reaction_name(candidate.name)
@@ -176,20 +186,32 @@ def test_exact_release_and_provider_are_atomic(tmp_path, monkeypatch):
     generated = []
     for components in database.sample_component_sets(2, 80, random.Random(123)):
         candidate = database.candidate(2, components)
-        if candidate is not None and candidate.inchikey not in {item.inchikey for item in generated}:
+        if candidate is not None and candidate.inchikey not in {
+            item.inchikey for item in generated
+        }:
             generated.append(candidate)
         if len(generated) == 20:
             break
     for index, candidate in enumerate(generated):
-        scores.append(ScoredCandidate(candidate, 0.5, -1.0, 1.0 - index / 100.0, VALIDATOR_EXACT_SCORER, 0.1))
+        scores.append(
+            ScoredCandidate(
+                candidate, 0.5, -1.0, 1.0 - index / 100.0, VALIDATOR_EXACT_SCORER, 0.1
+            )
+        )
     exact = tmp_path / "exact.json"
-    exact.write_text(json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]}))
+    exact.write_text(
+        json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]})
+    )
     baselines = tmp_path / "baselines.json"
-    baselines.write_text(json.dumps({
-        "schema_version": 1,
-        "target": "P40261",
-        "reactions": {"2": {"epoch": 1, "uid": 1, "score": 0.0}},
-    }))
+    baselines.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": "P40261",
+                "reactions": {"2": {"epoch": 1, "uid": 1, "score": 0.0}},
+            }
+        )
+    )
     result = tmp_path / "result_rxn2.json"
     manifest = promote_exact_checkpoint(
         exact,
@@ -200,7 +222,9 @@ def test_exact_release_and_provider_are_atomic(tmp_path, monkeypatch):
         target="P40261",
         epoch=1,
     )
-    monkeypatch.setenv("NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json"))
+    monkeypatch.setenv(
+        "NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json")
+    )
     names = load_submission(2, target="P40261", epoch=1).split(",")
     assert len(names) == len(set(names)) == 20
     assert json.loads(result.read_text())["molecules"][0]["score"] == 1.0
@@ -211,13 +235,19 @@ def test_exact_release_and_provider_are_atomic(tmp_path, monkeypatch):
 
 def test_provider_rejects_proxy_only_checkpoint(tmp_path, monkeypatch):
     path = tmp_path / "result_rxn5.json"
-    path.write_text(json.dumps({
-        "molecules": [
-            {"name": f"rxn:5:{index}:2:3", "score": 1.0, "scorer": "proxy"}
-            for index in range(20)
-        ]
-    }))
-    monkeypatch.setenv("NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json"))
+    path.write_text(
+        json.dumps(
+            {
+                "molecules": [
+                    {"name": f"rxn:5:{index}:2:3", "score": 1.0, "scorer": "proxy"}
+                    for index in range(20)
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv(
+        "NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json")
+    )
     with pytest.raises(ReleaseGateError, match="no exact release manifest"):
         load_submission(5)
 
@@ -244,22 +274,106 @@ def test_exact_union_preserves_incumbent_scores(tmp_path):
     incumbent_score = ScoredCandidate(
         incumbent, 0.9, -1.0, 0.9, VALIDATOR_EXACT_SCORER, 1.0
     )
-    new_score = ScoredCandidate(
-        new, 0.8, -1.0, 0.8, VALIDATOR_EXACT_SCORER, 1.0
-    )
+    new_score = ScoredCandidate(new, 0.8, -1.0, 0.8, VALIDATOR_EXACT_SCORER, 1.0)
     archive.add_candidates([incumbent])
     archive.add_scores([incumbent_score])
     current = tmp_path / "new.json"
-    current.write_text(json.dumps({"target": "P40261", "scores": [new_score.as_dict()]}))
+    current.write_text(
+        json.dumps({"target": "P40261", "scores": [new_score.as_dict()]})
+    )
     union = tmp_path / "union.json"
-    assert _write_exact_union(
-        archive.path, current, union, reaction=5, target="P40261"
-    ) == 2
+    assert (
+        _write_exact_union(archive.path, current, union, reaction=5, target="P40261")
+        == 2
+    )
     payload = json.loads(union.read_text())
     assert [item["name"] for item in payload["scores"]] == [
         incumbent.name,
         new.name,
     ]
+
+
+def _result_payload(score: float, epoch: int = 7) -> dict:
+    molecule_score = score / 20
+    molecules = [
+        {
+            "name": f"rxn:3:{index}:{index + 100}",
+            "inchikey": f"IK-{index}",
+            "score": molecule_score,
+            "scorer": VALIDATOR_EXACT_SCORER,
+        }
+        for index in range(20)
+    ]
+    return {
+        "molecules": molecules,
+        "release": {
+            "schema_version": 1,
+            "status": "qualified",
+            "target": "P40261",
+            "epoch": epoch,
+            "reaction": 3,
+            "scorer": VALIDATOR_EXACT_SCORER,
+            "exact_count": 20,
+            "selected_count": 20,
+            "selection_score": sum(item["score"] for item in molecules),
+            "baseline": {"score": 0.0},
+        },
+    }
+
+
+def test_anytime_promotion_never_replaces_a_better_incumbent(tmp_path):
+    destination = tmp_path / "result.json"
+    staged = tmp_path / "staged.json"
+    destination.write_text(json.dumps(_result_payload(2.0)))
+    staged.write_text(json.dumps(_result_payload(1.0)))
+
+    promoted, score = _promote_if_improved(
+        staged, destination, "P40261", epoch=7, reaction=3
+    )
+
+    assert not promoted
+    assert score == pytest.approx(2.0)
+    assert json.loads(destination.read_text())["release"][
+        "selection_score"
+    ] == pytest.approx(2.0)
+
+    staged.write_text(json.dumps(_result_payload(2.1)))
+    promoted, score = _promote_if_improved(
+        staged, destination, "P40261", epoch=7, reaction=3
+    )
+    assert promoted
+    assert score == pytest.approx(2.1)
+
+
+def test_anytime_budget_uses_slowest_observed_complete_iteration():
+    assert _can_start_iteration(1_321, [1_100, 1_200], 900, 120)
+    assert not _can_start_iteration(1_319, [1_100, 1_200], 900, 120)
+    assert not _can_start_iteration(1_019, [], 900, 120)
+
+
+def test_reduced_acquisition_fills_batch_after_excluding_prior_pass(tmp_path):
+    archive = CandidateArchive(tmp_path / "archive.sqlite")
+    candidates = [
+        Candidate(
+            f"rxn:3:{index}:{index + 100}",
+            "CCO",
+            3,
+            (index, index + 100),
+            f"IK-{index}",
+            3,
+            0,
+            proxy_mean=float(100 - index),
+            proxy_std=float(index),
+        )
+        for index in range(20)
+    ]
+    archive.add_candidates(candidates)
+    excluded = {item.inchikey for item in candidates[:10]}
+
+    records = load_records(archive.path, reaction=3, limit=8, excluded=excluded)
+
+    assert len(records) == 8
+    assert not excluded.intersection(record["inchikey"] for record in records)
 
 
 def test_epoch_baseline_uses_best_prior_submission(tmp_path):
@@ -282,7 +396,9 @@ def test_exact_release_must_beat_frozen_baseline(tmp_path):
     generated = []
     for components in database.sample_component_sets(2, 100, random.Random(321)):
         candidate = database.candidate(2, components)
-        if candidate is not None and candidate.inchikey not in {item.inchikey for item in generated}:
+        if candidate is not None and candidate.inchikey not in {
+            item.inchikey for item in generated
+        }:
             generated.append(candidate)
         if len(generated) == 20:
             break
@@ -291,13 +407,19 @@ def test_exact_release_must_beat_frozen_baseline(tmp_path):
         for candidate in generated
     ]
     exact = tmp_path / "exact.json"
-    exact.write_text(json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]}))
+    exact.write_text(
+        json.dumps({"target": "P40261", "scores": [item.as_dict() for item in scores]})
+    )
     baselines = tmp_path / "baselines.json"
-    baselines.write_text(json.dumps({
-        "schema_version": 1,
-        "target": "P40261",
-        "reactions": {"2": {"epoch": 1, "uid": 1, "score": 2.0}},
-    }))
+    baselines.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": "P40261",
+                "reactions": {"2": {"epoch": 1, "uid": 1, "score": 2.0}},
+            }
+        )
+    )
     result = tmp_path / "result.json"
     with pytest.raises(ReleaseGateError, match="misses frozen baseline"):
         promote_exact_checkpoint(
@@ -335,8 +457,7 @@ def test_contextual_delta_does_not_credit_unrelated_fixed_pair():
 
 def test_boltz_partitions_are_complete_and_deterministic():
     records = [
-        {"name": f"molecule-{index}", "heavy_atoms": 10 + index}
-        for index in range(17)
+        {"name": f"molecule-{index}", "heavy_atoms": 10 + index} for index in range(17)
     ]
     first = balanced_partitions(records, 4)
     second = balanced_partitions(list(reversed(records)), 4)
@@ -345,7 +466,10 @@ def test_boltz_partitions_are_complete_and_deterministic():
         item["name"] for item in records
     )
     costs = [
-        sum((258 + item["heavy_atoms"]) ** 2 + (200 + item["heavy_atoms"]) ** 2 for item in part)
+        sum(
+            (258 + item["heavy_atoms"]) ** 2 + (200 + item["heavy_atoms"]) ** 2
+            for item in part
+        )
         for part in first
     ]
     assert max(costs) / min(costs) < 1.3
@@ -360,11 +484,15 @@ def test_boltz_record_key_supports_resuming_score_portfolios():
 def test_distilled_oracle_batches_variable_molecules():
     examples = [
         StudentExample(name="ethanol", smiles="CCO", target="P40261", objective=0.1),
-        StudentExample(name="benzene", smiles="c1ccccc1", target="P40261", objective=0.2),
+        StudentExample(
+            name="benzene", smiles="c1ccccc1", target="P40261", objective=0.2
+        ),
     ]
     batch = collate_examples(examples)
     model = DistilledOracle(hidden=32, layers=2)
-    output = model(batch["graphs"], batch["protein"], batch["reaction"], batch["components"])
+    output = model(
+        batch["graphs"], batch["protein"], batch["reaction"], batch["components"]
+    )
     assert output["objective_mean"].shape == (2,)
     assert torch.isfinite(output["objective_mean"]).all()
     assert batch["protein"].shape == (2, 544)
@@ -392,8 +520,12 @@ def test_public_affinity_rows_are_aggregated(tmp_path):
 
 def test_scaffold_split_has_no_scaffold_overlap():
     examples = [
-        StudentExample(name=f"a{index}", smiles=smiles, target="P40261", objective=float(index))
-        for index, smiles in enumerate(("c1ccccc1", "Cc1ccccc1", "C1CCCCC1", "CC1CCCCC1", "CCO", "CCN"))
+        StudentExample(
+            name=f"a{index}", smiles=smiles, target="P40261", objective=float(index)
+        )
+        for index, smiles in enumerate(
+            ("c1ccccc1", "Cc1ccccc1", "C1CCCCC1", "CC1CCCCC1", "CCO", "CCN")
+        )
     ]
     train, validation = scaffold_split(examples, validation_fraction=0.5)
     assert train
@@ -402,32 +534,50 @@ def test_scaffold_split_has_no_scaffold_overlap():
 
 def test_target_split_has_no_protein_overlap():
     examples = [
-        StudentExample(name=f"{target}-{index}", smiles="CCO", target=target, protein_sequence="ACDE", experimental_affinity=6.0)
+        StudentExample(
+            name=f"{target}-{index}",
+            smiles="CCO",
+            target=target,
+            protein_sequence="ACDE",
+            experimental_affinity=6.0,
+        )
         for target in ("T1", "T2", "T3", "T4", "T5")
         for index in range(3)
     ]
     train, validation = target_split(examples, validation_fraction=0.4)
     assert train and validation
-    assert {value.target for value in train}.isdisjoint(value.target for value in validation)
+    assert {value.target for value in train}.isdisjoint(
+        value.target for value in validation
+    )
 
 
 def test_bindingdb_balancer_keeps_single_protein_numeric_rows(tmp_path):
     source = tmp_path / "bindingdb.tsv"
     fields = [
-        "Ligand SMILES", "Ki (nM)", "Kd (nM)", "IC50 (nM)", "EC50 (nM)",
+        "Ligand SMILES",
+        "Ki (nM)",
+        "Kd (nM)",
+        "IC50 (nM)",
+        "EC50 (nM)",
         "Number of Protein Chains in Target (>1 implies a multichain complex)",
         "BindingDB Target Chain Sequence 1",
         "UniProt (SwissProt) Primary ID of Target Chain 1",
         "UniProt (TrEMBL) Primary ID of Target Chain 1",
     ]
     source.write_text(
-        "\t".join(fields) + "\n"
-        + "\t".join(("CCO", "100", "", "", "", "1", "ACDE", "T1", "")) + "\n"
-        + "\t".join(("CCN", ">100", "", "", "", "1", "ACDE", "T1", "")) + "\n"
-        + "\t".join(("CCC", "10", "", "", "", "2", "ACDE", "T1", "")) + "\n"
+        "\t".join(fields)
+        + "\n"
+        + "\t".join(("CCO", "100", "", "", "", "1", "ACDE", "T1", ""))
+        + "\n"
+        + "\t".join(("CCN", ">100", "", "", "", "1", "ACDE", "T1", ""))
+        + "\n"
+        + "\t".join(("CCC", "10", "", "", "", "2", "ACDE", "T1", ""))
+        + "\n"
     )
     output = tmp_path / "balanced.csv.gz"
-    metrics = prepare_bindingdb_balanced(source, output, maximum_per_target=4, minimum_per_target=1)
+    metrics = prepare_bindingdb_balanced(
+        source, output, maximum_per_target=4, minimum_per_target=1
+    )
     examples = examples_from_public_csv(output)
     direct_examples = examples_from_bindingdb_tsv(source)
     assert metrics["interactions"] == 1
@@ -454,6 +604,10 @@ def test_interaction_adapter_roundtrip_and_scaffold_split(tmp_path):
     smiles = ["c1ccccc1", "Cc1ccccc1", "C1CCCCC1", "CC1CCCCC1", "CCO", "CCN"]
     train, validation = scaffold_indices(smiles, validation_fraction=0.4)
     assert set(train).isdisjoint(validation)
-    train_scaffolds = {MurckoScaffold.MurckoScaffoldSmiles(smiles[index]) for index in train}
-    validation_scaffolds = {MurckoScaffold.MurckoScaffoldSmiles(smiles[index]) for index in validation}
+    train_scaffolds = {
+        MurckoScaffold.MurckoScaffoldSmiles(smiles[index]) for index in train
+    }
+    validation_scaffolds = {
+        MurckoScaffold.MurckoScaffoldSmiles(smiles[index]) for index in validation
+    }
     assert train_scaffolds.isdisjoint(validation_scaffolds)

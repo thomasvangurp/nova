@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from compound_miner.archive import CandidateArchive
 from compound_miner.database import ReactionDatabase
 from compound_miner.history import aggregate_observations, sync_history, sync_novelty
 from compound_miner.proxy import TargetProxy
+from compound_miner.release import ReleaseGateError, validate_release_payload
 from compound_miner.search import SearchEngine
 from compound_miner.validity import HistoricalIndex
 
@@ -40,6 +42,65 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")))
     os.replace(temporary, path)
+
+
+def _release_score(path: Path, target: str, epoch: int, reaction: int) -> float | None:
+    """Return a verified live score, or ``None`` for a stale/invalid result."""
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        validate_release_payload(
+            payload,
+            reaction=reaction,
+            target=target,
+            epoch=epoch,
+        )
+        return float(payload["release"]["selection_score"])
+    except (OSError, ValueError, TypeError, KeyError, ReleaseGateError):
+        return None
+
+
+def _promote_if_improved(
+    staged: Path,
+    destination: Path,
+    target: str,
+    epoch: int,
+    reaction: int,
+) -> tuple[bool, float]:
+    """Atomically publish a staged exact release only when it improves."""
+    staged_score = _release_score(staged, target, epoch, reaction)
+    if staged_score is None:
+        raise ReleaseGateError(f"staged result is not a valid exact release: {staged}")
+    incumbent_score = _release_score(destination, target, epoch, reaction)
+    if incumbent_score is not None and staged_score <= incumbent_score:
+        return False, incumbent_score
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=destination.name, dir=destination.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(staged.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    return True, staged_score
+
+
+def _can_start_iteration(
+    remaining: float,
+    observed_seconds: list[float],
+    minimum_seconds: float,
+    reserve_seconds: float,
+) -> bool:
+    """Require enough budget for a complete measured pass plus commit headroom."""
+    estimate = max([minimum_seconds, *observed_seconds])
+    return remaining >= estimate + reserve_seconds
 
 
 def _write_dynamic_baselines(frame: pd.DataFrame, target: str, path: Path) -> None:
@@ -120,6 +181,19 @@ def main() -> None:
     parser.add_argument("--preprocessing-threads", type=int, default=1)
     parser.add_argument("--reduced-limit", type=int, default=1_024)
     parser.add_argument("--exact-limit", type=int, default=128)
+    parser.add_argument("--max-iterations", type=int, default=3)
+    parser.add_argument(
+        "--minimum-iteration-seconds",
+        type=float,
+        default=900.0,
+        help="Do not start another full proposal/Boltz pass without this much time",
+    )
+    parser.add_argument(
+        "--iteration-reserve-seconds",
+        type=float,
+        default=120.0,
+        help="Keep this much deadline headroom for atomic publication and commitment",
+    )
     parser.add_argument("--deadline-seconds", type=int, default=3_900)
     parser.add_argument("--scratch-root", type=Path, default=Path("/dev/shm"))
     parser.add_argument("--skip-history-refresh", action="store_true")
@@ -160,48 +234,114 @@ def main() -> None:
         CandidateArchive(archive_path),
         HistoricalIndex(novelty_path),
     )
-    search_metrics = engine.run_round(
-        reaction=args.reaction,
-        proposals=args.proposals,
-        exact_shortlist=args.exact_limit,
-        similarity_shortlist=args.similarity_shortlist,
-        result_path=None,
-        construction_workers=args.construction_workers,
-        similarity_workers=args.similarity_workers,
+    iteration_seconds: list[float] = []
+    # A restarted/upgraded runner may inherit the original one-shot portfolio.
+    # Treat it as pass zero so recovery continues into fresh chemistry instead
+    # of paying to score the same molecules again.
+    legacy_reduced = work / "boltz" / f"rxn{args.reaction}_reduced.json"
+    prior_reduced: list[Path] = (
+        [legacy_reduced] if legacy_reduced.is_file() else []
     )
-    _atomic_json(work / "search_metrics.json", search_metrics)
+    iterations: list[dict[str, object]] = []
+    stop_reason = "max_iterations"
+    for iteration in range(1, args.max_iterations + 1):
+        remaining = deadline - time.monotonic()
+        if iteration > 1 and not _can_start_iteration(
+            remaining,
+            iteration_seconds,
+            args.minimum_iteration_seconds,
+            args.iteration_reserve_seconds,
+        ):
+            stop_reason = "insufficient_time_for_measured_iteration"
+            break
 
-    qualification = [
-        sys.executable,
-        str(ROOT / "tools" / "build_exact_checkpoint.py"),
-        "--target",
-        args.target,
-        "--epoch",
-        str(args.epoch),
-        "--reaction",
-        str(args.reaction),
-        "--archive",
-        str(archive_path),
-        "--result",
-        str(args.result),
-        "--baselines",
-        str(baselines),
-        "--work-dir",
-        str(work / "boltz"),
-        "--gpus",
-        args.gpus,
-        "--shards-per-gpu",
-        str(args.shards_per_gpu),
-        "--preprocessing-threads",
-        str(args.preprocessing_threads),
-        "--reduced-limit",
-        str(args.reduced_limit),
-        "--exact-limit",
-        str(args.exact_limit),
-        "--scratch-root",
-        str(args.scratch_root),
-    ]
-    _run_until(qualification, deadline)
+        iteration_started = time.monotonic()
+        search_metrics = engine.run_round(
+            reaction=args.reaction,
+            proposals=args.proposals,
+            exact_shortlist=args.exact_limit,
+            similarity_shortlist=args.similarity_shortlist,
+            result_path=None,
+            construction_workers=args.construction_workers,
+            similarity_workers=args.similarity_workers,
+        )
+        _atomic_json(
+            work / f"search_metrics_iteration_{iteration}.json", search_metrics
+        )
+
+        qualification_work = work / "boltz" / f"iteration_{iteration}"
+        staged_result = work / f"result_iteration_{iteration}.json"
+        qualification = [
+            sys.executable,
+            str(ROOT / "tools" / "build_exact_checkpoint.py"),
+            "--target",
+            args.target,
+            "--epoch",
+            str(args.epoch),
+            "--reaction",
+            str(args.reaction),
+            "--archive",
+            str(archive_path),
+            "--result",
+            str(staged_result),
+            "--baselines",
+            str(baselines),
+            "--work-dir",
+            str(qualification_work),
+            "--gpus",
+            args.gpus,
+            "--shards-per-gpu",
+            str(args.shards_per_gpu),
+            "--preprocessing-threads",
+            str(args.preprocessing_threads),
+            "--reduced-limit",
+            str(args.reduced_limit),
+            "--exact-limit",
+            str(args.exact_limit),
+            "--scratch-root",
+            str(args.scratch_root),
+        ]
+        for prior in prior_reduced:
+            qualification.extend(("--exclude-records-json", str(prior)))
+        try:
+            _run_until(qualification, deadline)
+        except TimeoutError:
+            if iteration == 1:
+                raise
+            stop_reason = "deadline_during_optional_iteration"
+            break
+
+        reduced = qualification_work / f"rxn{args.reaction}_reduced.json"
+        prior_reduced.append(reduced)
+        promoted, score = _promote_if_improved(
+            staged_result,
+            args.result,
+            args.target,
+            args.epoch,
+            args.reaction,
+        )
+        duration = time.monotonic() - iteration_started
+        iteration_seconds.append(duration)
+        iterations.append(
+            {
+                "iteration": iteration,
+                "elapsed_seconds": duration,
+                "promoted": promoted,
+                "incumbent_score": score,
+                "remaining_seconds": max(0.0, deadline - time.monotonic()),
+                "search_metrics": search_metrics,
+            }
+        )
+        _atomic_json(
+            work / "progress.json",
+            {
+                "target": args.target,
+                "epoch": args.epoch,
+                "reaction": args.reaction,
+                "iterations": iterations,
+            },
+        )
+
     _atomic_json(
         work / "complete.json",
         {
@@ -210,6 +350,8 @@ def main() -> None:
             "reaction": args.reaction,
             "elapsed_seconds": time.monotonic() - started,
             "result": str(args.result.resolve()),
+            "iterations": iterations,
+            "stop_reason": stop_reason,
         },
     )
 

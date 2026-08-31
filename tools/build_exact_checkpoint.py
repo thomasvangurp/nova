@@ -47,7 +47,9 @@ def _write_exact_union(
     )
     by_name = {item.candidate.name: item for item in incumbents}
     by_name.update({item.candidate.name: item for item in current})
-    combined = sorted(by_name.values(), key=lambda item: (-item.score, item.candidate.name))
+    combined = sorted(
+        by_name.values(), key=lambda item: (-item.score, item.candidate.name)
+    )
     payload = {
         "reaction": reaction,
         "target": target,
@@ -93,6 +95,12 @@ def main() -> None:
     parser.add_argument("--preprocessing-threads", type=int, default=8)
     parser.add_argument("--reduced-limit", type=int, default=512)
     parser.add_argument("--exact-limit", type=int, default=128)
+    parser.add_argument(
+        "--exclude-records-json",
+        action="append",
+        type=Path,
+        help="Do not spend reduced-scoring work on an earlier iteration's portfolio",
+    )
     parser.add_argument("--scratch-root", type=Path)
     args = parser.parse_args()
 
@@ -101,48 +109,75 @@ def main() -> None:
     exact_new = args.work_dir / f"rxn{args.reaction}_exact_new.json"
     exact = args.work_dir / f"rxn{args.reaction}_exact.json"
     common = [
-        "--gpus", args.gpus,
-        "--shards-per-gpu", str(args.shards_per_gpu),
-        "--preprocessing-threads", str(args.preprocessing_threads),
+        "--gpus",
+        args.gpus,
+        "--shards-per-gpu",
+        str(args.shards_per_gpu),
+        "--preprocessing-threads",
+        str(args.preprocessing_threads),
     ]
     if args.scratch_root:
         common.extend(("--scratch-root", str(args.scratch_root)))
 
+    reduced_arguments = [
+        sys.executable,
+        str(SCORE_TOOL),
+        "--archive",
+        str(args.archive),
+        "--reaction",
+        str(args.reaction),
+        "--target",
+        args.target,
+        "--limit",
+        str(args.reduced_limit),
+        "--recycling-steps",
+        "1",
+        "--sampling-steps",
+        "20",
+        "--diffusion-samples",
+        "1",
+        "--recycling-steps-affinity",
+        "5",
+        "--sampling-steps-affinity",
+        "20",
+        "--diffusion-samples-affinity",
+        "1",
+        "--skip-affinity-structure",
+        "--output",
+        str(reduced),
+        *common,
+    ]
+    for path in args.exclude_records_json or []:
+        reduced_arguments.extend(("--exclude-records-json", str(path)))
+    _run(reduced_arguments)
     _run(
         [
             sys.executable,
             str(SCORE_TOOL),
-            "--archive", str(args.archive),
-            "--reaction", str(args.reaction),
-            "--target", args.target,
-            "--limit", str(args.reduced_limit),
-            "--recycling-steps", "1",
-            "--sampling-steps", "20",
-            "--diffusion-samples", "1",
-            "--recycling-steps-affinity", "5",
-            "--sampling-steps-affinity", "20",
-            "--diffusion-samples-affinity", "1",
-            "--skip-affinity-structure",
-            "--output", str(reduced),
-            *common,
-        ]
-    )
-    _run(
-        [
-            sys.executable,
-            str(SCORE_TOOL),
-            "--archive", str(args.archive),
-            "--reaction", str(args.reaction),
-            "--target", args.target,
-            "--records-json", str(reduced),
-            "--limit", str(args.exact_limit),
-            "--recycling-steps", "3",
-            "--sampling-steps", "100",
-            "--diffusion-samples", "1",
-            "--recycling-steps-affinity", "5",
-            "--sampling-steps-affinity", "100",
-            "--diffusion-samples-affinity", "3",
-            "--output", str(exact_new),
+            "--archive",
+            str(args.archive),
+            "--reaction",
+            str(args.reaction),
+            "--target",
+            args.target,
+            "--records-json",
+            str(reduced),
+            "--limit",
+            str(args.exact_limit),
+            "--recycling-steps",
+            "3",
+            "--sampling-steps",
+            "100",
+            "--diffusion-samples",
+            "1",
+            "--recycling-steps-affinity",
+            "5",
+            "--sampling-steps-affinity",
+            "100",
+            "--diffusion-samples-affinity",
+            "3",
+            "--output",
+            str(exact_new),
             *common,
         ]
     )
@@ -158,14 +193,22 @@ def main() -> None:
         "-m",
         "compound_miner.cli",
         "qualify-exact",
-        "--scores", str(exact),
-        "--reduced-scores", str(reduced),
-        "--archive", str(args.archive),
-        "--result", str(args.result),
-        "--baselines", str(args.baselines),
-        "--reaction", str(args.reaction),
-        "--target", args.target,
-        "--epoch", str(args.epoch),
+        "--scores",
+        str(exact),
+        "--reduced-scores",
+        str(reduced),
+        "--archive",
+        str(args.archive),
+        "--result",
+        str(args.result),
+        "--baselines",
+        str(args.baselines),
+        "--reaction",
+        str(args.reaction),
+        "--target",
+        args.target,
+        "--epoch",
+        str(args.epoch),
     ]
     _run(qualification)
     print(

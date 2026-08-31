@@ -34,7 +34,12 @@ def record_key(record: dict[str, Any]) -> str:
     return str(record.get("inchikey") or record.get("name") or record["smiles"])
 
 
-def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any]]:
+def load_records(
+    archive: Path,
+    reaction: int,
+    limit: int,
+    excluded: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Build a fixed acquisition portfolio instead of trusting one weak proxy rank.
 
     Half of each reaction batch exploits predicted mean, one quarter samples high
@@ -42,6 +47,7 @@ def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any
     full proxy-ranked archive.  The fixed ordering also keeps host timing from
     changing which molecules receive an exact score.
     """
+    excluded = excluded or set()
     with sqlite3.connect(archive) as connection:
         reactions = range(1, 6) if reaction == 0 else (reaction,)
         rows = []
@@ -52,6 +58,7 @@ def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any
                    ORDER BY proxy_mean DESC, name ASC""",
                 (value,),
             ).fetchall()
+            pool = [item for item in pool if (item[4] or item[0]) not in excluded]
             if not pool:
                 continue
             chosen: list[tuple[Any, ...]] = []
@@ -61,6 +68,10 @@ def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any
                 for item in items:
                     if len(chosen) >= quota or len(chosen) >= limit:
                         break
+                    # In an anytime search, prior reduced-score portfolios are
+                    # excluded so later passes spend GPU time on fresh chemistry.
+                    # Filtering the pool before constructing each acquisition
+                    # stratum prevents an excluded prefix from underfilling pass two.
                     if item[0] not in names:
                         chosen.append(item)
                         names.add(item[0])
@@ -68,15 +79,37 @@ def load_records(archive: Path, reaction: int, limit: int) -> list[dict[str, Any
             exploit_end = math.ceil(limit * 0.50)
             add(pool, exploit_end)
             uncertainty_end = exploit_end + math.ceil(limit * 0.25)
-            add(sorted(pool, key=lambda item: (-float(item[8]), item[0])), uncertainty_end)
+            add(
+                sorted(pool, key=lambda item: (-float(item[8]), item[0])),
+                uncertainty_end,
+            )
             remaining = [item for item in pool if item[0] not in names]
             if remaining:
                 needed = limit - len(chosen)
                 # Even ranks are stable, broad, and reproducible across machines.
-                positions = [int(index * len(remaining) / max(1, needed)) for index in range(needed)]
-                add([remaining[min(position, len(remaining) - 1)] for position in positions], limit)
+                positions = [
+                    int(index * len(remaining) / max(1, needed))
+                    for index in range(needed)
+                ]
+                add(
+                    [
+                        remaining[min(position, len(remaining) - 1)]
+                        for position in positions
+                    ],
+                    limit,
+                )
             rows.extend(chosen)
-    columns = ("name", "smiles", "reaction", "components", "inchikey", "heavy_atoms", "rotatable_bonds", "proxy_mean", "proxy_std")
+    columns = (
+        "name",
+        "smiles",
+        "reaction",
+        "components",
+        "inchikey",
+        "heavy_atoms",
+        "rotatable_bonds",
+        "proxy_mean",
+        "proxy_std",
+    )
     return [dict(zip(columns, row)) for row in rows]
 
 
@@ -116,7 +149,7 @@ def score_worker(
         str,
         str,
         dict[str, Any],
-    ]
+    ],
 ) -> list[dict[str, Any]]:
     shard, gpu, records, scratch_root, target, sequence, msa_path, inference = arguments
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -196,7 +229,13 @@ def score_worker(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
-    parser.add_argument("--reaction", type=int, choices=range(0, 6), required=True, help="1-5, or 0 for a balanced batch from all reactions")
+    parser.add_argument(
+        "--reaction",
+        type=int,
+        choices=range(0, 6),
+        required=True,
+        help="1-5, or 0 for a balanced batch from all reactions",
+    )
     parser.add_argument("--target", default="P40261")
     parser.add_argument("--sequence")
     parser.add_argument("--limit", type=int, default=128)
@@ -208,10 +247,16 @@ def main() -> None:
         default=1,
         help="CPU input-packing workers per GPU scoring process",
     )
-    parser.add_argument("--partition-strategy", choices=("lpt", "roundrobin"), default="lpt")
+    parser.add_argument(
+        "--partition-strategy", choices=("lpt", "roundrobin"), default="lpt"
+    )
     parser.add_argument("--msa", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--records-json", type=Path, help="Reuse the exact molecule set from an earlier score file")
+    parser.add_argument(
+        "--records-json",
+        type=Path,
+        help="Reuse the exact molecule set from an earlier score file",
+    )
     parser.add_argument(
         "--exclude-records-json",
         action="append",
@@ -229,7 +274,11 @@ def main() -> None:
     parser.add_argument("--skip-affinity-confidence", action="store_true")
     parser.add_argument("--full-structure-output", action="store_true")
     parser.add_argument("--compress-pre-affinity", action="store_true")
-    parser.add_argument("--scratch-root", type=Path, help="Prefer a RAM-backed directory such as /dev/shm")
+    parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help="Prefer a RAM-backed directory such as /dev/shm",
+    )
     parser.add_argument("--disk-affinity-handoff", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
     args = parser.parse_args()
@@ -241,25 +290,33 @@ def main() -> None:
     msa = args.msa or Path(f"data/msa_files/{args.target}.a3m")
     if not msa.is_file():
         raise SystemExit(f"MSA file does not exist: {msa}")
+    excluded: set[str] = set()
+    if args.exclude_records_json:
+        for path in args.exclude_records_json:
+            excluded_payload = json.loads(path.read_text())
+            excluded.update(record_key(item) for item in excluded_payload["scores"])
+
     if args.records_json:
         source_records = json.loads(args.records_json.read_text())["scores"]
         reactions = range(1, 6) if args.reaction == 0 else (args.reaction,)
         records = []
         for reaction in reactions:
-            reaction_records = [item for item in source_records if int(item["reaction"]) == reaction]
+            reaction_records = [
+                item for item in source_records if int(item["reaction"]) == reaction
+            ]
             if not args.preserve_record_order:
-                reaction_records.sort(key=lambda item: (-float(item["score"]), str(item["name"])))
+                reaction_records.sort(
+                    key=lambda item: (-float(item["score"]), str(item["name"]))
+                )
             records.extend(reaction_records[: args.limit])
         for record in records:
             if not isinstance(record["components"], str):
                 record["components"] = json.dumps(record["components"])
     else:
-        records = load_records(args.archive, args.reaction, args.limit)
-    if args.exclude_records_json:
-        excluded = set()
-        for path in args.exclude_records_json:
-            excluded_payload = json.loads(path.read_text())
-            excluded.update(record_key(item) for item in excluded_payload["scores"])
+        records = load_records(
+            args.archive, args.reaction, args.limit, excluded=excluded
+        )
+    if excluded:
         records = [item for item in records if record_key(item) not in excluded]
     if not records:
         raise SystemExit("archive shortlist is empty")
@@ -268,7 +325,9 @@ def main() -> None:
     if args.partition_strategy == "lpt":
         partitions = balanced_partitions(records, len(worker_gpus))
     else:
-        partitions = [records[index:: len(worker_gpus)] for index in range(len(worker_gpus))]
+        partitions = [
+            records[index :: len(worker_gpus)] for index in range(len(worker_gpus))
+        ]
     scratch = tempfile.mkdtemp(
         prefix="nova-boltz-",
         dir=str(args.scratch_root) if args.scratch_root else None,
@@ -293,26 +352,30 @@ def main() -> None:
         # ProcessPoolExecutor workers are non-daemonic, unlike
         # multiprocessing.Pool workers. Boltz can therefore use its own CPU
         # preprocessing pool inside each GPU worker when requested.
-        with ProcessPoolExecutor(max_workers=len(worker_gpus), mp_context=context) as pool:
-            chunks = list(pool.map(
-                score_worker,
-                [
-                    (
-                        index,
-                        gpu,
-                        partition,
-                        scratch,
-                        args.target,
-                        sequence,
-                        str(msa.resolve()),
-                        inference,
-                    )
-                    for index, (gpu, partition) in enumerate(
-                        zip(worker_gpus, partitions)
-                    )
-                    if partition
-                ],
-            ))
+        with ProcessPoolExecutor(
+            max_workers=len(worker_gpus), mp_context=context
+        ) as pool:
+            chunks = list(
+                pool.map(
+                    score_worker,
+                    [
+                        (
+                            index,
+                            gpu,
+                            partition,
+                            scratch,
+                            args.target,
+                            sequence,
+                            str(msa.resolve()),
+                            inference,
+                        )
+                        for index, (gpu, partition) in enumerate(
+                            zip(worker_gpus, partitions)
+                        )
+                        if partition
+                    ],
+                )
+            )
         results = [item for chunk in chunks for item in chunk]
         payload = {
             "reaction": args.reaction,
@@ -329,7 +392,11 @@ def main() -> None:
         temporary = args.output.with_suffix(args.output.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, separators=(",", ":")))
         temporary.replace(args.output)
-        print(json.dumps({key: value for key, value in payload.items() if key != "scores"}))
+        print(
+            json.dumps(
+                {key: value for key, value in payload.items() if key != "scores"}
+            )
+        )
     finally:
         if not args.keep_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
