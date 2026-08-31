@@ -15,6 +15,7 @@ from .database import ReactionDatabase
 from .history import aggregate_observations, sync_history, sync_novelty
 from .proxy import TargetProxy, chronological_evaluation
 from .provider import load_submission
+from .release import promote_exact_checkpoint
 from .scorer import NIMScorer
 from .search import SearchEngine
 from .selection import select_submission
@@ -81,6 +82,16 @@ def _parser() -> argparse.ArgumentParser:
     import_scores.add_argument("--scores", required=True)
     import_scores.add_argument("--archive", default="archives/P40261.sqlite")
     import_scores.add_argument("--result")
+
+    qualify = subparsers.add_parser("qualify-exact")
+    qualify.add_argument("--scores", required=True)
+    qualify.add_argument("--reduced-scores")
+    qualify.add_argument("--archive", default="archives/P40261.sqlite")
+    qualify.add_argument("--result", required=True)
+    qualify.add_argument(
+        "--baselines", default="config/compound_release_baselines.json"
+    )
+    qualify.add_argument("--reaction", type=int, choices=range(1, 6), required=True)
 
     validate = subparsers.add_parser("validate-result")
     validate.add_argument("--result", required=True)
@@ -213,6 +224,17 @@ def main() -> None:
             CandidateArchive.atomic_write_result(result, selected)
             summaries.append({"reaction": reaction, "imported": sum(item.candidate.reaction == reaction for item in scored), "submission_score": sum(item.score for item in selected), "result": str(Path(result).resolve())})
         print(json.dumps(summaries))
+        return
+    if args.command == "qualify-exact":
+        manifest = promote_exact_checkpoint(
+            exact_scores_path=args.scores,
+            reduced_scores_path=args.reduced_scores,
+            archive_path=args.archive,
+            result_path=args.result,
+            baseline_path=args.baselines,
+            reaction=args.reaction,
+        )
+        print(json.dumps(manifest, indent=2, sort_keys=True))
         return
     if args.command == "validate-result":
         database = ReactionDatabase()

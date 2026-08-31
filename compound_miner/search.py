@@ -12,9 +12,11 @@ import numpy as np
 import pandas as pd
 
 from .archive import CandidateArchive
+from .contextual import ContextualDeltaPolicy
 from .database import ReactionDatabase
 from .features import molecule_features
 from .proxy import TargetProxy
+from .release import VALIDATOR_EXACT_SCORER
 from .scorer import NIMScorer
 from .selection import select_submission
 from .types import Candidate, ScoredCandidate
@@ -83,6 +85,11 @@ class ProposalPolicy:
         else:
             self.exact_parent_weights = []
         self.roles = database.reactions[reaction].roles
+        self.contextual = (
+            ContextualDeltaPolicy(self.frame, len(self.roles))
+            if reaction == 5 and not self.frame.empty
+            else None
+        )
         self.weighted_ids: list[tuple[list[int], list[float]]] = []
         for column in ("component_a", "component_b", "component_c")[: len(self.roles)]:
             grouped = self.frame.groupby(column)["score"].agg(["mean", "count"])
@@ -112,6 +119,13 @@ class ProposalPolicy:
             )[0]
         )
 
+    def _replacement(self, components: list[int], index: int) -> int:
+        if self.contextual is not None:
+            return self.contextual.propose_replacement(
+                tuple(components), index, self.rng
+            )
+        return self._weighted_component(index)
+
     def propose(self) -> tuple[int, ...]:
         draw = self.rng.random()
         if draw < 0.40 and self.exact_parents:
@@ -122,7 +136,7 @@ class ProposalPolicy:
             )[0].candidate
             components = list(parent.components)
             index = self.rng.randrange(len(components))
-            components[index] = self._weighted_component(index)
+            components[index] = self._replacement(components, index)
             return tuple(components)
         if draw < 0.70 and not self.frame.empty:
             # Structural neighborhood: retain a successful context and substitute
@@ -132,9 +146,17 @@ class ProposalPolicy:
             if len(self.roles) == 3:
                 components.append(int(parent["component_c"]))
             index = self.rng.randrange(len(components))
-            components[index] = self._weighted_component(index)
+            components[index] = self._replacement(components, index)
             return tuple(components)
         if draw < 0.92:
+            if self.contextual is not None and not self.frame.empty:
+                parent = self.frame.iloc[self.rng.randrange(min(len(self.frame), 3000))]
+                components = [int(parent["component_a"]), int(parent["component_b"]), int(parent["component_c"])]
+                # Two contextual moves explore a new triple without discarding
+                # all of a successful chemical context at once.
+                for index in self.rng.sample(range(len(components)), k=2):
+                    components[index] = self._replacement(components, index)
+                return tuple(components)
             return tuple(self._weighted_component(index) for index in range(len(self.roles)))
         return self.database.random_components(self.reaction, self.rng)
 
@@ -169,7 +191,12 @@ class SearchEngine:
         similarity_workers: int = 1,
     ) -> dict[str, float]:
         started = time.monotonic()
-        exact_parents = self.archive.top(reaction, limit=100, scored_only=True)
+        exact_parents = self.archive.top(
+            reaction,
+            limit=100,
+            scored_only=True,
+            scorer=VALIDATOR_EXACT_SCORER,
+        )
         policy = ProposalPolicy(
             self.history, reaction, self.database, self.rng, exact_parents=exact_parents
         )

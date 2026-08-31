@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from .types import parse_reaction_name
+from .release import validate_release_payload
 
 
 def result_path(reaction: int) -> Path:
@@ -19,6 +20,7 @@ def load_submission(reaction: int, count: int = 20) -> str:
     path = result_path(reaction)
     with path.open() as handle:
         payload = json.load(handle)
+    validate_release_payload(payload, reaction, count)
     molecules = payload.get("molecules", [])
     if len(molecules) < count:
         raise ValueError(f"{path} contains {len(molecules)} candidates; need {count}")

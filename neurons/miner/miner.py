@@ -21,20 +21,41 @@ import pandas as pd
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.append(BASE_DIR)
+sys.path.append(os.path.join(BASE_DIR, "utils"))
+
+# Bittensor 10 exports classes in PascalCase.  Keep the miner compatible with
+# the older example API without forcing the scoring environment onto an old
+# SDK release.
+BTSubtensor = getattr(bt, "Subtensor", getattr(bt, "subtensor", None))
+BTAsyncSubtensor = getattr(bt, "AsyncSubtensor", getattr(bt, "async_subtensor", None))
+BTWallet = getattr(bt, "Wallet", getattr(bt, "wallet", None))
+BTConfig = getattr(bt, "Config", getattr(bt, "config", None))
 
 from config.config_loader import load_config
-from utils.constants import ALLOWED_AAS
-from utils import (
-    get_sequence_from_protein_code,
-    upload_file_to_github,
-    get_challenge_params_from_blockhash,
-    get_heavy_atom_count,
-    compute_maccs_entropy,
-
-)
-from utils.btdr import QuicknetBittensorDrandTimelock
+from constants import ALLOWED_AAS
+from files import upload_file_to_github
+from btdr import QuicknetBittensorDrandTimelock
 from combinatorial_db.reactions import get_random_reaction_product
 from compound_miner.provider import from_challenge
+
+
+def get_challenge_params_from_blockhash(
+    block_hash: str,
+    small_molecule_target: str,
+    nanobody_target: str,
+    include_reaction: bool = False,
+) -> Dict[str, Any]:
+    """Derive the mechanism-0 challenge without importing optional nano tools."""
+    if not isinstance(block_hash, str) or not block_hash.startswith("0x"):
+        raise ValueError("block_hash must start with '0x'")
+    seed = int(block_hash[2:], 16)
+    result: Dict[str, Any] = {
+        "small_molecule_target": small_molecule_target,
+        "nanobody_target": nanobody_target,
+    }
+    if include_reaction:
+        result["allowed_reaction"] = f"rxn:{seed % 5 + 1}"
+    return result
 
 '''
 This example miner contains all logic necessary for submitting a response to the chain
@@ -56,18 +77,21 @@ def parse_arguments() -> argparse.Namespace:
     Returns:
         argparse.Namespace: The combined configuration object.
     """
+    # Bittensor 10 defaults to ignoring process arguments for library callers.
+    # A standalone miner must opt back into its CLI contract.
+    os.environ.setdefault("BT_NO_PARSE_CLI_ARGS", "false")
     parser = argparse.ArgumentParser()
     # Add override arguments for network.
     parser.add_argument('--network', default=os.getenv('SUBTENSOR_NETWORK'), help='Network to use')
     # Adds override arguments for netuid.
     parser.add_argument('--netuid', type=int, default=379, help="The chain subnet uid.") #68 for mainnet
     # Bittensor standard argument additions.
-    bt.subtensor.add_args(parser)
+    BTSubtensor.add_args(parser)
     bt.logging.add_args(parser)
-    bt.wallet.add_args(parser)
+    BTWallet.add_args(parser)
 
     # Parse combined config
-    config = bt.config(parser)
+    config = BTConfig(parser, args=sys.argv[1:])
 
     # Load protein selection params
     config.update(load_config())
@@ -151,31 +175,34 @@ async def setup_bittensor_objects(config: argparse.Namespace) -> Tuple[Any, Any,
     bt.logging.info("Setting up Bittensor objects.")
 
     # Initialize wallet
-    wallet = bt.wallet(config=config)
+    wallet = BTWallet(config=config)
     bt.logging.info(f"Wallet: {wallet}")
 
     # Initialize subtensor (asynchronously)
     try:
-        async with bt.async_subtensor(network=config.network) as subtensor:
-            bt.logging.info(f"Connected to subtensor network: {config.network}")
-            
-            # Sync metagraph
-            metagraph = await subtensor.metagraph(config.netuid)
-            await metagraph.sync()
-            bt.logging.info(f"Metagraph synced successfully.")
+        subtensor = BTAsyncSubtensor(network=config.network)
+        await subtensor.initialize()
+        bt.logging.info(f"Connected to subtensor network: {config.network}")
 
-            bt.logging.info(f"Subtensor: {subtensor}")
-            bt.logging.info(f"Metagraph synced: {metagraph}")
+        # Sync metagraph while keeping the underlying websocket alive for the
+        # submission loop.  Returning from an ``async with`` block here closes
+        # the connection before the first commitment is sent.
+        metagraph = await subtensor.metagraph(config.netuid)
+        await metagraph.sync()
+        bt.logging.info(f"Metagraph synced successfully.")
 
-            # Get miner UID
-            miner_uid = metagraph.hotkeys.index(wallet.hotkey.ss58_address)
-            bt.logging.info(f"Miner UID: {miner_uid}")
+        bt.logging.info(f"Subtensor: {subtensor}")
+        bt.logging.info(f"Metagraph synced: {metagraph}")
 
-            # Query epoch length
-            node = SubstrateInterface(url=config.network)
-            # Set epoch_length to tempo + 1
-            epoch_length = node.query("SubtensorModule", "Tempo", [config.netuid]).value + 1
-            bt.logging.info(f"Epoch length query successful: {epoch_length} blocks")
+        # Get miner UID
+        miner_uid = metagraph.hotkeys.index(wallet.hotkey.ss58_address)
+        bt.logging.info(f"Miner UID: {miner_uid}")
+
+        # Query epoch length
+        node = SubstrateInterface(url=config.network)
+        # Set epoch_length to tempo + 1
+        epoch_length = node.query("SubtensorModule", "Tempo", [config.netuid]).value + 1
+        bt.logging.info(f"Epoch length query successful: {epoch_length} blocks")
 
         return wallet, subtensor, metagraph, miner_uid, epoch_length
     except Exception as e:
@@ -458,7 +485,7 @@ async def run_miner(config: argparse.Namespace) -> None:
 
         except asyncio.CancelledError:
             bt.logging.info("Resetting subtensor connection.")
-            subtensor = bt.async_subtensor(network=config.network)
+            subtensor = BTAsyncSubtensor(network=config.network)
             await subtensor.initialize()
             await asyncio.sleep(1)
             continue

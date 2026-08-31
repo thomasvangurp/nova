@@ -74,15 +74,29 @@ class CandidateArchive:
             )
         return len(rows)
 
-    def top(self, reaction: int, limit: int = 500, scored_only: bool = True) -> list[ScoredCandidate]:
-        predicate = "AND score IS NOT NULL" if scored_only else ""
+    def top(
+        self,
+        reaction: int,
+        limit: int = 500,
+        scored_only: bool = True,
+        scorer: str | None = None,
+    ) -> list[ScoredCandidate]:
+        predicates = []
+        parameters: list[object] = [reaction]
+        if scored_only:
+            predicates.append("score IS NOT NULL")
+        if scorer is not None:
+            predicates.append("scorer = ?")
+            parameters.append(scorer)
+        predicate = " AND " + " AND ".join(predicates) if predicates else ""
+        parameters.append(limit)
         with sqlite3.connect(self.path) as connection:
             rows = connection.execute(
                 f"""SELECT name,smiles,reaction,components,inchikey,heavy_atoms,rotatable_bonds,
                     proxy_mean,proxy_std,affinity_probability_binary,affinity_pred_value,score,scorer,elapsed_seconds
                     FROM candidates WHERE reaction=? {predicate}
                     ORDER BY COALESCE(score, proxy_mean) DESC LIMIT ?""",
-                (reaction, limit),
+                parameters,
             ).fetchall()
         results = []
         for row in rows:
@@ -91,10 +105,19 @@ class CandidateArchive:
         return results
 
     @staticmethod
-    def atomic_write_result(path: str | Path, scores: Iterable[ScoredCandidate]) -> None:
+    def atomic_write_result(
+        path: str | Path,
+        scores: Iterable[ScoredCandidate],
+        release: dict | None = None,
+    ) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"updated_at": time.time(), "molecules": [item.as_dict() for item in scores]}
+        payload = {
+            "updated_at": time.time(),
+            "molecules": [item.as_dict() for item in scores],
+        }
+        if release is not None:
+            payload["release"] = release
         fd, temporary_name = tempfile.mkstemp(prefix=destination.name, dir=destination.parent)
         try:
             with os.fdopen(fd, "w") as handle:

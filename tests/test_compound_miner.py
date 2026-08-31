@@ -11,6 +11,7 @@ import torch
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 from compound_miner.archive import CandidateArchive
+from compound_miner.contextual import ContextualDeltaPolicy
 from compound_miner.database import ReactionDatabase, readonly_connection
 from compound_miner.distilled import (
     DistilledOracle,
@@ -27,9 +28,15 @@ from compound_miner.interaction_student import RidgeInteractionEnsemble, scaffol
 from compound_miner.features import ComponentEncoder, molecule_features
 from compound_miner.proxy import _matrix
 from compound_miner.provider import load_submission
+from compound_miner.release import (
+    ReleaseGateError,
+    VALIDATOR_EXACT_SCORER,
+    promote_exact_checkpoint,
+)
 from compound_miner.reservoir import CandidateReservoir
 from compound_miner.selection import select_submission
 from compound_miner.types import Candidate, ScoredCandidate, parse_reaction_name
+from tools.build_exact_checkpoint import _write_exact_union
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
 from tools.score_boltz_batch import balanced_partitions, record_key
 
@@ -120,7 +127,7 @@ def test_candidate_reservoir_is_bounded_and_deterministic():
     assert len({item.name for item in first.selected()}) == 20
 
 
-def test_archive_and_provider_are_atomic(tmp_path, monkeypatch):
+def test_exact_release_and_provider_are_atomic(tmp_path, monkeypatch):
     archive = CandidateArchive(tmp_path / "archive.sqlite")
     scores = []
     database = ReactionDatabase()
@@ -132,16 +139,123 @@ def test_archive_and_provider_are_atomic(tmp_path, monkeypatch):
         if len(generated) == 20:
             break
     for index, candidate in enumerate(generated):
-        scores.append(ScoredCandidate(candidate, 0.5, -1.0, 1.0 - index / 100.0, "test", 0.1))
-    archive.add_candidates(item.candidate for item in scores)
-    archive.add_scores(scores)
-    selected = select_submission(archive.top(2))
+        scores.append(ScoredCandidate(candidate, 0.5, -1.0, 1.0 - index / 100.0, VALIDATOR_EXACT_SCORER, 0.1))
+    exact = tmp_path / "exact.json"
+    exact.write_text(json.dumps({"scores": [item.as_dict() for item in scores]}))
+    baselines = tmp_path / "baselines.json"
+    baselines.write_text(json.dumps({
+        "schema_version": 1,
+        "reactions": {"2": {"epoch": 1, "uid": 1, "score": 0.0}},
+    }))
     result = tmp_path / "result_rxn2.json"
-    archive.atomic_write_result(result, selected)
+    manifest = promote_exact_checkpoint(
+        exact, archive.path, result, baselines, reaction=2
+    )
     monkeypatch.setenv("NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json"))
     names = load_submission(2).split(",")
     assert len(names) == len(set(names)) == 20
     assert json.loads(result.read_text())["molecules"][0]["score"] == 1.0
+    assert manifest["status"] == "qualified"
+
+
+def test_provider_rejects_proxy_only_checkpoint(tmp_path, monkeypatch):
+    path = tmp_path / "result_rxn5.json"
+    path.write_text(json.dumps({
+        "molecules": [
+            {"name": f"rxn:5:{index}:2:3", "score": 1.0, "scorer": "proxy"}
+            for index in range(20)
+        ]
+    }))
+    monkeypatch.setenv("NOVA_CANDIDATE_RESULT", str(tmp_path / "result_rxn{reaction}.json"))
+    with pytest.raises(ReleaseGateError, match="no exact release manifest"):
+        load_submission(5)
+
+
+def test_archive_exact_parent_query_excludes_proxy_scores(tmp_path):
+    archive = CandidateArchive(tmp_path / "archive.sqlite")
+    proxy = Candidate("rxn:5:1:2:3", "CC", 5, (1, 2, 3), "PROXY", 2, 0)
+    exact = Candidate("rxn:5:4:5:6", "CCC", 5, (4, 5, 6), "EXACT", 3, 0)
+    archive.add_candidates([proxy, exact])
+    archive.add_scores(
+        [
+            ScoredCandidate(proxy, 1.0, -1.0, 1.0, "proxy", 0.0),
+            ScoredCandidate(exact, 0.5, -1.0, 0.5, VALIDATOR_EXACT_SCORER, 0.0),
+        ]
+    )
+    selected = archive.top(5, scorer=VALIDATOR_EXACT_SCORER)
+    assert [item.candidate.name for item in selected] == [exact.name]
+
+
+def test_exact_union_preserves_incumbent_scores(tmp_path):
+    archive = CandidateArchive(tmp_path / "archive.sqlite")
+    incumbent = Candidate("rxn:5:1:2:3", "CC", 5, (1, 2, 3), "OLD", 2, 0)
+    new = Candidate("rxn:5:4:5:6", "CCC", 5, (4, 5, 6), "NEW", 3, 0)
+    incumbent_score = ScoredCandidate(
+        incumbent, 0.9, -1.0, 0.9, VALIDATOR_EXACT_SCORER, 1.0
+    )
+    new_score = ScoredCandidate(
+        new, 0.8, -1.0, 0.8, VALIDATOR_EXACT_SCORER, 1.0
+    )
+    archive.add_candidates([incumbent])
+    archive.add_scores([incumbent_score])
+    current = tmp_path / "new.json"
+    current.write_text(json.dumps({"scores": [new_score.as_dict()]}))
+    union = tmp_path / "union.json"
+    assert _write_exact_union(archive.path, current, union, reaction=5) == 2
+    payload = json.loads(union.read_text())
+    assert [item["name"] for item in payload["scores"]] == [
+        incumbent.name,
+        new.name,
+    ]
+
+
+def test_exact_release_must_beat_frozen_baseline(tmp_path):
+    database = ReactionDatabase()
+    generated = []
+    for components in database.sample_component_sets(2, 100, random.Random(321)):
+        candidate = database.candidate(2, components)
+        if candidate is not None and candidate.inchikey not in {item.inchikey for item in generated}:
+            generated.append(candidate)
+        if len(generated) == 20:
+            break
+    scores = [
+        ScoredCandidate(candidate, 0.5, -1.0, 0.05, VALIDATOR_EXACT_SCORER, 0.1)
+        for candidate in generated
+    ]
+    exact = tmp_path / "exact.json"
+    exact.write_text(json.dumps({"scores": [item.as_dict() for item in scores]}))
+    baselines = tmp_path / "baselines.json"
+    baselines.write_text(json.dumps({
+        "schema_version": 1,
+        "reactions": {"2": {"epoch": 1, "uid": 1, "score": 2.0}},
+    }))
+    result = tmp_path / "result.json"
+    with pytest.raises(ReleaseGateError, match="misses frozen baseline"):
+        promote_exact_checkpoint(
+            exact, tmp_path / "archive.sqlite", result, baselines, reaction=2
+        )
+    assert not result.exists()
+
+
+def test_contextual_delta_does_not_credit_unrelated_fixed_pair():
+    frame = pd.DataFrame(
+        [
+            # B=10/C=20 is excellent only for A=1/2.
+            (1, 10, 20, 0.14),
+            (2, 10, 20, 0.13),
+            # A=3 has positive evidence with each retained context component.
+            (3, 10, 21, 0.12),
+            (3, 11, 20, 0.12),
+            # A=4 has a high marginal in unrelated contexts only.
+            (4, 12, 22, 0.15),
+            (4, 13, 23, 0.15),
+        ],
+        columns=("component_a", "component_b", "component_c", "score"),
+    )
+    policy = ContextualDeltaPolicy(frame, roles=3, smoothing=1.0, pool_size=10)
+    parent = (1, 10, 20)
+    values = dict(policy.ranked_replacements(parent, index=0, limit=10))
+    assert values[3] > values[4]
 
 
 def test_boltz_partitions_are_complete_and_deterministic():
