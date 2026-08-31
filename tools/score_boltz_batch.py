@@ -198,6 +198,7 @@ def main() -> None:
     parser.add_argument("--records-json", type=Path, help="Reuse the exact molecule set from an earlier score file")
     parser.add_argument(
         "--exclude-records-json",
+        action="append",
         type=Path,
         help="Skip molecules already present in another score file",
     )
@@ -231,8 +232,10 @@ def main() -> None:
     else:
         records = load_records(args.archive, args.reaction, args.limit)
     if args.exclude_records_json:
-        excluded_payload = json.loads(args.exclude_records_json.read_text())
-        excluded = {record_key(item) for item in excluded_payload["scores"]}
+        excluded = set()
+        for path in args.exclude_records_json:
+            excluded_payload = json.loads(path.read_text())
+            excluded.update(record_key(item) for item in excluded_payload["scores"])
         records = [item for item in records if record_key(item) not in excluded]
     if not records:
         raise SystemExit("archive shortlist is empty")

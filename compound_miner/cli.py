@@ -38,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--model", default="models/P40261_proxy.joblib")
     train.add_argument("--trees", type=int, default=256)
     train.add_argument("--holdout-epochs", type=int, default=8)
+    train.add_argument("--skip-evaluation", action="store_true")
 
     search = subparsers.add_parser("search")
     search.add_argument("--history", default="history/P40261_scores.csv")
@@ -48,6 +49,8 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--proposals", type=int, default=10000)
     search.add_argument("--exact-shortlist", type=int, default=64)
     search.add_argument("--similarity-shortlist", type=int, default=800)
+    search.add_argument("--construction-workers", type=int, default=1)
+    search.add_argument("--similarity-workers", type=int, default=1)
     search.add_argument("--result")
     search.add_argument("--nim-url")
     search.add_argument("--nim-concurrency", type=int, default=8)
@@ -61,6 +64,8 @@ def _parser() -> argparse.ArgumentParser:
     search_all.add_argument("--proposals", type=int, default=10000)
     search_all.add_argument("--exact-shortlist", type=int, default=64)
     search_all.add_argument("--similarity-shortlist", type=int, default=800)
+    search_all.add_argument("--construction-workers", type=int, default=1)
+    search_all.add_argument("--similarity-workers", type=int, default=1)
     search_all.add_argument("--nim-url")
     search_all.add_argument("--nim-concurrency", type=int, default=8)
     search_all.add_argument("--proxy-only", action="store_true")
@@ -97,7 +102,15 @@ def main() -> None:
         return
     if args.command == "train":
         frame = pd.read_csv(args.history)
-        metrics = chronological_evaluation(frame, holdout_epochs=args.holdout_epochs, trees=min(args.trees, 96))
+        metrics = (
+            {}
+            if args.skip_evaluation
+            else chronological_evaluation(
+                frame,
+                holdout_epochs=args.holdout_epochs,
+                trees=min(args.trees, 96),
+            )
+        )
         model = TargetProxy(trees=args.trees).fit(aggregate_observations(frame))
         model.save(args.model)
         print(json.dumps({**metrics, "model": str(Path(args.model).resolve())}, indent=2))
@@ -109,7 +122,15 @@ def main() -> None:
         scorer = None if args.proxy_only else NIMScorer(url=args.nim_url, concurrency=args.nim_concurrency)
         engine = SearchEngine(database, history, TargetProxy.load(args.model), CandidateArchive(args.archive), historical_index, scorer)
         result = args.result or f"artifacts/result_rxn{args.reaction}.json"
-        metrics = engine.run_round(args.reaction, args.proposals, args.exact_shortlist, args.similarity_shortlist, result)
+        metrics = engine.run_round(
+            args.reaction,
+            args.proposals,
+            args.exact_shortlist,
+            args.similarity_shortlist,
+            result,
+            args.construction_workers,
+            args.similarity_workers,
+        )
         print(json.dumps(metrics, indent=2))
         return
     if args.command == "search-all":
@@ -124,6 +145,8 @@ def main() -> None:
                 result = engine.run_round(
                     reaction, args.proposals, args.exact_shortlist, args.similarity_shortlist,
                     f"artifacts/result_rxn{reaction}.json",
+                    args.construction_workers,
+                    args.similarity_workers,
                 )
                 measurements.append({"round": round_index + 1, "reaction": reaction, **result})
                 print(json.dumps(measurements[-1]), flush=True)

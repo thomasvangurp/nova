@@ -5,6 +5,7 @@ import random
 import sqlite3
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from rdkit.Chem.Scaffolds import MurckoScaffold
@@ -23,7 +24,10 @@ from compound_miner.distilled import (
     target_split,
 )
 from compound_miner.interaction_student import RidgeInteractionEnsemble, scaffold_indices
+from compound_miner.features import ComponentEncoder, molecule_features
+from compound_miner.proxy import _matrix
 from compound_miner.provider import load_submission
+from compound_miner.reservoir import CandidateReservoir
 from compound_miner.selection import select_submission
 from compound_miner.types import Candidate, ScoredCandidate, parse_reaction_name
 from compound_miner.validity import HistoricalIndex, ValidityGate, maccs_entropy
@@ -52,6 +56,68 @@ def test_constructs_every_reaction(reaction):
 def test_gate_rejects_banned_atoms():
     molecule = Candidate("rxn:1:1:2", "CCBr", 1, (1, 2), "fake", 3, 1)
     assert not ValidityGate(HistoricalIndex()).accepts(molecule)
+
+
+def test_precomputed_proxy_features_are_exact():
+    frame = pd.DataFrame(
+        {
+            "smiles": ["CCO", "CCN"],
+            "reaction": [1, 1],
+            "component_a": [10, 11],
+            "component_b": [20, 21],
+            "component_c": [-1, -1],
+            "score": [0.1, 0.2],
+        }
+    )
+    encoder = ComponentEncoder().fit(frame)
+    precomputed = np.vstack([molecule_features(value) for value in frame["smiles"]])
+    np.testing.assert_array_equal(
+        _matrix(frame, encoder),
+        _matrix(frame, encoder, chemistry=precomputed),
+    )
+
+
+def test_valid_candidate_needs_only_novelty_on_second_gate():
+    database = ReactionDatabase()
+    gate = ValidityGate(HistoricalIndex())
+    candidates = []
+    for components in database.sample_component_sets(1, 100, random.Random(69)):
+        candidate = database.candidate(1, components)
+        if candidate is not None and gate.accepts(candidate, check_similarity=False):
+            candidates.append(candidate)
+        if len(candidates) == 10:
+            break
+    assert candidates
+    assert [gate.accepts(item, check_similarity=True) for item in candidates] == [
+        gate.history.is_novel(item) for item in candidates
+    ]
+
+
+def test_candidate_reservoir_is_bounded_and_deterministic():
+    candidates = [
+        Candidate(
+            name=f"rxn:1:{index}:{index + 1}",
+            smiles="CCO",
+            reaction=1,
+            components=(index, index + 1),
+            inchikey=str(index),
+            heavy_atoms=12,
+            rotatable_bonds=2,
+            proxy_mean=index / 1000.0,
+            proxy_std=(100 - index) / 1000.0,
+        )
+        for index in range(100)
+    ]
+    first = CandidateReservoir(20)
+    second = CandidateReservoir(20)
+    first.add(candidates[:37])
+    first.add(candidates[37:])
+    second.add(candidates)
+    assert [item.name for item in first.selected()] == [
+        item.name for item in second.selected()
+    ]
+    assert len(first.selected()) == 20
+    assert len({item.name for item in first.selected()}) == 20
 
 
 def test_archive_and_provider_are_atomic(tmp_path, monkeypatch):

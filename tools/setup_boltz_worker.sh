@@ -19,6 +19,7 @@ python -m pip uninstall -y torchvision torchaudio || true
 # Populate the shared cache once. Starting multiple score workers against an
 # empty cache races two multi-gigabyte downloads to the same destination.
 if [[ "${NOVA_PREFETCH_BOLTZ_CACHE:-1}" == "1" ]]; then
+  mkdir -p "${HOME}/.boltz"
   python - <<'PY'
 from pathlib import Path
 

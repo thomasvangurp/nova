@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 import joblib
+from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import ExtraTreesRegressor
@@ -14,8 +15,15 @@ from .features import ComponentEncoder, frame_components, molecule_features
 from .types import Candidate
 
 
-def _matrix(frame: pd.DataFrame, encoder: ComponentEncoder) -> np.ndarray:
-    chemistry = np.vstack([molecule_features(value) for value in frame["smiles"]])
+def _matrix(
+    frame: pd.DataFrame,
+    encoder: ComponentEncoder,
+    chemistry: np.ndarray | None = None,
+) -> np.ndarray:
+    if chemistry is None:
+        chemistry = np.vstack([molecule_features(value) for value in frame["smiles"]])
+    elif len(chemistry) != len(frame):
+        raise ValueError("chemistry feature rows must match the candidate frame")
     reactions, components = frame_components(frame)
     reaction_bits = np.eye(5, dtype=np.float32)[np.clip(reactions - 1, 0, 4)]
     return np.hstack((chemistry, reaction_bits, encoder.transform_rows(reactions, components)))
@@ -37,7 +45,11 @@ class TargetProxy:
         self.model.fit(_matrix(frame, self.encoder), frame["score"].to_numpy(dtype=np.float32))
         return self
 
-    def predict(self, candidates: Iterable[Candidate]) -> list[Candidate]:
+    def predict(
+        self,
+        candidates: Iterable[Candidate],
+        chemistry: np.ndarray | None = None,
+    ) -> list[Candidate]:
         values = list(candidates)
         if not values:
             return []
@@ -50,8 +62,12 @@ class TargetProxy:
                 "component_c": [item.components[2] if len(item.components) > 2 else -1 for item in values],
             }
         )
-        matrix = _matrix(frame, self.encoder)
-        tree_predictions = np.vstack([tree.predict(matrix) for tree in self.model.estimators_])
+        matrix = _matrix(frame, self.encoder, chemistry=chemistry)
+        tree_predictions = np.vstack(
+            Parallel(n_jobs=self.model.n_jobs, prefer="threads")(
+                delayed(tree.predict)(matrix) for tree in self.model.estimators_
+            )
+        )
         means = np.mean(tree_predictions, axis=0)
         standard_deviations = np.std(tree_predictions, axis=0)
         return [dataclasses.replace(item, proxy_mean=float(mean), proxy_std=float(std)) for item, mean, std in zip(values, means, standard_deviations)]

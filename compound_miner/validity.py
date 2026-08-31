@@ -24,13 +24,17 @@ class HistoricalIndex:
     def __init__(self, csv_path: str | Path | None = None) -> None:
         self.inchikeys: set[str] = set()
         self.fingerprints: list[DataStructs.ExplicitBitVect] = []
+        self._generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2, fpSize=2048
+        )
         if csv_path:
             frame = pd.read_csv(csv_path, usecols=["SMILES", "InChI_Key"])
             self.inchikeys = set(frame["InChI_Key"].dropna().astype(str))
             molecules = [Chem.MolFromSmiles(value) for value in frame["SMILES"].dropna().astype(str)]
             molecules = [molecule for molecule in molecules if molecule is not None]
-            generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
-            self.fingerprints = list(generator.GetFingerprints(molecules, numThreads=0))
+            self.fingerprints = list(
+                self._generator.GetFingerprints(molecules, numThreads=0)
+            )
 
     def is_novel(self, candidate: Candidate, maximum_similarity: float = 0.7) -> bool:
         if candidate.inchikey in self.inchikeys:
@@ -38,7 +42,7 @@ class HistoricalIndex:
         if not self.fingerprints:
             return True
         molecule = Chem.MolFromSmiles(candidate.smiles)
-        fingerprint = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048).GetFingerprint(molecule)
+        fingerprint = self._generator.GetFingerprint(molecule)
         return not any(value >= maximum_similarity for value in DataStructs.BulkTanimotoSimilarity(fingerprint, self.fingerprints))
 
 
@@ -74,4 +78,3 @@ def maccs_entropy(candidates: Iterable[Candidate]) -> float:
         return 0.0
     probabilities = np.mean(fingerprints, axis=0)
     return float(np.mean([-p * math.log2(p) - (1 - p) * math.log2(1 - p) if 0 < p < 1 else 0.0 for p in probabilities]))
-
