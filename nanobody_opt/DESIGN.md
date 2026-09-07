@@ -194,3 +194,50 @@ functional property (p=0.077). VHH frameworks are germline-encoded (every miner
 already passes those gates) while CDRs are somatically generated -- an
 evolutionary prior would pull CDRs toward germline, away from any specific
 antigen. It would help on the saturated half and hurt on the decisive half.
+
+---
+
+## 11. A generator that works (measured)
+
+Every attempt that let the proxy STEER the search was exploited to impossible
+values -- unconstrained hill-climb (-1,080,668), per-position-alphabet constrained
+(-131,972, distance pinned at the cap), and local mutation inside the basin
+(-168,269, 0/12 plausible). The proxy is additive over positions and cannot
+represent epistasis, so any optimiser assembles a combination that has never
+existed and the model cannot tell.
+
+What works is to SAMPLE on-manifold and let the proxy only RANK:
+
+```
+seeds        25 best archive sequences that already pass the top-50 novelty gate
+             (true rank_sum 39,607..44,740)
+mutate       1-3 CDR positions only (47 of 127); framework frozen so the VHH
+             hallmarks survive -- random whole-sequence mutation is what got
+             UID 31 rejected as "not VHH" in epoch 24978
+filter       drop exact duplicates (validator: is_unique)
+             drop identity >= 0.95 to any top-50 sequence (nanobody_validity.py:109-140)
+rank         one-hot Ridge proxy, trained WITHOUT the top 1%
+```
+
+Result: 9,538 gate-passing candidates, **all 9,538 with plausible predictions**,
+15.7% predicted better than the archive's top 1%, shortlist identity to top-50
+0.890-0.921 (gate 0.95).
+
+### The ceiling this operates under
+
+```
+top-50 gate threshold      rank_sum 39,458
+best sequence PASSING gate rank_sum 39,607  = overall rank 51 of 28,166
+91.3% of the archive passes the 0.95 gate
+cost of the novelty gate   53.2% worse rank_sum than the outright best
+```
+
+We cannot resubmit a leader, so the target is "best sequence that stays >=5% clear
+of the top 50" -- still percentile 0.18 material.
+
+### Still unproven
+
+The proxy's ranking has never been checked against boltzgen on OUR candidates.
+rho 0.88 and 23x enrichment are measured on ARCHIVE sequences. Score the top ~48
+of the shortlist with boltzgen and compare -- that is the only thing that turns
+this from plausible into real. Needs a free GPU.
