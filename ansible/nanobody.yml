@@ -217,11 +217,34 @@
         fail_msg: "boltzgen scoring protocol changed upstream:\n{{ proto.stdout }}{{ proto.stderr }}"
         success_msg: "{{ proto.stdout }}"
 
+    # owner/group false is LOAD-BEARING. rsync -a preserves the CONTROLLER's
+    # uid/gid, so a laptop checkout (uid 502) stamps 502:staff onto what it
+    # writes. When that lands on /root itself, sshd StrictModes then refuses
+    # every NEW public-key auth while existing multiplexed sessions keep
+    # working -- it reads as a flaky proxy and is actually a lockout.
     - name: Sync nanobody_opt code
       ansible.posix.synchronize:
         src: "{{ playbook_dir }}/../nanobody_opt/"
         dest: /root/nanobody_opt/
-        rsync_opts: ["--exclude=__pycache__"]
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+
+    - name: Repair any controller-stamped ownership under /root
+      ansible.builtin.shell: |
+        set -eu
+        bad=$(find /root -maxdepth 2 ! -user root -printf '%p\n' 2>/dev/null | head -20)
+        if [ -n "$bad" ]; then echo "REPAIRED:"; echo "$bad"; chown -R root:root /root; fi
+        chmod 700 /root
+        stat -c '%U:%G %a /root' /root
+      args: { executable: /bin/bash }
+      changed_when: "'REPAIRED' in repair.stdout"
+      register: repair
+
+    - ansible.builtin.assert:
+        that: "'root:root 700 /root' in repair.stdout"
+        fail_msg: "/root ownership/mode wrong -- sshd StrictModes will refuse new key auth"
+        success_msg: "/root ownership correct"
 
     - name: Proxy + scorer deps (conda-forge owns these, not pip)
       ansible.builtin.shell: |
