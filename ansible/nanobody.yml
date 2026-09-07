@@ -91,7 +91,8 @@
     # "mkdir /root/external_tools/boltzgen failed: No such file or directory".
     - name: Destination parents
       ansible.builtin.file: { path: "{{ item }}", state: directory }
-      loop: [/root/external_tools, /root/nanobody_opt, /root/.boltzgen]
+      loop: [/root/external_tools, /root/nanobody_opt, /root/.boltzgen,
+             /root/config, /root/bgen_shards]
 
     - name: Sync boltzgen source
       ansible.posix.synchronize:
@@ -151,6 +152,42 @@
         url: "https://files.rcsb.org/download/{{ structure }}.cif"
         dest: "/root/{{ structure }}.cif"
         mode: "0644"
+
+    # BoltzgenWrapper resolves NOVA_DIR from its own __file__ (up four levels
+    # from boltzgen/src/boltzgen) = /root, then reads /root/config/
+    # boltzgen_config.yaml at a FIXED path in __init__. Passing a config path as
+    # an argument does nothing. These two files define the scoring protocol --
+    # metrics, rank mode, step/noise scales -- so they are fetched from upstream
+    # rather than hand-written, and refetched every run so a protocol change
+    # upstream cannot leave us scoring against a stale definition.
+    - name: Upstream configs at the paths BoltzgenWrapper hardcodes
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/metanova-labs/nova/main/config/{{ item }}"
+        dest: "/root/config/{{ item }}"
+        mode: "0644"
+        force: true
+      loop:
+        - boltzgen_config.yaml
+        - config.yaml
+
+    - name: Assert the scoring protocol is the one we think it is
+      ansible.builtin.shell: |
+        /root/bgen_python.sh -c "
+        import yaml
+        c=yaml.safe_load(open('/root/config/boltzgen_config.yaml'))
+        m=[k for d in c['metrics'].values() for k in d]
+        assert len(m)==10, f'expected 10 ranked metrics, got {len(m)}: {m}'
+        assert c['protocol']=='nanobody-anything', c['protocol']
+        print('PROTOCOL_OK', c['protocol'], len(m), 'metrics')
+        "
+      args: { executable: /bin/bash }
+      changed_when: false
+      register: proto
+
+    - ansible.builtin.assert:
+        that: "'PROTOCOL_OK' in proto.stdout"
+        fail_msg: "boltzgen scoring protocol changed upstream:\n{{ proto.stdout }}{{ proto.stderr }}"
+        success_msg: "{{ proto.stdout }}"
 
     - name: Sync nanobody_opt code
       ansible.posix.synchronize:
