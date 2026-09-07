@@ -19,27 +19,50 @@ import argparse, json, os, time
 import multiprocessing as mp
 
 
-def _flatten_config(cfg: dict, target: str) -> dict:
-    """Flatten upstream config.yaml into the keys BoltzgenWrapper reads.
+# Every subnet_config key BoltzgenWrapper reads, enumerated from its source:
+#   grep -oE "subnet_config\['[a-z_]+'\]" boltzgen_wrapper.py | sort -u
+# Enumerated rather than discovered, because each missing key surfaces as a
+# KeyError inside a worker process, one per run, with the real cause buried
+# under a multiprocessing traceback.
+REQUIRED_SUBNET_KEYS = (
+    "nanobody_target",
+    "nanobody_target_clip_interval",
+    "nanobody_structure",
+    "nanobody_structure_chain",
+    "nanobody_structure_res_index",
+    "nanobody_structure_binding_site",
+    "boltzgen_rank_by",
+    "boltzgen_rank_mode",
+)
 
-    The wrapper reads FLAT keys -- subnet_config['nanobody_structure'],
-    ['nanobody_structure_chain'], ['nanobody_structure_res_index'],
-    ['nanobody_structure_binding_site'] -- while config.yaml nests them under
-    protein_selection.nanobody.{structure,structure_chain,...}. The validator
-    does this flattening itself; replicating it here rather than hand-writing
-    values keeps the binding site and residue range tied to upstream, so a
-    change there cannot leave us silently scoring against a different epitope.
+
+def _flatten_config(cfg: dict, target: str) -> dict:
+    """Flatten upstream config.yaml into the flat keys BoltzgenWrapper reads.
+
+    config.yaml nests these under protein_selection.nanobody.* and
+    boltzgen_config.*; the wrapper reads them flat. The validator does this
+    flattening itself. Deriving them from the upstream file rather than
+    hand-writing values keeps the epitope, residue range and clip interval tied
+    to upstream -- hand-written values would silently score against a different
+    binding site after any upstream change, and still look perfectly healthy.
     """
     nb = (cfg.get("protein_selection") or {}).get("nanobody") or {}
-    missing = [k for k in ("structure", "structure_chain", "structure_res_index",
-                           "structure_binding_site") if k not in nb]
-    if missing:
-        raise SystemExit(f"config.yaml protein_selection.nanobody lacks {missing}")
     flat = dict(cfg)
     flat["nanobody_target"] = [target]
+    flat["nanobody_target_clip_interval"] = nb.get("clip_interval")
     for k in ("structure", "structure_chain", "structure_res_index",
               "structure_binding_site"):
-        flat[f"nanobody_{k}"] = nb[k]
+        if k in nb:
+            flat[f"nanobody_{k}"] = nb[k]
+    for k, v in (cfg.get("boltzgen_config") or {}).items():
+        flat.setdefault(k, v)
+
+    missing = [k for k in REQUIRED_SUBNET_KEYS if flat.get(k) is None]
+    if missing:
+        raise SystemExit(
+            "config.yaml cannot supply these keys BoltzgenWrapper requires: "
+            f"{missing}. Check protein_selection.nanobody and boltzgen_config."
+        )
     return flat
 
 
@@ -76,11 +99,15 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
+    # Accept every shape we produce: a bare list, {"sequences": [...]} with
+    # plain strings, or {"cases": [{"sequence": ...}]} from instrument_check.
+    # Mixing them silently raised "string indices must be integers".
     raw = json.load(open(a.sequences))
-    if isinstance(raw, dict):
-        seqs = [c["sequence"] for c in raw.get("cases", raw.get("sequences", []))]
-    else:
-        seqs = list(raw)
+    items = raw if isinstance(raw, list) else (raw.get("cases") or raw.get("sequences") or [])
+    seqs = [it["sequence"] if isinstance(it, dict) else it for it in items]
+    seqs = [s for s in seqs if isinstance(s, str) and s]
+    if not seqs:
+        raise SystemExit(f"no sequences parsed from {a.sequences}")
 
     import yaml
     raw_cfg = yaml.safe_load(open(a.config))
@@ -106,14 +133,23 @@ def main():
         results = pool.map(_worker, jobs)
     wall = time.time() - started
 
+    # components is {uid: {sequence: {target: metrics}}} and EVERY shard uses
+    # uid 0, so a plain dict.update() replaces the previous shard's entry
+    # wholesale and silently drops its sequences -- 3 of 6 vanished before this
+    # was caught. Merge at the SEQUENCE level instead.
     merged = {}
     for path, n, secs in results:
         d = json.load(open(path))
-        merged.update(d["components"])
+        for uid, by_seq in d["components"].items():
+            merged.setdefault(uid, {}).update(by_seq)
         print(f"  shard {d['shard']} gpu {d['gpu']}: {n} seqs in {secs:.1f}s "
               f"({secs/max(n,1):.1f}s/seq)", flush=True)
+    n_out = sum(len(v) for v in merged.values())
     print(f"TOTAL {len(seqs)} sequences in {wall:.1f}s "
           f"({wall/max(len(seqs),1):.1f}s per sequence wall-clock)", flush=True)
+    if n_out != len(seqs):
+        raise SystemExit(f"MERGE LOST SEQUENCES: submitted {len(seqs)}, "
+                         f"merged {n_out}. Refusing to write a partial result.")
     json.dump({"target": a.target, "n": len(seqs), "wall_seconds": wall,
                "per_nanobody_components": merged}, open(a.out, "w"),
               indent=2, default=str)

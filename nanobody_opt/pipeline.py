@@ -49,6 +49,8 @@ def main():
     ap.add_argument("--seed-pool", type=int, default=400,
                     help="how many high-ranked archive sequences to perturb")
     ap.add_argument("--shortlist", type=int, default=200)
+    ap.add_argument("--recent-only", type=int, default=0,
+                    help="use only the most recent N archive rows (current scoring era)")
     ap.add_argument("--min-support", type=int, default=25,
                     help="a residue must appear this often at a position to be usable")
     a = ap.parse_args()
@@ -58,6 +60,17 @@ def main():
     cfg = yaml.safe_load(open(a.config))["nanobody_requirements"]
 
     df = pd.read_csv(a.archive).drop_duplicates(subset=["sequence"]).reset_index(drop=True)
+    # ERA MATTERS, and ignoring it is why the first attempt placed #38 of 50.
+    # The archive spans multiple scoring eras: the oldest rows average
+    # design_iiptm 0.385 / delta_sasa 1223, the most recent 0.758 / 717. Ranking
+    # across the whole archive therefore promotes sequences that were strong in
+    # a WEAKER era, and seeding from them produces candidates that lose to the
+    # current field. Competition is against this epoch's ~50 rivals, so only the
+    # recent era is informative -- for the seeds AND for the proxy's training.
+    if a.recent_only:
+        keep_n = min(a.recent_only, len(df))
+        df = df.tail(keep_n).reset_index(drop=True)
+        print(f"restricted to the most recent {keep_n:,} submissions (current era)")
     L = int(df.sequence.str.len().mode()[0])
     df = df[df.sequence.str.len() == L].reset_index(drop=True)
     print(f"archive: {len(df):,} sequences at the modal length {L}")
