@@ -82,3 +82,48 @@ does for the compound side.
 Nanobodies is smaller, 1.6x more contested, and **no one fails the gates** — the
 field is already past the easy wins. Molecules remains ~2.4x better EV per
 competitor. Proceed here only as diversification, not as the primary bet.
+
+---
+
+## 7. CDR-constraint VALIDATED AGAINST DATA — and it is insufficient
+
+Source: `P20809_nanobodies.csv` (HuggingFace `Metanova/Submission-Archive`),
+**28,166 unique modal-length sequences with all 10 scored metrics**. This is the
+public archive for the UPSTREAM target, so it is the right protein.
+
+Method (no model, no GPU): rank every sequence by `rank_sum` exactly as the
+validator does, take top-1% and bottom-1%, and compute per-position Shannon
+entropy in each. The entropy DROP from losers to winners measures how much a
+position discriminates.
+
+```
+mean per-position entropy   ALL 0.611   TOP1% 0.301   BOTTOM1% 0.407
+positions entropy<0.5       ALL 73      TOP1% 100     BOTTOM1% 86
+```
+
+**Winners are twice as converged as the field.** There is a discoverable optimum
+and most competitors have not found it: pos61 `Y` in 100% of winners, pos48 `F`
+(100%) vs `W` in losers, pos36 `S` vs `A`, pos112 `W` vs `E`.
+
+```
+CDRs = 37% of sequence but hold 60% of top-20 signal
+discriminative power: CDR 0.140 vs framework 0.085 (1.65x per position)
+top-20 positions: 12 in CDRs, 8 in FRAMEWORK (2,12,45,48,81,122,125,126)
+```
+
+**Verdict: do NOT hard-restrict to CDRs.** They are enriched but carry only 60%
+of the signal. The framework hits cluster at the termini, where developability
+lives -- and `liability_score` + `liability_num_violations` are 2 of the 10
+ranked metrics. CDRs drive binding, framework drives developability, `rank_sum`
+weights both equally.
+
+**Revised approach:** weight mutation probability by MEASURED entropy drop per
+position rather than by region membership. The archive gives that for free.
+
+## 8. Corrections to earlier sections
+
+- `liability.py` does NOT reproduce the validator's formula. Mine scores the
+  reference base at 4.5; the archive's `liability_score` averages 199 (110-280).
+  Treat it as illustrative only -- learn the real one from the archive columns.
+- The field does broad redesign, not scaffold mutation: 98 of 127 positions vary
+  in >5% of sequences. The "everyone mutates one base" assumption was wrong.
