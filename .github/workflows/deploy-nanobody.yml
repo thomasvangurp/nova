@@ -1,0 +1,54 @@
+name: Deploy nanobody box
+
+# Separate from the miner deploy: boltzgen pins torch==2.7.1 while the miner's
+# bz2 env is pinned to 2.6.0 for boltz. They must never share a machine env.
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "SSH host or IP of the target box"
+        required: true
+      port:
+        description: "SSH port"
+        required: true
+        default: "22"
+      target:
+        description: "Nanobody target (must match upstream config)"
+        required: true
+        default: "P20809"
+      structure:
+        description: "PDB id for the target structure"
+        required: true
+        default: "6O4O"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+
+      - name: Load SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ inputs.port }}" -H "${{ inputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Provision
+        run: |
+          ansible-playbook -i '${{ inputs.host }},' ansible/nanobody.yml \
+            -e ansible_port=${{ inputs.port }} \
+            -e target=${{ inputs.target }} \
+            -e structure=${{ inputs.structure }} \
+            --private-key ~/.ssh/id_deploy \
+            --ssh-common-args '-o StrictHostKeyChecking=accept-new'
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+          ANSIBLE_FORCE_COLOR: "1"

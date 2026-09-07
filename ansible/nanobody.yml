@@ -1,0 +1,127 @@
+---
+# Nanobody toolchain. SEPARATE from the miner playbook because boltzgen requires
+# torch==2.7.1 while the miner's bz2 env is pinned to 2.6.0 for boltz -- installing
+# them together would break the live scorer.
+#
+#   ansible-playbook -i '<ip>,' ansible/nanobody.yml -e ansible_port=<port> --private-key <key>
+- name: Provision the nanobody design/scoring box
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  vars:
+    target: P20809                 # IL-11; must match upstream config nanobody target
+    structure: 6O4O
+    bgen: /root/mamba/envs/bgen
+    ckpts:
+      - boltzgen1_diverse.ckpt
+      - boltzgen1_adherence.ckpt
+      - boltzgen1_ifold.ckpt       # inverse folding -- our generator
+      - boltz2_conf_final.ckpt
+
+  tasks:
+    - name: Effective CPUs (cgroup v2 then v1)
+      ansible.builtin.shell: |
+        if [ -f /sys/fs/cgroup/cpu.max ]; then
+          read q p < /sys/fs/cgroup/cpu.max
+          [ "$q" = max ] && nproc || echo $(( q / p ))
+        else
+          q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+          [ "$q" -le 0 ] && nproc || echo $(( q / p ))
+        fi
+      changed_when: false
+      register: cpus
+
+    - name: Bandwidth probe (a host advertising 872 Mbps once delivered 57 KB/s)
+      ansible.builtin.shell: |
+        s=$(date +%s)
+        curl -s -o /dev/null --max-time 60 https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ target }}_nanobodies.csv
+        echo $(( $(date +%s) - s ))
+      changed_when: false
+      register: probe
+
+    - ansible.builtin.assert:
+        that: probe.stdout | int <= 30
+        fail_msg: "8MB took {{ probe.stdout }}s -- destroy this host"
+        success_msg: "{{ cpus.stdout }} CPUs, 8MB in {{ probe.stdout }}s"
+
+    - name: micromamba present
+      ansible.builtin.shell: |
+        set -e
+        mkdir -p /root/mamba/bin
+        curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /root/mamba bin/micromamba
+      args: { creates: /root/mamba/bin/micromamba }
+
+    # boltzgen needs torch 2.7.1; bz2 is pinned to 2.6.0. ISOLATED prefix.
+    - name: Create the bgen env
+      ansible.builtin.shell: |
+        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba create -y -p {{ bgen }} -c conda-forge python=3.11 pip
+      args: { creates: "{{ bgen }}/bin/python" }
+
+    - name: torch 2.7.1 (boltzgen pins it)
+      ansible.builtin.shell: |
+        {{ bgen }}/bin/pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/torch/version.py" }
+
+    - name: Sync boltzgen source
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../external_tools/boltzgen/"
+        dest: /root/external_tools/boltzgen/
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc"]
+
+    - name: Install boltzgen (editable)
+      ansible.builtin.shell: cd /root/external_tools/boltzgen && {{ bgen }}/bin/pip install -e .
+      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/boltzgen.egg-link" }
+
+    - name: Verify boltzgen imports and sees the GPUs
+      ansible.builtin.command: >
+        {{ bgen }}/bin/python -c
+        "import torch,boltzgen;assert torch.cuda.is_available();print(torch.__version__, torch.cuda.device_count())"
+      changed_when: false
+      register: bg
+    - ansible.builtin.debug: { msg: "boltzgen OK: torch {{ bg.stdout }}" }
+
+    # Serial, resumable, HTTP/1.1 -- concurrent downloads truncate each other and
+    # HTTP/2 truncated a boltz checkpoint at 83% earlier today.
+    - name: Download boltzgen checkpoints
+      ansible.builtin.shell: |
+        mkdir -p /root/.boltzgen && cd /root/.boltzgen
+        for a in 1 2 3; do
+          [ -s "{{ item }}" ] && break
+          curl -L -C - --http1.1 --retry 5 --retry-delay 5 --speed-limit 100000 --speed-time 60 \
+            -o "{{ item }}" "https://huggingface.co/boltzgen/boltzgen-1/resolve/main/{{ item }}" >/dev/null 2>&1
+        done
+        stat -c %s "{{ item }}"
+      loop: "{{ ckpts }}"
+      register: ck
+      changed_when: false
+      failed_when: ck.stdout | int < 1000000
+
+    - name: Nanobody archive for the target (basin + proxy training data)
+      ansible.builtin.get_url:
+        url: "https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ target }}_nanobodies.csv"
+        dest: "/root/{{ target }}_nanobodies.csv"
+        mode: "0644"
+
+    - name: Target structure
+      ansible.builtin.get_url:
+        url: "https://files.rcsb.org/download/{{ structure }}.cif"
+        dest: "/root/{{ structure }}.cif"
+        mode: "0644"
+
+    - name: Sync nanobody_opt code
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../nanobody_opt/"
+        dest: /root/nanobody_opt/
+        rsync_opts: ["--exclude=__pycache__"]
+
+    - name: scikit-learn for the proxy
+      ansible.builtin.shell: "{{ bgen }}/bin/pip install scikit-learn pandas"
+      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/sklearn" }
+
+    - name: Smoke-test the proxy on the archive
+      ansible.builtin.command: >
+        {{ bgen }}/bin/python -c
+        "import pandas as pd;d=pd.read_csv('/root/{{ target }}_nanobodies.csv');print(len(d),'sequences',len(d.columns),'columns')"
+      changed_when: false
+      register: smoke
+    - ansible.builtin.debug: { msg: "archive: {{ smoke.stdout }}" }
