@@ -127,3 +127,70 @@ position rather than by region membership. The archive gives that for free.
   Treat it as illustrative only -- learn the real one from the archive columns.
 - The field does broad redesign, not scaffold mutation: 98 of 127 positions vary
   in >5% of sequences. The "everyone mutates one base" assumption was wrong.
+
+---
+
+## 9. The proxy is a DISCRIMINATOR, not an objective (measured)
+
+Trained on 22,533 archive sequences (top 5% held out), one-hot Ridge:
+
+```
+held-out rho                     0.8824
+top-1% enrichment                23.4x
+true top-10 -> proxy ranks       140, 83, 12, 2262, 170, 119, 23, 270, 275, 144
+budget 500 of 5,633 captures     9/10 of the true best
+transfer near-consensus -> far   rho 0.8270   (NO covariate-shift collapse)
+```
+
+That is a far better proxy than the molecule one (rho 0.2768, ~2x enrichment,
+0 of 19 winners in top-2000). Ridge beats ExtraTrees here (0.8824 vs 0.8546).
+Adding motif features changed rho by 0.0001 -- one-hot already encodes them.
+
+**But it cannot be used as a search objective.**
+
+```
+unconstrained hill-climb   best predicted rank_sum  -1,080,668  (impossible)
+                           Hamming 111-113 vs archive 6-101 -> off-manifold
+constrained (per-position observed alphabet, Hamming cap 37)
+                           best predicted           -131,972   (still impossible)
+                           Hamming pinned 37..37    -> saturates the cap
+                           physically plausible      0/8
+```
+
+A per-position additive model scores a sequence as a sum of independent residue
+contributions. Assembling the best residue at every position yields a combination
+that has never existed, and the model cannot know it is implausible -- real
+sequences respect epistasis, synthetic ones do not. Constraining the alphabet does
+not help because the violation is in the COMBINATION, not the parts.
+
+This is the same failure as APEX on the molecule side (additive over synthons,
+cannot represent interactions).
+
+**Consequence for the pipeline:**
+  generate with boltzgen inverse folding  (on-manifold by construction)
+  -> filter with the proxy                (rho 0.88, 23x enrichment, cheap)
+  -> score the shortlist with boltzgen    (the real oracle)
+
+Never invert that order. The proxy ranks what exists; it does not invent.
+
+## 10. "Learn from nature" -- checked, mostly closed for this target
+
+Target is human **Interleukin-11** (P20809); `6O4O` is IL-11 alone. The signalling
+complex IS solved (`8DPS`/`8DPT`, IL-11 + IL-11RA + gp130), and residue numbering
+between 6O4O and 8DPS was verified consistent (**100.0% identity at shared
+numbers**, chain B).
+
+```
+config binding_site residues that are NATURAL receptor contacts: 2/14  [33, 40]
+not natural contacts: 31,32,34,35,37,38,88,135,136,137,138,142
+```
+
+The nanobody must bind a largely NON-natural epitope, so copying how gp130 or
+IL-11RA grip IL-11 does not transfer.
+
+Evolutionary models (ESM-style) are also the wrong tool here, and we have the
+precedent in-house: PlantCaduceus on eIF4E recovered CONSERVATION, not the
+functional property (p=0.077). VHH frameworks are germline-encoded (every miner
+already passes those gates) while CDRs are somatically generated -- an
+evolutionary prior would pull CDRs toward germline, away from any specific
+antigen. It would help on the saturated half and hurt on the decisive half.
