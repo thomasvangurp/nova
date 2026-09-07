@@ -12,11 +12,21 @@
     target: P20809                 # IL-11; must match upstream config nanobody target
     structure: 6O4O
     bgen: /root/mamba/envs/bgen
+    # SHA256 from the HuggingFace LFS manifest
+    #   https://huggingface.co/api/models/boltzgen/boltzgen-1/tree/main
+    # A size check is not enough: it catches truncation but not corruption, and
+    # a corrupt checkpoint is invisible until inference. Note ifold is genuinely
+    # ~12 MB while the others are ~1.9 GB -- that is correct, not a short read,
+    # which is precisely why the threshold-on-size approach was misleading.
     ckpts:
-      - boltzgen1_diverse.ckpt
-      - boltzgen1_adherence.ckpt
-      - boltzgen1_ifold.ckpt       # inverse folding -- our generator
-      - boltz2_conf_final.ckpt
+      - name: boltzgen1_diverse.ckpt
+        sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
+      - name: boltzgen1_adherence.ckpt
+        sha256: ac7078b3dc13064c68e0c3fd542e5bc538c33558bf6607f65e499eb336ca5e5d
+      - name: boltzgen1_ifold.ckpt        # inverse folding -- our generator
+        sha256: dd4cf108c94471bdc3a326b7b180fa3854dc019110fae780208c30b50bd56578
+      - name: boltz2_conf_final.ckpt
+        sha256: 525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530
 
   tasks:
     - name: Effective CPUs (cgroup v2 then v1)
@@ -57,10 +67,25 @@
         MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba create -y -p {{ bgen }} -c conda-forge python=3.11 pip
       args: { creates: "{{ bgen }}/bin/python" }
 
-    - name: torch 2.7.1 (boltzgen pins it)
+    # micromamba, NOT pip. pip assembles wheels built against different CUDA
+    # minors and they only fail at runtime, deep inside a worker, as a segfault
+    # or BrokenProcessPool with no traceback. conda-forge owns everything
+    # CUDA-linked here; pip is used ONLY for what conda-forge cannot do (an
+    # editable install of the vendored boltzgen source, below).
+    - name: torch 2.7.1 + CUDA runtime (boltzgen pins the torch version)
       ansible.builtin.shell: |
-        {{ bgen }}/bin/pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
+          -p {{ bgen }} -c conda-forge \
+          "pytorch=2.7.1=cuda126*" pytorch-cuda cuda-version=12.6
       args: { creates: "{{ bgen }}/lib/python3.11/site-packages/torch/version.py" }
+
+    - name: Assert torch actually sees the GPUs (a CPU-only build installs happily)
+      ansible.builtin.command: >
+        {{ bgen }}/bin/python -c
+        "import torch;assert torch.cuda.is_available(), 'torch has no CUDA';
+        print(torch.__version__, torch.cuda.device_count())"
+      changed_when: false
+      register: torchchk
 
     # rsync cannot create a nested destination when the parent is absent:
     # "mkdir /root/external_tools/boltzgen failed: No such file or directory".
@@ -88,19 +113,32 @@
 
     # Serial, resumable, HTTP/1.1 -- concurrent downloads truncate each other and
     # HTTP/2 truncated a boltz checkpoint at 83% earlier today.
-    - name: Download boltzgen checkpoints
+    # Serial, resumable, HTTP/1.1 -- concurrent downloads truncate each other and
+    # HTTP/2 truncated a boltz checkpoint at 83% earlier. Verified by CHECKSUM,
+    # and re-fetched from scratch if the hash is wrong: a resumed download that
+    # appended onto a corrupt prefix would otherwise resume forever.
+    - name: Download and checksum-verify boltzgen checkpoints
       ansible.builtin.shell: |
+        set -u
         mkdir -p /root/.boltzgen && cd /root/.boltzgen
-        for a in 1 2 3; do
-          [ -s "{{ item }}" ] && break
-          curl -L -C - --http1.1 --retry 5 --retry-delay 5 --speed-limit 100000 --speed-time 60 \
-            -o "{{ item }}" "https://huggingface.co/boltzgen/boltzgen-1/resolve/main/{{ item }}" >/dev/null 2>&1
+        f="{{ item.name }}"; want="{{ item.sha256 }}"
+        for attempt in 1 2 3; do
+          if [ -s "$f" ] && [ "$(sha256sum "$f" | cut -d" " -f1)" = "$want" ]; then
+            echo "OK $f"; exit 0
+          fi
+          # a wrong hash means the bytes on disk are unusable -- never resume onto them
+          [ -s "$f" ] && rm -f "$f"
+          curl -L --http1.1 --retry 5 --retry-delay 5 \
+               --speed-limit 100000 --speed-time 60 \
+               -o "$f" "https://huggingface.co/boltzgen/boltzgen-1/resolve/main/$f" >/dev/null 2>&1
         done
-        stat -c %s "{{ item }}"
+        got=$(sha256sum "$f" 2>/dev/null | cut -d" " -f1)
+        echo "MISMATCH $f want=$want got=${got:-<missing>}"; exit 1
+      args: {executable: /bin/bash}
       loop: "{{ ckpts }}"
+      loop_control: {label: "{{ item.name }}"}
       register: ck
-      changed_when: false
-      failed_when: ck.stdout | int < 1000000
+      changed_when: "'OK' not in ck.stdout"
 
     - name: Nanobody archive for the target (basin + proxy training data)
       ansible.builtin.get_url:
@@ -120,9 +158,46 @@
         dest: /root/nanobody_opt/
         rsync_opts: ["--exclude=__pycache__"]
 
-    - name: scikit-learn for the proxy
-      ansible.builtin.shell: "{{ bgen }}/bin/pip install scikit-learn pandas"
+    - name: Proxy + scorer deps (conda-forge owns these, not pip)
+      ansible.builtin.shell: |
+        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
+          -p {{ bgen }} -c conda-forge scikit-learn pandas requests
       args: { creates: "{{ bgen }}/lib/python3.11/site-packages/sklearn" }
+
+    # ---- boltzgen as an EXACT SCORER ---------------------------------------
+    # boltzgen_wrapper.py imports `bittensor` (logging only) and two symbols
+    # from nova's `utils`. Nova's utils/__init__ eagerly pulls in metanano (the
+    # whole NOVA-nanobody-filter service), datasets and combinatorial_db -- none
+    # of it reachable from the functions actually used. bgen_shim supplies just
+    # those two, so this box stays a scorer rather than half a validator.
+    - name: Install the boltzgen scoring shim and interpreter wrapper
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/files/root/"
+        dest: /root/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+
+    - name: Restore the exec bit on the wrapper
+      ansible.builtin.file: { path: /root/bgen_python.sh, mode: "0755" }
+
+    # Prove the scorer is callable. An import that fails here is a deploy
+    # failure; discovering it mid-scoring wastes the GPU hours instead.
+    - name: Prove BoltzgenWrapper imports and sees the GPUs
+      ansible.builtin.command: >
+        /root/bgen_python.sh -c
+        "import torch;
+        from boltzgen.boltzgen_wrapper import BoltzgenWrapper;
+        assert torch.cuda.is_available();
+        print('BOLTZGEN_SCORER_OK', torch.cuda.device_count(), 'GPUs')"
+      changed_when: false
+      register: scorer
+
+    - ansible.builtin.assert:
+        that: "'BOLTZGEN_SCORER_OK' in scorer.stdout"
+        fail_msg: "boltzgen scorer not callable:\n{{ scorer.stderr }}"
+        success_msg: "{{ scorer.stdout }}"
 
     - name: Smoke-test the proxy on the archive
       ansible.builtin.command: >
