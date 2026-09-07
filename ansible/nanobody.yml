@@ -62,6 +62,12 @@
         {{ bgen }}/bin/pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
       args: { creates: "{{ bgen }}/lib/python3.11/site-packages/torch/version.py" }
 
+    # rsync cannot create a nested destination when the parent is absent:
+    # "mkdir /root/external_tools/boltzgen failed: No such file or directory".
+    - name: Destination parents
+      ansible.builtin.file: { path: "{{ item }}", state: directory }
+      loop: [/root/external_tools, /root/nanobody_opt, /root/.boltzgen]
+
     - name: Sync boltzgen source
       ansible.posix.synchronize:
         src: "{{ playbook_dir }}/../external_tools/boltzgen/"
