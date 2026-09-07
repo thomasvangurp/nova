@@ -19,6 +19,30 @@ import argparse, json, os, time
 import multiprocessing as mp
 
 
+def _flatten_config(cfg: dict, target: str) -> dict:
+    """Flatten upstream config.yaml into the keys BoltzgenWrapper reads.
+
+    The wrapper reads FLAT keys -- subnet_config['nanobody_structure'],
+    ['nanobody_structure_chain'], ['nanobody_structure_res_index'],
+    ['nanobody_structure_binding_site'] -- while config.yaml nests them under
+    protein_selection.nanobody.{structure,structure_chain,...}. The validator
+    does this flattening itself; replicating it here rather than hand-writing
+    values keeps the binding site and residue range tied to upstream, so a
+    change there cannot leave us silently scoring against a different epitope.
+    """
+    nb = (cfg.get("protein_selection") or {}).get("nanobody") or {}
+    missing = [k for k in ("structure", "structure_chain", "structure_res_index",
+                           "structure_binding_site") if k not in nb]
+    if missing:
+        raise SystemExit(f"config.yaml protein_selection.nanobody lacks {missing}")
+    flat = dict(cfg)
+    flat["nanobody_target"] = [target]
+    for k in ("structure", "structure_chain", "structure_res_index",
+              "structure_binding_site"):
+        flat[f"nanobody_{k}"] = nb[k]
+    return flat
+
+
 def _worker(args):
     shard_id, gpu, seqs, subnet_config, out_path = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -32,7 +56,9 @@ def _worker(args):
     wrapper = bw.BoltzgenWrapper()
     assert wrapper.tmp_dir == shard_dir, (
         f"shard {shard_id} did not isolate its tmp dir: {wrapper.tmp_dir}")
-    components = wrapper.run_nanobody_inference({0: seqs}, subnet_config)
+    # shape matches the validator's uid_to_data: _deduplicate_nanobodies reads
+    # nanobodies['sequences'], so a bare list raises TypeError deep in the pool
+    components = wrapper.run_nanobody_inference({0: {"sequences": seqs}}, subnet_config)
     elapsed = time.time() - started
     json.dump({"shard": shard_id, "gpu": gpu, "n": len(seqs),
                "seconds": elapsed, "components": components},
@@ -57,8 +83,8 @@ def main():
         seqs = list(raw)
 
     import yaml
-    subnet_config = yaml.safe_load(open(a.config))
-    subnet_config["nanobody_target"] = [a.target]
+    raw_cfg = yaml.safe_load(open(a.config))
+    subnet_config = _flatten_config(raw_cfg, a.target)
 
     gpus = [g.strip() for g in a.gpus.split(",") if g.strip()]
     n_shards = max(1, len(gpus) * a.shards_per_gpu)

@@ -92,7 +92,8 @@
     - name: Destination parents
       ansible.builtin.file: { path: "{{ item }}", state: directory }
       loop: [/root/external_tools, /root/nanobody_opt, /root/.boltzgen,
-             /root/config, /root/bgen_shards]
+             /root/config, /root/bgen_shards,
+             /root/data/structures, /root/data/msa_files]
 
     - name: Sync boltzgen source
       ansible.posix.synchronize:
@@ -147,11 +148,38 @@
         dest: "/root/{{ target }}_nanobodies.csv"
         mode: "0644"
 
-    - name: Target structure
+    # BoltzgenWrapper._create_yaml_content builds these paths itself:
+    #   NOVA_DIR/data/structures/<nanobody_structure>.cif
+    #   NOVA_DIR/data/msa_files/<target>.a3m
+    # with NOVA_DIR=/root. Putting the CIF anywhere else means the YAML it
+    # writes points at a file that does not exist, and boltzgen fails deep in
+    # the run rather than at setup.
+    - name: Target structure, at the path the wrapper builds
       ansible.builtin.get_url:
         url: "https://files.rcsb.org/download/{{ structure }}.cif"
-        dest: "/root/{{ structure }}.cif"
+        dest: "/root/data/structures/{{ structure }}.cif"
         mode: "0644"
+
+    - name: MSA for the target (ships in the repo, not downloadable)
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../data/msa_files/{{ target }}.a3m"
+        dest: "/root/data/msa_files/{{ target }}.a3m"
+
+    - name: Assert the two files the wrapper hardcodes are present and non-empty
+      ansible.builtin.stat: { path: "{{ item }}" }
+      loop:
+        - "/root/data/structures/{{ structure }}.cif"
+        - "/root/data/msa_files/{{ target }}.a3m"
+      register: wrapper_inputs
+
+    - ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size > 1000
+        fail_msg: "{{ item.item }} missing or truncated ({{ item.stat.size | default(0) }} bytes)"
+        success_msg: "{{ item.item }} {{ item.stat.size }} bytes"
+      loop: "{{ wrapper_inputs.results }}"
+      loop_control: { label: "{{ item.item }}" }
 
     # BoltzgenWrapper resolves NOVA_DIR from its own __file__ (up four levels
     # from boltzgen/src/boltzgen) = /root, then reads /root/config/
