@@ -12,6 +12,7 @@
     target: P20809                 # IL-11; must match upstream config nanobody target
     structure: 6O4O
     bgen: /root/mamba/envs/bgen
+    metanano: /root/mamba/envs/metanano
     # SHA256 from the HuggingFace LFS manifest
     #   https://huggingface.co/api/models/boltzgen/boltzgen-1/tree/main
     # A size check is not enough: it catches truncation but not corruption, and
@@ -75,8 +76,7 @@
     - name: torch 2.7.1 + CUDA runtime (boltzgen pins the torch version)
       ansible.builtin.shell: |
         MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
-          -p {{ bgen }} -c conda-forge \
-          "pytorch=2.7.1=cuda126*" pytorch-cuda cuda-version=12.6
+          -p {{ bgen }} -c conda-forge "pytorch-gpu=2.7.1"
       args: { creates: "{{ bgen }}/lib/python3.11/site-packages/torch/version.py" }
 
     - name: Assert torch actually sees the GPUs (a CPU-only build installs happily)
@@ -286,6 +286,88 @@
         that: "'BOLTZGEN_SCORER_OK' in scorer.stdout"
         fail_msg: "boltzgen scorer not callable:\n{{ scorer.stderr }}"
         success_msg: "{{ scorer.stdout }}"
+
+    # ---- Layer-2 filters (NOVA-nanobody-filter / metanano) ------------------
+    # Gating locally BEFORE spending GPU is the whole point: a candidate that
+    # fails nativeness, humanness, VHH classification or TNP developability
+    # scores nothing in a live epoch, so exact-scoring it is wasted GPU time.
+    # Our gates.py only replicates the cheap Layer-1 sequence checks; these are
+    # the real Layer-2 filters, run from upstream's own code.
+    #
+    # Deliberately a SEPARATE python 3.12 env: metanano pins python 3.12 while
+    # the boltzgen scorer is on 3.11, and mixing them would break the scorer.
+    - name: Create the metanano env (python 3.12, isolated from bgen)
+      ansible.builtin.shell: |
+        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba create -y \
+          -p {{ metanano }} -c conda-forge -c bioconda \
+          python=3.12 uv pip cmake make cython swig \
+          mmseqs2 abnumber datasketch hmmer \
+          pandas numpy scipy scikit-learn flask pyyaml tqdm biopython
+      args: { creates: "{{ metanano }}/bin/python" }
+
+    # dssp provides mkdssp, which TNP needs for secondary structure. install.sh
+    # builds it from source; bioconda ships it, which is far faster and pinned.
+    - name: DSSP (mkdssp) for TNP secondary-structure calls
+      ansible.builtin.shell: |
+        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
+          -p {{ metanano }} -c conda-forge -c bioconda dssp
+      args: { creates: "{{ metanano }}/bin/mkdssp" }
+
+    - name: IgBLAST (nativeness and humanness scores are IgBLAST alignments)
+      ansible.builtin.shell: |
+        set -eu
+        mkdir -p /root/external_tools && cd /root/external_tools
+        curl -sSL --retry 5 -o igblast.tar.gz \
+          https://ftp.ncbi.nih.gov/blast/executables/igblast/release/LATEST/ncbi-igblast-1.22.0-x64-linux.tar.gz
+        tar -xzf igblast.tar.gz && mv ncbi-igblast-1.22.0 igblast && rm igblast.tar.gz
+      args: { creates: /root/external_tools/igblast/bin/igblastn }
+
+    - name: NOVA-nanobody-filter source
+      ansible.builtin.git:
+        repo: https://github.com/frankji-groundcontrol/NOVA-nanobody-filter.git
+        dest: /root/external_tools/NOVA-nanobody-filter
+        depth: 1
+        version: HEAD
+        update: false
+
+    # TNP is pip-only; abnativ backs the nativeness score. CPU torch is enough --
+    # these filters do not need a GPU and CUDA wheels would collide with bgen.
+    - name: metanano pip dependencies (TNP, abnativ, promb)
+      ansible.builtin.shell: |
+        set -eu
+        cd /root/external_tools/NOVA-nanobody-filter
+        {{ metanano }}/bin/uv pip install --python {{ metanano }}/bin/python \
+          torch --index-url https://download.pytorch.org/whl/cpu
+        {{ metanano }}/bin/uv pip install --python {{ metanano }}/bin/python \
+          -r install/requirements-minimal.txt || \
+          {{ metanano }}/bin/pip install -r install/requirements-minimal.txt
+        {{ metanano }}/bin/pip install -e . || true
+      args: { creates: "{{ metanano }}/lib/python3.12/site-packages/metanano" }
+
+    - name: Apply upstream's TNP patch (Biopython 1.80+ moved the Bio imports)
+      ansible.builtin.shell: |
+        set -eu
+        src=/root/external_tools/NOVA-nanobody-filter/install/patches/TNP/process_pdb.py
+        dst={{ metanano }}/lib/python3.12/site-packages/scripts/process_pdb.py
+        [ -f "$src" ] && [ -d "$(dirname $dst)" ] && cp "$src" "$dst" && echo patched || echo "skipped"
+      changed_when: false
+
+    - name: Prove the Layer-2 filters import
+      ansible.builtin.shell: |
+        PATH=/root/external_tools/igblast/bin:$PATH {{ metanano }}/bin/python -c "
+        import abnumber, datasketch
+        from metanano.filters.nativeness import NativenessFilter
+        from metanano.filters.developability import DevelopabilityFilter
+        from metanano.filters.diversity import DiversityFilter
+        print('LAYER2_OK')"
+      changed_when: false
+      register: l2
+      failed_when: false
+
+    - ansible.builtin.debug:
+        msg: >-
+          {{ 'Layer-2 filters available' if 'LAYER2_OK' in l2.stdout
+             else 'Layer-2 filters NOT available: ' ~ (l2.stderr | default('') | truncate(200)) }}
 
     - name: Smoke-test the proxy on the archive
       ansible.builtin.command: >
