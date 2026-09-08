@@ -69,10 +69,24 @@ def main():
     print(f"the field's own rank_sums: best {field_rs.min():.1f}, "
           f"median {np.median(field_rs):.1f}, worst {field_rs.max():.1f}")
 
-    rows = []
+    # Boltzgen applies filter_cysteine=true for nanobody-anything and simply
+    # returns NO metrics for a design it rejects ("No metrics found for
+    # nanobody ..."). Those are not near-misses -- in a live epoch they score
+    # nothing at all. Counting them is part of the honest result.
+    required = set(METRICS)
+    rows, dropped = [], []
     for seq, met in ours.items():
+        if not isinstance(met, dict) or not required.issubset(met):
+            dropped.append(seq)
+            continue
         rows.append((rank_sum_in_field(met, field), seq))
     rows.sort()
+    if dropped:
+        print(f"\nWARNING: {len(dropped)}/{len(ours)} candidates produced NO metrics "
+              f"(boltzgen rejected them, e.g. filter_cysteine). In a live epoch "
+              f"each of these scores nothing.")
+    if not rows:
+        raise SystemExit("no candidate produced a complete metric set")
     print(f"\nour candidates in that field (lower is better, floor is 10):")
     print(f"{'rank_sum':>9}  {'beats N of 49':>13}  sequence")
     for rs, seq in rows[:10]:
