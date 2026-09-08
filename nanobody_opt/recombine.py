@@ -162,10 +162,41 @@ def main():
     print(f"mutations from the nearest elite: median {int(np.median(dmin))}, "
           f"min {min(dmin)}, max {max(dmin)}")
 
-    out = pd.DataFrame({"sequence": [r[0] for r in rows],
-                        "max_jaccard_to_top50": [r[1] for r in rows]})
-    out.head(a.shortlist).to_csv(a.out, index=False)
-    print(f"wrote {min(a.shortlist, len(out))} candidates to {a.out}")
+    # Rank the survivors with the proxy so the framework space can be sampled by
+    # merit rather than at random. The proxy is trained WITHOUT the top 1% so its
+    # ordering is not memorisation, and only on the recent era.
+    from sklearn.linear_model import Ridge
+    AA = "ACDEFGHIKLMNPQRSTVWY"; IX = {c: i for i, c in enumerate(AA)}
+
+    def onehot(seqs):
+        X = np.zeros((len(seqs), L * 20), dtype=np.float32)
+        for r, sq in enumerate(seqs):
+            for pos, c in enumerate(sq):
+                j = IX.get(c)
+                if j is not None:
+                    X[r, pos * 20 + j] = 1.0
+        return X
+
+    keep = order[int(0.01 * len(df)):]
+    proxy = Ridge(alpha=1.0).fit(onehot(df.sequence.values[keep]), rank_sum[keep])
+    seqs = [r[0] for r in rows]
+    pred = proxy.predict(onehot(seqs))
+    exhaustive = set(cand[:len(combos)]) if a.exhaustive_cdr else set()
+    out = pd.DataFrame({
+        "sequence": seqs,
+        "max_jaccard_to_top50": [r[1] for r in rows],
+        "proxy_rank_sum": pred,
+        "exhaustive_cdr": [s in exhaustive for s in seqs],
+    }).sort_values("proxy_rank_sum")
+    n_exh = int(out.exhaustive_cdr.sum())
+    print(f"proxy: best {pred.min():.0f}, archive best {rank_sum.min():.0f}, "
+          f"median {np.median(rank_sum):.0f}")
+    if (pred < rank_sum.min()).sum():
+        print(f"  WARNING {(pred < rank_sum.min()).sum()} predict below the archive "
+              f"minimum -- extrapolating, do not trust the ordering there")
+    out.to_csv(a.out, index=False)
+    print(f"wrote ALL {len(out):,} gate-passing candidates to {a.out} "
+          f"({n_exh} of them the exhaustive CDR set)")
 
 
 if __name__ == "__main__":

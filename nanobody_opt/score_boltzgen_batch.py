@@ -15,7 +15,7 @@ worker therefore rebinds that module global to its own directory BEFORE
 constructing the wrapper (__init__ reads the global into self.tmp_dir).
 """
 from __future__ import annotations
-import argparse, json, os, time
+import argparse, json, os, shutil, time
 import multiprocessing as mp
 
 
@@ -67,7 +67,7 @@ def _flatten_config(cfg: dict, target: str) -> dict:
 
 
 def _worker(args):
-    shard_id, gpu, seqs, subnet_config, out_path = args
+    shard_id, gpu, seqs, subnet_config, out_path, batch_size = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     import boltzgen.boltzgen_wrapper as bw
     shard_dir = f"/root/bgen_shards/shard{shard_id}"
@@ -76,12 +76,35 @@ def _worker(args):
     os.makedirs(os.path.join(shard_dir, "inputs"), exist_ok=True)
     os.makedirs(os.path.join(shard_dir, "outputs"), exist_ok=True)
     started = time.time()
-    wrapper = bw.BoltzgenWrapper()
-    assert wrapper.tmp_dir == shard_dir, (
-        f"shard {shard_id} did not isolate its tmp dir: {wrapper.tmp_dir}")
-    # shape matches the validator's uid_to_data: _deduplicate_nanobodies reads
-    # nanobodies['sequences'], so a bare list raises TypeError deep in the pool
-    components = wrapper.run_nanobody_inference({0: {"sequences": seqs}}, subnet_config)
+    # SMALL BATCHES ARE LOAD-BEARING. Measured on the compound side with the
+    # validator's own wrapper: the SAME molecule scores 0.041 in a 24-batch and
+    # 0.117 in a 128-batch -- a 2.8x swing driven purely by what else shares the
+    # predict() call. Scoring a shard's whole slice at once would rank our
+    # candidates by an artefact of how we happened to group them.
+    components = {}
+    for start in range(0, len(seqs), batch_size):
+        chunk = seqs[start:start + batch_size]
+        # a fresh tmp dir per chunk: the wrapper reads predictions back out of a
+        # fixed directory, so a reused one would pick up the previous chunk
+        chunk_dir = os.path.join(shard_dir, f"chunk{start // batch_size}")
+        bw.BOLTZGEN_TMP_FILES_DIR = chunk_dir
+        os.makedirs(os.path.join(chunk_dir, "inputs"), exist_ok=True)
+        os.makedirs(os.path.join(chunk_dir, "outputs"), exist_ok=True)
+        wrapper = bw.BoltzgenWrapper()
+        wrapper.tmp_dir = chunk_dir
+        wrapper.input_dir = os.path.join(chunk_dir, "inputs")
+        wrapper.output_dir = os.path.join(chunk_dir, "outputs")
+        try:
+            got = wrapper.run_nanobody_inference({0: {"sequences": chunk}}, subnet_config)
+        except Exception as exc:
+            print(f"  shard {shard_id} chunk {start // batch_size} raised "
+                  f"({type(exc).__name__}); continuing", flush=True)
+            got = getattr(wrapper, "per_nanobody_components", {}) or {}
+        for uid, by_seq in (got or {}).items():
+            components.setdefault(uid, {}).update(by_seq)
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        print(f"  shard {shard_id}: {min(start + batch_size, len(seqs))}/{len(seqs)}",
+              flush=True)
     elapsed = time.time() - started
     json.dump({"shard": shard_id, "gpu": gpu, "n": len(seqs),
                "seconds": elapsed, "components": components},
@@ -96,6 +119,10 @@ def main():
     ap.add_argument("--target", default="P20809")
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--shards-per-gpu", type=int, default=1)
+    ap.add_argument("--batch-size", type=int, default=24,
+                    help="sequences per predict() call; small keeps scores "
+                         "composition-independent (measured: 24 vs 128 moves a "
+                         "molecule 2.8x on the compound side)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -123,7 +150,7 @@ def main():
 
     os.makedirs("/root/bgen_shards", exist_ok=True)
     jobs = [(i, gpus[i % len(gpus)], b, subnet_config,
-             f"/root/bgen_shards/out{i}.json")
+             f"/root/bgen_shards/out{i}.json", a.batch_size)
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 
