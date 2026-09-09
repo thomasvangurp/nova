@@ -337,28 +337,46 @@ then pulled it over the configured SCP path and committed it alongside the
 unchanged 20-molecule portfolio.
 
 This proves only that the pipeline can produce and transport a valid,
-repeat-stable live submission. It is **not a competitive design result**. Strong
-nanobody winners are typically near rank sum 50; 167.5 is about 117.5 points
-worse. The earlier bootstrap placement claim was misleading because randomly
-sampling the recent archive mostly measures performance against the middle of
-the field rather than the winning tail.
+repeat-stable live submission. It is **not evidence of a competitive design**.
+The 167.5 selection score is a bootstrap statistic against randomly sampled
+historical archive rows. A dashboard score near 50 is a rank sum against the
+actual one-submission-per-UID field, so subtracting the two is invalid. The
+earlier bootstrap placement claim was still misleading because randomly
+sampling the archive does not reproduce that live field.
 
 The failure is structural rather than a Layer-1/Layer-2 problem. Against the
 latest 300 archive rows, the repeat winner ranked 206/301 on `design_iiptm`,
 168/301 on `interaction_pae`, and 151/301 on `design_to_target_iptm`. Its
 liability ranks were excellent (5/301 and 4/301), but rank sum weights all ten
 metrics, so developability cannot compensate for a mediocre binding pose. A
-winning total near 50 requires roughly top-decile performance across nearly all
-ten metrics.
+live dashboard contender with confidence rank sum 31 and physical-interaction
+rank sum 9 beat our repeat median on four of five confidence metrics and two of
+three physical-interaction metrics. Our candidate beat it on both
+developability metrics. This raw-vector comparison, rather than the
+incommensurate aggregate scores, is the evidence that binding pre-selection
+needs to improve.
+
+The 545 paired local proposals and exact results quantify the pre-selection
+failure. Parent archive rank had Spearman rho -0.097 with the child's exact
+eight-metric structural rank sum. A linear sequence/mutation/parent model,
+validated with entire parents held out, reached rho 0.51; retaining its predicted
+best 20% recovered only 35% of the true top decile. It is therefore suitable for
+light rejection only, not aggressive shortlisting. None of the 545 exact-scored
+children beat that dashboard contender on six or more of the eight structural
+metrics (the maximum was five), confirming that proposal support is the larger
+bottleneck.
 
 Consequently, local one-to-three-residue mutation is rejected as the primary
 generator. It remains useful only for exploitation after a genuinely strong
 exact-scored parent exists. The next primary search must generate new
 target-conditioned complexes with BoltzGen's nanobody design plus inverse-fold
 pipeline, preserve the full exact metric vector, and use the exact observations
-for active learning. Reports and publisher metadata must show the distance to a
-50-point winning reference, not describe an archive-bootstrap top-five rate as
-competitiveness.
+for active learning. Its pre-selector must use structure-conditioned design
+outputs and Pareto shortfalls against a refreshed live reference vector. A
+sequence-only exact surrogate may prune only the clearly bad tail until its
+held-parent top-tail recall improves materially. Reports must keep bootstrap
+statistics distinct from live validator rank sums and must not describe an
+archive-bootstrap top-five rate as competitiveness.
 
 The operational fallback policy is therefore:
 
