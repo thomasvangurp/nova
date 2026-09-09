@@ -2,13 +2,15 @@
 
 The scorer wrapper accepts an already chosen sequence.  This utility builds the
 different input needed by BoltzGen's generative pipeline: the current target
-structure and epitope plus a set of VHH scaffold templates whose loops may be
-redesigned.  Challenge values are always read from the fetched validator config;
-no protein, structure, chain, residue range, or epitope is pinned here.
+structure and a set of VHH scaffold templates whose loops may be redesigned.
+Challenge identity and structure values are always read from the fetched
+validator config.  The epitope can optionally come from a target-matched,
+machine-generated structural-teacher summary; it is never pinned in source.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -33,6 +35,7 @@ def build_spec(
     structure_dir: Path,
     msa_dir: Path,
     scaffold_paths: list[Path],
+    binding_site: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Return the resolved target name and a BoltzGen design specification."""
     try:
@@ -46,7 +49,12 @@ def build_spec(
     structure = _required(challenge, "structure")
     chain = _required(challenge, "structure_chain")
     residues = _required(challenge, "structure_res_index")
-    binding_site = _required(challenge, "structure_binding_site")
+    configured_binding_site = _required(challenge, "structure_binding_site")
+    resolved_binding_site = (
+        binding_site.strip()
+        if isinstance(binding_site, str) and binding_site.strip()
+        else configured_binding_site
+    )
     if not scaffold_paths:
         raise ValueError("at least one VHH scaffold is required")
 
@@ -68,7 +76,7 @@ def build_spec(
                         {
                             "chain": {
                                 "id": chain,
-                                "binding": binding_site,
+                                "binding": resolved_binding_site,
                             }
                         }
                     ],
@@ -82,6 +90,25 @@ def build_spec(
         ]
     }
     return target, spec
+
+
+def binding_site_from_summary(
+    config: dict[str, Any], summary: dict[str, Any]
+) -> str:
+    """Validate a teacher summary against the live challenge and return its site."""
+    challenge = config["protein_selection"]["nanobody"]
+    for name in ("target", "structure"):
+        if str(summary.get(name, "")) != str(challenge.get(name, "")):
+            raise ValueError(
+                f"interface summary {name} {summary.get(name)!r} does not match "
+                f"live challenge {challenge.get(name)!r}"
+            )
+    site = summary.get("recommended_binding_site")
+    if not isinstance(site, str) or not site.strip():
+        raise ValueError("interface summary lacks recommended_binding_site")
+    if int(summary.get("teacher_count", 0)) < 3:
+        raise ValueError("interface summary needs at least three teachers")
+    return site.strip()
 
 
 def _atomic_yaml(path: Path, payload: dict[str, Any]) -> None:
@@ -107,20 +134,32 @@ def main() -> None:
     parser.add_argument("--structure-dir", required=True, type=Path)
     parser.add_argument("--msa-dir", required=True, type=Path)
     parser.add_argument("--scaffold", action="append", required=True, type=Path)
+    parser.add_argument(
+        "--interface-summary",
+        type=Path,
+        help="target-matched consensus contacts from public structural teachers",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
     config = yaml.safe_load(args.config.read_text())
+    binding_site = None
+    binding_source = "validator-config"
+    if args.interface_summary:
+        summary = json.loads(args.interface_summary.read_text())
+        binding_site = binding_site_from_summary(config, summary)
+        binding_source = "structural-teacher-consensus"
     target, spec = build_spec(
         config,
         structure_dir=args.structure_dir,
         msa_dir=args.msa_dir,
         scaffold_paths=args.scaffold,
+        binding_site=binding_site,
     )
     _atomic_yaml(args.output, spec)
     print(
         f"DESIGN_SPEC_READY target={target} scaffolds={len(args.scaffold)} "
-        f"output={args.output}"
+        f"binding_source={binding_source} output={args.output}"
     )
 
 

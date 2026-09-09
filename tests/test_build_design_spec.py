@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobody_opt.build_design_spec import build_spec
+from nanobody_opt.build_design_spec import binding_site_from_summary, build_spec
 
 
 def _config():
@@ -61,3 +61,36 @@ def test_build_spec_rejects_an_incomplete_live_challenge():
             msa_dir=Path("/msa"),
             scaffold_paths=[Path("/scaffolds/a.yaml")],
         )
+
+
+def test_teacher_consensus_can_replace_only_the_generation_epitope():
+    config = _config()
+    summary = {
+        "target": "P20809",
+        "structure": "6O4O",
+        "teacher_count": 10,
+        "recommended_binding_site": "11,14..15,94..95",
+    }
+    target, spec = build_spec(
+        config,
+        structure_dir=Path("/structures"),
+        msa_dir=Path("/msa"),
+        scaffold_paths=[Path("/scaffolds/a.yaml")],
+        binding_site=binding_site_from_summary(config, summary),
+    )
+
+    assert target == "P20809"
+    assert spec["entities"][0]["file"]["binding_types"] == [
+        {"chain": {"id": "A", "binding": "11,14..15,94..95"}}
+    ]
+
+
+def test_teacher_consensus_must_match_the_live_target():
+    summary = {
+        "target": "WRONG",
+        "structure": "6O4O",
+        "teacher_count": 10,
+        "recommended_binding_site": "11",
+    }
+    with pytest.raises(ValueError, match="does not match live challenge"):
+        binding_site_from_summary(_config(), summary)

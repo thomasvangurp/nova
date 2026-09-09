@@ -108,6 +108,7 @@ build-design-spec = "python /root/nanobody_opt/build_design_spec.py"
 select-structural-teachers = "python /root/nanobody_opt/select_structural_teachers.py"
 exact-score = "python /root/nanobody_opt/score_boltzgen_batch.py"
 interface-contacts = "python /root/nanobody_opt/interface_contacts.py"
+summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contacts.py"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
