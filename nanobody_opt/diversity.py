@@ -59,9 +59,12 @@ def kmer_jaccard(a: str, b: str, k: int = 5) -> float:
 def passes_diversity(seq: str, top_seqs, threshold: float = 0.9,
                      k: int = 5) -> tuple[bool, float]:
     """Reject if Jaccard >= threshold against ANY of the target's top sequences."""
+    query_kmers = kmers(seq, k)
     worst = 0.0
     for t in top_seqs:
-        j = kmer_jaccard(seq, t, k)
+        target_kmers = t if isinstance(t, set) else kmers(t, k)
+        union = len(query_kmers | target_kmers)
+        j = (len(query_kmers & target_kmers) / union) if union else 0.0
         if j > worst:
             worst = j
         if worst >= threshold:

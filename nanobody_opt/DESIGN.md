@@ -241,3 +241,108 @@ The proxy's ranking has never been checked against boltzgen on OUR candidates.
 rho 0.88 and 23x enrichment are measured on ARCHIVE sequences. Score the top ~48
 of the shortlist with boltzgen and compare -- that is the only thing that turns
 this from plausible into real. Needs a free GPU.
+
+---
+
+## 12. Synthetic transfer test: the archive proxy does not transfer
+
+The missing test was run on 2026-09-09 against P20809. A current-gate archive
+framework was held fixed while residues observed in elite CDRs were recombined.
+The CDR product had grown to 63,700,992 combinations, so 200 deterministic
+weighted samples were tested rather than materializing the product.
+
+```
+generated / Layer-1                         200 / 200
+passed current IgBLAST thresholds           190 / 200
+passed TNP                                  88 / 190
+exact BoltzGen scored                       88 / 88
+best fixed recent-field rank_sum            290.5
+field placement                             39 / 50
+archive-proxy vs exact Spearman rho          0.045 (p=0.676)
+exact winner's proxy position               75 / 88
+```
+
+All 88 designs placed last in the 50-member field on `design_iiptm`,
+`design_ptm`, `design_to_target_iptm`, `min_design_to_target_pae`, and
+`interaction_pae`. The framework seed itself has current-era values on those
+metrics (`design_iiptm=0.728`, `design_to_target_iptm=0.667`), but the tested
+recombinants changed 9-18 residues. Independent residue recombination destroyed
+the target-binding geometry even though Layer-2 survival improved to 44%.
+
+This closes two paths:
+
+- Do not optimize or shortlist synthetic designs with the archive-trained
+  additive proxy. Its archive holdout result does not transfer to our proposal
+  distribution.
+- Do not independently recombine CDR residues. A residue can be common among
+  good binders without being compatible with residues from other CDR haplotypes.
+
+### Revised experimental loop
+
+1. Select multiple recent archive seeds by their exact ten-metric result, then
+   require each seed to pass today's IgBLAST, VHH, TNP, and novelty gates.
+2. Explore local, target-preserving neighborhoods: one to three substitutions
+   per proposal, plus whole observed loop motifs. Never assemble individual
+   residues across unrelated CDRs.
+3. Exact-score a balanced pilot across seeds and edit distances. Fit
+   parent-relative deltas for each physical metric from our own results; use
+   uncertainty and sequence diversity for acquisition, not an extrapolated
+   archive rank sum.
+4. Expand only if a held-out round shows useful exact ranking and the best
+   candidates beat the median recent competitor field. Otherwise retire the
+   neighborhood rather than multiplying the batch size.
+5. Re-score finalists in multiple positions/compositions before release. The
+   compound work showed that shared scorer RNG can create a selection effect;
+   a one-off hot result is not sufficient evidence.
+6. Keep the resulting exact-scored, gate-passing bank off the epoch clock. An
+   epoch should verify and select from that bank, not rebuild Layer-2 or run an
+   hour-long 800-candidate exact search.
+
+An order-statistic extrapolation of the failed 88-design family predicts that
+even the best of 800 would score roughly 274-285 (about place 34-38 of 50).
+That is diagnostic only, not a reason to run the batch.
+
+---
+
+## 13. Local-neighborhood and repeat-stability result
+
+The revised loop was exercised live for epoch 25021 against the target resolved
+from the upstream validator configuration (`P20809`, structure `6O4O`). It did
+not use the archive proxy to rank synthetic mutations. Proposals were one to
+three local substitutions or whole observed motifs around current, gate-passing
+archive seeds, followed by the live Layer-1, IgBLAST, TNP, and exact BoltzGen
+paths.
+
+```
+generated local proposals                         784
+passed IgBLAST                                    784
+passed TNP / complete Layer 2                     545
+exact-scored in the anytime first tranche         225
+repeat-scored finalists                            50
+failed exact structures                             0
+```
+
+The earlier 175-candidate pilot produced a one-observation score of 116.5, but
+the same sequence fell to roughly 252 on confirmation. That is direct evidence
+of a large winner's-curse effect in single BoltzGen observations and is why the
+publisher now refuses candidates with fewer than two exact observations.
+
+The live winner had a worst-repeat bootstrap median rank sum of 167.5, an
+aggregate median of 159.75, and aggregate p90 of 175.2 over 64 deterministic
+49-competitor fields sampled from the recent 300 archive rows. It passed both
+exact observations, the refreshed archive uniqueness check, current Layer 1,
+current Layer 2, and Algorithm-2 top-50 diversity. The producer atomically
+published a schema-version-1 checkpoint for epoch 25021. The Compound master
+then pulled it over the configured SCP path and committed it alongside the
+unchanged 20-molecule portfolio.
+
+This is evidence that the local-neighborhood strategy can produce a valid,
+repeat-stable live submission. It is not evidence that score 167.5 wins the
+epoch; the validator field and final realized stochastic score remain unknown.
+The operational policy is therefore:
+
+1. publish the first two-observation qualified candidate as an anytime result;
+2. continue exact-scoring the remaining Layer-2 bank off the Compound host;
+3. replace the checkpoint only after an improvement also passes a fresh repeat;
+4. resolve target/config/archive online for every epoch and reject a target
+   change instead of carrying a pinned checkpoint forward.

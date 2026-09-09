@@ -57,11 +57,23 @@ def main():
     ap.add_argument("--elites", type=int, default=200,
                     help="how many top sequences donate their residues")
     ap.add_argument("--n-candidates", type=int, default=40000)
-    ap.add_argument("--shortlist", type=int, default=200)
+    ap.add_argument(
+        "--shortlist", type=int, default=1300,
+        help="proxy-ranked full recombinants to retain in addition to every "
+             "surviving candidate from the bounded CDR sweep",
+    )
     ap.add_argument("--cdr-only", action="store_true", default=False,
-                    help="recombine only inside CDRs (space is just 768 -- see --exhaustive)")
+                    help="recombine only inside CDRs")
     ap.add_argument("--exhaustive-cdr", action="store_true",
-                    help="enumerate ALL CDR combinations (768) before sampling the rest")
+                    help="enumerate the CDR product when it fits --cdr-budget; "
+                         "otherwise draw a deterministic weighted CDR sweep")
+    ap.add_argument("--cdr-budget", type=int, default=768,
+                    help="maximum retained CDR-only candidates (default: 768)")
+    ap.add_argument(
+        "--cdr-template", default="",
+        help="verified current-gate archive sequence whose framework is held "
+             "fixed during the CDR sweep",
+    )
     a = ap.parse_args()
 
     import sys, os
@@ -90,35 +102,69 @@ def main():
 
     top50 = diversity.minmax_weighted_rank(df, k=cfg.get("num_top_sequences", 50))
     top50_seqs = top50.sequence.tolist()
+    top50_kmers = [diversity.kmers(seq, 5) for seq in top50_seqs]
     existing = set(df.sequence.values)
 
     rng = np.random.default_rng(0)
     parents = df.sequence.values[elite_idx]
     cand, seen = [], set()
 
-    # Elites vary at only 9 CDR positions -> 768 CDR combinations total. That is
-    # small enough to enumerate COMPLETELY, so nothing in that subspace is missed
-    # by sampling luck. The 18 framework variable positions are what make the
-    # full space large (1.1e14); recombining them is safe because every residue
-    # comes from an elite that already passed nativeness, humanness, VHH
-    # classification and TNP -- unlike a random mutation, which passes nothing.
+    # The archive changes over time, so never assume its CDR Cartesian product
+    # is still the 768 combinations observed during the original analysis. A
+    # list(product(...)) on a later, more diverse archive consumed hundreds of
+    # GB before producing its first candidate. Enumerate lazily when the whole
+    # product fits the explicit budget; otherwise retain a deterministic,
+    # score-weighted CDR-only sweep of that size.
+    cdr_sweep: set[str] = set()
+    cdr_enumeration_complete = False
+    cdr_template = ""
     if a.exhaustive_cdr:
-        import itertools
-        best = parents[0]
-        reg0 = find_regions(best)
+        import itertools, math
+        if a.cdr_budget < 0:
+            raise SystemExit("--cdr-budget must be non-negative")
+        if not a.cdr_template.strip():
+            raise SystemExit(
+                "--exhaustive-cdr requires an explicit --cdr-template that "
+                "has passed the current Layer-2 gates"
+            )
+        cdr_template = a.cdr_template.strip().upper()
+        if len(cdr_template) != L or set(cdr_template) - AAS:
+            raise SystemExit("--cdr-template must be a valid archive-length sequence")
+        if cdr_template not in existing:
+            raise SystemExit("--cdr-template is not present in the selected archive era")
+        reg0 = find_regions(cdr_template)
         cdr_pos = [p for p in reg0.cdr_positions() if len(pools[p][0]) > 1]
-        combos = list(itertools.product(*[pools[p][0] for p in cdr_pos]))
-        print(f"exhaustive CDR enumeration: {len(cdr_pos)} varying CDR positions "
-              f"-> {len(combos):,} combinations")
+        total_cdr = math.prod(len(pools[p][0]) for p in cdr_pos)
+        cdr_enumeration_complete = total_cdr <= a.cdr_budget
+        if cdr_enumeration_complete:
+            combos = itertools.product(*[pools[p][0] for p in cdr_pos])
+            mode = "complete lazy enumeration"
+        else:
+            cdr_rng = np.random.default_rng(1)
+
+            def sampled_combos():
+                attempts = 0
+                while len(cdr_sweep) < a.cdr_budget and attempts < a.cdr_budget * 100:
+                    attempts += 1
+                    yield tuple(
+                        pools[p][0][cdr_rng.choice(len(pools[p][0]), p=pools[p][1])]
+                        for p in cdr_pos
+                    )
+
+            combos = sampled_combos()
+            mode = f"weighted sweep capped at {a.cdr_budget:,}"
+        print(f"CDR space: {len(cdr_pos)} varying positions -> "
+              f"{total_cdr:,} combinations; {mode}")
+        before = len(cand)
         for combo in combos:
-            s2 = list(best)
+            s2 = list(cdr_template)
             for p, r in zip(cdr_pos, combo):
                 s2[p] = r
             s2 = "".join(s2)
             if s2 in existing or s2 in seen:
                 continue
-            seen.add(s2); cand.append(s2)
-        print(f"  {len(cand):,} of them are novel")
+            seen.add(s2); cand.append(s2); cdr_sweep.add(s2)
+        print(f"  {len(cand) - before:,} CDR-only candidates are novel")
     for _ in range(a.n_candidates):
         base = parents[rng.integers(len(parents))]
         try:
@@ -143,7 +189,7 @@ def main():
         f = gates.check_sequence(s, cfg)
         if f:
             k = "layer1:" + f[0].split("=")[0]; rej[k] = rej.get(k, 0) + 1; continue
-        ok, j = diversity.passes_diversity(s, top50_seqs, threshold=0.9, k=5)
+        ok, j = diversity.passes_diversity(s, top50_kmers, threshold=0.9, k=5)
         if not ok:
             rej["diversity"] = rej.get("diversity", 0) + 1; continue
         rows.append((s, j))
@@ -181,22 +227,29 @@ def main():
     proxy = Ridge(alpha=1.0).fit(onehot(df.sequence.values[keep]), rank_sum[keep])
     seqs = [r[0] for r in rows]
     pred = proxy.predict(onehot(seqs))
-    exhaustive = set(cand[:len(combos)]) if a.exhaustive_cdr else set()
     out = pd.DataFrame({
         "sequence": seqs,
         "max_jaccard_to_top50": [r[1] for r in rows],
         "proxy_rank_sum": pred,
-        "exhaustive_cdr": [s in exhaustive for s in seqs],
+        "cdr_sweep": [s in cdr_sweep for s in seqs],
+        "exhaustive_cdr": [cdr_enumeration_complete and s in cdr_sweep for s in seqs],
+        "cdr_template": [cdr_template if s in cdr_sweep else "" for s in seqs],
     }).sort_values("proxy_rank_sum")
-    n_exh = int(out.exhaustive_cdr.sum())
+    if a.shortlist < 0:
+        raise SystemExit("--shortlist must be non-negative")
+    cdr_out = out[out.cdr_sweep]
+    sampled_out = out[~out.cdr_sweep].head(a.shortlist)
+    out = pd.concat([cdr_out, sampled_out]).sort_values("proxy_rank_sum")
+    n_cdr = int(out.cdr_sweep.sum())
     print(f"proxy: best {pred.min():.0f}, archive best {rank_sum.min():.0f}, "
           f"median {np.median(rank_sum):.0f}")
     if (pred < rank_sum.min()).sum():
         print(f"  WARNING {(pred < rank_sum.min()).sum()} predict below the archive "
               f"minimum -- extrapolating, do not trust the ordering there")
     out.to_csv(a.out, index=False)
-    print(f"wrote ALL {len(out):,} gate-passing candidates to {a.out} "
-          f"({n_exh} of them the exhaustive CDR set)")
+    print(f"wrote {len(out):,} candidates to {a.out}: all {n_cdr:,} "
+          f"gate-passing CDR-sweep candidates plus "
+          f"{len(out) - n_cdr:,} proxy-ranked full recombinants")
 
 
 if __name__ == "__main__":

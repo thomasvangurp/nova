@@ -39,7 +39,7 @@ def main():
                     help="JSON: a list of sequences, or {cases:[{sequence:...}]}")
     ap.add_argument("--config", required=True)
     ap.add_argument("--boltzgen-config", required=True)
-    ap.add_argument("--target", default="P20809")
+    ap.add_argument("--target", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 

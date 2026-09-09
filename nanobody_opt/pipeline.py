@@ -1,4 +1,4 @@
-"""End-to-end nanobody candidate pipeline: generate -> gate -> rank.
+"""Experimental nanobody candidate pipeline: generate -> gate -> proxy rank.
 
 Every gate is enforced locally before anything is committed. We submit
 num_sequences=1 and a single failed gate rejects the WHOLE submission for the
@@ -6,8 +6,12 @@ epoch, so an unchecked commit risks the entire epoch.
 
 The search operates in a thin shell around known-good sequences:
   * FAR enough    -- k-mer Jaccard < 0.9 vs the target's top 50 (hard gate)
-  * CLOSE enough  -- on the natural VHH manifold, where the proxy is calibrated
-                     and where the framework/nativeness filters still pass.
+  * CLOSE enough  -- on the natural VHH manifold, where framework/nativeness
+                     filters are more likely to pass.
+
+The archive proxy is a diagnostic ordering only. Its Spearman correlation was
+0.045 on the 2026-09-09 exact-scored synthetic probe, so output from this script
+must not be treated as submission-ready without Layer-2 and exact scoring.
 """
 from __future__ import annotations
 import argparse, os, sys

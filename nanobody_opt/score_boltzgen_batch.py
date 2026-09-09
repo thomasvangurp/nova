@@ -67,7 +67,7 @@ def _flatten_config(cfg: dict, target: str) -> dict:
 
 
 def _worker(args):
-    shard_id, gpu, seqs, subnet_config, out_path, batch_size = args
+    shard_id, gpu, seqs, subnet_config, out_path, batch_size, keep_work_dir = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     import boltzgen.boltzgen_wrapper as bw
     shard_dir = f"/root/bgen_shards/shard{shard_id}"
@@ -88,6 +88,7 @@ def _worker(args):
         # fixed directory, so a reused one would pick up the previous chunk
         chunk_dir = os.path.join(shard_dir, f"chunk{start // batch_size}")
         bw.BOLTZGEN_TMP_FILES_DIR = chunk_dir
+        shutil.rmtree(chunk_dir, ignore_errors=True)
         os.makedirs(os.path.join(chunk_dir, "inputs"), exist_ok=True)
         os.makedirs(os.path.join(chunk_dir, "outputs"), exist_ok=True)
         wrapper = bw.BoltzgenWrapper()
@@ -102,7 +103,8 @@ def _worker(args):
             got = getattr(wrapper, "per_nanobody_components", {}) or {}
         for uid, by_seq in (got or {}).items():
             components.setdefault(uid, {}).update(by_seq)
-        shutil.rmtree(chunk_dir, ignore_errors=True)
+        if not keep_work_dir:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
         print(f"  shard {shard_id}: {min(start + batch_size, len(seqs))}/{len(seqs)}",
               flush=True)
     elapsed = time.time() - started
@@ -116,13 +118,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequences", required=True)
     ap.add_argument("--config", required=True)
-    ap.add_argument("--target", default="P20809")
+    ap.add_argument("--target", required=True)
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--shards-per-gpu", type=int, default=1)
     ap.add_argument("--batch-size", type=int, default=24,
                     help="sequences per predict() call; small keeps scores "
                          "composition-independent (measured: 24 vs 128 moves a "
                          "molecule 2.8x on the compound side)")
+    ap.add_argument(
+        "--keep-work-dir",
+        action="store_true",
+        help="retain generated complexes and analysis files under "
+             "/root/bgen_shards (use only for small finalist runs)",
+    )
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -150,7 +158,7 @@ def main():
 
     os.makedirs("/root/bgen_shards", exist_ok=True)
     jobs = [(i, gpus[i % len(gpus)], b, subnet_config,
-             f"/root/bgen_shards/out{i}.json", a.batch_size)
+             f"/root/bgen_shards/out{i}.json", a.batch_size, a.keep_work_dir)
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 

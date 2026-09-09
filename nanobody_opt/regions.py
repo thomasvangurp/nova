@@ -10,8 +10,9 @@ The reference miner mutates random positions across all 117 residues
   * It searches ~117 positions when only ~35 can help.
 
 Region boundaries come from conserved VHH anchors rather than a numbering
-library, so this has no anarci/ImmuneBuilder dependency:
-    Cys22 ... Trp(WVRQ) ... Cys96(YYC) ... WGxG (FR4)
+library, so this has no anarci/ImmuneBuilder dependency. Current accepted
+archive sequences use both WGxG and FGxG at the FR4 boundary:
+    Cys22 ... Trp(WVRQ) ... Cys96(YYC) ... [WF]GxG (FR4)
 """
 from dataclasses import dataclass
 
@@ -52,10 +53,11 @@ def find_regions(seq: str) -> Regions:
     # CDR2 sits between FR2 and FR3; FR2 is ~14 residues after the W anchor
     cdr2 = (w + 14, w + 14 + 17)
 
-    # FR4 starts at the WGxG motif after CDR3
+    # FR4 starts at the WGxG/FGxG motif after CDR3. The original WG-only
+    # heuristic rejects current sequences that the validator numbers as VHH.
     import re
-    m = re.search(r"WG.G", seq[c2:])
+    m = re.search(r"[WF]G.G", seq[c2:])
     if not m:
-        raise ValueError("no FR4 WGxG anchor")
+        raise ValueError("no FR4 [WF]GxG anchor")
     cdr3 = (c2 + 1, c2 + m.start())
     return Regions(cdr1=cdr1, cdr2=cdr2, cdr3=cdr3)
