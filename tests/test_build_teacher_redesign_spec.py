@@ -6,6 +6,7 @@ import pytest
 from nanobody_opt.build_teacher_redesign_spec import (
     build_spec,
     cdr_ranges,
+    contact_positions,
     locate_retained_complex,
 )
 
@@ -13,6 +14,26 @@ from nanobody_opt.build_teacher_redesign_spec import (
 def test_cdr_ranges_are_one_based_inclusive():
     sequence = "AAAACCCCGGGGTTTT"
     assert cdr_ranges(sequence, ["CCCC", "GG", "TTT"]) == "5..8,9..10,13..15"
+
+
+def test_cdr_ranges_can_preserve_observed_contacts():
+    sequence = "AAAACCCCGGGGTTTT"
+    assert cdr_ranges(
+        sequence,
+        ["CCCC", "GG", "TTT"],
+        excluded_positions={6, 9, 14},
+    ) == "5,7..8,10,13,15"
+
+
+def test_loads_contact_sequence_indices(tmp_path: Path):
+    report = tmp_path / "contacts.json"
+    report.write_text(json.dumps({
+        "interface_residues": [
+            {"sequence_index": 33},
+            {"sequence_index": 102},
+        ]
+    }))
+    assert contact_positions(report) == {33, 102}
 
 
 def test_locates_exactly_one_retained_teacher(tmp_path: Path):

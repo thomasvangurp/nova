@@ -2,8 +2,10 @@
 
 The teacher is selected dynamically from ``select_structural_teachers.py``
 output and located in an isolated exact-scoring work root.  Its public sequence
-is never emitted as a candidate: all three IMGT CDRs are marked for redesign,
-while its competitive target/VHH backbone pose is held fixed.
+is never emitted as a candidate.  By default all three IMGT CDRs are marked for
+redesign; when a contact report is supplied, observed interface residues are
+held fixed and only the non-contact CDR positions are redesigned.  In both
+cases the competitive target/VHH backbone pose is held fixed.
 """
 from __future__ import annotations
 
@@ -17,10 +19,34 @@ from typing import Any
 import yaml
 
 
-def cdr_ranges(sequence: str, cdr_sequences: list[str]) -> str:
+def _compress_positions(positions: list[int]) -> str:
+    """Return sorted 1-based positions as compact inclusive ranges."""
+    if not positions:
+        raise ValueError("no design positions remain")
+    groups: list[tuple[int, int]] = []
+    start = previous = positions[0]
+    for position in positions[1:]:
+        if position == previous + 1:
+            previous = position
+            continue
+        groups.append((start, previous))
+        start = previous = position
+    groups.append((start, previous))
+    return ",".join(
+        str(start) if start == end else f"{start}..{end}"
+        for start, end in groups
+    )
+
+
+def cdr_ranges(
+    sequence: str,
+    cdr_sequences: list[str],
+    excluded_positions: set[int] | None = None,
+) -> str:
     """Return 1-based inclusive ranges for ordered CDR subsequences."""
-    ranges = []
+    ranges: list[str] = []
     search_from = 0
+    excluded = excluded_positions or set()
     for cdr in cdr_sequences:
         if not cdr:
             raise ValueError("CDR sequence may not be empty")
@@ -28,9 +54,29 @@ def cdr_ranges(sequence: str, cdr_sequences: list[str]) -> str:
         if start < 0:
             raise ValueError(f"CDR {cdr!r} is absent from teacher sequence")
         end = start + len(cdr)
-        ranges.append(f"{start + 1}..{end}")
+        positions = [
+            position
+            for position in range(start + 1, end + 1)
+            if position not in excluded
+        ]
+        if positions:
+            ranges.append(_compress_positions(positions))
         search_from = end
+    if not ranges:
+        raise ValueError("no design positions remain")
     return ",".join(ranges)
+
+
+def contact_positions(path: Path) -> set[int]:
+    """Load 1-based VHH sequence positions observed within the contact cutoff."""
+    payload = json.loads(path.read_text())
+    residues = payload.get("interface_residues")
+    if not isinstance(residues, list):
+        raise ValueError("contact report has no interface_residues list")
+    positions = {int(residue["sequence_index"]) for residue in residues}
+    if not positions:
+        raise ValueError("contact report has no VHH interface positions")
+    return positions
 
 
 def locate_retained_complex(
@@ -113,6 +159,11 @@ def main() -> None:
     parser.add_argument("--teacher-rank", type=int, default=1)
     parser.add_argument("--target-chain", default="A")
     parser.add_argument("--nanobody-chain", default="B")
+    parser.add_argument(
+        "--contacts",
+        type=Path,
+        help="interface_contacts.py JSON; preserve every observed VHH contact",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -127,9 +178,11 @@ def main() -> None:
     from abnumber import Chain
 
     chain = Chain(sequence, scheme="imgt")
+    excluded = contact_positions(args.contacts) if args.contacts else set()
     ranges = cdr_ranges(
         sequence,
         [str(chain.cdr1_seq), str(chain.cdr2_seq), str(chain.cdr3_seq)],
+        excluded_positions=excluded,
     )
     structure, shard = locate_retained_complex(args.work_root, sequence)
     spec = build_spec(
@@ -142,6 +195,7 @@ def main() -> None:
     print(
         f"TEACHER_REDESIGN_SPEC_READY target={payload.get('target')} "
         f"teacher_rank={args.teacher_rank} shard={shard} cdrs={ranges} "
+        f"preserved_contacts={len(excluded)} "
         f"output={args.output}"
     )
 
