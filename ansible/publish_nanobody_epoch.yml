@@ -1,0 +1,161 @@
+---
+# Publish the best unused, repeat-scored nanobody for a current live epoch.
+# The exact-score bank is target-bound and may be reused while the target stays
+# unchanged; published and historical sequences are always excluded.
+- name: Publish a qualified nanobody checkpoint for the live epoch
+  hosts: nanobody_producer
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    nanobody_target: P20809
+    nanobody_epoch: 0
+    live_root: /root/live
+    source_epoch_root: /root/live/epoch25021
+    published_ledger: /root/artifacts/nanobody_published_sequences.txt
+    exact_inputs:
+      - /root/local_neighborhood_round1_exact.json
+      - /root/local_neighborhood_round1_winner_confirm.json
+      - "{{ source_epoch_root }}/local_neighborhood_round2_exact_part1.json"
+      - "{{ source_epoch_root }}/finalists_round1_confirm.json"
+      - "{{ source_epoch_root }}/local_neighborhood_round2_exact_part2.json"
+      - "{{ source_epoch_root }}/new_contenders_confirm.json"
+    layer2_inputs:
+      - "{{ source_epoch_root }}/local_neighborhood_round2_layer2.json"
+
+  tasks:
+    - name: Require an explicit live epoch
+      ansible.builtin.assert:
+        that: nanobody_epoch | int > 0
+        fail_msg: Pass the current epoch as -e nanobody_epoch=NNNNN.
+
+    - name: Read controller Git state
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]
+      delegate_to: localhost
+      register: controller_status
+      changed_when: false
+
+    - name: Deploy only committed producer source
+      ansible.builtin.assert:
+        that: controller_status.stdout | length == 0
+        fail_msg: Commit the nanobody worktree before live publication.
+
+    - name: Sync the committed nanobody producer
+      ansible.posix.synchronize:
+        src: "{{ repo }}/nanobody_opt/"
+        dest: /root/nanobody_opt/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+
+    - name: Create the current epoch workspace
+      ansible.builtin.file:
+        path: "{{ live_root }}/epoch{{ nanobody_epoch }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Refresh validator config and complete submission history
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+        force: true
+      loop:
+        - url: https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml
+          dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml"
+        - url: >-
+            https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
+          dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/archive.csv"
+
+    - name: Verify the current target and locked Pixi runtime
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import torch,yaml;
+            c=yaml.safe_load(open('{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml'));
+            assert c['protein_selection']['nanobody']['target']=='{{ nanobody_target }}',c;
+            assert torch.cuda.device_count()=={{ gpu_count | int }},torch.cuda.device_count();
+            print('LIVE_NANOBODY_RUNTIME_OK',torch.cuda.device_count())
+      changed_when: false
+
+    - name: Check the previous qualified checkpoint
+      ansible.builtin.stat:
+        path: /root/artifacts/nanobody_result.json
+      register: prior_checkpoint
+
+    - name: Read the previous qualified checkpoint
+      ansible.builtin.slurp:
+        src: /root/artifacts/nanobody_result.json
+      register: prior_checkpoint_content
+      when: prior_checkpoint.stat.isreg | default(false)
+
+    - name: Remember the previously published sequence permanently
+      ansible.builtin.lineinfile:
+        path: "{{ published_ledger }}"
+        line: >-
+          {{ ((prior_checkpoint_content.content | b64decode | from_json).sequences)[0] }}
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: prior_checkpoint.stat.isreg | default(false)
+
+    - name: Rank only unused, nonhistorical, repeat-scored candidates
+      ansible.builtin.command:
+        cmd: >-
+          /root/bgen_python.sh /root/nanobody_opt/rank_exact.py
+          {% for path in exact_inputs %} --exact {{ path | quote }}{% endfor %}
+          --archive {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/archive.csv') | quote }}
+          --target {{ nanobody_target | quote }}
+          --output {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
+          --exclude-file {{ published_ledger | quote }}
+          --minimum-observations 2 --recent 300 --field-size 49
+          --bootstrap-fields 64 --limit 30
+      changed_when: true
+
+    - name: Publish the best remaining fully qualified candidate atomically
+      ansible.builtin.command:
+        cmd: >-
+          /root/bgen_python.sh /root/nanobody_opt/publish_checkpoint.py
+          --rankings {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
+          {% for path in layer2_inputs %} --layer2 {{ path | quote }}{% endfor %}
+          --archive {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/archive.csv') | quote }}
+          --config {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/config.yaml') | quote }}
+          --target {{ nanobody_target | quote }}
+          --epoch {{ nanobody_epoch | int }}
+          --output /root/artifacts/nanobody_result.json
+      register: publication
+      changed_when: true
+
+    - name: Verify the published checkpoint is current and qualified
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import json;
+            x=json.load(open('/root/artifacts/nanobody_result.json'));
+            assert x['schema_version']==1,x;
+            assert x['status']=='qualified',x;
+            assert x['target']=='{{ nanobody_target }}',x;
+            assert x['epoch']=={{ nanobody_epoch | int }},x;
+            assert len(x['sequences'])==1,x;
+            assert x['validation']['layer_1']['passed'],x;
+            assert x['validation']['layer_2']['passed'],x;
+            assert x['validation']['boltzgen']['exact'],x;
+            assert x['validation']['boltzgen']['validator_matched'],x;
+            print('NANOBODY_CHECKPOINT_OK',x['selection']['score'])
+      changed_when: false
+      register: checkpoint_check
+
+    - name: Report the current candidate
+      ansible.builtin.debug:
+        msg: "{{ publication.stdout_lines[-1] }}; {{ checkpoint_check.stdout_lines[-1] }}"
