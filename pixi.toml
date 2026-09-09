@@ -112,3 +112,4 @@ summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contac
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
+build-teacher-redesign-spec = "python /root/nanobody_opt/build_teacher_redesign_spec.py"
