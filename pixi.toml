@@ -109,6 +109,7 @@ select-structural-teachers = "python /root/nanobody_opt/select_structural_teache
 exact-score = "python /root/nanobody_opt/score_boltzgen_batch.py"
 interface-contacts = "python /root/nanobody_opt/interface_contacts.py"
 summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contacts.py"
+scan-teacher-terminals = "python /root/nanobody_opt/scan_teacher_terminals.py"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
