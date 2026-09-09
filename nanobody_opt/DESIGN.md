@@ -304,7 +304,7 @@ That is diagnostic only, not a reason to run the batch.
 
 ---
 
-## 13. Local-neighborhood and repeat-stability result
+## 13. Local-neighborhood result: valid transport, noncompetitive design
 
 The revised loop was exercised live for epoch 25021 against the target resolved
 from the upstream validator configuration (`P20809`, structure `6O4O`). It did
@@ -327,7 +327,7 @@ the same sequence fell to roughly 252 on confirmation. That is direct evidence
 of a large winner's-curse effect in single BoltzGen observations and is why the
 publisher now refuses candidates with fewer than two exact observations.
 
-The live winner had a worst-repeat bootstrap median rank sum of 167.5, an
+The live selection had a worst-repeat bootstrap median rank sum of 167.5, an
 aggregate median of 159.75, and aggregate p90 of 175.2 over 64 deterministic
 49-competitor fields sampled from the recent 300 archive rows. It passed both
 exact observations, the refreshed archive uniqueness check, current Layer 1,
@@ -336,10 +336,31 @@ published a schema-version-1 checkpoint for epoch 25021. The Compound master
 then pulled it over the configured SCP path and committed it alongside the
 unchanged 20-molecule portfolio.
 
-This is evidence that the local-neighborhood strategy can produce a valid,
-repeat-stable live submission. It is not evidence that score 167.5 wins the
-epoch; the validator field and final realized stochastic score remain unknown.
-The operational policy is therefore:
+This proves only that the pipeline can produce and transport a valid,
+repeat-stable live submission. It is **not a competitive design result**. Strong
+nanobody winners are typically near rank sum 50; 167.5 is about 117.5 points
+worse. The earlier bootstrap placement claim was misleading because randomly
+sampling the recent archive mostly measures performance against the middle of
+the field rather than the winning tail.
+
+The failure is structural rather than a Layer-1/Layer-2 problem. Against the
+latest 300 archive rows, the repeat winner ranked 206/301 on `design_iiptm`,
+168/301 on `interaction_pae`, and 151/301 on `design_to_target_iptm`. Its
+liability ranks were excellent (5/301 and 4/301), but rank sum weights all ten
+metrics, so developability cannot compensate for a mediocre binding pose. A
+winning total near 50 requires roughly top-decile performance across nearly all
+ten metrics.
+
+Consequently, local one-to-three-residue mutation is rejected as the primary
+generator. It remains useful only for exploitation after a genuinely strong
+exact-scored parent exists. The next primary search must generate new
+target-conditioned complexes with BoltzGen's nanobody design plus inverse-fold
+pipeline, preserve the full exact metric vector, and use the exact observations
+for active learning. Reports and publisher metadata must show the distance to a
+50-point winning reference, not describe an archive-bootstrap top-five rate as
+competitiveness.
+
+The operational fallback policy is therefore:
 
 1. publish the first two-observation qualified candidate as an anytime result;
 2. continue exact-scoring the remaining Layer-2 bank off the Compound host;
