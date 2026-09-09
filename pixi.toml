@@ -103,6 +103,8 @@ theraprofnano = { git = "https://github.com/oxpig/TNP.git", rev = "29dcac72f1380
 
 [feature.bgen.tasks]
 check = "python -c \"import torch; from triton.runtime import driver; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count(), driver.active.get_current_device())\""
+boltzgen = "python -m boltzgen.cli.boltzgen"
+build-design-spec = "python /root/nanobody_opt/build_design_spec.py"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
