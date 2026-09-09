@@ -1,0 +1,145 @@
+---
+# Fast path for an immutable OCI runtime plus a Vast persistent cache volume.
+# After proving both are the expected artifacts, import the canonical playbook:
+# its locked Pixi installs and checkpoint downloads become local verification.
+- name: Validate prebuilt nanobody runtime and persistent cache
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    nanobody_cache_root: /mnt/nova-cache
+    expected_runtime_version: ""
+
+  tasks:
+    - name: Read controller Git revision
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ repo }}"
+          - rev-parse
+          - HEAD
+      delegate_to: localhost
+      register: controller_revision
+      changed_when: false
+
+    - name: Check controller worktree is committed
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ repo }}"
+          - status
+          - --porcelain
+          - --untracked-files=all
+      delegate_to: localhost
+      register: controller_status
+      changed_when: false
+
+    - name: Require a clean deployment source
+      ansible.builtin.assert:
+        that:
+          - controller_status.stdout | length == 0
+        fail_msg: >-
+          Fast deployment requires a clean committed checkout so its source can
+          be matched to the immutable image.
+
+    - name: Calculate controller lockfile digest
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - >-
+            import hashlib,sys;
+            print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+          - "{{ repo }}/pixi.lock"
+      delegate_to: localhost
+      register: controller_lock_digest
+      changed_when: false
+
+    - name: Read immutable runtime metadata
+      ansible.builtin.slurp:
+        src: /etc/nova-nanobody-runtime
+      register: runtime_metadata
+
+    - name: Verify image was built from this Pixi lock
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('pixi_lock_sha256=' ~ controller_lock_digest.stdout) in
+            (runtime_metadata.content | b64decode)
+          - >-
+            ('vcs_ref=' ~ controller_revision.stdout) in
+            (runtime_metadata.content | b64decode)
+          - >-
+            (expected_runtime_version | length == 0) or
+            (('runtime_version=' ~ expected_runtime_version) in
+             (runtime_metadata.content | b64decode))
+        fail_msg: >-
+          Prebuilt image metadata does not match this checkout. Rebuild the
+          image or deploy the matching Git revision.
+
+    - name: Verify both locked Pixi environments are present
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /root/.pixi/envs/bgen/bin/python
+        - /root/.pixi/envs/metanano/bin/python
+        - /root/.pixi/envs/metanano/bin/igblastp
+      register: runtime_files
+
+    - name: Require all prebuilt runtime executables
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.executable
+        fail_msg: "Prebuilt runtime is incomplete: {{ item.item }}"
+      loop: "{{ runtime_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Verify the persistent volume is mounted
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --noheadings
+          - --target
+          - "{{ nanobody_cache_root }}"
+      changed_when: false
+
+    - name: Read persistent cache layout marker
+      ansible.builtin.slurp:
+        src: "{{ nanobody_cache_root }}/.nova-nanobody-cache"
+      register: cache_marker
+
+    - name: Verify persistent cache layout
+      ansible.builtin.assert:
+        that:
+          - "'layout_version=1' in (cache_marker.content | b64decode)"
+          - "'checkpoints=boltzgen' in (cache_marker.content | b64decode)"
+        fail_msg: >-
+          The Vast volume is mounted but was not initialized by
+          scripts/nanobody_cache_onstart.sh.
+
+    - name: Verify checkpoint and compiler caches point at the volume
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - "{{ item.link }}"
+      loop:
+        - link: /root/.boltzgen
+          target: "{{ nanobody_cache_root }}/boltzgen"
+        - link: /root/.cache/triton-bgen
+          target: "{{ nanobody_cache_root }}/triton-bgen"
+        - link: /root/.nv/ComputeCache
+          target: "{{ nanobody_cache_root }}/cuda-compute"
+      register: cache_links
+      changed_when: false
+      failed_when: cache_links.stdout != item.target
+      loop_control:
+        label: "{{ item.link }}"
+
+- name: Apply canonical nanobody configuration and canaries
+  ansible.builtin.import_playbook: nanobody.yml
