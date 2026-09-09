@@ -1,0 +1,67 @@
+---
+# Resolve the Linux-only lock on an x86 worker and fetch it back. Git-backed
+# TNP/ImmuneBuilder builds cannot be cross-resolved on an ARM macOS controller.
+- name: Resolve the nanobody Pixi lock on x86 Linux
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    lock_workspace: /tmp/nova-nanobody-pixi-lock
+    pixi_version: "0.73.0"
+    pixi_archive: /root/.cache/pixi-{{ pixi_version }}-linux.tar.gz
+    pixi_url: >-
+      https://github.com/prefix-dev/pixi/releases/download/v{{ pixi_version }}/pixi-x86_64-unknown-linux-musl.tar.gz
+    pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
+  tasks:
+    - name: Create Pixi and lock workspace directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /root/.cache
+        - "{{ lock_workspace }}"
+
+    - name: Download the pinned Pixi archive
+      ansible.builtin.get_url:
+        url: "{{ pixi_url }}"
+        dest: "{{ pixi_archive }}"
+        checksum: "sha256:{{ pixi_sha256 }}"
+        mode: "0644"
+
+    - name: Install pinned Pixi
+      ansible.builtin.unarchive:
+        src: "{{ pixi_archive }}"
+        dest: /usr/local/bin
+        remote_src: true
+        creates: /usr/local/bin/pixi
+
+    - name: Verify exact Pixi version
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      changed_when: false
+      register: pixi_check
+      failed_when: "('pixi ' ~ pixi_version) not in pixi_check.stdout"
+
+    - name: Stage manifest
+      ansible.builtin.copy:
+        src: "{{ repo }}/pixi.toml"
+        dest: "{{ lock_workspace }}/pixi.toml"
+        mode: "0644"
+
+    - name: Resolve Linux lock without installing environments
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - lock
+          - --manifest-path
+          - "{{ lock_workspace }}/pixi.toml"
+      environment:
+        PIXI_COLOR: never
+      changed_when: true
+
+    - name: Fetch resolved lockfile into the repository
+      ansible.builtin.fetch:
+        src: "{{ lock_workspace }}/pixi.lock"
+        dest: "{{ repo }}/pixi.lock"
+        flat: true

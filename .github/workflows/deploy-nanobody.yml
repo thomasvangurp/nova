@@ -12,25 +12,26 @@ on:
         description: "SSH port"
         required: true
         default: "22"
-      target:
-        description: "Nanobody target (must match upstream config)"
-        required: true
-        default: "P20809"
-      structure:
-        description: "PDB id for the target structure"
-        required: true
-        default: "6O4O"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install ansible
         run: |
           python -m pip install --upgrade pip
-          pip install ansible
+          python -m pip install "ansible-core>=2.16,<2.22" "ansible-lint>=24"
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Lint the deployment
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+        run: ansible-lint ansible/
 
       - name: Load SSH key
         env:
@@ -45,10 +46,9 @@ jobs:
         run: |
           ansible-playbook -i '${{ inputs.host }},' ansible/nanobody.yml \
             -e ansible_port=${{ inputs.port }} \
-            -e target=${{ inputs.target }} \
-            -e structure=${{ inputs.structure }} \
             --private-key ~/.ssh/id_deploy \
             --ssh-common-args '-o StrictHostKeyChecking=accept-new'
         env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
           ANSIBLE_HOST_KEY_CHECKING: "False"
           ANSIBLE_FORCE_COLOR: "1"

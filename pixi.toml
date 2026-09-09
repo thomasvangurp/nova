@@ -1,0 +1,108 @@
+[workspace]
+name = "nova-nanobody-runtime"
+version = "0.1.0"
+description = "Locked design, scoring, and Layer-2 runtimes for NOVA nanobodies"
+channels = ["conda-forge", "bioconda"]
+platforms = [
+  { platform = "linux-64", cuda = "12.6", glibc = "2.35" },
+]
+requires-pixi = ">=0.73,<0.74"
+
+# PyTorch is supplied by conda-forge in both environments. These mappings keep
+# PyPI-only cuEquivariance packages from solving a second CUDA runtime on top of
+# it, the same split of ownership used by the compound runtime.
+[workspace.conda-pypi-map]
+conda-forge = { mapping = { triton = false, libcublas = "nvidia-cublas-cu12", cuda-nvrtc = "nvidia-cuda-nvrtc-cu12" } }
+
+[environments]
+bgen = { features = ["bgen"], no-default-feature = true }
+metanano = { features = ["metanano"], no-default-feature = true }
+
+# BoltzGen exact-scoring environment. Versions mirror the vendored BoltzGen
+# pyproject; CUDA-linked packages belong to this single conda-forge solve.
+[feature.bgen.dependencies]
+python = "3.11.*"
+pytorch = { version = "2.7.1", build = "cuda126*" }
+pytorch-gpu = "2.7.1"
+numpy = "2.0.2"
+numba = "0.61.0"
+matplotlib = "3.10.9"
+biotite = "1.2.0"
+gemmi = "0.7.5"
+scikit-learn = "1.6.1"
+hydra-core = "1.3.2"
+pytorch-lightning = "2.5.5"
+torchmetrics = "1.9.0"
+rdkit = "2024.09.4"
+pandas = "2.2.3"
+einops = "0.8.0"
+biopython = "1.84"
+requests = "*"
+pyyaml = "*"
+
+[feature.bgen.pypi-dependencies]
+hydride = "==1.2.3"
+pydssp = "==0.9.1"
+logomaker = "==0.8.7"
+edit-distance = "==1.0.9"
+pdbeccdutils = "==1.0.4"
+einx = "==0.3.0"
+mashumaro = "==3.14"
+nvidia-ml-py = "==13.610.43"
+cuequivariance-ops-cu12 = "==0.10.0"
+cuequivariance-ops-torch-cu12 = "==0.10.0"
+cuequivariance-torch = "==0.10.0"
+huggingface-hub = "==1.8.0"
+
+# Runtime and compiler discovery is part of the locked environment contract.
+# Triton builds its CUDA driver shim on first use; GCC reads CPATH and
+# LIBRARY_PATH when the generated command does not include CUDA_HOME itself.
+[feature.bgen.activation.env]
+CUDA_HOME = "/usr/local/cuda"
+CPATH = "/usr/local/cuda/include"
+LIBRARY_PATH = "/usr/local/cuda/lib64"
+LD_LIBRARY_PATH = "/usr/local/cuda/lib64"
+TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = "1"
+TRITON_CACHE_DIR = "/root/.cache/triton-bgen"
+CUDA_CACHE_PATH = "/root/.nv/ComputeCache"
+CUDA_CACHE_MAXSIZE = "4294967296"
+BOLTZGEN_CACHE = "/root/.boltzgen"
+PYTHONPATH = "/root/bgen_shim:/root/external_tools/boltzgen/src"
+
+# Layer-2 remains isolated from the scorer, but ImmuneBuilder automatically uses
+# CUDA when available. Its neural structure-prediction stage therefore gets its
+# own conda-forge CUDA solve; ANARCI, DSSP, OpenMM refinement, and the remaining
+# TNP descriptors still run on CPU. IgBLAST is also installed by Pixi here.
+[feature.metanano.dependencies]
+python = "3.12.*"
+pytorch = { version = "2.7.1", build = "cuda126*" }
+pytorch-gpu = "2.7.1"
+numpy = "1.26.4"
+scipy = "*"
+matplotlib = "*"
+pandas = "*"
+scikit-learn = "*"
+pyyaml = "*"
+pydantic = ">=2,<3"
+requests = "*"
+biopython = "1.86"
+einops = "*"
+openmm = "8.5.1"
+pdbfixer = "1.12"
+mmseqs2 = "*"
+abnumber = "*"
+anarci = "2024.05.21"
+datasketch = "*"
+hmmer = "*"
+dssp = "4.5.7"
+igblast = "1.22.0"
+
+[feature.metanano.pypi-dependencies]
+immunebuilder = { git = "https://github.com/oxpig/ImmuneBuilder.git", rev = "0df4e2ad82a1aa60f37ea9dae335d1198159ef78" }
+theraprofnano = { git = "https://github.com/oxpig/TNP.git", rev = "29dcac72f1380e8538e8870f45a699d3c6156162" }
+
+[feature.bgen.tasks]
+check = "python -c \"import torch; from triton.runtime import driver; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count(), driver.active.get_current_device())\""
+
+[feature.metanano.tasks]
+check = "python -c \"import Bio, anarci; print(Bio.__version__)\""

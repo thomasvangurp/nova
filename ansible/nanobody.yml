@@ -1,264 +1,167 @@
 ---
-# Nanobody toolchain. SEPARATE from the miner playbook because boltzgen requires
-# torch==2.7.1 while the miner's bz2 env is pinned to 2.6.0 for boltz -- installing
-# them together would break the live scorer.
-#
-#   ansible-playbook -i '<ip>,' ansible/nanobody.yml -e ansible_port=<port> --private-key <key>
-- name: Provision the nanobody design/scoring box
+# Dedicated NOVA nanobody design/scoring host. BoltzGen and MetaNano require
+# different Python/PyTorch stacks, so both are declared as isolated Pixi
+# environments and installed strictly from the committed lockfile.
+- name: Provision the nanobody design and scoring box
   hosts: all
   remote_user: root
   gather_facts: false
+  any_errors_fatal: true
   vars:
-    target: P20809                 # IL-11; must match upstream config nanobody target
-    structure: 6O4O
-    bgen: /root/mamba/envs/bgen
-    metanano: /root/mamba/envs/metanano
-    # SHA256 from the HuggingFace LFS manifest
-    #   https://huggingface.co/api/models/boltzgen/boltzgen-1/tree/main
-    # A size check is not enough: it catches truncation but not corruption, and
-    # a corrupt checkpoint is invisible until inference. Note ifold is genuinely
-    # ~12 MB while the others are ~1.9 GB -- that is correct, not a short read,
-    # which is precisely why the threshold-on-size approach was misleading.
+    repo: "{{ playbook_dir }}/.."
+    validator_config_url: >-
+      https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml
+    validator_boltzgen_config_url: >-
+      https://raw.githubusercontent.com/metanova-labs/nova/main/config/boltzgen_config.yaml
+    pixi_version: "0.73.0"
+    pixi_archive: /root/.cache/pixi-{{ pixi_version }}-linux.tar.gz
+    pixi_url: >-
+      https://github.com/prefix-dev/pixi/releases/download/v{{ pixi_version }}/pixi-x86_64-unknown-linux-musl.tar.gz
+    pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
       - name: boltzgen1_adherence.ckpt
         sha256: ac7078b3dc13064c68e0c3fd542e5bc538c33558bf6607f65e499eb336ca5e5d
-      - name: boltzgen1_ifold.ckpt        # inverse folding -- our generator
+      - name: boltzgen1_ifold.ckpt
         sha256: dd4cf108c94471bdc3a326b7b180fa3854dc019110fae780208c30b50bd56578
       - name: boltz2_conf_final.ckpt
         sha256: 525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530
 
   tasks:
-    - name: Effective CPUs (cgroup v2 then v1)
+    - name: Count effective CPUs
       ansible.builtin.shell: |
         if [ -f /sys/fs/cgroup/cpu.max ]; then
-          read q p < /sys/fs/cgroup/cpu.max
+          read -r q p < /sys/fs/cgroup/cpu.max
           [ "$q" = max ] && nproc || echo $(( q / p ))
         else
-          q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+          q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+          p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
           [ "$q" -le 0 ] && nproc || echo $(( q / p ))
         fi
+      args:
+        executable: /bin/bash
       changed_when: false
       register: cpus
 
-    - name: Bandwidth probe (a host advertising 872 Mbps once delivered 57 KB/s)
-      ansible.builtin.shell: |
-        s=$(date +%s)
-        curl -s -o /dev/null --max-time 60 https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ target }}_nanobodies.csv
-        echo $(( $(date +%s) - s ))
-      changed_when: false
-      register: probe
-
-    - ansible.builtin.assert:
-        that: probe.stdout | int <= 30
-        fail_msg: "8MB took {{ probe.stdout }}s -- destroy this host"
-        success_msg: "{{ cpus.stdout }} CPUs, 8MB in {{ probe.stdout }}s"
-
-    - name: micromamba present
-      ansible.builtin.shell: |
-        set -e
-        mkdir -p /root/mamba/bin
-        curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /root/mamba bin/micromamba
-      args: { creates: /root/mamba/bin/micromamba }
-
-    # boltzgen needs torch 2.7.1; bz2 is pinned to 2.6.0. ISOLATED prefix.
-    - name: Create the bgen env
-      ansible.builtin.shell: |
-        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba create -y -p {{ bgen }} -c conda-forge python=3.11 pip
-      args: { creates: "{{ bgen }}/bin/python" }
-
-    # micromamba, NOT pip. pip assembles wheels built against different CUDA
-    # minors and they only fail at runtime, deep inside a worker, as a segfault
-    # or BrokenProcessPool with no traceback. conda-forge owns everything
-    # CUDA-linked here; pip is used ONLY for what conda-forge cannot do (an
-    # editable install of the vendored boltzgen source, below).
-    - name: torch 2.7.1 + CUDA runtime (boltzgen pins the torch version)
-      ansible.builtin.shell: |
-        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
-          -p {{ bgen }} -c conda-forge "pytorch-gpu=2.7.1"
-      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/torch/version.py" }
-
-    - name: Assert torch actually sees the GPUs (a CPU-only build installs happily)
-      ansible.builtin.command: >
-        {{ bgen }}/bin/python -c
-        "import torch;assert torch.cuda.is_available(), 'torch has no CUDA';
-        print(torch.__version__, torch.cuda.device_count())"
-      changed_when: false
-      register: torchchk
-
-    # rsync cannot create a nested destination when the parent is absent:
-    # "mkdir /root/external_tools/boltzgen failed: No such file or directory".
-    - name: Destination parents
-      ansible.builtin.file: { path: "{{ item }}", state: directory }
-      loop: [/root/external_tools, /root/nanobody_opt, /root/.boltzgen,
-             /root/config, /root/bgen_shards,
-             /root/data/structures, /root/data/msa_files]
-
-    - name: Sync boltzgen source
-      ansible.posix.synchronize:
-        src: "{{ playbook_dir }}/../external_tools/boltzgen/"
-        dest: /root/external_tools/boltzgen/
-        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc"]
-
-    - name: Install boltzgen (editable)
-      ansible.builtin.shell: cd /root/external_tools/boltzgen && {{ bgen }}/bin/pip install -e .
-      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/boltzgen.egg-link" }
-
-    - name: Verify boltzgen imports and sees the GPUs
-      ansible.builtin.command: >
-        {{ bgen }}/bin/python -c
-        "import torch,boltzgen;assert torch.cuda.is_available();print(torch.__version__, torch.cuda.device_count())"
-      changed_when: false
-      register: bg
-    - ansible.builtin.debug: { msg: "boltzgen OK: torch {{ bg.stdout }}" }
-
-    # Serial, resumable, HTTP/1.1 -- concurrent downloads truncate each other and
-    # HTTP/2 truncated a boltz checkpoint at 83% earlier today.
-    # Serial, resumable, HTTP/1.1 -- concurrent downloads truncate each other and
-    # HTTP/2 truncated a boltz checkpoint at 83% earlier. Verified by CHECKSUM,
-    # and re-fetched from scratch if the hash is wrong: a resumed download that
-    # appended onto a corrupt prefix would otherwise resume forever.
-    - name: Download and checksum-verify boltzgen checkpoints
-      ansible.builtin.shell: |
-        set -u
-        mkdir -p /root/.boltzgen && cd /root/.boltzgen
-        f="{{ item.name }}"; want="{{ item.sha256 }}"
-        for attempt in 1 2 3; do
-          if [ -s "$f" ] && [ "$(sha256sum "$f" | cut -d" " -f1)" = "$want" ]; then
-            echo "OK $f"; exit 0
-          fi
-          # a wrong hash means the bytes on disk are unusable -- never resume onto them
-          [ -s "$f" ] && rm -f "$f"
-          curl -L --http1.1 --retry 5 --retry-delay 5 \
-               --speed-limit 100000 --speed-time 60 \
-               -o "$f" "https://huggingface.co/boltzgen/boltzgen-1/resolve/main/$f" >/dev/null 2>&1
-        done
-        got=$(sha256sum "$f" 2>/dev/null | cut -d" " -f1)
-        echo "MISMATCH $f want=$want got=${got:-<missing>}"; exit 1
-      args: {executable: /bin/bash}
-      loop: "{{ ckpts }}"
-      loop_control: {label: "{{ item.name }}"}
-      register: ck
-      changed_when: "'OK' not in ck.stdout"
-
-    - name: Nanobody archive for the target (basin + proxy training data)
-      ansible.builtin.get_url:
-        url: "https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ target }}_nanobodies.csv"
-        dest: "/root/{{ target }}_nanobodies.csv"
-        mode: "0644"
-
-    # BoltzgenWrapper._create_yaml_content builds these paths itself:
-    #   NOVA_DIR/data/structures/<nanobody_structure>.cif
-    #   NOVA_DIR/data/msa_files/<target>.a3m
-    # with NOVA_DIR=/root. Putting the CIF anywhere else means the YAML it
-    # writes points at a file that does not exist, and boltzgen fails deep in
-    # the run rather than at setup.
-    - name: Target structure, at the path the wrapper builds
-      ansible.builtin.get_url:
-        url: "https://files.rcsb.org/download/{{ structure }}.cif"
-        dest: "/root/data/structures/{{ structure }}.cif"
-        mode: "0644"
-
-    - name: MSA for the target (ships in the repo, not downloadable)
-      ansible.posix.synchronize:
-        src: "{{ playbook_dir }}/../data/msa_files/{{ target }}.a3m"
-        dest: "/root/data/msa_files/{{ target }}.a3m"
-
-    - name: Assert the two files the wrapper hardcodes are present and non-empty
-      ansible.builtin.stat: { path: "{{ item }}" }
+    - name: Create runtime destinations and persistent caches
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
       loop:
-        - "/root/data/structures/{{ structure }}.cif"
-        - "/root/data/msa_files/{{ target }}.a3m"
-      register: wrapper_inputs
+        - /root/.cache
+        - /root/.cache/triton-bgen
+        - /root/.cache/matplotlib
+        - /root/.nv/ComputeCache
+        - /root/.boltzgen
+        - /root/config
+        - /root/data/msa_files
+        - /root/data/structures
+        - /root/external_tools/boltzgen
+        - /root/external_tools/NOVA-nanobody-filter
+        - /root/external_tools/igblast/bin
+        - /root/external_tools/igblast/database
+        - /root/external_tools/igblast/internal_data
+        - /root/metanano_shim
+        - /root/nanobody_opt
+        - /root/layer2_cache
 
-    - ansible.builtin.assert:
-        that:
-          - item.stat.exists
-          - item.stat.size > 1000
-        fail_msg: "{{ item.item }} missing or truncated ({{ item.stat.size | default(0) }} bytes)"
-        success_msg: "{{ item.item }} {{ item.stat.size }} bytes"
-      loop: "{{ wrapper_inputs.results }}"
-      loop_control: { label: "{{ item.item }}" }
-
-    # BoltzgenWrapper resolves NOVA_DIR from its own __file__ (up four levels
-    # from boltzgen/src/boltzgen) = /root, then reads /root/config/
-    # boltzgen_config.yaml at a FIXED path in __init__. Passing a config path as
-    # an argument does nothing. These two files define the scoring protocol --
-    # metrics, rank mode, step/noise scales -- so they are fetched from upstream
-    # rather than hand-written, and refetched every run so a protocol change
-    # upstream cannot leave us scoring against a stale definition.
-    - name: Upstream configs at the paths BoltzgenWrapper hardcodes
+    - name: Fetch the live validator configuration
       ansible.builtin.get_url:
-        url: "https://raw.githubusercontent.com/metanova-labs/nova/main/config/{{ item }}"
-        dest: "/root/config/{{ item }}"
+        url: "{{ item.url }}"
+        dest: "{{ item.dest }}"
         mode: "0644"
         force: true
       loop:
-        - boltzgen_config.yaml
-        - config.yaml
+        - url: "{{ validator_config_url }}"
+          dest: /root/config/config.yaml
+        - url: "{{ validator_boltzgen_config_url }}"
+          dest: /root/config/boltzgen_config.yaml
 
-    - name: Assert the scoring protocol is the one we think it is
+    - name: Read the live validator configuration
+      ansible.builtin.slurp:
+        src: /root/config/config.yaml
+      register: validator_config_file
+
+    - name: Parse the live validator configuration
+      ansible.builtin.set_fact:
+        validator_config: "{{ validator_config_file.content | b64decode | from_yaml }}"
+
+    - name: Resolve the live nanobody challenge
+      ansible.builtin.set_fact:
+        nanobody_target: "{{ validator_config.protein_selection.nanobody.target }}"
+        nanobody_structure: "{{ validator_config.protein_selection.nanobody.structure }}"
+
+    - name: Require a single fully specified live nanobody challenge
+      ansible.builtin.assert:
+        that:
+          - nanobody_target | length > 0
+          - "',' not in nanobody_target"
+          - nanobody_structure | length > 0
+        fail_msg: >-
+          The live validator config does not describe one supported nanobody target.
+        success_msg: >-
+          Live nanobody challenge is {{ nanobody_target }} / {{ nanobody_structure }}.
+
+    - name: Reject a host with unusable real download bandwidth
       ansible.builtin.shell: |
-        /root/bgen_python.sh -c "
-        import yaml
-        c=yaml.safe_load(open('/root/config/boltzgen_config.yaml'))
-        m=[k for d in c['metrics'].values() for k in d]
-        assert len(m)==10, f'expected 10 ranked metrics, got {len(m)}: {m}'
-        assert c['protocol']=='nanobody-anything', c['protocol']
-        print('PROTOCOL_OK', c['protocol'], len(m), 'metrics')
-        "
-      args: { executable: /bin/bash }
+        start=$(date +%s)
+        curl -fsSL -o /dev/null --max-time 60 \
+          https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
+        echo $(( $(date +%s) - start ))
+      args:
+        executable: /bin/bash
       changed_when: false
-      register: proto
+      register: probe
 
-    - ansible.builtin.assert:
-        that: "'PROTOCOL_OK' in proto.stdout"
-        fail_msg: "boltzgen scoring protocol changed upstream:\n{{ proto.stdout }}{{ proto.stderr }}"
-        success_msg: "{{ proto.stdout }}"
+    - name: Report host preflight
+      ansible.builtin.assert:
+        that: probe.stdout | int <= 30
+        fail_msg: "Archive download took {{ probe.stdout }} seconds; replace this host"
+        success_msg: "{{ cpus.stdout }} CPUs; archive in {{ probe.stdout }} seconds"
 
-    # owner/group false is LOAD-BEARING. rsync -a preserves the CONTROLLER's
-    # uid/gid, so a laptop checkout (uid 502) stamps 502:staff onto what it
-    # writes. When that lands on /root itself, sshd StrictModes then refuses
-    # every NEW public-key auth while existing multiplexed sessions keep
-    # working -- it reads as a flaky proxy and is actually a lockout.
-    - name: Sync nanobody_opt code
+    - name: Ship the declarative Pixi manifest and lockfile
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/root/{{ item | basename }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - "{{ repo }}/pixi.toml"
+        - "{{ repo }}/pixi.lock"
+
+    - name: Sync the pinned vendored BoltzGen source
       ansible.posix.synchronize:
-        src: "{{ playbook_dir }}/../nanobody_opt/"
-        dest: /root/nanobody_opt/
+        src: "{{ repo }}/external_tools/boltzgen/"
+        dest: /root/external_tools/boltzgen/
+        checksum: true
         owner: false
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
-    - name: Repair any controller-stamped ownership under /root
-      ansible.builtin.shell: |
-        set -eu
-        bad=$(find /root -maxdepth 2 ! -user root -printf '%p\n' 2>/dev/null | head -20)
-        if [ -n "$bad" ]; then echo "REPAIRED:"; echo "$bad"; chown -R root:root /root; fi
-        chmod 700 /root
-        stat -c '%U:%G %a /root' /root
-      args: { executable: /bin/bash }
-      changed_when: "'REPAIRED' in repair.stdout"
-      register: repair
+    - name: Sync the pinned NOVA-nanobody-filter submodule
+      ansible.posix.synchronize:
+        src: "{{ repo }}/NOVA-nanobody-filter/"
+        dest: /root/external_tools/NOVA-nanobody-filter/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=.git", "--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
-    - ansible.builtin.assert:
-        that: "'root:root 700 /root' in repair.stdout"
-        fail_msg: "/root ownership/mode wrong -- sshd StrictModes will refuse new key auth"
-        success_msg: "/root ownership correct"
+    - name: Sync nanobody optimization code
+      ansible.posix.synchronize:
+        src: "{{ repo }}/nanobody_opt/"
+        dest: /root/nanobody_opt/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
-    - name: Proxy + scorer deps (conda-forge owns these, not pip)
-      ansible.builtin.shell: |
-        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
-          -p {{ bgen }} -c conda-forge scikit-learn pandas requests
-      args: { creates: "{{ bgen }}/lib/python3.11/site-packages/sklearn" }
-
-    # ---- boltzgen as an EXACT SCORER ---------------------------------------
-    # boltzgen_wrapper.py imports `bittensor` (logging only) and two symbols
-    # from nova's `utils`. Nova's utils/__init__ eagerly pulls in metanano (the
-    # whole NOVA-nanobody-filter service), datasets and combinatorial_db -- none
-    # of it reachable from the functions actually used. bgen_shim supplies just
-    # those two, so this box stays a scorer rather than half a validator.
-    - name: Install the boltzgen scoring shim and interpreter wrapper
+    - name: Install interpreter wrappers and scorer shims
       ansible.posix.synchronize:
         src: "{{ playbook_dir }}/files/root/"
         dest: /root/
@@ -267,112 +170,308 @@
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
-    - name: Restore the exec bit on the wrapper
-      ansible.builtin.file: { path: /root/bgen_python.sh, mode: "0755" }
+    - name: Install the MetaNano bittensor logging shim outside site-packages
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/metanano/bittensor.py"
+        dest: /root/metanano_shim/bittensor.py
+        owner: root
+        group: root
+        mode: "0644"
 
-    # Prove the scorer is callable. An import that fails here is a deploy
-    # failure; discovering it mid-scoring wastes the GPU hours instead.
-    - name: Prove BoltzgenWrapper imports and sees the GPUs
-      ansible.builtin.command: >
+    - name: Restore executable bits on wrappers
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0755"
+      loop:
+        - /root/bgen_python.sh
+        - /root/metanano_python.sh
+        - /root/metanano_shim/bin/TNP
+
+    - name: Sync the MSA at the path BoltzGen constructs
+      ansible.posix.synchronize:
+        src: "{{ repo }}/data/msa_files/{{ nanobody_target }}.a3m"
+        dest: "/root/data/msa_files/{{ nanobody_target }}.a3m"
+        owner: false
+        group: false
+
+    - name: Sync NOVA's pinned IgBLAST germline databases
+      ansible.posix.synchronize:
+        src: "{{ repo }}/data/igblast_database/database/"
+        dest: /root/external_tools/igblast/database/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--no-perms"]
+
+    - name: Sync NOVA's custom camelid IgBLAST internal data
+      ansible.posix.synchronize:
+        src: "{{ repo }}/data/igblast_internal_data/camelid/"
+        dest: /root/external_tools/igblast/internal_data/camelid/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--no-perms"]
+
+    - name: Download the target structure
+      ansible.builtin.get_url:
+        url: "https://files.rcsb.org/download/{{ nanobody_structure }}.cif"
+        dest: "/root/data/structures/{{ nanobody_structure }}.cif"
+        mode: "0644"
+
+    - name: Fetch the target submission archive
+      ansible.builtin.get_url:
+        url: >-
+          https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
+        dest: "/root/{{ nanobody_target }}_nanobodies.csv"
+        mode: "0644"
+
+    - name: Download the pinned Pixi binary archive
+      ansible.builtin.get_url:
+        url: "{{ pixi_url }}"
+        dest: "{{ pixi_archive }}"
+        checksum: "sha256:{{ pixi_sha256 }}"
+        mode: "0644"
+
+    - name: Install the pinned Pixi binary
+      ansible.builtin.unarchive:
+        src: "{{ pixi_archive }}"
+        dest: /usr/local/bin
+        remote_src: true
+        creates: /usr/local/bin/pixi
+
+    - name: Verify the exact Pixi version
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      changed_when: false
+      register: pixi_check
+      failed_when: "('pixi ' ~ pixi_version) not in pixi_check.stdout"
+
+    - name: Install the locked BoltzGen CUDA environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+      environment:
+        PIXI_COLOR: never
+      register: bgen_build
+      changed_when: "'Nothing to do' not in (bgen_build.stdout ~ bgen_build.stderr)"
+
+    # Hugging Face's Xet client moved a 1.9 GB checkpoint in 20 seconds on the
+    # same host where a raw LFS curl transferred only ~1 MB/s. Start the locked
+    # client after bgen exists, then overlap it with MetaNano setup and canaries.
+    - name: Start Xet-accelerated checksum-verified checkpoint download
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - /root/nanobody_opt/fetch_checkpoints.py
+          - --local-dir
+          - /root/.boltzgen
+          - --specs-json
+          - "{{ ckpts | to_json }}"
+      environment:
+        HF_XET_HIGH_PERFORMANCE: "1"
+      async: 1800
+      poll: 0
+      changed_when: true
+      register: checkpoint_job
+
+    - name: Install the locked MetaNano and IgBLAST environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - metanano
+      environment:
+        PIXI_COLOR: never
+      register: metanano_build
+      changed_when: "'Nothing to do' not in (metanano_build.stdout ~ metanano_build.stderr)"
+
+    - name: Locate Pixi's built-in human IgBLAST internal data
+      ansible.builtin.shell: |
+        find /root/.pixi/envs/metanano -type d -path '*/internal_data/human' -print -quit
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: human_igdata
+      failed_when: not human_igdata.stdout
+
+    - name: Expose Pixi's IgBLAST binary at MetaNano's fixed path
+      ansible.builtin.file:
+        src: /root/.pixi/envs/metanano/bin/igblastp
+        dest: /root/external_tools/igblast/bin/igblastp
+        state: link
+        force: true
+
+    - name: Expose Pixi's human IgBLAST internal data beside camelid data
+      ansible.builtin.file:
+        src: "{{ human_igdata.stdout }}"
+        dest: /root/external_tools/igblast/internal_data/human
+        state: link
+        force: true
+
+    - name: Find the Pixi-installed TNP patch target
+      ansible.builtin.shell: |
+        find /root/.pixi/envs/metanano/lib -path '*/site-packages/scripts/process_pdb.py' -print -quit
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tnp_patch_target
+      failed_when: not tnp_patch_target.stdout
+
+    - name: Apply upstream's Biopython compatibility patch to locked TNP
+      ansible.builtin.copy:
+        src: /root/external_tools/NOVA-nanobody-filter/install/patches/TNP/process_pdb.py
+        dest: "{{ tnp_patch_target.stdout }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Assert the wrapper rejects an inherited cross-environment PYTHONPATH
+      ansible.builtin.command: >-
         /root/bgen_python.sh -c
-        "import torch;
-        from boltzgen.boltzgen_wrapper import BoltzgenWrapper;
+        "import numpy; assert numpy.__version__ == '2.0.2'; print(numpy.__version__)"
+      environment:
+        PYTHONPATH: /root/.pixi/envs/metanano/lib/python3.12/site-packages
+      changed_when: false
+
+    - name: Verify BoltzGen imports and sees every rented GPU
+      ansible.builtin.command: >-
+        /root/bgen_python.sh -c
+        "import torch,boltzgen; from triton.runtime import driver;
         assert torch.cuda.is_available();
-        print('BOLTZGEN_SCORER_OK', torch.cuda.device_count(), 'GPUs')"
+        print('BOLTZGEN_OK', torch.__version__, torch.cuda.device_count(),
+        driver.active.get_current_device())"
       changed_when: false
-      register: scorer
+      register: bgen_check
+      failed_when: "'BOLTZGEN_OK' not in bgen_check.stdout"
 
-    - ansible.builtin.assert:
-        that: "'BOLTZGEN_SCORER_OK' in scorer.stdout"
-        fail_msg: "boltzgen scorer not callable:\n{{ scorer.stderr }}"
-        success_msg: "{{ scorer.stdout }}"
-
-    # ---- Layer-2 filters (NOVA-nanobody-filter / metanano) ------------------
-    # Gating locally BEFORE spending GPU is the whole point: a candidate that
-    # fails nativeness, humanness, VHH classification or TNP developability
-    # scores nothing in a live epoch, so exact-scoring it is wasted GPU time.
-    # Our gates.py only replicates the cheap Layer-1 sequence checks; these are
-    # the real Layer-2 filters, run from upstream's own code.
-    #
-    # Deliberately a SEPARATE python 3.12 env: metanano pins python 3.12 while
-    # the boltzgen scorer is on 3.11, and mixing them would break the scorer.
-    - name: Create the metanano env (python 3.12, isolated from bgen)
-      ansible.builtin.shell: |
-        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba create -y \
-          -p {{ metanano }} -c conda-forge -c bioconda \
-          python=3.12 uv pip cmake make cython swig \
-          mmseqs2 abnumber datasketch hmmer \
-          pandas numpy scipy scikit-learn flask pyyaml tqdm biopython
-      args: { creates: "{{ metanano }}/bin/python" }
-
-    # dssp provides mkdssp, which TNP needs for secondary structure. install.sh
-    # builds it from source; bioconda ships it, which is far faster and pinned.
-    - name: DSSP (mkdssp) for TNP secondary-structure calls
-      ansible.builtin.shell: |
-        MAMBA_ROOT_PREFIX=/root/mamba /root/mamba/bin/micromamba install -y \
-          -p {{ metanano }} -c conda-forge -c bioconda dssp
-      args: { creates: "{{ metanano }}/bin/mkdssp" }
-
-    - name: IgBLAST (nativeness and humanness scores are IgBLAST alignments)
-      ansible.builtin.shell: |
-        set -eu
-        mkdir -p /root/external_tools && cd /root/external_tools
-        curl -sSL --retry 5 -o igblast.tar.gz \
-          https://ftp.ncbi.nih.gov/blast/executables/igblast/release/LATEST/ncbi-igblast-1.22.0-x64-linux.tar.gz
-        tar -xzf igblast.tar.gz && mv ncbi-igblast-1.22.0 igblast && rm igblast.tar.gz
-      args: { creates: /root/external_tools/igblast/bin/igblastn }
-
-    - name: NOVA-nanobody-filter source
-      ansible.builtin.git:
-        repo: https://github.com/frankji-groundcontrol/NOVA-nanobody-filter.git
-        dest: /root/external_tools/NOVA-nanobody-filter
-        depth: 1
-        version: HEAD
-        update: false
-
-    # TNP is pip-only; abnativ backs the nativeness score. CPU torch is enough --
-    # these filters do not need a GPU and CUDA wheels would collide with bgen.
-    - name: metanano pip dependencies (TNP, abnativ, promb)
-      ansible.builtin.shell: |
-        set -eu
-        cd /root/external_tools/NOVA-nanobody-filter
-        {{ metanano }}/bin/uv pip install --python {{ metanano }}/bin/python \
-          torch --index-url https://download.pytorch.org/whl/cpu
-        {{ metanano }}/bin/uv pip install --python {{ metanano }}/bin/python \
-          -r install/requirements-minimal.txt || \
-          {{ metanano }}/bin/pip install -r install/requirements-minimal.txt
-        {{ metanano }}/bin/pip install -e . || true
-      args: { creates: "{{ metanano }}/lib/python3.12/site-packages/metanano" }
-
-    - name: Apply upstream's TNP patch (Biopython 1.80+ moved the Bio imports)
-      ansible.builtin.shell: |
-        set -eu
-        src=/root/external_tools/NOVA-nanobody-filter/install/patches/TNP/process_pdb.py
-        dst={{ metanano }}/lib/python3.12/site-packages/scripts/process_pdb.py
-        [ -f "$src" ] && [ -d "$(dirname $dst)" ] && cp "$src" "$dst" && echo patched || echo "skipped"
+    - name: Assert the live BoltzGen protocol has ten ranked metrics
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import yaml;
+            c=yaml.safe_load(open('/root/config/boltzgen_config.yaml'));
+            m=[k for d in c['metrics'].values() for k in d];
+            assert c['protocol']=='nanobody-anything',c['protocol'];
+            assert len(m)==10,m;
+            print('PROTOCOL_OK',len(m))
       changed_when: false
 
-    - name: Prove the Layer-2 filters import
+    - name: Assert every external Layer-2 executable and database exists
       ansible.builtin.shell: |
-        PATH=/root/external_tools/igblast/bin:$PATH {{ metanano }}/bin/python -c "
-        import abnumber, datasketch
-        from metanano.filters.nativeness import NativenessFilter
-        from metanano.filters.developability import DevelopabilityFilter
-        from metanano.filters.diversity import DiversityFilter
-        print('LAYER2_OK')"
+        set -eu
+        test -x /root/.pixi/envs/metanano/bin/igblastp
+        test -x /root/.pixi/envs/metanano/bin/TNP
+        test -x /root/.pixi/envs/metanano/bin/NanoBodyBuilder2
+        test -x /root/.pixi/envs/metanano/bin/mkdssp
+        test -x /root/.pixi/envs/metanano/bin/psa
+        test -s /root/external_tools/igblast/database/camelid_V.psq
+        test -s /root/external_tools/igblast/database/human_V.psq
+        test -s /root/external_tools/igblast/internal_data/camelid/camelid.pdm.imgt
+        echo LAYER2_ARTIFACTS_OK
+      args:
+        executable: /bin/bash
       changed_when: false
-      register: l2
-      failed_when: false
+      register: layer2_artifacts
 
-    - ansible.builtin.debug:
+    - name: Prove Layer-2 computes real IgBLAST and TNP results
+      ansible.builtin.command:
+        argv:
+          - /root/metanano_python.sh
+          - /root/nanobody_opt/filter_layer2.py
+          - --input
+          - "/root/{{ nanobody_target }}_nanobodies.csv"
+          - --config
+          - /root/config/config.yaml
+          - --output
+          - /root/layer2_canary.json
+          - --tail
+          - "1"
+          - --concurrency
+          - "1"
+          - --cache-dir
+          - /root/layer2_cache
+      environment:
+        NOVA_MAX_CONCURRENT_TNP: "1"
+      changed_when: false
+      register: layer2_canary
+
+    - name: Verify the Layer-2 canary is a measured pass
+      ansible.builtin.command:
+        argv:
+          - /root/metanano_python.sh
+          - -c
+          - >-
+            import json;
+            x=json.load(open('/root/layer2_canary.json'));
+            assert x['input_count']==1,x;
+            assert x['pass_count']==1,x;
+            c=x['candidates'][0];
+            assert c['nativeness_score'] is not None,c;
+            assert c['human_framework_score'] is not None,c;
+            assert c['developability']['passed'],c;
+            print('LAYER2_CANARY_OK')
+      changed_when: false
+
+    - name: Reap the Xet checkpoint download
+      ansible.builtin.async_status:
+        jid: "{{ checkpoint_job.ansible_job_id }}"
+      register: checkpoints
+      until: checkpoints.finished
+      retries: 720
+      delay: 10
+      changed_when: "'DOWNLOADED=0' not in (checkpoints.stdout | default(''))"
+      failed_when: >-
+        checkpoints.finished and
+        (checkpoints.rc | default(1) != 0 or
+         'ALL_CHECKPOINTS_OK' not in (checkpoints.stdout | default('')))
+
+    - name: Verify hardcoded BoltzGen inputs are nonempty
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "/root/data/structures/{{ nanobody_structure }}.cif"
+        - "/root/data/msa_files/{{ nanobody_target }}.a3m"
+      register: scorer_inputs
+
+    - name: Assert hardcoded BoltzGen inputs landed
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size > 1000
+        fail_msg: "{{ item.item }} is missing or truncated"
+      loop: "{{ scorer_inputs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Repair ownership without following external links
+      ansible.builtin.shell: |
+        set -euo pipefail
+        bad=$(find /root -xdev -maxdepth 3 ! -user root -printf '%p\n' 2>/dev/null | head -20)
+        if [ -n "$bad" ]; then
+          echo "REPAIRED"
+          chown -R --no-dereference root:root /root
+        fi
+        chmod 0700 /root
+        stat -c '%U:%G %a /root' /root
+      args:
+        executable: /bin/bash
+      changed_when: "'REPAIRED' in ownership.stdout"
+      register: ownership
+
+    - name: Report successful provisioning
+      ansible.builtin.debug:
         msg: >-
-          {{ 'Layer-2 filters available' if 'LAYER2_OK' in l2.stdout
-             else 'Layer-2 filters NOT available: ' ~ (l2.stderr | default('') | truncate(200)) }}
-
-    - name: Smoke-test the proxy on the archive
-      ansible.builtin.command: >
-        {{ bgen }}/bin/python -c
-        "import pandas as pd;d=pd.read_csv('/root/{{ target }}_nanobodies.csv');print(len(d),'sequences',len(d.columns),'columns')"
-      changed_when: false
-      register: smoke
-    - ansible.builtin.debug: { msg: "archive: {{ smoke.stdout }}" }
+          {{ bgen_check.stdout }}; {{ layer2_artifacts.stdout }};
+          {{ layer2_canary.stdout_lines[-1] }}; archive and checkpoints ready
