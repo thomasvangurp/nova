@@ -346,3 +346,16 @@ The operational policy is therefore:
 3. replace the checkpoint only after an improvement also passes a fresh repeat;
 4. resolve target/config/archive online for every epoch and reject a target
    change instead of carrying a pinned checkpoint forward.
+
+### Exact-scoring wave size
+
+Do not pass the entire epoch bank to `score_boltzgen_batch.py`. Its result is
+fail-closed and appears only after the complete input finishes, so a large input
+prevents the producer from publishing interim improvements. Run
+`score_boltzgen_waves.py` with 80-candidate waves on ten GPUs (eight candidates
+per GPU, `--predict-batch-size 8`). Each wave is independently validated and
+atomically promoted, and the manifest permits safe resume. After every
+`WAVE_READY`, rank the accumulated observations and repeat-score only new
+candidates whose first observation can still beat the published worst-repeat
+score. This bounds the time between actionable checkpoint decisions to roughly
+one small exact wave rather than the full bank.
