@@ -15,8 +15,12 @@ worker therefore rebinds that module global to its own directory BEFORE
 constructing the wrapper (__init__ reads the global into self.tmp_dir).
 """
 from __future__ import annotations
-import argparse, json, os, shutil, time
+import argparse
+import json
 import multiprocessing as mp
+import os
+import shutil
+import time
 
 
 # Every subnet_config key BoltzgenWrapper reads, enumerated from its source:
@@ -67,10 +71,11 @@ def _flatten_config(cfg: dict, target: str) -> dict:
 
 
 def _worker(args):
-    shard_id, gpu, seqs, subnet_config, out_path, batch_size, keep_work_dir = args
+    (shard_id, gpu, seqs, subnet_config, out_path, batch_size,
+     keep_work_dir, work_root) = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     import boltzgen.boltzgen_wrapper as bw
-    shard_dir = f"/root/bgen_shards/shard{shard_id}"
+    shard_dir = os.path.join(work_root, f"shard{shard_id}")
     # rebind BEFORE constructing: __init__ copies the global into self.tmp_dir
     bw.BOLTZGEN_TMP_FILES_DIR = shard_dir
     os.makedirs(os.path.join(shard_dir, "inputs"), exist_ok=True)
@@ -129,7 +134,13 @@ def main():
         "--keep-work-dir",
         action="store_true",
         help="retain generated complexes and analysis files under "
-             "/root/bgen_shards (use only for small finalist runs)",
+             "--work-root (use only for small finalist/teacher runs)",
+    )
+    ap.add_argument(
+        "--work-root",
+        default="/root/bgen_shards",
+        help="isolated shard/output directory; use a unique path for retained "
+             "teacher complexes (default: /root/bgen_shards)",
     )
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -156,9 +167,11 @@ def main():
     for i, s in enumerate(seqs):
         buckets[i % n_shards].append(s)
 
-    os.makedirs("/root/bgen_shards", exist_ok=True)
+    work_root = os.path.abspath(a.work_root)
+    os.makedirs(work_root, exist_ok=True)
     jobs = [(i, gpus[i % len(gpus)], b, subnet_config,
-             f"/root/bgen_shards/out{i}.json", a.batch_size, a.keep_work_dir)
+             os.path.join(work_root, f"out{i}.json"), a.batch_size,
+             a.keep_work_dir, work_root)
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 
