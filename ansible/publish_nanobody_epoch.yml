@@ -13,8 +13,11 @@
     nanobody_target: P20809
     nanobody_epoch: 0
     gpu_count: 10
+    layer2_concurrency: 40
     live_root: /root/live
     source_epoch_root: /root/live/epoch25021
+    current_layer2_output: >-
+      {{ live_root }}/epoch{{ nanobody_epoch }}/qualified_layer2.json
     published_ledger: /root/artifacts/nanobody_published_sequences.txt
     exact_inputs:
       - /root/local_neighborhood_round1_exact.json
@@ -122,11 +125,37 @@
           --bootstrap-fields 64 --limit 30
       changed_when: true
 
+    - name: Revalidate the ranked shortlist with the current Layer-2 gates
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/bin/pixi
+          - run
+          - -e
+          - metanano
+          - filter-layer2
+          - --
+          - --input
+          - "{{ live_root }}/epoch{{ nanobody_epoch }}/qualified_rankings.json"
+          - --config
+          - "{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml"
+          - --output
+          - "{{ current_layer2_output }}"
+          - --concurrency
+          - "{{ layer2_concurrency | string }}"
+          - --igblast-concurrency
+          - "{{ layer2_concurrency | string }}"
+          - --igblast-batch-size
+          - "1"
+          - --cache-dir
+          - /root/layer2_cache
+      changed_when: true
+
     - name: Publish the best remaining fully qualified candidate atomically
       ansible.builtin.command:
         cmd: >-
           /root/bgen_python.sh /root/nanobody_opt/publish_checkpoint.py
           --rankings {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
+          --layer2 {{ current_layer2_output | quote }}
           {% for path in layer2_inputs %} --layer2 {{ path | quote }}{% endfor %}
           --archive {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/archive.csv') | quote }}
           --config {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/config.yaml') | quote }}
