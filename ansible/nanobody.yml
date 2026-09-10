@@ -20,6 +20,9 @@
     pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
     nanobody_producer_activate: false
     nanobody_producer_session: nova-nanobody-producer
+    nanobody_proposals_per_seed: 12
+    nanobody_candidate_limit: 320
+    nanobody_screen_tranche_size: 20
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -586,12 +589,19 @@
           - run
           - --manifest-path
           - /root/pixi.toml
+          - --locked
           - --environment
           - bgen
           - live-producer
           - --
           - --poll-interval
           - "30"
+          - --per-seed
+          - "{{ nanobody_proposals_per_seed }}"
+          - --candidate-limit
+          - "{{ nanobody_candidate_limit }}"
+          - --screen-tranche-size
+          - "{{ nanobody_screen_tranche_size }}"
       changed_when: true
       when: nanobody_producer_activate | bool
 
