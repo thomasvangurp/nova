@@ -10,7 +10,6 @@
 
   vars:
     repo: "{{ playbook_dir }}/.."
-    nanobody_target: P20809
     nanobody_epoch: 0
     gpu_count: 10
     layer2_concurrency: 40
@@ -77,18 +76,38 @@
         group: root
         mode: "0700"
 
-    - name: Refresh validator config and complete submission history
+    - name: Refresh the live validator config
       ansible.builtin.get_url:
-        url: "{{ item.url }}"
-        dest: "{{ item.dest }}"
+        url: https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml
+        dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml"
         mode: "0644"
         force: true
-      loop:
-        - url: https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml
-          dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml"
-        - url: >-
-            https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
-          dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/archive.csv"
+
+    - name: Read the live validator config
+      ansible.builtin.slurp:
+        src: "{{ live_root }}/epoch{{ nanobody_epoch }}/config.yaml"
+      register: validator_config_content
+
+    - name: Resolve the nanobody target from the live config
+      ansible.builtin.set_fact:
+        nanobody_target: >-
+          {{ (validator_config_content.content | b64decode | from_yaml).protein_selection.nanobody.target }}
+
+    - name: Validate the live nanobody target
+      ansible.builtin.assert:
+        that:
+          - nanobody_target | length > 0
+          - "',' not in nanobody_target"
+          - "'/' not in nanobody_target"
+        fail_msg: The live validator config does not contain a safe nanobody target.
+
+    - name: Refresh the live target submission history
+      ansible.builtin.get_url:
+        url: >-
+          https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
+        dest: "{{ live_root }}/epoch{{ nanobody_epoch }}/archive.csv"
+        mode: "0644"
+        force: true
 
     - name: Verify the current target and locked Pixi runtime
       ansible.builtin.command:
