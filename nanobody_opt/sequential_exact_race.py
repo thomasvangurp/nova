@@ -116,17 +116,19 @@ def _rank_command(
         "--archive", str(archive),
         "--target", target,
         "--output", str(output),
-        "--pose-config", str(config),
         "--recent", "300",
         "--field-size", "49",
-        "--before-epoch", str(epoch),
-        "--api-field-count", "10",
-        "--minimum-api-fields", "3",
         "--limit", "30",
     ])
     if ledger is not None:
         command.extend(["--exclude-file", str(ledger)])
     if strict:
+        command.extend([
+            "--pose-config", str(config),
+            "--before-epoch", str(epoch),
+            "--api-field-count", "10",
+            "--minimum-api-fields", "3",
+        ])
         command.extend(STRICT_RANK_ARGUMENTS)
     else:
         command.extend(["--selection-order", "p90"])

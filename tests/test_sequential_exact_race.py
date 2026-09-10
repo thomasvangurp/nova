@@ -80,3 +80,20 @@ def test_best_confirmed_p90_uses_best_candidate_not_file_order(tmp_path):
     ]}))
 
     assert race._best_confirmed_p90(ranking) == 72.0
+
+
+def test_provisional_tranche_ranking_skips_slow_pose_and_api_replay(tmp_path):
+    command = race._rank_command(
+        exact=[tmp_path / "exact.json"],
+        archive=tmp_path / "archive.csv",
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        epoch=25036,
+        output=tmp_path / "ranking.json",
+        ledger=None,
+        strict=False,
+    )
+
+    assert "--pose-config" not in command
+    assert "--api-field-count" not in command
+    assert command[command.index("--selection-order") + 1] == "p90"
