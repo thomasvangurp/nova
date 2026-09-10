@@ -52,6 +52,14 @@
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
+    - name: Ship diagnostic-capable scorer
+      ansible.builtin.copy:
+        src: "{{ repo }}/nanobody_opt/score_boltzgen_batch.py"
+        dest: /root/nanobody_opt/score_boltzgen_batch.py
+        owner: root
+        group: root
+        mode: "0644"
+
     - name: Install validator parity environment from lock
       ansible.builtin.command:
         argv:

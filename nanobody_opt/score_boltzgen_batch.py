@@ -124,8 +124,14 @@ def _copy_refolded_complexes(
 
 def _worker(args):
     (shard_id, gpu, seqs, subnet_config, out_path, batch_size,
-     keep_work_dir, work_root, structure_dir, observation_id) = args
+     keep_work_dir, work_root, structure_dir, observation_id,
+     diagnostic_seed) = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    # Set this only inside the spawned shard worker.  The pipeline itself uses
+    # fresh Python subprocesses, whose opt-in sitecustomize hook consumes the
+    # value before importing Torch.  Normal live scoring leaves it unset.
+    if diagnostic_seed is not None:
+        os.environ["BOLTZGEN_DIAGNOSTIC_SEED"] = str(diagnostic_seed)
     import boltzgen.boltzgen_wrapper as bw
     shard_dir = os.path.join(work_root, f"shard{shard_id}")
     # rebind BEFORE constructing: __init__ copies the global into self.tmp_dir
@@ -219,7 +225,17 @@ def main():
         help="refuse the exact result unless every sequence has a retained complex",
     )
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--diagnostic-seed",
+        type=int,
+        help=(
+            "seed every BoltzGen pipeline subprocess for controlled parity A/B "
+            "tests; never set by live scoring"
+        ),
+    )
     a = ap.parse_args()
+    if a.diagnostic_seed is not None and a.diagnostic_seed < 0:
+        raise SystemExit("--diagnostic-seed must be non-negative")
 
     # Accept every shape we produce: a bare list, {"sequences": [...]} with
     # plain strings, or {"cases": [{"sequence": ...}]} from instrument_check.
@@ -248,7 +264,8 @@ def main():
     observation_id = str(uuid.uuid4())
     jobs = [(i, gpus[i % len(gpus)], b, subnet_config,
              os.path.join(work_root, f"out{i}.json"), a.batch_size,
-             a.keep_work_dir, work_root, a.structure_dir, observation_id)
+             a.keep_work_dir, work_root, a.structure_dir, observation_id,
+             a.diagnostic_seed)
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 
@@ -285,6 +302,7 @@ def main():
         )
     json.dump({"target": a.target, "n": len(seqs), "wall_seconds": wall,
                "observation_id": observation_id,
+               "diagnostic_seed": a.diagnostic_seed,
                "predict_batch_size": a.batch_size,
                "per_nanobody_components": merged,
                "structures": merged_structures}, open(a.out, "w"),
