@@ -33,6 +33,10 @@ mutagenesis.
 | [EasyNano](https://arxiv.org/abs/2606.12772) | Differentiable CDR-logit optimization against an ESMFold2 distogram with epitope proximity and a framework-pose prior | Open [code](https://github.com/YueHuLab/EasyNano); reports 10–20 minute optimization and large predicted ipTM gains, but no wet-lab validation in the paper. | Very attractive fast exploitation experiment once a credible dock/framework exists; validate every output with BoltzGen. |
 | [TiDE-Ab](https://pubmed.ncbi.nlm.nih.gov/42635242/) | Time-dependent guided SE(3) flow matching that first establishes pose, then relaxes guidance for CDR refinement | Open [code](https://github.com/SNU-CSSB/TiDE-Ab); benchmark reports better epitope recall and far fewer clashes than RFantibody, but no comparable wet-lab campaign yet. | Research lane, after the experimentally validated/open methods above. |
 | [AntiFold](https://pmc.ncbi.nlm.nih.gov/articles/PMC11961221/) | Antibody/nanobody-specific inverse folding, optionally antigen-aware | Open [code](https://github.com/oxpig/AntiFold); samples CDR sequences on an existing IMGT-numbered complex. | Sequence redesign after a strong pose; it cannot rescue a wrong dock by itself. |
+| [FoldCraft](https://www.biorxiv.org/content/10.1101/2025.07.02.662497v1.full) | Fold-conditioned AlphaFold2-Multimer hallucination with contact-map guidance | Open [code](https://github.com/PeptoneLtd/foldcraft); the preprint reports 0.5–19.5% in-silico VHH success and better AF3 evaluation than RFantibody on four targets, but no wet-lab VHH validation yet. | A targeted alternative when a desired VHH fold/pose is known; BoltzGen remains the independent judge. |
+| [AiCDR](https://spj.science.org/doi/10.1016/j.csbj.2025.07.052) | Natural-like CDR3 generation, grafting onto a humanized caplacizumab scaffold, then structure filtering and epitope profiling | Roughly 10,000 grafts produced about 5,200 high-confidence models; two of ten selected Omicron-RBD designs showed detectable neutralization in vitro. | Supports scaffold/CDR recombination, but also supports structural rejection after grafting rather than trusting sequence similarity. |
+| [Llamanade](https://www.sciencedirect.com/science/article/pii/S0969212621004184) | VHH-specific humanization with framework substitutions and structure/energy evaluation | Open [implementation](https://github.com/sangzhe/Llamanade); explicitly treats VHH humanization as more than ordinary VH germlining. | Source of conservative framework substitutions and an orthogonal check on framework transfer. |
+| [Sapiens](https://github.com/Merck/Sapiens) / [AbNatiV2](https://www.tandfonline.com/doi/abs/10.1080/19420862.2026.2646361) | Antibody language-model humanization and nanobody-specific nativeness assessment | Sapiens is open; AbNatiV2 reports training on 20,208,125 nanobody sequences. Neither is a target-binding oracle. | Proposal prior/evaluator for framework repair before the exact live IgBLAST, TNP, and BoltzGen gates. |
 
 The strongest recent scale lesson comes from the [2026 agent-guided VHH
 study](https://www.biorxiv.org/content/10.64898/2026.04.13.717816v1.full):
@@ -41,6 +45,31 @@ hotspot sets were searched, and candidates were Pareto-filtered instead of
 collapsed early to one surrogate score. It generated 288,000 designs across
 eight epitopes and three frameworks. That scale is not necessary for our first
 diagnostic, but the factorial design is.
+
+## Framework transfer: useful, but not a blind swap
+
+The user's proposed donor-swap idea has direct support, with an important
+qualification. A controlled VHH CDR-grafting study found that moving the CDRs
+onto a humanized framework could substantially reduce affinity and thermal
+stability while changing the CDR3 conformation; targeted framework
+back-mutations restored both properties. The mechanism involved bulky residues
+near CDR3 and interactions between CDR3 and FR2 ([Kinoshita et al.,
+2022](https://onlinelibrary.wiley.com/doi/10.1002/pro.4450)). A second
+structure/function study identifies framework positions immediately outside
+CDR3 as pivotal for a beta-hairpin CDR3 ([Yamamoto et al.,
+2023](https://onlinelibrary.wiley.com/doi/10.1002/pro.4827)). Reviews and
+prospective humanization work likewise emphasize the VHH FR2 hallmarks and the
+way CDR3 can be sandwiched between CDR1/CDR2 and the framework
+([Fernandez-Quintero et al.,
+2024](https://onlinelibrary.wiley.com/doi/10.1002/pro.5176)).
+
+Accordingly, the implemented transfer experiment uses whole frameworks from
+already scored, low-liability VHHs, not arbitrary per-position substitutions.
+It grafts the measured teacher CDRs with IMGT numbering and back-mutates all
+Vernier residues plus every antigen-contacting framework residue. Resulting
+hybrids must independently pass current IgBLAST/humanness, TNP, historical and
+top-50 novelty, and repeated exact target-complex scoring. This makes donor
+evidence a proposal distribution, never a substitute for the live gates.
 
 ## Immediate experimental design
 
@@ -59,6 +88,13 @@ diagnostic, but the factorial design is.
 5. Preserve the eight structural/interaction values plus two developability
    values and select a Pareto set. A sequence surrogate may reject only the
    obvious bottom tail until held-parent top-tail recall is demonstrated.
+6. Reconstruct actual epoch cohorts from the public archive commit history and
+   compare their rank-sum winners. Use recurring winner residues as evidence,
+   but distinguish terminal family variation from residues that support the
+   conserved interface.
+7. Graft the winning teacher paratope onto low-liability, validator-proven VHH
+   frameworks with Vernier/contact back-mutations. Reject grafts on current
+   Layer-2 before spending exact-scoring GPU budget.
 
 Mining must remain disabled until a novel candidate has repeated exact scores
 competitive with the live reference vector, not merely a favorable archive
