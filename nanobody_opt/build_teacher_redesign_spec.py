@@ -1,11 +1,13 @@
-"""Build a CDR-only inverse-folding spec from a retained public teacher pose.
+"""Build an inverse-folding spec from a retained public teacher pose.
 
 The teacher is selected dynamically from ``select_structural_teachers.py``
 output and located in an isolated exact-scoring work root.  Its public sequence
 is never emitted as a candidate.  By default all three IMGT CDRs are marked for
 redesign; when a contact report is supplied, observed interface residues are
-held fixed and only the non-contact CDR positions are redesigned.  In both
-cases the competitive target/VHH backbone pose is held fixed.
+held fixed and only the non-contact CDR positions are redesigned. A framework
+scope instead holds every CDR, interface contact, and cysteine fixed while
+redesigning the remaining scaffold. In both cases the competitive target/VHH
+backbone pose is held fixed.
 """
 from __future__ import annotations
 
@@ -65,6 +67,44 @@ def cdr_ranges(
     if not ranges:
         raise ValueError("no design positions remain")
     return ",".join(ranges)
+
+
+def _cdr_positions(sequence: str, cdr_sequences: list[str]) -> set[int]:
+    positions: set[int] = set()
+    search_from = 0
+    for cdr in cdr_sequences:
+        if not cdr:
+            raise ValueError("CDR sequence may not be empty")
+        start = sequence.find(cdr, search_from)
+        if start < 0:
+            raise ValueError(f"CDR {cdr!r} is absent from teacher sequence")
+        end = start + len(cdr)
+        positions.update(range(start + 1, end + 1))
+        search_from = end
+    return positions
+
+
+def redesign_ranges(
+    sequence: str,
+    cdr_sequences: list[str],
+    scope: str,
+    excluded_positions: set[int] | None = None,
+) -> str:
+    """Return the requested design mask while preserving structural anchors."""
+    excluded = set(excluded_positions or set())
+    cdrs = _cdr_positions(sequence, cdr_sequences)
+    if scope == "cdr":
+        design = cdrs - excluded
+    elif scope == "framework":
+        cysteines = {
+            index
+            for index, residue in enumerate(sequence, start=1)
+            if residue == "C"
+        }
+        design = set(range(1, len(sequence) + 1)) - cdrs - excluded - cysteines
+    else:
+        raise ValueError(f"unsupported redesign scope: {scope}")
+    return _compress_positions(sorted(design))
 
 
 def contact_positions(path: Path) -> set[int]:
@@ -164,6 +204,12 @@ def main() -> None:
         type=Path,
         help="interface_contacts.py JSON; preserve every observed VHH contact",
     )
+    parser.add_argument(
+        "--scope",
+        choices=("cdr", "framework"),
+        default="cdr",
+        help="redesign non-contact CDRs or the non-CDR/non-contact framework",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -179,9 +225,13 @@ def main() -> None:
 
     chain = Chain(sequence, scheme="imgt")
     excluded = contact_positions(args.contacts) if args.contacts else set()
-    ranges = cdr_ranges(
+    cdr_sequences = [
+        str(chain.cdr1_seq), str(chain.cdr2_seq), str(chain.cdr3_seq)
+    ]
+    ranges = redesign_ranges(
         sequence,
-        [str(chain.cdr1_seq), str(chain.cdr2_seq), str(chain.cdr3_seq)],
+        cdr_sequences,
+        scope=args.scope,
         excluded_positions=excluded,
     )
     structure, shard = locate_retained_complex(args.work_root, sequence)
@@ -194,7 +244,8 @@ def main() -> None:
     _atomic_yaml(args.output, spec)
     print(
         f"TEACHER_REDESIGN_SPEC_READY target={payload.get('target')} "
-        f"teacher_rank={args.teacher_rank} shard={shard} cdrs={ranges} "
+        f"teacher_rank={args.teacher_rank} shard={shard} scope={args.scope} "
+        f"design={ranges} "
         f"preserved_contacts={len(excluded)} "
         f"output={args.output}"
     )

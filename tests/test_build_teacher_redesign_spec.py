@@ -8,6 +8,7 @@ from nanobody_opt.build_teacher_redesign_spec import (
     cdr_ranges,
     contact_positions,
     locate_retained_complex,
+    redesign_ranges,
 )
 
 
@@ -77,3 +78,22 @@ def test_builds_cdr_only_design_mask():
             }
         }]
     }
+
+
+def test_framework_scope_preserves_cdrs_contacts_and_cysteines():
+    sequence = "AACDEFGHCIKLMN"
+    assert redesign_ranges(
+        sequence,
+        ["DEF", "H", "LM"],
+        scope="framework",
+        excluded_positions={2, 11},
+    ) == "1,7,10,14"
+
+
+def test_cdr_scope_preserves_observed_contacts():
+    assert redesign_ranges(
+        "AAAACCCCGGGGTTTT",
+        ["CCCC", "GG", "TTT"],
+        scope="cdr",
+        excluded_positions={6, 9, 14},
+    ) == "5,7..8,10,13,15"
