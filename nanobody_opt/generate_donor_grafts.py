@@ -25,6 +25,36 @@ from nanobody_opt.build_teacher_redesign_spec import contact_positions
 from nanobody_opt.simulate_round import METRICS
 
 
+CONSERVATIVE_GROUPS = tuple(map(frozenset, (
+    "AVLIM",   # aliphatic/hydrophobic
+    "FYW",     # aromatic
+    "STNQ",    # uncharged polar
+    "DE",      # acidic
+    "KRH",     # basic/basic-like
+    "AGST",    # small
+    "NQ",      # amide
+)))
+VHH_HALLMARKS = frozenset({"H42", "H49", "H50", "H52"})
+
+
+def conservative_substitution(left: str, right: str) -> bool:
+    """Whether a donor change remains in a broad physicochemical class."""
+    return left != right and any(
+        left in group and right in group for group in CONSERVATIVE_GROUPS
+    )
+
+
+def _liability_priority(residue: str) -> int:
+    """Order likely validator-liability repairs before neutral donor changes."""
+    if residue in "KRW":
+        return 10
+    if residue == "M":
+        return 5
+    if residue in "NQ":
+        return 2
+    return 0
+
+
 def select_donors(
     archive: pd.DataFrame,
     teacher_length: int,
@@ -102,6 +132,61 @@ def graft_sequence(
     )
 
 
+def progressive_grafts(
+    teacher_sequence: str,
+    donor_sequence: str,
+    preserved_raw_positions: set[int],
+    swap_counts: list[int],
+) -> list[tuple[str, list[str]]]:
+    """Apply conservative donor residues to a protected teacher framework."""
+    from abnumber import Chain
+
+    teacher = Chain(teacher_sequence, scheme="imgt")
+    donor = Chain(donor_sequence, scheme="imgt")
+    kabat_teacher = Chain(
+        teacher_sequence, scheme="kabat", cdr_definition="kabat"
+    )
+    teacher_items = list(teacher)
+    donor_by_position = dict(donor)
+    vernier_raw_positions = {
+        index
+        for index, (position, _) in enumerate(kabat_teacher, start=1)
+        if position.is_in_vernier()
+    }
+    protected_raw = preserved_raw_positions | vernier_raw_positions
+    changes = []
+    for raw_position, (position, source) in enumerate(teacher_items, start=1):
+        target = donor_by_position.get(position)
+        if (
+            raw_position in protected_raw
+            or position.is_in_cdr()
+            or str(position) in VHH_HALLMARKS
+            or target is None
+            or not conservative_substitution(source, target)
+        ):
+            continue
+        changes.append((
+            -_liability_priority(source),
+            raw_position,
+            source,
+            target,
+            str(position),
+        ))
+    changes.sort()
+
+    variants = []
+    for count in sorted(set(swap_counts)):
+        if count <= 0 or count > len(changes):
+            continue
+        sequence = list(teacher_sequence)
+        mutations = []
+        for _, raw_position, source, target, position in changes[:count]:
+            sequence[raw_position - 1] = target
+            mutations.append(f"{position}:{source}>{target}")
+        variants.append(("".join(sequence), mutations))
+    return variants
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -133,6 +218,14 @@ def main() -> None:
     parser.add_argument("--max-donor-liability", type=float, default=180.0)
     parser.add_argument("--donors", type=int, default=200)
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument(
+        "--mode", choices=("full", "progressive"), default="full",
+        help="whole framework graft or conservative teacher-side donor swaps",
+    )
+    parser.add_argument(
+        "--swap-counts", default="2,4,6,8,10,12",
+        help="comma-separated progressive framework mutation counts",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -167,18 +260,43 @@ def main() -> None:
     )
     top_kmers = [diversity.kmers(sequence, 5) for sequence in top.sequence]
     threshold = float(requirements["max_similarity_score"])
+    try:
+        swap_counts = [
+            int(value) for value in args.swap_counts.split(",") if value.strip()
+        ]
+    except ValueError as exc:
+        parser.error(f"invalid --swap-counts: {exc}")
+    if args.mode == "progressive" and not swap_counts:
+        parser.error("--swap-counts must contain at least one integer")
 
     cases = []
     rejected: dict[str, int] = {}
     seen = set()
     for donor in donor_frame.to_dict("records"):
         try:
-            sequence, contact_backmutations, vernier_backmutations = graft_sequence(
-                teacher_sequence, donor["sequence"], preserved
-            )
+            if args.mode == "full":
+                sequence, contact_backmutations, vernier_backmutations = (
+                    graft_sequence(teacher_sequence, donor["sequence"], preserved)
+                )
+                variants = [(sequence, [], contact_backmutations,
+                             vernier_backmutations)]
+            else:
+                variants = [
+                    (sequence, mutations, [], [])
+                    for sequence, mutations in progressive_grafts(
+                        teacher_sequence, donor["sequence"], preserved, swap_counts
+                    )
+                ]
         except (AssertionError, ValueError, RuntimeError):
             reason = "imgt_graft"
-        else:
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+        if not variants:
+            reason = "no_eligible_swaps"
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+
+        for sequence, mutations, contact_backmutations, vernier_backmutations in variants:
             reason = ""
             if sequence in seen:
                 reason = "duplicate_hybrid"
@@ -209,9 +327,11 @@ def main() -> None:
                     "max_jaccard_to_top50": float(max_jaccard),
                     "contact_backmutations": contact_backmutations,
                     "vernier_backmutations": vernier_backmutations,
+                    "swap_count": len(mutations),
+                    "swaps": mutations,
                 })
-        if reason:
-            rejected[reason] = rejected.get(reason, 0) + 1
+            if reason:
+                rejected[reason] = rejected.get(reason, 0) + 1
 
     cases.sort(key=lambda item: (
         item["donor_rank_sum"], item["donor_liability_score"], item["sequence"]
@@ -222,6 +342,8 @@ def main() -> None:
         "target": target,
         "teacher_sequence": teacher_sequence,
         "teacher_rank": args.teacher_rank,
+        "mode": args.mode,
+        "swap_counts": swap_counts if args.mode == "progressive" else [],
         "max_donor_liability": args.max_donor_liability,
         "donor_count": len(donor_frame),
         "preserved_contact_positions": sorted(preserved),

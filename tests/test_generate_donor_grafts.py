@@ -1,6 +1,6 @@
 import pandas as pd
 
-from nanobody_opt.generate_donor_grafts import select_donors
+from nanobody_opt.generate_donor_grafts import conservative_substitution, select_donors
 from nanobody_opt.simulate_round import METRICS
 
 
@@ -26,3 +26,13 @@ def test_selects_same_length_low_liability_measured_donors():
     ])
     got = select_donors(frame, teacher_length=4, max_liability_score=180, limit=10)
     assert got.sequence.tolist() == ["AAAA", "CCCC"]
+
+
+def test_conservative_substitution_classes_are_bounded():
+    assert conservative_substitution("W", "Y")
+    assert conservative_substitution("M", "L")
+    assert conservative_substitution("K", "H")
+    assert conservative_substitution("N", "Q")
+    assert not conservative_substitution("K", "L")
+    assert not conservative_substitution("C", "A")
+    assert not conservative_substitution("W", "W")
