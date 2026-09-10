@@ -27,7 +27,9 @@ def _load_candidates(path: Path) -> list[dict[str, Any]]:
     else:
         blob = json.loads(path.read_text())
         if isinstance(blob, dict):
-            blob = blob.get("candidates", blob.get("sequences", blob))
+            blob = blob.get(
+                "candidates", blob.get("sequences", blob.get("cases", blob))
+            )
         if isinstance(blob, dict):
             rows = [{"sequence": seq, **(meta if isinstance(meta, dict) else {})}
                     for seq, meta in blob.items()]

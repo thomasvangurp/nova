@@ -114,3 +114,4 @@ scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_termin
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
 build-teacher-redesign-spec = "python /root/nanobody_opt/build_teacher_redesign_spec.py"
+filter-layer2 = "cd /root && python -m nanobody_opt.filter_layer2"
