@@ -26,8 +26,10 @@
       - "{{ source_epoch_root }}/finalists_round1_confirm.json"
       - "{{ source_epoch_root }}/local_neighborhood_round2_exact_part2.json"
       - "{{ source_epoch_root }}/new_contenders_confirm.json"
+    additional_exact_inputs: []
     layer2_inputs:
       - "{{ source_epoch_root }}/local_neighborhood_round2_layer2.json"
+    additional_layer2_inputs: []
 
   tasks:
     - name: Require an explicit live epoch
@@ -116,7 +118,7 @@
       ansible.builtin.command:
         cmd: >-
           /root/bgen_python.sh /root/nanobody_opt/rank_exact.py
-          {% for path in exact_inputs %} --exact {{ path | quote }}{% endfor %}
+          {% for path in exact_inputs + additional_exact_inputs %} --exact {{ path | quote }}{% endfor %}
           --archive {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/archive.csv') | quote }}
           --target {{ nanobody_target | quote }}
           --output {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
@@ -156,7 +158,7 @@
           /root/bgen_python.sh /root/nanobody_opt/publish_checkpoint.py
           --rankings {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
           --layer2 {{ current_layer2_output | quote }}
-          {% for path in layer2_inputs %} --layer2 {{ path | quote }}{% endfor %}
+          {% for path in layer2_inputs + additional_layer2_inputs %} --layer2 {{ path | quote }}{% endfor %}
           --archive {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/archive.csv') | quote }}
           --config {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/config.yaml') | quote }}
           --target {{ nanobody_target | quote }}
