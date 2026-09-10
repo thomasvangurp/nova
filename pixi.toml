@@ -122,6 +122,7 @@ summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contac
 scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_terminals"
 harvest-inverse-fold = "cd /root && python -m nanobody_opt.harvest_inverse_fold"
 analyze-epoch-winners = "cd /root && python -m nanobody_opt.analyze_epoch_winners"
+score-candidate-liability = "cd /root && python -m nanobody_opt.score_candidate_liability"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""
