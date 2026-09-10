@@ -150,6 +150,7 @@ qualify-screen-leader = "cd /root && python -m nanobody_opt.qualify_screen_leade
 train-parent-relative-ranker = "cd /root && python -m nanobody_opt.train_parent_relative_ranker"
 train-pairwise-ranker-v2 = "cd /root && python -m nanobody_opt.train_pairwise_ranker_v2"
 backtest-pairwise-beam = "cd /root && python -m nanobody_opt.backtest_pairwise_beam"
+audit-pairwise-shortlist = "cd /root && python -m nanobody_opt.audit_pairwise_shortlist"
 
 # Layer-2 remains isolated from the scorer, but ImmuneBuilder automatically uses
 # CUDA when available. Its neural structure-prediction stage therefore gets its
@@ -217,6 +218,7 @@ qualify-screen-leader = "cd /root && python -m nanobody_opt.qualify_screen_leade
 train-parent-relative-ranker = "cd /root && python -m nanobody_opt.train_parent_relative_ranker"
 train-pairwise-ranker-v2 = "cd /root && python -m nanobody_opt.train_pairwise_ranker_v2"
 backtest-pairwise-beam = "cd /root && python -m nanobody_opt.backtest_pairwise_beam"
+audit-pairwise-shortlist = "cd /root && python -m nanobody_opt.audit_pairwise_shortlist"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""
