@@ -1,11 +1,9 @@
-"""Race Layer-2 nanobodies with candidate-major, validator-shaped repeats.
+"""Race Layer-2 nanobodies in publishable, validator-shaped screen tranches.
 
-One diverse screen observation orders candidates.  The leader is then repeated
-concurrently across isolated GPU processes so it reaches eight independent
-observations in a single wave.  If it qualifies, only challengers whose screen
-p90 remains within a configurable margin of the confirmed incumbent are
-repeated.  If it fails, the next challenger is always tried.  Every completed
-JSON and retained complex is atomic and immediately visible to the publisher.
+Each completed screen tranche is immediately visible to the independent
+publisher. The first leader is repeated concurrently across isolated GPU
+processes, then screening continues until the full candidate budget is used.
+Later tranche leaders can replace the incumbent when their evidence is better.
 """
 from __future__ import annotations
 
@@ -77,6 +75,12 @@ def _candidate_sequences(path: Path, limit: int) -> list[str]:
     return list(dict.fromkeys(sequences))[:limit]
 
 
+def _batches(items: list[str], size: int) -> list[list[str]]:
+    if size < 1:
+        raise ValueError("batch size must be positive")
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
 def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bool:
     if path is None:
         return True
@@ -138,6 +142,9 @@ def _run_screen(
     gpus: list[str],
     candidate_limit: int,
 ) -> Path:
+    completed = output_dir / "exact_all.json"
+    if completed.is_file():
+        return completed
     command = [
         sys.executable,
         "-m",
@@ -153,7 +160,7 @@ def _run_screen(
         "--capture-structures",
     ]
     subprocess.run(command, check=True)
-    return output_dir / "exact_all.json"
+    return completed
 
 
 def _repeat_command(
@@ -288,6 +295,12 @@ def main() -> None:
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
     parser.add_argument("--candidate-limit", type=int, default=160)
     parser.add_argument(
+        "--screen-tranche-size",
+        type=int,
+        default=20,
+        help="publish and reconsider the leader after this many screen candidates",
+    )
+    parser.add_argument(
         "--finalists",
         type=int,
         default=3,
@@ -306,6 +319,8 @@ def main() -> None:
     args = parser.parse_args()
     if not 1 <= args.finalists <= args.candidate_limit:
         parser.error("require 1 <= --finalists <= --candidate-limit")
+    if not 1 <= args.screen_tranche_size <= args.candidate_limit:
+        parser.error("require 1 <= --screen-tranche-size <= --candidate-limit")
     if args.qualification_observations < 8:
         parser.error("qualification requires at least eight observations")
     if args.challenger_p90_margin < 0:
@@ -317,67 +332,102 @@ def main() -> None:
     if not sequences:
         raise SystemExit("Layer-2 input has no passing candidates")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    source = args.output_dir / "screen_candidates.json"
-    _atomic_json(source, {"target": args.target, "sequences": sequences})
+    _atomic_json(
+        args.output_dir / "screen_candidates.json",
+        {"target": args.target, "sequences": sequences},
+    )
     if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
         raise SystemExit("current chain epoch is inside the scoring reserve window")
 
-    screen_exact = _run_screen(
-        source=source,
-        config=args.config,
-        target=args.target,
-        output_dir=args.output_dir / "screen",
-        gpus=gpus,
-        candidate_limit=len(sequences),
-    )
     screen_ranking = args.output_dir / "screen_ranking.json"
-    subprocess.run(
-        _rank_command(
-            exact=[screen_exact],
-            archive=args.archive,
+    screen_exact_paths: list[Path] = []
+    qualified_outputs: list[Path] = []
+    repeated_finalists: list[str] = []
+    skipped_finalists: list[str] = []
+    incumbent_p90: float | None = None
+    screened = 0
+    for tranche_index, tranche in enumerate(
+        _batches(sequences, args.screen_tranche_size), start=1
+    ):
+        if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
+            print("EXACT_RACE_RESERVE_REACHED before next screen tranche", flush=True)
+            break
+        tranche_root = args.output_dir / "screen" / f"tranche_{tranche_index:02d}"
+        source = tranche_root / "candidates.json"
+        _atomic_json(source, {"target": args.target, "sequences": tranche})
+        screen_exact_paths.append(_run_screen(
+            source=source,
             config=args.config,
             target=args.target,
-            epoch=args.epoch,
-            output=screen_ranking,
-            ledger=args.ledger,
-            strict=False,
-        ),
-        check=True,
-    )
-    screen_candidates = _ranking_by_sequence(screen_ranking)
-    ranked_sequences = json.loads(screen_ranking.read_text())["sequences"]
-    finalists = ranked_sequences[: args.finalists]
-    qualified_outputs = []
-    repeated_finalists = []
-    skipped_finalists = []
-    incumbent_p90: float | None = None
-    for finalist_index, sequence in enumerate(finalists, start=1):
+            output_dir=tranche_root,
+            gpus=gpus,
+            candidate_limit=len(tranche),
+        ))
+        screened += len(tranche)
+        subprocess.run(
+            _rank_command(
+                exact=screen_exact_paths,
+                archive=args.archive,
+                config=args.config,
+                target=args.target,
+                epoch=args.epoch,
+                output=screen_ranking,
+                ledger=args.ledger,
+                strict=False,
+            ),
+            check=True,
+        )
+        screen_candidates = _ranking_by_sequence(screen_ranking)
+        ranked_sequences = json.loads(screen_ranking.read_text())["sequences"]
+        print(
+            f"EXACT_SCREEN_TRANCHE_COMPLETE tranche={tranche_index} "
+            f"screened={screened}/{len(sequences)} leader={ranked_sequences[0]}",
+            flush=True,
+        )
+        if len(repeated_finalists) >= args.finalists:
+            continue
+        sequence = next(
+            (item for item in ranked_sequences if item not in repeated_finalists),
+            None,
+        )
+        if sequence is None:
+            continue
+        finalist_index = len(repeated_finalists) + 1
         screen_p90 = float(screen_candidates[sequence]["score_p90"])
         if incumbent_p90 is not None and not _challenger_can_overtake(
             screen_p90=screen_p90,
             incumbent_p90=incumbent_p90,
             margin=args.challenger_p90_margin,
         ):
-            skipped_finalists.extend(finalists[finalist_index - 1 :])
+            if sequence not in skipped_finalists:
+                skipped_finalists.append(sequence)
             print(
-                f"EXACT_CHALLENGERS_SKIPPED first_index={finalist_index} "
+                f"EXACT_CHALLENGER_SKIPPED index={finalist_index} "
                 f"screen_p90={screen_p90:.1f} incumbent_p90={incumbent_p90:.1f} "
                 f"margin={args.challenger_p90_margin:.1f}",
                 flush=True,
             )
-            break
+            continue
         if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
             print("EXACT_RACE_RESERVE_REACHED before next finalist", flush=True)
             break
         repeated_finalists.append(sequence)
-        _score_repeats(
-            sequence=sequence,
-            repeat_numbers=list(range(2, args.qualification_observations + 1)),
-            root=args.output_dir,
-            config=args.config,
-            target=args.target,
-            gpus=gpus,
-        )
+        try:
+            _score_repeats(
+                sequence=sequence,
+                repeat_numbers=list(range(2, args.qualification_observations + 1)),
+                root=args.output_dir,
+                config=args.config,
+                target=args.target,
+                gpus=gpus,
+            )
+        except subprocess.CalledProcessError as error:
+            print(
+                f"EXACT_REPEAT_FAILED index={finalist_index} "
+                f"returncode={error.returncode}; continuing screen",
+                flush=True,
+            )
+            continue
         output = args.output_dir / f"qualified_after_{finalist_index:02d}.json"
         if _try_strict_rank(
             root=args.output_dir,
@@ -403,8 +453,10 @@ def main() -> None:
         {
             "epoch": args.epoch,
             "target": args.target,
-            "screened": len(sequences),
-            "maximum_finalists": finalists,
+            "screened": screened,
+            "candidate_limit": len(sequences),
+            "screen_tranche_size": args.screen_tranche_size,
+            "maximum_finalists": args.finalists,
             "repeated_finalists": repeated_finalists,
             "skipped_finalists": skipped_finalists,
             "challenger_p90_margin": args.challenger_p90_margin,

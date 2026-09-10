@@ -209,6 +209,7 @@ def _run_iteration(
         "--reserve-blocks", str(args.reserve_blocks),
         "--gpus", args.gpus,
         "--candidate-limit", str(args.candidate_limit),
+        "--screen-tranche-size", str(args.screen_tranche_size),
         "--finalists", str(args.finalists),
         "--challenger-p90-margin", str(args.challenger_p90_margin),
     ])
@@ -243,6 +244,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-exhaustive-singles", type=int, default=160)
     parser.add_argument("--layer2-concurrency", type=int, default=40)
     parser.add_argument("--candidate-limit", type=int, default=160)
+    parser.add_argument("--screen-tranche-size", type=int, default=20)
     parser.add_argument("--finalists", type=int, default=3)
     parser.add_argument("--challenger-p90-margin", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")

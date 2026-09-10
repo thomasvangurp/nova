@@ -41,6 +41,16 @@ def test_candidate_loader_requires_layer2_pass_and_deduplicates(tmp_path):
     assert race._candidate_sequences(source, 10) == ["DDD", "AAA", "CCC"]
 
 
+def test_screen_budget_is_split_into_publishable_twenty_candidate_tranches():
+    sequences = [f"SEQ{index}" for index in range(160)]
+
+    batches = race._batches(sequences, 20)
+
+    assert len(batches) == 8
+    assert all(len(batch) == 20 for batch in batches)
+    assert [item for batch in batches for item in batch] == sequences
+
+
 def test_chain_reserve_prevents_new_gpu_wave(tmp_path):
     state = tmp_path / "chain.json"
     state.write_text(json.dumps({

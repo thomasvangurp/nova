@@ -131,6 +131,7 @@ select-elite-parents = "cd /root && python -m nanobody_opt.select_elite_parents"
 audit-validator-score = "cd /root && python -m nanobody_opt.audit_validator_score"
 rank-live-fields = "cd /root && python -m nanobody_opt.rank_exact"
 score-candidate-liability = "cd /root && python -m nanobody_opt.score_candidate_liability"
+qualify-screen-leader = "cd /root && python -m nanobody_opt.qualify_screen_leader"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""

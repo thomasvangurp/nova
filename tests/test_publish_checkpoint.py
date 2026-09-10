@@ -1,6 +1,10 @@
 import pytest
 
-from nanobody_opt.publish_checkpoint import validate_exact_robustness
+from nanobody_opt.publish_checkpoint import (
+    checkpoint_is_better,
+    validate_exact_robustness,
+    validate_provisional_exact_evidence,
+)
 
 
 def test_robustness_gate_requires_eight_independent_observations():
@@ -71,3 +75,29 @@ def test_robustness_gate_requires_repeat_stable_complexes():
                 "epitope_occupancy_min": 0.5,
             }
         ))
+
+
+def test_provisional_gate_accepts_first_complete_exact_observation():
+    assert validate_provisional_exact_evidence({
+        "observation_count": 1,
+        "score_p90": 42,
+        "competitive_rate": 1,
+        "observation_competitive_rate": 1,
+    }) == (1, 1.0, 1.0)
+
+
+def _checkpoint(sequence="A", score=50, observations=1, epoch=25036):
+    return {
+        "epoch": epoch,
+        "sequences": [sequence],
+        "selection": {"score": score},
+        "exact": {"observation_count": observations},
+    }
+
+
+def test_checkpoint_replacement_is_monotonic_within_an_epoch():
+    previous = _checkpoint()
+    assert checkpoint_is_better(previous, _checkpoint(score=49))
+    assert not checkpoint_is_better(previous, _checkpoint(score=51))
+    assert checkpoint_is_better(previous, _checkpoint(observations=8))
+    assert checkpoint_is_better(previous, _checkpoint(epoch=25037, score=99))

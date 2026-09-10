@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import diversity, gates
 from nanobody_opt.simulate_round import METRICS
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXACT_SCORER = "nova-boltzgen-validator-wrapper"
 MINIMUM_EXACT_OBSERVATIONS = 8
 MINIMUM_COMPETITIVE_RATE = 0.75
@@ -151,6 +151,57 @@ def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
     return observation_count, competitive_rate, observation_rate
 
 
+def validate_provisional_exact_evidence(winner: dict) -> tuple[int, float, float]:
+    """Accept the first complete exact observation for optimistic publication."""
+    observation_count = int(winner.get("observation_count", 0))
+    if observation_count < 1:
+        raise ValueError("winner has no exact observations")
+    score_p90 = float(winner.get("score_p90", float("nan")))
+    if not math.isfinite(score_p90):
+        raise ValueError("winner has no finite exact p90 score")
+    competitive_rate = float(winner.get("competitive_rate", 0.0))
+    observation_rate = float(winner.get("observation_competitive_rate", 0.0))
+    if not math.isfinite(competitive_rate) or not math.isfinite(observation_rate):
+        raise ValueError("winner has non-finite competitive evidence")
+    return observation_count, competitive_rate, observation_rate
+
+
+def checkpoint_is_better(previous: object, candidate: dict) -> bool:
+    """Only replace a same-epoch checkpoint with better exact evidence."""
+    if not isinstance(previous, dict):
+        return True
+    if previous.get("epoch") != candidate.get("epoch"):
+        return True
+    try:
+        previous_score = float(previous["selection"]["score"])
+        candidate_score = float(candidate["selection"]["score"])
+        previous_observations = int(previous["exact"]["observation_count"])
+        candidate_observations = int(candidate["exact"]["observation_count"])
+        previous_sequence = str(previous["sequences"][0])
+        candidate_sequence = str(candidate["sequences"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return True
+    if not math.isfinite(previous_score):
+        return True
+    if not math.isfinite(candidate_score):
+        return False
+    if previous_sequence == candidate_sequence:
+        return (
+            candidate_observations > previous_observations
+            or (
+                candidate_observations == previous_observations
+                and candidate_score < previous_score
+            )
+        )
+    return (
+        candidate_score < previous_score
+        or (
+            candidate_score == previous_score
+            and candidate_observations > previous_observations
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rankings", required=True, type=Path)
@@ -160,6 +211,11 @@ def main() -> None:
     parser.add_argument("--target", required=True)
     parser.add_argument("--epoch", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--provisional",
+        action="store_true",
+        help="publish after one complete exact observation while repeats continue",
+    )
     args = parser.parse_args()
 
     config = yaml.safe_load(args.config.read_text())
@@ -182,9 +238,12 @@ def main() -> None:
     winner = candidates[0]
     sequence = str(winner["sequence"]).strip().upper()
     try:
-        observation_count, competitive_rate, observation_rate = (
-            validate_exact_robustness(winner)
+        validator = (
+            validate_provisional_exact_evidence
+            if args.provisional
+            else validate_exact_robustness
         )
+        observation_count, competitive_rate, observation_rate = validator(winner)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     if gates.check_sequence(sequence, requirements):
@@ -217,7 +276,8 @@ def main() -> None:
 
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "status": "qualified",
+        "status": "provisional" if args.provisional else "qualified",
+        "publication_stage": "provisional" if args.provisional else "qualified",
         "target": args.target,
         "epoch": args.epoch,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -249,7 +309,11 @@ def main() -> None:
             "pose_stability": winner.get("pose_stability", {}),
         },
         "selection": {
-            "method": "competitive-rate-then-p90-observation-field-dense-rank-sum",
+            "method": (
+                "p90-observation-field-dense-rank-sum"
+                if args.provisional
+                else "competitive-rate-then-p90-observation-field-dense-rank-sum"
+            ),
             "score": selection_score,
             "competitive_rate": competitive_rate,
             "observation_competitive_rate": observation_rate,
@@ -287,9 +351,20 @@ def main() -> None:
             "layer2_sha256": [_sha256(path) for path in args.layer2],
         },
     }
+    try:
+        previous = json.loads(args.output.read_text())
+    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
+        previous = None
+    if not checkpoint_is_better(previous, payload):
+        print(
+            f"retained better epoch {args.epoch} checkpoint at {args.output}; "
+            f"candidate_score={selection_score:.1f} sequence={sequence}"
+        )
+        return
     _atomic_json(args.output, payload)
+    stage = payload["publication_stage"]
     print(
-        f"published qualified epoch {args.epoch} {args.target} checkpoint to "
+        f"published {stage} epoch {args.epoch} {args.target} checkpoint to "
         f"{args.output}: robustness_p90={selection_score:.1f} sequence={sequence}"
     )
 
