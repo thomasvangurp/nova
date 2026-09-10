@@ -237,13 +237,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-limit", type=int, default=32)
     parser.add_argument("--seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)
-    parser.add_argument("--per-seed", type=int, default=6)
+    parser.add_argument(
+        "--per-seed",
+        type=int,
+        default=12,
+        help="proposals generated per elite parent before Layer-2 filtering",
+    )
     parser.add_argument("--motif-fraction", type=float, default=0.25)
     parser.add_argument("--single-mutation-fraction", type=float, default=0.75)
     parser.add_argument("--maximum-motif-mutations", type=int, default=3)
-    parser.add_argument("--maximum-exhaustive-singles", type=int, default=160)
+    parser.add_argument("--maximum-exhaustive-singles", type=int, default=320)
     parser.add_argument("--layer2-concurrency", type=int, default=40)
-    parser.add_argument("--candidate-limit", type=int, default=160)
+    parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=320,
+        help="maximum exact screens per iteration, published in small tranches",
+    )
     parser.add_argument("--screen-tranche-size", type=int, default=20)
     parser.add_argument("--finalists", type=int, default=3)
     parser.add_argument("--challenger-p90-margin", type=float, default=20.0)

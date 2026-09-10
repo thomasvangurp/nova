@@ -43,9 +43,9 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.parent_limit == 32
     assert args.seed_count == 32
     assert args.minimum_seeds == 8
-    assert args.per_seed == 6
-    assert args.maximum_exhaustive_singles == 160
-    assert args.candidate_limit == 160
+    assert args.per_seed == 12
+    assert args.maximum_exhaustive_singles == 320
+    assert args.candidate_limit == 320
     assert args.screen_tranche_size == 20
     assert args.finalists == 3
     assert args.challenger_p90_margin == 20.0

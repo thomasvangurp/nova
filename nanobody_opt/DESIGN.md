@@ -399,14 +399,15 @@ The operational fallback policy is therefore:
 ### Exact-scoring wave size
 
 Do not pass the entire epoch bank to `score_boltzgen_batch.py`. The autonomous
-race screens at most 160 candidates in ten-candidate waves with
-`--predict-batch-size 1`. It immediately assigns repeats 2--8 of the screen
-leader to separate GPU processes. If that leader fails, the next finalist is
-always tried. Once an incumbent qualifies, a challenger is repeated only when
-its one-shot p90 is within 20 rank-sum points of the confirmed incumbent; the
-remaining GPU budget returns to proposal discovery. Every exact JSON and
-retained refolded complex is atomic and resumable. Strict ranking runs after
-each repeated finalist, allowing the publisher to promote a qualified
+race may screen up to 320 candidates, but it retains 20-candidate publication
+tranches. On a ten-GPU box each tranche is one model-loading wave with two
+singleton cases per resident pipeline. It immediately assigns repeats 2--8 of
+the screen leader to separate GPU processes. If that leader fails, the next
+finalist is always tried. Once an incumbent qualifies, a challenger is repeated
+only when its one-shot p90 is within 20 rank-sum points of the confirmed
+incumbent; the remaining GPU budget returns to proposal discovery. Every exact
+JSON and retained refolded complex is atomic and resumable. Strict ranking runs
+after each repeated finalist, allowing the publisher to promote a qualified
 checkpoint without waiting for every other candidate.
 
 ### Elite parent policy

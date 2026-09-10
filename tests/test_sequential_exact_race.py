@@ -42,11 +42,11 @@ def test_candidate_loader_requires_layer2_pass_and_deduplicates(tmp_path):
 
 
 def test_screen_budget_is_split_into_publishable_twenty_candidate_tranches():
-    sequences = [f"SEQ{index}" for index in range(160)]
+    sequences = [f"SEQ{index}" for index in range(320)]
 
     batches = race._batches(sequences, 20)
 
-    assert len(batches) == 8
+    assert len(batches) == 16
     assert all(len(batch) == 20 for batch in batches)
     assert [item for batch in batches for item in batch] == sequences
 

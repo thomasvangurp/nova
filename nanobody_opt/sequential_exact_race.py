@@ -313,7 +313,7 @@ def main() -> None:
     parser.add_argument("--chain-state", type=Path)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
-    parser.add_argument("--candidate-limit", type=int, default=160)
+    parser.add_argument("--candidate-limit", type=int, default=320)
     parser.add_argument(
         "--screen-tranche-size",
         type=int,
