@@ -57,6 +57,7 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
     combined = json.loads((output_dir / "exact_all.json").read_text())
     assert len(calls) == 3
     assert manifest["completed_count"] == 17
+    assert manifest["observation_id"] == combined["observation_id"]
     assert [item["count"] for item in manifest["completed_waves"]] == [8, 8, 1]
     assert combined["n"] == 17
     assert len(combined["per_nanobody_components"]["0"]) == 17
@@ -64,3 +65,5 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
     waves.main()
 
     assert len(calls) == 3
+    resumed = json.loads((output_dir / "exact_all.json").read_text())
+    assert resumed["observation_id"] == combined["observation_id"]

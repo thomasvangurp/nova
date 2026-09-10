@@ -20,6 +20,8 @@ from nanobody_opt.simulate_round import METRICS
 
 SCHEMA_VERSION = 1
 EXACT_SCORER = "nova-boltzgen-validator-wrapper"
+MINIMUM_EXACT_OBSERVATIONS = 8
+MINIMUM_COMPETITIVE_RATE = 0.5
 
 
 def _sha256(path: Path) -> str:
@@ -60,6 +62,25 @@ def _atomic_json(path: Path, payload: dict) -> None:
         raise
 
 
+def validate_exact_robustness(winner: dict) -> tuple[int, float]:
+    """Enforce the live publisher's stochastic-repeat qualification floor."""
+    observation_count = int(winner.get("observation_count", 0))
+    if observation_count < MINIMUM_EXACT_OBSERVATIONS:
+        raise ValueError(
+            f"winner has fewer than {MINIMUM_EXACT_OBSERVATIONS} exact observations"
+        )
+    competitive_rate = float(winner.get("competitive_rate", float("nan")))
+    if (
+        not math.isfinite(competitive_rate)
+        or competitive_rate < MINIMUM_COMPETITIVE_RATE
+    ):
+        raise ValueError(
+            f"winner competitive rate {competitive_rate!r} is below "
+            f"{MINIMUM_COMPETITIVE_RATE:.0%}"
+        )
+    return observation_count, competitive_rate
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rankings", required=True, type=Path)
@@ -90,8 +111,10 @@ def main() -> None:
         raise SystemExit("ranking contains no candidate")
     winner = candidates[0]
     sequence = str(winner["sequence"]).strip().upper()
-    if int(winner.get("observation_count", 0)) < 2:
-        raise SystemExit("winner has fewer than two exact observations")
+    try:
+        observation_count, competitive_rate = validate_exact_robustness(winner)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     if gates.check_sequence(sequence, requirements):
         raise SystemExit("winner fails current Layer-1 sequence gates")
     if sequence not in _layer2_passes(args.layer2):
@@ -137,24 +160,37 @@ def main() -> None:
             "layer_2": {"passed": True},
             "boltzgen": {
                 "exact": True,
+                "runtime_matched": True,
                 "validator_matched": True,
+                "stochastic": True,
+                "rank_method": "dense",
                 "metrics": metrics,
             },
         },
         "exact": {
             "scorer": EXACT_SCORER,
-            "observation_count": int(winner["observation_count"]),
+            "observation_count": observation_count,
             "metrics": metrics,
+            "observations": winner.get("observations", []),
             "per_observation_median_rank_sum": winner[
                 "per_observation_median_rank_sum"
             ],
         },
         "selection": {
-            "method": "worst-repeat-historical-field-median-dense-rank-sum",
+            "method": "competitive-rate-then-p90-observation-field-dense-rank-sum",
             "score": selection_score,
+            "competitive_rate": competitive_rate,
+            "competitive_score_threshold": float(
+                winner["competitive_score_threshold"]
+            ),
+            "score_median": float(winner["score_median"]),
+            "score_p90": float(winner["score_p90"]),
+            "score_worst": float(winner["score_worst"]),
+            "p90_category_rank_sums": winner.get("p90_category_rank_sums", {}),
             "score_semantics": (
-                "validator-compatible dense rank sum against historical reference "
-                "fields; not a prediction of the next stochastic observation"
+                "validator-compatible dense-rank robustness distribution over "
+                "repeated exact observations and historical live fields; not a "
+                "prediction of the next stochastic validator observation"
             ),
             "reference": ranking.get("reference", {}),
             "aggregate_median_rank_sum": float(

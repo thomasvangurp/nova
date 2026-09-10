@@ -2,13 +2,15 @@
 
 BoltzGen inference is stochastic, so a live finalist must survive more than one
 exact observation. This utility applies the validator's per-metric dense ranks
-to deterministic bootstrap fields and uses the candidate's worst observation
-median as its conservative selection statistic. Lower is better. The statistic
-is field-relative; it is not presented as a prediction of the next API score.
+to historical live fields. Selection uses the complete observation-by-field
+score distribution: first the probability of a competitive score, then its
+upper tail. Lower is better. These are robustness statistics, not a prediction
+of the next stochastic validator observation.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -34,10 +36,17 @@ LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
 
 def _observations(paths: list[Path], target: str) -> dict[str, list[dict[str, float]]]:
     found: dict[str, list[dict[str, float]]] = defaultdict(list)
+    seen_observations: set[str] = set()
     for path in paths:
-        payload = json.loads(path.read_text())
+        raw = path.read_bytes()
+        payload = json.loads(raw)
         if str(payload.get("target")) != target:
             raise SystemExit(f"{path} targets {payload.get('target')!r}, not {target}")
+        observation_id = str(payload.get("observation_id") or "").strip()
+        source_key = observation_id or hashlib.sha256(raw).hexdigest()
+        if source_key in seen_observations:
+            continue
+        seen_observations.add(source_key)
         for by_sequence in payload.get("per_nanobody_components", {}).values():
             for sequence, by_target in by_sequence.items():
                 metrics = by_target.get(target)
@@ -129,6 +138,23 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--minimum-observations", type=int, default=1)
     parser.add_argument(
+        "--competitive-score-threshold",
+        type=float,
+        default=75.0,
+        help="rank sum treated as competitive in historical live fields",
+    )
+    parser.add_argument(
+        "--minimum-competitive-rate",
+        type=float,
+        default=0.0,
+        help="fail closed below this observation-by-field success fraction",
+    )
+    parser.add_argument(
+        "--maximum-p90-rank-sum",
+        type=float,
+        help="optional fail-closed upper-tail ceiling",
+    )
+    parser.add_argument(
         "--exclude-file",
         action="append",
         default=[],
@@ -149,6 +175,11 @@ def main() -> None:
     parser.add_argument("--api-scan-limit", type=int, default=40)
     parser.add_argument("--leaderboard-api-root", default=LEADERBOARD_API_ROOT)
     args = parser.parse_args()
+
+    if args.minimum_observations < 1:
+        parser.error("--minimum-observations must be positive")
+    if not 0 <= args.minimum_competitive_rate <= 1:
+        parser.error("--minimum-competitive-rate must be between zero and one")
 
     full_archive = pd.read_csv(args.archive)
     historical_sequences = set(
@@ -210,10 +241,24 @@ def main() -> None:
             continue
         if len(observations) < args.minimum_observations:
             continue
-        per_observation = [
-            float(np.median([rank_sum_in_field(metrics, field) for field in fields]))
+        score_matrix = [
+            [float(rank_sum_in_field(metrics, field)) for field in fields]
             for metrics in observations
         ]
+        score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
+        per_observation = [float(np.median(scores)) for scores in score_matrix]
+        score_median = float(np.median(score_distribution))
+        score_p90 = float(np.quantile(score_distribution, 0.9))
+        competitive_rate = float(
+            np.mean(score_distribution <= args.competitive_score_threshold)
+        )
+        if competitive_rate < args.minimum_competitive_rate:
+            continue
+        if (
+            args.maximum_p90_rank_sum is not None
+            and score_p90 > args.maximum_p90_rank_sum
+        ):
+            continue
         aggregate = {
             name: float(np.median([item[name] for item in observations]))
             for name in METRICS
@@ -228,11 +273,29 @@ def main() -> None:
             ]
             for category in ("confidence", "physical_interaction", "developability")
         }
+        category_distributions = {
+            category: [
+                float(category_rank_sums(metrics, field)[category])
+                for metrics in observations
+                for field in fields
+            ]
+            for category in ("confidence", "physical_interaction", "developability")
+        }
         ranked.append({
             "sequence": normalized_sequence,
             "observation_count": len(observations),
-            "selection_score": max(per_observation),
+            "selection_score": score_p90,
+            "competitive_score_threshold": args.competitive_score_threshold,
+            "competitive_rate": competitive_rate,
+            "score_median": score_median,
+            "score_p90": score_p90,
+            "score_worst": float(np.max(score_distribution)),
+            "per_observation_field_rank_sums": score_matrix,
             "per_observation_median_rank_sum": per_observation,
+            "p90_category_rank_sums": {
+                category: float(np.quantile(scores, 0.9))
+                for category, scores in category_distributions.items()
+            },
             "aggregate_median_rank_sum": float(np.median(aggregate_field_scores)),
             "aggregate_p90_rank_sum": float(np.quantile(aggregate_field_scores, 0.9)),
             "aggregate_median_category_rank_sums": {
@@ -244,7 +307,11 @@ def main() -> None:
         })
 
     ranked.sort(key=lambda item: (
-        item["selection_score"], item["aggregate_p90_rank_sum"], item["sequence"]
+        -item["competitive_rate"],
+        item["score_p90"],
+        item["score_median"],
+        item["score_worst"],
+        item["sequence"],
     ))
     selected = ranked[: args.limit]
     if not selected:
@@ -252,11 +319,22 @@ def main() -> None:
     payload = {
         "target": args.target,
         "exact_files": [str(path) for path in args.exact],
+        "unique_exact_observation_count": len({
+            str(json.loads(path.read_text()).get("observation_id") or "")
+            or hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in args.exact
+        }),
         "minimum_observations": args.minimum_observations,
+        "qualification": {
+            "competitive_score_threshold": args.competitive_score_threshold,
+            "minimum_competitive_rate": args.minimum_competitive_rate,
+            "maximum_p90_rank_sum": args.maximum_p90_rank_sum,
+        },
         "rank_method": "dense",
         "score_semantics": (
-            "validator-compatible per-metric dense rank sum against historical "
-            "reference fields; not a prediction of the next stochastic observation"
+            "validator-compatible per-metric dense rank sums over independent exact "
+            "observations and historical live fields; a robustness distribution, "
+            "not a prediction of the next stochastic observation"
         ),
         "reference": reference,
         "excluded_sequence_count": len(excluded_sequences),
@@ -269,8 +347,8 @@ def main() -> None:
     print(f"ranked {len(ranked)} candidates; wrote top {len(selected)} to {args.output}")
     for item in selected[:10]:
         print(
-            f"  score={item['selection_score']:.1f} "
-            f"p90={item['aggregate_p90_rank_sum']:.1f} "
+            f"  competitive={item['competitive_rate']:.1%} "
+            f"p90={item['score_p90']:.1f} median={item['score_median']:.1f} "
             f"n={item['observation_count']} {item['sequence']}"
         )
 

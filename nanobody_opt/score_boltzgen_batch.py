@@ -21,6 +21,7 @@ import multiprocessing as mp
 import os
 import shutil
 import time
+import uuid
 
 
 # Every subnet_config key BoltzgenWrapper reads, enumerated from its source:
@@ -126,10 +127,12 @@ def main():
     ap.add_argument("--target", required=True)
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--shards-per-gpu", type=int, default=1)
-    ap.add_argument("--batch-size", type=int, default=24,
-                    help="sequences per predict() call; small keeps scores "
-                         "composition-independent (measured: 24 vs 128 moves a "
-                         "molecule 2.8x on the compound side)")
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="sequences per predict() call; validator parity requires one",
+    )
     ap.add_argument(
         "--keep-work-dir",
         action="store_true",
@@ -199,6 +202,8 @@ def main():
         raise SystemExit(f"MERGE LOST SEQUENCES: submitted {len(seqs)}, "
                          f"merged {n_out}. Refusing to write a partial result.")
     json.dump({"target": a.target, "n": len(seqs), "wall_seconds": wall,
+               "observation_id": str(uuid.uuid4()),
+               "predict_batch_size": a.batch_size,
                "per_nanobody_components": merged}, open(a.out, "w"),
               indent=2, default=str)
     print(f"wrote {a.out}")

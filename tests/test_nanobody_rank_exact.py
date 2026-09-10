@@ -62,6 +62,25 @@ def test_dashboard_payload_becomes_unique_validator_field():
     assert field.iloc[0].to_dict() == first
 
 
+def test_duplicate_scoring_sweep_is_only_one_observation(tmp_path):
+    payload = {
+        "target": "P20809",
+        "observation_id": "same-sweep",
+        "per_nanobody_components": {
+            "0": {"FRESH": {"P20809": _metrics(1)}}
+        },
+    }
+    first = tmp_path / "first.json"
+    duplicate = tmp_path / "duplicate.json"
+    first.write_text(json.dumps(payload))
+    payload["per_nanobody_components"]["0"]["FRESH"]["P20809"] = _metrics(9)
+    duplicate.write_text(json.dumps(payload))
+
+    observations = rank_exact._observations([first, duplicate], "P20809")
+
+    assert observations == {"FRESH": [_metrics(1)]}
+
+
 def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch):
     archive = tmp_path / "archive.csv"
     rows = [
@@ -121,3 +140,13 @@ def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch
     assert payload["sequences"] == ["FRESH"]
     assert payload["excluded_sequence_count"] == 1
     assert payload["rank_method"] == "dense"
+    assert payload["qualification"] == {
+        "competitive_score_threshold": 75.0,
+        "minimum_competitive_rate": 0.0,
+        "maximum_p90_rank_sum": None,
+    }
+    candidate = payload["candidates"][0]
+    assert 0 <= candidate["competitive_rate"] <= 1
+    assert candidate["selection_score"] == candidate["score_p90"]
+    assert len(candidate["per_observation_field_rank_sums"]) == 1
+    assert len(candidate["per_observation_field_rank_sums"][0]) == 64

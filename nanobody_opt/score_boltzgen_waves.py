@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +98,8 @@ def main() -> None:
     parser.add_argument(
         "--predict-batch-size",
         type=int,
-        default=8,
-        help="sequences sharing one BoltzGen predict call inside a shard",
+        default=1,
+        help="sequences sharing one BoltzGen predict call; validator parity requires one",
     )
     parser.add_argument("--scorer", type=Path)
     args = parser.parse_args()
@@ -110,6 +111,11 @@ def main() -> None:
         raise SystemExit(f"no sequences parsed from {args.sequences}")
     scorer = args.scorer or Path(__file__).with_name("score_boltzgen_batch.py")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = args.output_dir / "manifest.json"
+    if manifest_path.is_file():
+        observation_id = str(json.loads(manifest_path.read_text())["observation_id"])
+    else:
+        observation_id = str(uuid.uuid4())
     completed = []
     all_components: dict[str, dict] = {}
 
@@ -164,8 +170,9 @@ def main() -> None:
             }
         )
         _atomic_json(
-            args.output_dir / "manifest.json",
+            manifest_path,
             {
+                "observation_id": observation_id,
                 "target": args.target,
                 "source": str(args.sequences),
                 "source_sha256": _sha256(args.sequences),
@@ -188,6 +195,7 @@ def main() -> None:
         args.output_dir / "exact_all.json",
         {
             "target": args.target,
+            "observation_id": observation_id,
             "n": len(sequences),
             "wave_count": len(completed),
             "per_nanobody_components": {"0": all_components},

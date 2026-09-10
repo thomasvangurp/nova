@@ -124,6 +124,7 @@ summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contac
 scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_terminals"
 harvest-inverse-fold = "cd /root && python -m nanobody_opt.harvest_inverse_fold"
 analyze-epoch-winners = "cd /root && python -m nanobody_opt.analyze_epoch_winners"
+audit-validator-score = "cd /root && python -m nanobody_opt.audit_validator_score"
 rank-live-fields = "cd /root && python -m nanobody_opt.rank_exact"
 score-candidate-liability = "cd /root && python -m nanobody_opt.score_candidate_liability"
 
