@@ -103,7 +103,7 @@
       register: prior_checkpoint_content
       when: prior_checkpoint.stat.isreg | default(false)
 
-    - name: Remember the previously published sequence permanently
+    - name: Retire the previous epoch's published sequence permanently
       ansible.builtin.lineinfile:
         path: "{{ published_ledger }}"
         line: >-
@@ -112,7 +112,11 @@
         owner: root
         group: root
         mode: "0600"
-      when: prior_checkpoint.stat.isreg | default(false)
+      when:
+        - prior_checkpoint.stat.isreg | default(false)
+        - >-
+          ((prior_checkpoint_content.content | b64decode | from_json).epoch | int)
+          != (nanobody_epoch | int)
 
     - name: Rank only unused, nonhistorical, repeat-scored candidates
       ansible.builtin.command:
