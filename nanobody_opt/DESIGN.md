@@ -304,7 +304,7 @@ That is diagnostic only, not a reason to run the batch.
 
 ---
 
-## 13. Local-neighborhood result: valid transport, noncompetitive design
+## 13. Local-neighborhood result: valid transport and a second-place design
 
 The revised loop was exercised live for epoch 25021 against the target resolved
 from the upstream validator configuration (`P20809`, structure `6O4O`). It did
@@ -336,13 +336,13 @@ published a schema-version-1 checkpoint for epoch 25021. The Compound master
 then pulled it over the configured SCP path and committed it alongside the
 unchanged 20-molecule portfolio.
 
-This proves only that the pipeline can produce and transport a valid,
-repeat-stable live submission. It is **not evidence of a competitive design**.
-The 167.5 selection score is a bootstrap statistic against randomly sampled
-historical archive rows. A dashboard score near 50 is a rank sum against the
-actual one-submission-per-UID field, so subtracting the two is invalid. The
-earlier bootstrap placement claim was still misleading because randomly
-sampling the archive does not reproduce that live field.
+This proves that the pipeline can produce and transport a valid,
+repeat-stable live submission. The epoch-25022 dashboard subsequently placed
+that submission second, which is direct evidence that the family is
+competitive. The 167.5 selection score is a bootstrap statistic against
+randomly sampled historical archive rows and is not numerically comparable to
+the dashboard rank sum against the actual one-submission-per-UID field. The
+live placement, not a bootstrap placement estimate, is authoritative.
 
 The failure is structural rather than a Layer-1/Layer-2 problem. Against the
 latest 300 archive rows, the repeat winner ranked 206/301 on `design_iiptm`,

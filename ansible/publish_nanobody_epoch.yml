@@ -12,6 +12,7 @@
     repo: "{{ playbook_dir }}/.."
     nanobody_target: P20809
     nanobody_epoch: 0
+    gpu_count: 10
     live_root: /root/live
     source_epoch_root: /root/live/epoch25021
     published_ledger: /root/artifacts/nanobody_published_sequences.txt
