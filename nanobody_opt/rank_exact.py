@@ -29,6 +29,11 @@ from nanobody_opt.simulate_round import (
     category_rank_sums,
     rank_sum_in_field,
 )
+from nanobody_opt.pose_stability import (
+    exact_structure_paths,
+    residue_numbers,
+    summarize_sequence_structures,
+)
 
 
 LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
@@ -150,9 +155,34 @@ def main() -> None:
         help="fail closed below this observation-by-field success fraction",
     )
     parser.add_argument(
+        "--minimum-observation-competitive-rate",
+        type=float,
+        default=0.0,
+        help=(
+            "fail closed unless this fraction of independent exact observations "
+            "has a median historical-field score at or below the competitive "
+            "threshold"
+        ),
+    )
+    parser.add_argument(
         "--maximum-p90-rank-sum",
         type=float,
         help="optional fail-closed upper-tail ceiling",
+    )
+    parser.add_argument(
+        "--maximum-p90-confidence-rank-sum",
+        type=float,
+        help="optional fail-closed upper-tail ceiling for five confidence metrics",
+    )
+    parser.add_argument(
+        "--maximum-p90-physical-interaction-rank-sum",
+        type=float,
+        help="optional fail-closed upper-tail ceiling for three interface metrics",
+    )
+    parser.add_argument(
+        "--maximum-p90-developability-rank-sum",
+        type=float,
+        help="optional fail-closed upper-tail ceiling for two liability metrics",
     )
     parser.add_argument(
         "--exclude-file",
@@ -174,12 +204,47 @@ def main() -> None:
     parser.add_argument("--minimum-api-fields", type=int, default=3)
     parser.add_argument("--api-scan-limit", type=int, default=40)
     parser.add_argument("--leaderboard-api-root", default=LEADERBOARD_API_ROOT)
+    parser.add_argument(
+        "--selection-order",
+        choices=("competitive-rate", "p90"),
+        default="competitive-rate",
+        help="ordering after all fail-closed qualification gates pass",
+    )
+    parser.add_argument(
+        "--pose-config",
+        type=Path,
+        help="live config used to evaluate retained complex-pose stability",
+    )
+    parser.add_argument("--minimum-structure-observations", type=int, default=0)
+    parser.add_argument("--minimum-median-contact-jaccard", type=float, default=0.0)
+    parser.add_argument("--maximum-cdr3-rmsd", type=float)
+    parser.add_argument("--minimum-epitope-occupancy", type=float, default=0.0)
     args = parser.parse_args()
 
     if args.minimum_observations < 1:
         parser.error("--minimum-observations must be positive")
-    if not 0 <= args.minimum_competitive_rate <= 1:
-        parser.error("--minimum-competitive-rate must be between zero and one")
+    for name in (
+        "minimum_competitive_rate",
+        "minimum_observation_competitive_rate",
+    ):
+        if not 0 <= getattr(args, name) <= 1:
+            parser.error(f"--{name.replace('_', '-')} must be between zero and one")
+    for name in (
+        "minimum_median_contact_jaccard",
+        "minimum_epitope_occupancy",
+    ):
+        if not 0 <= getattr(args, name) <= 1:
+            parser.error(f"--{name.replace('_', '-')} must be between zero and one")
+    if args.minimum_structure_observations < 0:
+        parser.error("--minimum-structure-observations cannot be negative")
+    pose_requested = bool(
+        args.minimum_structure_observations
+        or args.minimum_median_contact_jaccard
+        or args.maximum_cdr3_rmsd is not None
+        or args.minimum_epitope_occupancy
+    )
+    if pose_requested and args.pose_config is None:
+        parser.error("pose-stability gates require --pose-config")
 
     full_archive = pd.read_csv(args.archive)
     historical_sequences = set(
@@ -231,6 +296,17 @@ def main() -> None:
             "field_count": len(fields),
             "random_seed": args.random_seed,
         }
+    structure_paths: dict[str, list[Path]] = {}
+    pose_challenge: dict[str, Any] | None = None
+    if args.pose_config is not None:
+        import yaml
+
+        pose_challenge = yaml.safe_load(args.pose_config.read_text())[
+            "protein_selection"
+        ]["nanobody"]
+        if str(pose_challenge["target"]) != args.target:
+            raise SystemExit("pose config target does not match exact target")
+        structure_paths = exact_structure_paths(args.exact, args.target)
     ranked = []
     for sequence, observations in _observations(args.exact, args.target).items():
         normalized_sequence = sequence.strip().upper()
@@ -247,12 +323,22 @@ def main() -> None:
         ]
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]
+        observation_competitive = [
+            score <= args.competitive_score_threshold
+            for score in per_observation
+        ]
+        observation_competitive_rate = float(np.mean(observation_competitive))
         score_median = float(np.median(score_distribution))
         score_p90 = float(np.quantile(score_distribution, 0.9))
         competitive_rate = float(
             np.mean(score_distribution <= args.competitive_score_threshold)
         )
         if competitive_rate < args.minimum_competitive_rate:
+            continue
+        if (
+            observation_competitive_rate
+            < args.minimum_observation_competitive_rate
+        ):
             continue
         if (
             args.maximum_p90_rank_sum is not None
@@ -281,21 +367,68 @@ def main() -> None:
             ]
             for category in ("confidence", "physical_interaction", "developability")
         }
+        p90_categories = {
+            category: float(np.quantile(scores, 0.9))
+            for category, scores in category_distributions.items()
+        }
+        category_ceilings = {
+            "confidence": args.maximum_p90_confidence_rank_sum,
+            "physical_interaction": (
+                args.maximum_p90_physical_interaction_rank_sum
+            ),
+            "developability": args.maximum_p90_developability_rank_sum,
+        }
+        if any(
+            ceiling is not None and p90_categories[category] > ceiling
+            for category, ceiling in category_ceilings.items()
+        ):
+            continue
+        pose_summary: dict[str, Any] = {"structure_observation_count": 0}
+        if pose_challenge is not None:
+            pose_summary = summarize_sequence_structures(
+                normalized_sequence,
+                structure_paths.get(normalized_sequence, []),
+                target_chain=str(pose_challenge["structure_chain"]),
+                nanobody_chain="B",
+                epitope=residue_numbers(
+                    str(pose_challenge["structure_binding_site"])
+                ),
+            )
+        if (
+            int(pose_summary["structure_observation_count"])
+            < args.minimum_structure_observations
+        ):
+            continue
+        if (
+            float(pose_summary.get("contact_jaccard_median", 0.0))
+            < args.minimum_median_contact_jaccard
+        ):
+            continue
+        if (
+            args.maximum_cdr3_rmsd is not None
+            and float(pose_summary.get("cdr3_rmsd_max_angstrom", math.inf))
+            > args.maximum_cdr3_rmsd
+        ):
+            continue
+        if (
+            float(pose_summary.get("epitope_occupancy_min", 0.0))
+            < args.minimum_epitope_occupancy
+        ):
+            continue
         ranked.append({
             "sequence": normalized_sequence,
             "observation_count": len(observations),
             "selection_score": score_p90,
             "competitive_score_threshold": args.competitive_score_threshold,
             "competitive_rate": competitive_rate,
+            "observation_competitive_rate": observation_competitive_rate,
+            "observation_competitive": observation_competitive,
             "score_median": score_median,
             "score_p90": score_p90,
             "score_worst": float(np.max(score_distribution)),
             "per_observation_field_rank_sums": score_matrix,
             "per_observation_median_rank_sum": per_observation,
-            "p90_category_rank_sums": {
-                category: float(np.quantile(scores, 0.9))
-                for category, scores in category_distributions.items()
-            },
+            "p90_category_rank_sums": p90_categories,
             "aggregate_median_rank_sum": float(np.median(aggregate_field_scores)),
             "aggregate_p90_rank_sum": float(np.quantile(aggregate_field_scores, 0.9)),
             "aggregate_median_category_rank_sums": {
@@ -304,15 +437,27 @@ def main() -> None:
             },
             "metrics": aggregate,
             "observations": observations,
+            "pose_stability": pose_summary,
         })
 
-    ranked.sort(key=lambda item: (
-        -item["competitive_rate"],
-        item["score_p90"],
-        item["score_median"],
-        item["score_worst"],
-        item["sequence"],
-    ))
+    if args.selection_order == "p90":
+        ranked.sort(key=lambda item: (
+            item["score_p90"],
+            item["score_median"],
+            -item["observation_competitive_rate"],
+            -item["competitive_rate"],
+            item["score_worst"],
+            item["sequence"],
+        ))
+    else:
+        ranked.sort(key=lambda item: (
+            -item["observation_competitive_rate"],
+            -item["competitive_rate"],
+            item["score_p90"],
+            item["score_median"],
+            item["score_worst"],
+            item["sequence"],
+        ))
     selected = ranked[: args.limit]
     if not selected:
         raise SystemExit("no complete exact candidates met the observation requirement")
@@ -328,9 +473,30 @@ def main() -> None:
         "qualification": {
             "competitive_score_threshold": args.competitive_score_threshold,
             "minimum_competitive_rate": args.minimum_competitive_rate,
+            "minimum_observation_competitive_rate": (
+                args.minimum_observation_competitive_rate
+            ),
             "maximum_p90_rank_sum": args.maximum_p90_rank_sum,
+            "maximum_p90_category_rank_sums": {
+                "confidence": args.maximum_p90_confidence_rank_sum,
+                "physical_interaction": (
+                    args.maximum_p90_physical_interaction_rank_sum
+                ),
+                "developability": args.maximum_p90_developability_rank_sum,
+            },
+            "pose_stability": {
+                "minimum_structure_observations": (
+                    args.minimum_structure_observations
+                ),
+                "minimum_median_contact_jaccard": (
+                    args.minimum_median_contact_jaccard
+                ),
+                "maximum_cdr3_rmsd": args.maximum_cdr3_rmsd,
+                "minimum_epitope_occupancy": args.minimum_epitope_occupancy,
+            },
         },
         "rank_method": "dense",
+        "selection_order": args.selection_order,
         "score_semantics": (
             "validator-compatible per-metric dense rank sums over independent exact "
             "observations and historical live fields; a robustness distribution, "
@@ -347,7 +513,8 @@ def main() -> None:
     print(f"ranked {len(ranked)} candidates; wrote top {len(selected)} to {args.output}")
     for item in selected[:10]:
         print(
-            f"  competitive={item['competitive_rate']:.1%} "
+            f"  observations={item['observation_competitive_rate']:.1%} "
+            f"field_replays={item['competitive_rate']:.1%} "
             f"p90={item['score_p90']:.1f} median={item['score_median']:.1f} "
             f"n={item['observation_count']} {item['sequence']}"
         )

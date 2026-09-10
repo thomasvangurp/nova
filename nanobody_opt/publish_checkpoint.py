@@ -18,10 +18,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import diversity, gates
 from nanobody_opt.simulate_round import METRICS
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXACT_SCORER = "nova-boltzgen-validator-wrapper"
 MINIMUM_EXACT_OBSERVATIONS = 8
-MINIMUM_COMPETITIVE_RATE = 0.5
+MINIMUM_COMPETITIVE_RATE = 0.75
+MINIMUM_OBSERVATION_COMPETITIVE_RATE = 0.75
+MAXIMUM_P90_RANK_SUM = 90.0
+MAXIMUM_P90_CATEGORY_RANK_SUMS = {
+    "confidence": 70.0,
+    "physical_interaction": 40.0,
+    "developability": 15.0,
+}
+MINIMUM_STRUCTURE_OBSERVATIONS = 8
+MINIMUM_MEDIAN_CONTACT_JACCARD = 0.35
+MAXIMUM_CDR3_RMSD_ANGSTROM = 5.0
+# The validator-configured generation hotspot is not the contact patch used by
+# the strongest public P20809 poses. Retain occupancy as a diagnostic, but do
+# not gate publication on that mismatched site.
+MINIMUM_EPITOPE_OCCUPANCY = 0.0
 
 
 def _sha256(path: Path) -> str:
@@ -62,7 +76,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
         raise
 
 
-def validate_exact_robustness(winner: dict) -> tuple[int, float]:
+def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
     """Enforce the live publisher's stochastic-repeat qualification floor."""
     observation_count = int(winner.get("observation_count", 0))
     if observation_count < MINIMUM_EXACT_OBSERVATIONS:
@@ -78,7 +92,63 @@ def validate_exact_robustness(winner: dict) -> tuple[int, float]:
             f"winner competitive rate {competitive_rate!r} is below "
             f"{MINIMUM_COMPETITIVE_RATE:.0%}"
         )
-    return observation_count, competitive_rate
+    observation_rate = float(
+        winner.get("observation_competitive_rate", float("nan"))
+    )
+    if (
+        not math.isfinite(observation_rate)
+        or observation_rate < MINIMUM_OBSERVATION_COMPETITIVE_RATE
+    ):
+        raise ValueError(
+            f"winner independent-observation competitive rate "
+            f"{observation_rate!r} is below "
+            f"{MINIMUM_OBSERVATION_COMPETITIVE_RATE:.0%}"
+        )
+    score_p90 = float(winner.get("score_p90", float("nan")))
+    if not math.isfinite(score_p90) or score_p90 > MAXIMUM_P90_RANK_SUM:
+        raise ValueError(
+            f"winner p90 rank sum {score_p90!r} exceeds "
+            f"{MAXIMUM_P90_RANK_SUM:.0f}"
+        )
+    categories = winner.get("p90_category_rank_sums") or {}
+    for category, maximum in MAXIMUM_P90_CATEGORY_RANK_SUMS.items():
+        value = float(categories.get(category, float("nan")))
+        if not math.isfinite(value) or value > maximum:
+            raise ValueError(
+                f"winner p90 {category} rank sum {value!r} exceeds {maximum:.0f}"
+            )
+    pose = winner.get("pose_stability") or {}
+    structure_count = int(pose.get("structure_observation_count", 0))
+    if structure_count < MINIMUM_STRUCTURE_OBSERVATIONS:
+        raise ValueError(
+            f"winner has fewer than {MINIMUM_STRUCTURE_OBSERVATIONS} retained "
+            "complex observations"
+        )
+    contact_jaccard = float(pose.get("contact_jaccard_median", float("nan")))
+    if (
+        not math.isfinite(contact_jaccard)
+        or contact_jaccard < MINIMUM_MEDIAN_CONTACT_JACCARD
+    ):
+        raise ValueError(
+            f"winner median contact Jaccard {contact_jaccard!r} is below "
+            f"{MINIMUM_MEDIAN_CONTACT_JACCARD:.2f}"
+        )
+    cdr3_rmsd = float(pose.get("cdr3_rmsd_max_angstrom", float("nan")))
+    if not math.isfinite(cdr3_rmsd) or cdr3_rmsd > MAXIMUM_CDR3_RMSD_ANGSTROM:
+        raise ValueError(
+            f"winner maximum CDR3 RMSD {cdr3_rmsd!r} exceeds "
+            f"{MAXIMUM_CDR3_RMSD_ANGSTROM:.1f} A"
+        )
+    epitope_occupancy = float(pose.get("epitope_occupancy_min", float("nan")))
+    if (
+        not math.isfinite(epitope_occupancy)
+        or epitope_occupancy < MINIMUM_EPITOPE_OCCUPANCY
+    ):
+        raise ValueError(
+            f"winner minimum epitope occupancy {epitope_occupancy!r} is below "
+            f"{MINIMUM_EPITOPE_OCCUPANCY:.0%}"
+        )
+    return observation_count, competitive_rate, observation_rate
 
 
 def main() -> None:
@@ -112,7 +182,9 @@ def main() -> None:
     winner = candidates[0]
     sequence = str(winner["sequence"]).strip().upper()
     try:
-        observation_count, competitive_rate = validate_exact_robustness(winner)
+        observation_count, competitive_rate, observation_rate = (
+            validate_exact_robustness(winner)
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
     if gates.check_sequence(sequence, requirements):
@@ -174,11 +246,13 @@ def main() -> None:
             "per_observation_median_rank_sum": winner[
                 "per_observation_median_rank_sum"
             ],
+            "pose_stability": winner.get("pose_stability", {}),
         },
         "selection": {
             "method": "competitive-rate-then-p90-observation-field-dense-rank-sum",
             "score": selection_score,
             "competitive_rate": competitive_rate,
+            "observation_competitive_rate": observation_rate,
             "competitive_score_threshold": float(
                 winner["competitive_score_threshold"]
             ),

@@ -140,13 +140,72 @@ def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch
     assert payload["sequences"] == ["FRESH"]
     assert payload["excluded_sequence_count"] == 1
     assert payload["rank_method"] == "dense"
+    assert payload["selection_order"] == "competitive-rate"
     assert payload["qualification"] == {
         "competitive_score_threshold": 75.0,
         "minimum_competitive_rate": 0.0,
+        "minimum_observation_competitive_rate": 0.0,
         "maximum_p90_rank_sum": None,
+        "maximum_p90_category_rank_sums": {
+            "confidence": None,
+            "physical_interaction": None,
+            "developability": None,
+        },
+        "pose_stability": {
+            "minimum_structure_observations": 0,
+            "minimum_median_contact_jaccard": 0.0,
+            "maximum_cdr3_rmsd": None,
+            "minimum_epitope_occupancy": 0.0,
+        },
     }
     candidate = payload["candidates"][0]
     assert 0 <= candidate["competitive_rate"] <= 1
+    assert 0 <= candidate["observation_competitive_rate"] <= 1
     assert candidate["selection_score"] == candidate["score_p90"]
     assert len(candidate["per_observation_field_rank_sums"]) == 1
     assert len(candidate["per_observation_field_rank_sums"][0]) == 64
+
+
+def test_ranker_rejects_structurally_unstable_observations(tmp_path, monkeypatch):
+    archive = tmp_path / "archive.csv"
+    pd.DataFrame([
+        {"sequence": f"ARCHIVE{index:02d}", **_metrics(index + 1)}
+        for index in range(60)
+    ]).to_csv(archive, index=False)
+    good = {
+        name: (100.0 if direction == "max" else 0.0)
+        for name, direction in rank_exact.METRICS.items()
+    }
+    bad = {
+        name: (0.0 if direction == "max" else 100.0)
+        for name, direction in rank_exact.METRICS.items()
+    }
+    exact_paths = []
+    for index, metrics in enumerate([good] * 4 + [bad] * 4):
+        path = tmp_path / f"exact-{index}.json"
+        path.write_text(json.dumps({
+            "target": "P20809",
+            "observation_id": f"observation-{index}",
+            "per_nanobody_components": {
+                "0": {"UNSTABLE": {"P20809": metrics}}
+            },
+        }))
+        exact_paths.extend(["--exact", str(path)])
+    output = tmp_path / "ranking.json"
+    monkeypatch.setattr(sys, "argv", [
+        "rank_exact.py", *exact_paths,
+        "--archive", str(archive),
+        "--target", "P20809",
+        "--output", str(output),
+        "--recent", "50",
+        "--field-size", "10",
+        "--minimum-observations", "8",
+        "--minimum-observation-competitive-rate", "0.75",
+    ])
+
+    try:
+        rank_exact.main()
+    except SystemExit as error:
+        assert "no complete exact candidates" in str(error)
+    else:
+        raise AssertionError("four good and four bad observations were accepted")

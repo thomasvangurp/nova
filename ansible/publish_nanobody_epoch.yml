@@ -157,7 +157,19 @@
           --target {{ nanobody_target | quote }}
           --output {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
           --exclude-file {{ published_ledger | quote }}
-          --minimum-observations 2 --recent 300 --field-size 49
+          --minimum-observations 8
+          --minimum-competitive-rate 0.75
+          --minimum-observation-competitive-rate 0.75
+          --maximum-p90-rank-sum 90
+          --maximum-p90-confidence-rank-sum 70
+          --maximum-p90-physical-interaction-rank-sum 40
+          --maximum-p90-developability-rank-sum 15
+          --pose-config {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/config.yaml') | quote }}
+          --minimum-structure-observations 8
+          --minimum-median-contact-jaccard 0.35
+          --maximum-cdr3-rmsd 5
+          --minimum-epitope-occupancy 0
+          --recent 300 --field-size 49
           --bootstrap-fields 64 --limit 30
           --before-epoch {{ nanobody_epoch | int }}
           --api-field-count 10 --minimum-api-fields 3
@@ -211,7 +223,7 @@
           - >-
             import json;
             x=json.load(open('/root/artifacts/nanobody_result.json'));
-            assert x['schema_version']==1,x;
+            assert x['schema_version']==2,x;
             assert x['status']=='qualified',x;
             assert x['target']=='{{ nanobody_target }}',x;
             assert x['epoch']=={{ nanobody_epoch | int }},x;

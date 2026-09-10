@@ -61,7 +61,12 @@ def _components(payload: dict, target: str) -> dict[str, dict]:
     return merged
 
 
-def _validated_wave(path: Path, expected: list[str], target: str) -> dict:
+def _validated_wave(
+    path: Path,
+    expected: list[str],
+    target: str,
+    require_structures: bool = False,
+) -> dict:
     payload = json.loads(path.read_text())
     found = _components(payload, target)
     if set(found) != set(expected) or len(found) != len(expected):
@@ -70,6 +75,8 @@ def _validated_wave(path: Path, expected: list[str], target: str) -> dict:
         )
     if int(payload.get("n", -1)) != len(expected):
         raise ValueError("wave result count does not match its input")
+    if require_structures and set(payload.get("structures", {})) != set(expected):
+        raise ValueError("wave result lacks required retained structures")
     return payload
 
 
@@ -103,6 +110,11 @@ def main() -> None:
     )
     parser.add_argument("--scorer", type=Path)
     parser.add_argument(
+        "--capture-structures",
+        action="store_true",
+        help="retain one refolded target complex per exact observation",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         help="score only the first N ranked sequences for a short update sweep",
@@ -129,6 +141,7 @@ def main() -> None:
         observation_id = str(uuid.uuid4())
     completed = []
     all_components: dict[str, dict] = {}
+    all_structures: dict[str, dict] = {}
 
     for wave_index, start in enumerate(range(0, len(sequences), args.wave_size)):
         wave = sequences[start : start + args.wave_size]
@@ -138,7 +151,9 @@ def main() -> None:
         _atomic_json(wave_input, {"target": args.target, "sequences": wave})
 
         if wave_output.exists():
-            payload = _validated_wave(wave_output, wave, args.target)
+            payload = _validated_wave(
+                wave_output, wave, args.target, args.capture_structures
+            )
             action = "RESUMED"
         else:
             temporary_output = args.output_dir / f".{stem}_exact.incomplete.json"
@@ -164,12 +179,22 @@ def main() -> None:
                 "--out",
                 str(temporary_output),
             ]
+            if args.capture_structures:
+                command.extend([
+                    "--structure-dir",
+                    str(args.output_dir / "structures"),
+                    "--require-structures",
+                ])
             subprocess.run(command, check=True)
-            payload = _validated_wave(temporary_output, wave, args.target)
+            payload = _validated_wave(
+                temporary_output, wave, args.target, args.capture_structures
+            )
             os.replace(temporary_output, wave_output)
             action = "READY"
 
         all_components.update(_components(payload, args.target))
+        for sequence, by_target in payload.get("structures", {}).items():
+            all_structures.setdefault(sequence, {}).update(by_target)
         completed.append(
             {
                 "wave": wave_index,
@@ -210,6 +235,7 @@ def main() -> None:
             "n": len(sequences),
             "wave_count": len(completed),
             "per_nanobody_components": {"0": all_components},
+            "structures": all_structures,
         },
     )
     print(

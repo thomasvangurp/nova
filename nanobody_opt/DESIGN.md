@@ -324,8 +324,9 @@ failed exact structures                             0
 
 The earlier 175-candidate pilot produced a one-observation score of 116.5, but
 the same sequence fell to roughly 252 on confirmation. That is direct evidence
-of a large winner's-curse effect in single BoltzGen observations and is why the
-publisher now refuses candidates with fewer than two exact observations.
+of a large winner's-curse effect in single BoltzGen observations. The current
+publisher requires eight independent exact observations, competitive score and
+category tails, and eight retained complexes with a stable interface pose.
 
 The first live selection had an incorrectly average-tied worst-repeat bootstrap
 median rank sum of 167.5, an
@@ -388,7 +389,8 @@ archive-bootstrap top-five rate as competitiveness.
 
 The operational fallback policy is therefore:
 
-1. publish the first two-observation qualified candidate as an anytime result;
+1. publish the first eight-observation, pose-stable qualified candidate as an
+   anytime result;
 2. continue exact-scoring the remaining Layer-2 bank off the Compound host;
 3. replace the checkpoint only after an improvement also passes a fresh repeat;
 4. resolve target/config/archive online for every epoch and reject a target
@@ -396,15 +398,25 @@ The operational fallback policy is therefore:
 
 ### Exact-scoring wave size
 
-Do not pass the entire epoch bank to `score_boltzgen_batch.py`. Its result is
-fail-closed and appears only after the complete input finishes, so a large input
-prevents the producer from publishing interim improvements. Run
-`score_boltzgen_waves.py` with 80-candidate waves on ten GPUs (eight candidates
-per GPU, `--predict-batch-size 1`). The workers still process eight candidates
-per GPU, but each BoltzGen call contains one sequence, matching the validator.
-Each wave is independently validated and
-atomically promoted, and the manifest permits safe resume. After every
-`WAVE_READY`, rank the accumulated observations and repeat-score only new
-candidates whose first observation can still beat the published worst-repeat
-score. This bounds the time between actionable checkpoint decisions to roughly
-one small exact wave rather than the full bank.
+Do not pass the entire epoch bank to `score_boltzgen_batch.py`. The autonomous
+race screens at most 160 candidates in ten-candidate waves with
+`--predict-batch-size 1`. It immediately assigns repeats 2--8 of the screen
+leader to separate GPU processes. If that leader fails, the next finalist is
+always tried. Once an incumbent qualifies, a challenger is repeated only when
+its one-shot p90 is within 20 rank-sum points of the confirmed incumbent; the
+remaining GPU budget returns to proposal discovery. Every exact JSON and
+retained refolded complex is atomic and resumable. Strict ranking runs after
+each repeated finalist, allowing the publisher to promote a qualified
+checkpoint without waiting for every other candidate.
+
+### Elite parent policy
+
+Proposal parents come from the public API, not the newest local output file.
+For each epoch the producer retains the two best validator-scored sequences
+from the preceding 16 completed rounds, then re-runs current Layer 2. All
+surviving parents receive proposal slots in round-robin order. This policy
+replays the two successful discovery paths: the epoch-25022 child was `M29L`
+from an epoch-25019 rank-2 parent scoring 44, and the epoch-25026 winner was
+`M29L` from an epoch-25016 rank-1 parent scoring 72. With a 32-parent bank both
+parents are retained when the selector is evaluated at the corresponding time.
+`M29L` is a context-dependent, winner-enriched proposal—not a hardcoded rule.

@@ -18,6 +18,8 @@
     pixi_url: >-
       https://github.com/prefix-dev/pixi/releases/download/v{{ pixi_version }}/pixi-x86_64-unknown-linux-musl.tar.gz
     pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
+    nanobody_producer_activate: false
+    nanobody_producer_session: nova-nanobody-producer
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -29,6 +31,16 @@
         sha256: 525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530
 
   tasks:
+    - name: Require committed deployment source
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: controller_status
+      changed_when: false
+      failed_when: controller_status.stdout | length > 0
+
     - name: Count effective CPUs
       ansible.builtin.shell: |
         if [ -f /sys/fs/cgroup/cpu.max ]; then
@@ -68,6 +80,8 @@
         - /root/metanano_shim
         - /root/nanobody_opt
         - /root/layer2_cache
+        - /root/live
+        - /root/artifacts
 
     - name: Fetch the live validator configuration
       ansible.builtin.get_url:
@@ -418,6 +432,35 @@
             print('PROTOCOL_OK',len(m))
       changed_when: false
 
+    - name: Compile autonomous producer and structure-stability modules
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -m
+          - py_compile
+          - /root/nanobody_opt/pose_stability.py
+          - /root/nanobody_opt/sequential_exact_race.py
+          - /root/nanobody_opt/run_live_producer.py
+          - /root/nanobody_opt/select_elite_parents.py
+          - /root/nanobody_opt/rank_exact.py
+      changed_when: false
+
+    - name: Verify autonomous producer entry points use the locked Pixi runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --environment
+          - bgen
+          - sequential-exact-race
+          - --
+          - --help
+      environment:
+        PIXI_COLOR: never
+      changed_when: false
+
     - name: Assert every external Layer-2 executable and database exists
       ansible.builtin.shell: |
         set -eu
@@ -520,8 +563,44 @@
       changed_when: "'REPAIRED' in ownership.stdout"
       register: ownership
 
+    - name: Stop prior autonomous nanobody producer before activation
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ nanobody_producer_session }}"]
+      register: producer_stop
+      changed_when: producer_stop.rc == 0
+      failed_when: false
+      when: nanobody_producer_activate | bool
+
+    - name: Start autonomous Pixi nanobody producer
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - "{{ nanobody_producer_session }}"
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --environment
+          - bgen
+          - live-producer
+          - --
+          - --poll-interval
+          - "30"
+      changed_when: true
+      when: nanobody_producer_activate | bool
+
+    - name: Confirm autonomous nanobody producer remains alive
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, "{{ nanobody_producer_session }}"]
+      changed_when: false
+      when: nanobody_producer_activate | bool
+
     - name: Report successful provisioning
       ansible.builtin.debug:
         msg: >-
           {{ bgen_check.stdout }}; {{ layer2_artifacts.stdout }};
-          {{ layer2_canary.stdout_lines[-1] }}; archive and checkpoints ready
+          {{ layer2_canary.stdout_lines[-1] }}; archive and checkpoints ready;
+          autonomous producer active={{ nanobody_producer_activate | bool }}

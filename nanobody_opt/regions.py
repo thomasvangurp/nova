@@ -10,9 +10,11 @@ The reference miner mutates random positions across all 117 residues
   * It searches ~117 positions when only ~35 can help.
 
 Region boundaries come from conserved VHH anchors rather than a numbering
-library, so this has no anarci/ImmuneBuilder dependency. Current accepted
-archive sequences use both WGxG and FGxG at the FR4 boundary:
-    Cys22 ... Trp(WVRQ) ... Cys96(YYC) ... [WF]GxG (FR4)
+library, so this has no anarci/ImmuneBuilder dependency. Many accepted archive
+sequences use WGxG or FGxG at the FR4 boundary, but elite variants can mutate
+that motif. Immunoglobulin FR4 is eleven residues in the supported aligned VHH
+family, which provides a bounded fallback after the other anchors agree:
+    Cys22 ... Trp(WVRQ) ... Cys96(YYC) ... [WF]GxG or 11-residue FR4
 """
 from dataclasses import dataclass
 
@@ -57,7 +59,15 @@ def find_regions(seq: str) -> Regions:
     # heuristic rejects current sequences that the validator numbers as VHH.
     import re
     m = re.search(r"[WF]G.G", seq[c2:])
-    if not m:
-        raise ValueError("no FR4 [WF]GxG anchor")
-    cdr3 = (c2 + 1, c2 + m.start())
+    if m:
+        fr4_start = c2 + m.start()
+    else:
+        # Validator-accepted P20809 leaders include FR4 variants such as
+        # ``FAAGT...`` that no longer match [WF]GxG.  Their V-domain alignment
+        # retains the standard 11-residue FR4.  Use that invariant only after
+        # the independent FR1, FR2, and FR3 anchors above have all matched.
+        fr4_start = len(seq) - 11
+        if fr4_start <= c2 + 3:
+            raise ValueError("no plausible 11-residue FR4 after CDR3")
+    cdr3 = (c2 + 1, fr4_start)
     return Regions(cdr1=cdr1, cdr2=cdr2, cdr3=cdr3)

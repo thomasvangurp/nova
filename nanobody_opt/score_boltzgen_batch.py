@@ -16,12 +16,15 @@ constructing the wrapper (__init__ reads the global into self.tmp_dir).
 """
 from __future__ import annotations
 import argparse
+import csv
+import hashlib
 import json
 import multiprocessing as mp
 import os
 import shutil
 import time
 import uuid
+from pathlib import Path
 
 
 # Every subnet_config key BoltzgenWrapper reads, enumerated from its source:
@@ -71,9 +74,57 @@ def _flatten_config(cfg: dict, target: str) -> dict:
     return flat
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _copy_refolded_complexes(
+    sequences: list[str],
+    targets: list[str],
+    chunk_dir: str,
+    structure_dir: str | None,
+    observation_id: str,
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Copy only refolded complexes out of the disposable BoltzGen tree."""
+    if structure_dir is None:
+        return {}
+    design_dir = Path(chunk_dir) / "outputs" / "intermediate_designs"
+    metrics_path = design_dir / "aggregate_metrics_analyze.csv"
+    if not metrics_path.is_file():
+        return {}
+    with metrics_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    by_id = {str(row.get("id")): row for row in rows}
+    copied: dict[str, dict[str, dict[str, str]]] = {}
+    destination = Path(structure_dir) / observation_id
+    destination.mkdir(parents=True, exist_ok=True)
+    for sequence in sequences:
+        sequence_hash = hashlib.sha256(sequence.encode("ascii")).hexdigest()
+        for target in targets:
+            record_id = f"{sequence_hash}_{target}_input"
+            row = by_id.get(record_id)
+            if row is None:
+                continue
+            filename = str(row.get("file_name") or f"{record_id}.cif")
+            source = design_dir / "refold_cif" / filename
+            if not source.is_file():
+                continue
+            target_path = destination / f"{sequence_hash}_{target}.cif"
+            shutil.copyfile(source, target_path)
+            copied.setdefault(sequence, {})[target] = {
+                "path": str(target_path),
+                "sha256": _sha256(target_path),
+            }
+    return copied
+
+
 def _worker(args):
     (shard_id, gpu, seqs, subnet_config, out_path, batch_size,
-     keep_work_dir, work_root) = args
+     keep_work_dir, work_root, structure_dir, observation_id) = args
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     import boltzgen.boltzgen_wrapper as bw
     shard_dir = os.path.join(work_root, f"shard{shard_id}")
@@ -88,6 +139,7 @@ def _worker(args):
     # predict() call. Scoring a shard's whole slice at once would rank our
     # candidates by an artefact of how we happened to group them.
     components = {}
+    structures = {}
     for start in range(0, len(seqs), batch_size):
         chunk = seqs[start:start + batch_size]
         # a fresh tmp dir per chunk: the wrapper reads predictions back out of a
@@ -109,13 +161,22 @@ def _worker(args):
             got = getattr(wrapper, "per_nanobody_components", {}) or {}
         for uid, by_seq in (got or {}).items():
             components.setdefault(uid, {}).update(by_seq)
+        for sequence, by_target in _copy_refolded_complexes(
+            chunk,
+            list(subnet_config["nanobody_target"]),
+            chunk_dir,
+            structure_dir,
+            observation_id,
+        ).items():
+            structures.setdefault(sequence, {}).update(by_target)
         if not keep_work_dir:
             shutil.rmtree(chunk_dir, ignore_errors=True)
         print(f"  shard {shard_id}: {min(start + batch_size, len(seqs))}/{len(seqs)}",
               flush=True)
     elapsed = time.time() - started
     json.dump({"shard": shard_id, "gpu": gpu, "n": len(seqs),
-               "seconds": elapsed, "components": components},
+               "seconds": elapsed, "components": components,
+               "structures": structures},
               open(out_path, "w"), default=str)
     return out_path, len(seqs), elapsed
 
@@ -145,6 +206,18 @@ def main():
         help="isolated shard/output directory; use a unique path for retained "
              "teacher complexes (default: /root/bgen_shards)",
     )
+    ap.add_argument(
+        "--structure-dir",
+        help=(
+            "copy each refolded target complex here before deleting temporary "
+            "BoltzGen outputs"
+        ),
+    )
+    ap.add_argument(
+        "--require-structures",
+        action="store_true",
+        help="refuse the exact result unless every sequence has a retained complex",
+    )
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -172,9 +245,10 @@ def main():
 
     work_root = os.path.abspath(a.work_root)
     os.makedirs(work_root, exist_ok=True)
+    observation_id = str(uuid.uuid4())
     jobs = [(i, gpus[i % len(gpus)], b, subnet_config,
              os.path.join(work_root, f"out{i}.json"), a.batch_size,
-             a.keep_work_dir, work_root)
+             a.keep_work_dir, work_root, a.structure_dir, observation_id)
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 
@@ -189,10 +263,13 @@ def main():
     # wholesale and silently drops its sequences -- 3 of 6 vanished before this
     # was caught. Merge at the SEQUENCE level instead.
     merged = {}
+    merged_structures = {}
     for path, n, secs in results:
         d = json.load(open(path))
         for uid, by_seq in d["components"].items():
             merged.setdefault(uid, {}).update(by_seq)
+        for sequence, by_target in d.get("structures", {}).items():
+            merged_structures.setdefault(sequence, {}).update(by_target)
         print(f"  shard {d['shard']} gpu {d['gpu']}: {n} seqs in {secs:.1f}s "
               f"({secs/max(n,1):.1f}s/seq)", flush=True)
     n_out = sum(len(v) for v in merged.values())
@@ -201,10 +278,16 @@ def main():
     if n_out != len(seqs):
         raise SystemExit(f"MERGE LOST SEQUENCES: submitted {len(seqs)}, "
                          f"merged {n_out}. Refusing to write a partial result.")
+    if a.require_structures and len(merged_structures) != len(seqs):
+        raise SystemExit(
+            f"STRUCTURE CAPTURE LOST COMPLEXES: submitted {len(seqs)}, retained "
+            f"{len(merged_structures)}. Refusing to write an incomplete result."
+        )
     json.dump({"target": a.target, "n": len(seqs), "wall_seconds": wall,
-               "observation_id": str(uuid.uuid4()),
+               "observation_id": observation_id,
                "predict_batch_size": a.batch_size,
-               "per_nanobody_components": merged}, open(a.out, "w"),
+               "per_nanobody_components": merged,
+               "structures": merged_structures}, open(a.out, "w"),
               indent=2, default=str)
     print(f"wrote {a.out}")
 
