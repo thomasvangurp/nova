@@ -156,7 +156,7 @@ def main() -> None:
                 "validator-compatible dense rank sum against historical reference "
                 "fields; not a prediction of the next stochastic observation"
             ),
-            "reference": rankings.get("reference", {}),
+            "reference": ranking.get("reference", {}),
             "aggregate_median_rank_sum": float(
                 winner["aggregate_median_rank_sum"]
             ),
