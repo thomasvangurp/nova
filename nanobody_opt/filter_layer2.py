@@ -206,6 +206,11 @@ def main() -> None:
     parser.add_argument("--cache-dir", type=Path, default=Path("layer2_cache"))
     parser.add_argument("--limit", type=int, default=0, help="canary/debug prefix only")
     parser.add_argument("--tail", type=int, default=0, help="canary/debug suffix only")
+    parser.add_argument(
+        "--igblast-only",
+        action="store_true",
+        help="stop after the sequence-only nativeness/humanness/VHH gate",
+    )
     args = parser.parse_args()
 
     rows = _load_candidates(args.input)
@@ -276,6 +281,32 @@ def main() -> None:
     print(f"IgBLAST: {len(survivors):,}/{len(rows):,} pass live thresholds")
     for reason, count in sorted(rejected.items(), key=lambda item: -item[1]):
         print(f"  rejected by {reason}: {count:,}")
+
+    if args.igblast_only:
+        for row in survivors:
+            row["igblast_passed"] = True
+        output = {
+            "thresholds": {
+                "min_nativeness_score": min_nativeness,
+                "min_human_framework_score": min_humanness,
+                "enforce_vhh_hallmarks": enforce_vhh,
+            },
+            "igblast_only": True,
+            "input_count": len(rows),
+            "pass_count": len(survivors),
+            "rejection_counts": rejected,
+            "sequences": [row["sequence"] for row in survivors],
+            "candidates": survivors,
+            "rejected": igblast_rejected,
+        }
+        args.output.write_text(json.dumps(output, indent=2) + "\n")
+        print(
+            f"IgBLAST-only: {len(survivors):,}/{len(rows):,} pass; "
+            f"wrote {args.output}"
+        )
+        if not survivors:
+            raise SystemExit("no candidate passed IgBLAST")
+        return
 
     if survivors:
         concurrency = max(1, min(128, args.concurrency))
