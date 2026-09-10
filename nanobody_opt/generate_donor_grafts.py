@@ -61,27 +61,45 @@ def graft_sequence(
     teacher_sequence: str,
     donor_sequence: str,
     preserved_raw_positions: set[int],
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Return an IMGT CDR/Vernier/contact graft and copied positions."""
     from abnumber import Chain
 
     teacher = Chain(teacher_sequence, scheme="imgt")
     donor = Chain(donor_sequence, scheme="imgt")
     numbered = [position for position, _ in teacher]
+    # AbNumber only exposes Vernier classification under Kabat numbering. Map
+    # those residues back by raw sequence index, then express the explicit
+    # backmutations in the IMGT numbering used for the CDR graft itself.
+    kabat_teacher = Chain(
+        teacher_sequence, scheme="kabat", cdr_definition="kabat"
+    )
+    vernier_raw_positions = {
+        index
+        for index, (position, _) in enumerate(kabat_teacher, start=1)
+        if position.is_in_vernier()
+    }
     invalid = sorted(
         position for position in preserved_raw_positions
         if position < 1 or position > len(numbered)
     )
     if invalid:
         raise ValueError(f"contact positions outside teacher sequence: {invalid}")
-    backmutations = [numbered[position - 1] for position in preserved_raw_positions]
+    all_raw_positions = preserved_raw_positions | vernier_raw_positions
+    backmutations = [
+        numbered[position - 1] for position in sorted(all_raw_positions)
+    ]
     grafted = teacher.graft_cdrs_onto(
         donor,
-        backmutate_vernier=True,
+        backmutate_vernier=False,
         backmutations=backmutations,
         name="teacher_paratope_low_liability_framework",
     )
-    return grafted.seq, [str(position) for position in backmutations]
+    return (
+        grafted.seq,
+        [str(numbered[position - 1]) for position in sorted(preserved_raw_positions)],
+        [str(numbered[position - 1]) for position in sorted(vernier_raw_positions)],
+    )
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -155,7 +173,7 @@ def main() -> None:
     seen = set()
     for donor in donor_frame.to_dict("records"):
         try:
-            sequence, backmutations = graft_sequence(
+            sequence, contact_backmutations, vernier_backmutations = graft_sequence(
                 teacher_sequence, donor["sequence"], preserved
             )
         except (AssertionError, ValueError, RuntimeError):
@@ -189,7 +207,8 @@ def main() -> None:
                         for left, right in zip(sequence, teacher_sequence)
                     ) + abs(len(sequence) - len(teacher_sequence)),
                     "max_jaccard_to_top50": float(max_jaccard),
-                    "contact_backmutations": backmutations,
+                    "contact_backmutations": contact_backmutations,
+                    "vernier_backmutations": vernier_backmutations,
                 })
         if reason:
             rejected[reason] = rejected.get(reason, 0) + 1
