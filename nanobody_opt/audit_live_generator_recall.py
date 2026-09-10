@@ -80,6 +80,8 @@ def _replay_epoch(
     config: Path,
     output_dir: Path,
     budget: int,
+    proposal_pool_limit: int,
+    minimum_residue_support: int,
 ) -> list[dict[str, Any]]:
     prior_epochs = [value for value in sorted(fields) if value < epoch]
     prior = pd.concat([fields[value] for value in prior_epochs], ignore_index=True)
@@ -159,7 +161,7 @@ def _replay_epoch(
         "--neighbor-seed-count", "32",
         "--minimum-seeds", "1",
         "--per-seed", "12",
-        "--proposal-limit", "384",
+        "--proposal-limit", str(proposal_pool_limit),
         "--framework-fraction", "0.5",
         "--framework-per-seed", "64",
         "--terminal-width", "17",
@@ -168,6 +170,7 @@ def _replay_epoch(
         "--single-mutation-fraction", "0.75",
         "--maximum-motif-mutations", "6",
         "--maximum-exhaustive-singles", "100000",
+        "--min-support", str(minimum_residue_support),
         "--random-seed", str(epoch * 100 + 1),
     ]
     completed = subprocess.run(
@@ -250,9 +253,17 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--holdout-epochs", type=int, default=20)
     parser.add_argument("--budget", type=int, default=320)
+    parser.add_argument("--proposal-pool-limit", type=int, default=384)
+    parser.add_argument("--minimum-residue-support", type=int, default=2)
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
-    if min(args.holdout_epochs, args.budget, args.workers) < 1:
+    if min(
+        args.holdout_epochs,
+        args.budget,
+        args.proposal_pool_limit,
+        args.minimum_residue_support,
+        args.workers,
+    ) < 1:
         parser.error("holdout, budget, and worker counts must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     snapshot = pd.read_csv(args.api_snapshot)
@@ -272,6 +283,8 @@ def main() -> None:
                 config=args.config,
                 output_dir=args.output_dir,
                 budget=args.budget,
+                proposal_pool_limit=args.proposal_pool_limit,
+                minimum_residue_support=args.minimum_residue_support,
             ): epoch
             for epoch in heldout
         }
@@ -294,6 +307,8 @@ def main() -> None:
         "layer2_replay": False,
         "parent_layer2_assumption": "historical public parents treated as valid",
         "budget": args.budget,
+        "proposal_pool_limit": args.proposal_pool_limit,
+        "minimum_residue_support": args.minimum_residue_support,
         "holdout_epochs": len(heldout),
         "failed_epochs": sorted(
             placements.loc[placements.generator_failed, "epoch"].unique().tolist()
