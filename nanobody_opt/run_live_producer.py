@@ -153,6 +153,7 @@ def _run_iteration(
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked",
             "--environment", "metanano",
             "filter-layer2", "--",
             "--input", str(elite_parents),
@@ -202,6 +203,7 @@ def _run_iteration(
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked",
             "--environment", "metanano",
             "filter-layer2", "--",
             "--input", str(candidates),
