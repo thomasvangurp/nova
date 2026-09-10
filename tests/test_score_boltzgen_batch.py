@@ -1,7 +1,28 @@
 import csv
 import hashlib
+import os
 
-from nanobody_opt.score_boltzgen_batch import _copy_refolded_complexes
+from nanobody_opt.score_boltzgen_batch import (
+    _configure_diagnostic_determinism,
+    _copy_refolded_complexes,
+)
+
+
+def test_diagnostic_seed_configures_pipeline_subprocesses(monkeypatch):
+    for name in (
+        "BOLTZGEN_DIAGNOSTIC_SEED",
+        "PYTHONHASHSEED",
+        "CUBLAS_WORKSPACE_CONFIG",
+        "NVIDIA_TF32_OVERRIDE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    _configure_diagnostic_determinism(25037)
+
+    assert os.environ["BOLTZGEN_DIAGNOSTIC_SEED"] == "25037"
+    assert os.environ["PYTHONHASHSEED"] == "25037"
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+    assert os.environ["NVIDIA_TF32_OVERRIDE"] == "0"
 
 
 def test_refolded_complex_is_copied_before_work_tree_cleanup(tmp_path):

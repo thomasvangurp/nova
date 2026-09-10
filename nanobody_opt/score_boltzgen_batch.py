@@ -82,6 +82,21 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _configure_diagnostic_determinism(seed: int | None) -> None:
+    """Configure child interpreters for an opt-in deterministic parity run."""
+    if seed is None:
+        return
+    value = str(seed)
+    os.environ["BOLTZGEN_DIAGNOSTIC_SEED"] = value
+    # These variables must exist before each pipeline interpreter starts.
+    # sitecustomize can seed Python/NumPy/Torch, but PYTHONHASHSEED is read
+    # while Python itself starts and cuBLAS selects deterministic kernels
+    # during CUDA initialization.
+    os.environ["PYTHONHASHSEED"] = value
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+
+
 def _copy_refolded_complexes(
     sequences: list[str],
     targets: list[str],
@@ -130,8 +145,7 @@ def _worker(args):
     # Set this only inside the spawned shard worker.  The pipeline itself uses
     # fresh Python subprocesses, whose opt-in sitecustomize hook consumes the
     # value before importing Torch.  Normal live scoring leaves it unset.
-    if diagnostic_seed is not None:
-        os.environ["BOLTZGEN_DIAGNOSTIC_SEED"] = str(diagnostic_seed)
+    _configure_diagnostic_determinism(diagnostic_seed)
     import boltzgen.boltzgen_wrapper as bw
     shard_dir = os.path.join(work_root, f"shard{shard_id}")
     # rebind BEFORE constructing: __init__ copies the global into self.tmp_dir

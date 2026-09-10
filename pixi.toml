@@ -15,7 +15,11 @@ requires-pixi = ">=0.73,<0.74"
 conda-forge = { mapping = { triton = false, libcublas = "nvidia-cublas-cu12", cuda-nvrtc = "nvidia-cuda-nvrtc-cu12" } }
 
 [environments]
-bgen = { features = ["bgen"], no-default-feature = true }
+# Live exact scoring uses the validator's documented Python 3.12 + official
+# PyTorch cu126 wheel stack. Keep the former conda-forge solve available only
+# for controlled parity comparisons.
+bgen = { features = ["validator-bgen"], no-default-feature = true }
+bgen-conda = { features = ["bgen"], no-default-feature = true }
 metanano = { features = ["metanano"], no-default-feature = true }
 validator-bgen = { features = ["validator-bgen"], no-default-feature = true }
 
@@ -70,11 +74,9 @@ CUDA_CACHE_MAXSIZE = "4294967296"
 BOLTZGEN_CACHE = "/root/.boltzgen"
 PYTHONPATH = "/root/bgen_shim:/root/external_tools/boltzgen/src"
 
-# Parity environment for the validator's documented install_deps.sh path.
-# The production scorer uses the conda-forge CUDA solve above; this environment
-# deliberately uses Python 3.12 and PyTorch's official cu126 wheels so an A/B
-# run can attribute metric drift instead of mutating either environment with
-# an unrecorded pip install.
+# Runtime for the validator's documented install_deps.sh path. Live scoring and
+# parity diagnostics both use Python 3.12 and PyTorch's official cu126 wheels;
+# the old conda-forge solve remains isolated as the bgen-conda environment.
 [feature.validator-bgen.dependencies]
 python = "3.12.*"
 
@@ -124,6 +126,29 @@ PYTHONPATH = "/root/bgen_shim:/root/external_tools/boltzgen/src"
 [feature.validator-bgen.tasks]
 check-validator-bgen = "python -c \"import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.device_count())\""
 validator-exact-score = "python /root/nanobody_opt/score_boltzgen_batch.py"
+check = "python -c \"import torch; from triton.runtime import driver; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count(), driver.active.get_current_device())\""
+boltzgen = "python -m boltzgen.cli.boltzgen"
+build-design-spec = "python /root/nanobody_opt/build_design_spec.py"
+select-structural-teachers = "python /root/nanobody_opt/select_structural_teachers.py"
+exact-score = "python /root/nanobody_opt/score_boltzgen_batch.py"
+exact-score-waves = "cd /root && python -m nanobody_opt.score_boltzgen_waves"
+rank-exact = "cd /root && python -m nanobody_opt.rank_exact"
+local-neighborhood = "cd /root && python -m nanobody_opt.local_neighborhood"
+interface-contacts = "python /root/nanobody_opt/interface_contacts.py"
+pose-stability = "cd /root && python -m nanobody_opt.pose_stability"
+sequential-exact-race = "cd /root && python -m nanobody_opt.sequential_exact_race"
+live-producer = "cd /root && python -m nanobody_opt.run_live_producer"
+summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contacts.py"
+scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_terminals"
+harvest-inverse-fold = "cd /root && python -m nanobody_opt.harvest_inverse_fold"
+analyze-epoch-winners = "cd /root && python -m nanobody_opt.analyze_epoch_winners"
+select-elite-parents = "cd /root && python -m nanobody_opt.select_elite_parents"
+audit-validator-score = "cd /root && python -m nanobody_opt.audit_validator_score"
+rank-live-fields = "cd /root && python -m nanobody_opt.rank_exact"
+score-candidate-liability = "cd /root && python -m nanobody_opt.score_candidate_liability"
+qualify-screen-leader = "cd /root && python -m nanobody_opt.qualify_screen_leader"
+train-parent-relative-ranker = "cd /root && python -m nanobody_opt.train_parent_relative_ranker"
+train-pairwise-ranker-v2 = "cd /root && python -m nanobody_opt.train_pairwise_ranker_v2"
 
 # Layer-2 remains isolated from the scorer, but ImmuneBuilder automatically uses
 # CUDA when available. Its neural structure-prediction stage therefore gets its

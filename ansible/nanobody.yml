@@ -410,8 +410,11 @@
     - name: Verify BoltzGen imports and sees every rented GPU
       ansible.builtin.command: >-
         /root/bgen_python.sh -c
-        "import torch,boltzgen; from triton.runtime import driver;
+        "import sys,torch,boltzgen; from triton.runtime import driver;
         assert torch.cuda.is_available();
+        assert sys.version_info[:2]==(3,12),sys.version;
+        assert torch.__version__=='2.7.1+cu126',torch.__version__;
+        assert torch.version.cuda=='12.6',torch.version.cuda;
         print('BOLTZGEN_OK', torch.__version__, torch.cuda.device_count(),
         driver.active.get_current_device())"
       changed_when: false

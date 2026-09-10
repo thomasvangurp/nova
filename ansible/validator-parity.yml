@@ -1,7 +1,7 @@
 ---
-# Install the validator's documented Python/PyTorch scoring environment beside
-# the production scorer.  This playbook never activates, restarts, or stops the
-# live producer; it exists solely for controlled cross-environment A/B runs.
+# Install the validator's documented Python/PyTorch scoring environment without
+# activating, restarting, or stopping the live producer. The full nanobody play
+# installs this same locked feature as the live ``bgen`` environment.
 - name: Install locked validator parity environment
   hosts: all
   remote_user: root
