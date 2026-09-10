@@ -21,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from nanobody_opt.mutation_network import update_observation_store
 from nanobody_opt.select_elite_parents import select_elite_parents
 from nanobody_opt.simulate_round import METRICS, dense_rank_sums
 
@@ -112,6 +113,28 @@ def _replay_epoch(
             for item in selected
         ],
     })
+    mutation_database = epoch_dir / "prior_observations.sqlite"
+    update_observation_store(
+        mutation_database,
+        (
+            {
+                "observation_id": (
+                    f"audit-public:epoch{int(row.epoch)}:{row.sequence}"
+                ),
+                "sequence": str(row.sequence),
+                "score": float(row.final_score),
+                "score_kind": "validator_final_rank_sum",
+                "source": "heldout_prior_public_field",
+                "epoch": int(row.epoch),
+                "target": target,
+                "observation_count": 1,
+                "metrics": {
+                    name: float(getattr(row, name)) for name in METRICS
+                },
+            }
+            for row in prior.itertuples(index=False)
+        ),
+    )
     winners = []
     for value in prior_epochs:
         leader = _rank_field(fields[value]).iloc[0]
@@ -130,6 +153,7 @@ def _replay_epoch(
         "--config", str(config),
         "--layer2-seeds", str(parent_path),
         "--winner-priors", str(winner_path),
+        "--mutation-observations", str(mutation_database),
         "--output", str(candidates),
         "--seed-count", "32",
         "--neighbor-seed-count", "32",
@@ -178,6 +202,20 @@ def _replay_epoch(
     for item in heldout.itertuples(index=False):
         sequence = str(item.sequence)
         route = route_by_sequence.get(sequence, {})
+        nearest_distance, nearest_sequence, nearest_parent = min(
+            (
+                sum(
+                    left != right
+                    for left, right in zip(
+                        sequence, str(parent["sequence"]), strict=True
+                    )
+                ),
+                str(parent["sequence"]),
+                parent,
+            )
+            for parent in selected
+            if len(str(parent["sequence"])) == len(sequence)
+        )
         rows.append({
             "epoch": epoch,
             "actual_field_rank": int(item.actual_field_rank),
@@ -185,6 +223,12 @@ def _replay_epoch(
             "sequence": sequence,
             "parent_count": len(selected),
             "proposal_count": len(generated),
+            "nearest_parent_distance": nearest_distance,
+            "nearest_parent_sequence": nearest_sequence,
+            "nearest_parent_lane": nearest_parent["parent_selection_lane"],
+            "nearest_parent_history_scope": nearest_parent.get(
+                "parent_history_scope"
+            ),
             "organically_generated": sequence in route_by_sequence,
             "in_top320": sequence in shortlist_rank,
             "screen_rank": shortlist_rank.get(sequence),
