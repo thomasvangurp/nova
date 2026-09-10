@@ -170,6 +170,19 @@ class MutationNetwork:
             ))
         self.nodes.sort(key=lambda node: (node.score, node.sequence))
         self._by_sequence = {node.sequence: node for node in self.nodes}
+        self._contacts: dict[str, set[int]] = {}
+        for sequence, observations in grouped.items():
+            contacts = set()
+            for item in observations:
+                pose = item.get("pose_stability") or {}
+                contacts.update(
+                    int(position) - 1
+                    for position in pose.get(
+                        "consensus_nanobody_contact_positions", []
+                    )
+                    if 1 <= int(position) <= len(sequence)
+                )
+            self._contacts[sequence] = contacts
         self._vectors = np.asarray([
             [AA_INDEX[residue] for residue in node.sequence]
             for node in self.nodes
@@ -195,7 +208,11 @@ class MutationNetwork:
         adjustment = 0.0
         supported = 0
         uncertainty_squared = 0.0
-        for context in mutation_contexts(source, candidate):
+        for context in mutation_contexts(
+            source,
+            candidate,
+            contact_positions=self._contacts.get(source, set()),
+        ):
             key = (
                 int(context["position"]),
                 str(context["from_residue"]),
@@ -660,6 +677,24 @@ def rebuild_nearest_edges(
     with _connect(path) as connection:
         edge_rows: dict[tuple[int, int], tuple[int, int, int, str, str]] = {}
         scores: dict[str, float] = {}
+        contact_rows = connection.execute(
+            """
+            SELECT n.id, o.pose_json FROM nodes n
+            JOIN observations o ON o.node_id=n.id
+            WHERE n.target=? AND o.pose_json IS NOT NULL
+            """,
+            (target,),
+        ).fetchall()
+        contacts_by_node_id: dict[int, set[int]] = defaultdict(set)
+        for node_id, pose_json in contact_rows:
+            pose = json.loads(pose_json)
+            contacts_by_node_id[int(node_id)].update(
+                int(position) - 1
+                for position in pose.get(
+                    "consensus_nanobody_contact_positions", []
+                )
+                if int(position) >= 1
+            )
         lengths = connection.execute(
             """
             SELECT length, COUNT(*) FROM nodes
@@ -716,7 +751,15 @@ def rebuild_nearest_edges(
                             distance,
                             json.dumps(mutations(left, right)),
                             json.dumps(
-                                mutation_contexts(left, right), sort_keys=True
+                                mutation_contexts(
+                                    left,
+                                    right,
+                                    contact_positions=(
+                                        contacts_by_node_id[key[0]]
+                                        | contacts_by_node_id[key[1]]
+                                    ),
+                                ),
+                                sort_keys=True,
                             ),
                         )
 
