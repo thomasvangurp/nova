@@ -20,6 +20,7 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
         wave_input = Path(command[command.index("--sequences") + 1])
         output = Path(command[command.index("--out") + 1])
         target = command[command.index("--target") + 1]
+        assert Path(command[command.index("--work-root") + 1]) == output_dir / "work"
         items = json.loads(wave_input.read_text())["sequences"]
         output.write_text(
             json.dumps(

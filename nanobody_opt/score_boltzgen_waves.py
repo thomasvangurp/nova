@@ -176,6 +176,8 @@ def main() -> None:
                 str(args.shards_per_gpu),
                 "--batch-size",
                 str(args.predict_batch_size),
+                "--work-root",
+                str(args.output_dir / "work"),
                 "--out",
                 str(temporary_output),
             ]
