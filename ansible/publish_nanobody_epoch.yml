@@ -128,7 +128,7 @@
     - name: Revalidate the ranked shortlist with the current Layer-2 gates
       ansible.builtin.command:
         argv:
-          - /root/.pixi/bin/pixi
+          - /usr/local/bin/pixi
           - run
           - -e
           - metanano
