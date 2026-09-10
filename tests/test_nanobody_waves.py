@@ -48,6 +48,8 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
         "8",
         "--predict-batch-size",
         "8",
+        "--limit",
+        "10",
     ]
     monkeypatch.setattr(sys, "argv", arguments)
 
@@ -55,15 +57,15 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
 
     manifest = json.loads((output_dir / "manifest.json").read_text())
     combined = json.loads((output_dir / "exact_all.json").read_text())
-    assert len(calls) == 3
-    assert manifest["completed_count"] == 17
+    assert len(calls) == 2
+    assert manifest["completed_count"] == 10
     assert manifest["observation_id"] == combined["observation_id"]
-    assert [item["count"] for item in manifest["completed_waves"]] == [8, 8, 1]
-    assert combined["n"] == 17
-    assert len(combined["per_nanobody_components"]["0"]) == 17
+    assert [item["count"] for item in manifest["completed_waves"]] == [8, 2]
+    assert combined["n"] == 10
+    assert len(combined["per_nanobody_components"]["0"]) == 10
 
     waves.main()
 
-    assert len(calls) == 3
+    assert len(calls) == 2
     resumed = json.loads((output_dir / "exact_all.json").read_text())
     assert resumed["observation_id"] == combined["observation_id"]

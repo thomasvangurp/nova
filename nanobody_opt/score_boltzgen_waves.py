@@ -102,11 +102,22 @@ def main() -> None:
         help="sequences sharing one BoltzGen predict call; validator parity requires one",
     )
     parser.add_argument("--scorer", type=Path)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="score only the first N ranked sequences for a short update sweep",
+    )
     args = parser.parse_args()
 
-    if args.wave_size < 1 or args.predict_batch_size < 1:
-        raise SystemExit("wave and predict batch sizes must be positive")
+    if (
+        args.wave_size < 1
+        or args.predict_batch_size < 1
+        or (args.limit is not None and args.limit < 1)
+    ):
+        raise SystemExit("wave size, predict batch size, and limit must be positive")
     sequences = _sequences(args.sequences)
+    if args.limit is not None:
+        sequences = sequences[: args.limit]
     if not sequences:
         raise SystemExit(f"no sequences parsed from {args.sequences}")
     scorer = args.scorer or Path(__file__).with_name("score_boltzgen_batch.py")
