@@ -25,6 +25,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import diversity, gates
 from nanobody_opt.regions import find_regions
+from nanobody_opt.simulate_round import dense_rank_sums
 
 METRICS = {
     "design_iiptm": "max",
@@ -53,12 +54,7 @@ def _rank_sum(frame: pd.DataFrame) -> np.ndarray:
     missing = set(METRICS) - set(frame.columns)
     if missing:
         raise ValueError(f"archive lacks exact metrics: {sorted(missing)}")
-    total = np.zeros(len(frame), dtype=np.float64)
-    for metric, direction in METRICS.items():
-        total += frame[metric].rank(
-            ascending=(direction == "min"), method="average"
-        ).to_numpy()
-    return total
+    return dense_rank_sums(frame, METRICS)
 
 
 def _motif(sequence: str, bounds: tuple[int, int]) -> str:

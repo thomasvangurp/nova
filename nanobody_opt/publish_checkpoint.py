@@ -150,12 +150,20 @@ def main() -> None:
             ],
         },
         "selection": {
-            "method": "worst-repeat-bootstrap-median-rank-sum",
+            "method": "worst-repeat-historical-field-median-dense-rank-sum",
             "score": selection_score,
+            "score_semantics": (
+                "validator-compatible dense rank sum against historical reference "
+                "fields; not a prediction of the next stochastic observation"
+            ),
+            "reference": rankings.get("reference", {}),
             "aggregate_median_rank_sum": float(
                 winner["aggregate_median_rank_sum"]
             ),
             "aggregate_p90_rank_sum": float(winner["aggregate_p90_rank_sum"]),
+            "aggregate_median_category_rank_sums": winner.get(
+                "aggregate_median_category_rank_sums", {}
+            ),
         },
         "challenge": {
             "structure": str(nanobody["structure"]),

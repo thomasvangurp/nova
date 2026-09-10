@@ -22,7 +22,7 @@ import yaml
 
 from nanobody_opt import diversity, gates
 from nanobody_opt.build_teacher_redesign_spec import contact_positions
-from nanobody_opt.simulate_round import METRICS
+from nanobody_opt.simulate_round import METRICS, dense_rank_sums
 
 
 CONSERVATIVE_GROUPS = tuple(map(frozenset, (
@@ -76,12 +76,9 @@ def select_donors(
     if frame.empty:
         raise ValueError("no same-length donors pass the liability ceiling")
 
-    total = np.zeros(len(frame), dtype=np.float64)
-    for metric, direction in METRICS.items():
-        total += pd.to_numeric(frame[metric], errors="coerce").rank(
-            ascending=(direction == "min"), method="average", na_option="bottom"
-        ).to_numpy()
-    frame["donor_rank_sum"] = total
+    frame["donor_rank_sum"] = dense_rank_sums(
+        frame, METRICS, na_option="bottom"
+    )
     return frame.sort_values(
         ["donor_rank_sum", "liability_score", "sequence"], kind="stable"
     ).head(min(limit, len(frame)))

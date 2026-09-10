@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse, json
 import numpy as np, pandas as pd
 
+from nanobody_opt.simulate_round import dense_rank_sums
+
 METRICS = {
     "design_iiptm": "max", "design_ptm": "max", "design_to_target_iptm": "max",
     "min_design_to_target_pae": "min", "interaction_pae": "min",
@@ -31,7 +33,7 @@ def main():
     a = ap.parse_args()
 
     df = pd.read_csv(a.archive).drop_duplicates(subset=["sequence"]).reset_index(drop=True)
-    rank_sum = sum(df[m].rank(ascending=(d == "min")).values for m, d in METRICS.items())
+    rank_sum = dense_rank_sums(df, METRICS)
     order = np.argsort(rank_sum)
     # span the range: best, worst, and evenly spaced quantiles between
     idx = [int(order[int(q * (len(order) - 1))]) for q in np.linspace(0, 1, a.n)]

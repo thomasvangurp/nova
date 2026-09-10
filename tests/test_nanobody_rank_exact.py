@@ -4,11 +4,62 @@ import sys
 import pandas as pd
 
 from nanobody_opt import rank_exact
-from nanobody_opt.simulate_round import METRICS
+from nanobody_opt.simulate_round import (
+    METRICS,
+    category_rank_sums,
+    rank_sum_in_field,
+)
 
 
 def _metrics(value):
     return {name: float(value) for name in METRICS}
+
+
+def test_rank_sum_uses_validator_dense_ties():
+    # With average ranks five identical rows would score 30 total. The validator
+    # assigns every tied value dense rank 1, split 5 + 3 + 2 by category.
+    mine = _metrics(1)
+    field = pd.DataFrame([_metrics(1) for _ in range(4)])
+
+    assert category_rank_sums(mine, field) == {
+        "confidence": 5.0,
+        "physical_interaction": 3.0,
+        "developability": 2.0,
+    }
+    assert rank_sum_in_field(mine, field) == 10.0
+
+
+def test_dashboard_payload_becomes_unique_validator_field():
+    first = _metrics(1)
+    second = _metrics(2)
+    payload = {
+        "success": True,
+        "data": [
+            {"nanobodies": [{
+                **first,
+                "protein_name": "P20809",
+                "sequence": "AAAA",
+                "sequence_hash": "same",
+            }]},
+            {"nanobodies": [{
+                **second,
+                "protein_name": "P20809",
+                "sequence": "AAAA",
+                "sequence_hash": "same",
+            }]},
+            {"nanobodies": [{
+                **second,
+                "protein_name": "OTHER",
+                "sequence": "BBBB",
+                "sequence_hash": "other",
+            }]},
+        ],
+    }
+
+    field = rank_exact.leaderboard_field(payload, "P20809")
+
+    assert len(field) == 1
+    assert field.iloc[0].to_dict() == first
 
 
 def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch):
@@ -69,3 +120,4 @@ def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch
     assert payload["candidate_count"] == 1
     assert payload["sequences"] == ["FRESH"]
     assert payload["excluded_sequence_count"] == 1
+    assert payload["rank_method"] == "dense"

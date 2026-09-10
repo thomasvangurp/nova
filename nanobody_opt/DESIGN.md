@@ -327,7 +327,8 @@ the same sequence fell to roughly 252 on confirmation. That is direct evidence
 of a large winner's-curse effect in single BoltzGen observations and is why the
 publisher now refuses candidates with fewer than two exact observations.
 
-The live selection had a worst-repeat bootstrap median rank sum of 167.5, an
+The first live selection had an incorrectly average-tied worst-repeat bootstrap
+median rank sum of 167.5, an
 aggregate median of 159.75, and aggregate p90 of 175.2 over 64 deterministic
 49-competitor fields sampled from the recent 300 archive rows. It passed both
 exact observations, the refreshed archive uniqueness check, current Layer 1,
@@ -336,13 +337,20 @@ published a schema-version-1 checkpoint for epoch 25021. The Compound master
 then pulled it over the configured SCP path and committed it alongside the
 unchanged 20-molecule portfolio.
 
-This proves that the pipeline can produce and transport a valid,
-repeat-stable live submission. The epoch-25022 dashboard subsequently placed
-that submission second, which is direct evidence that the family is
-competitive. The 167.5 selection score is a bootstrap statistic against
-randomly sampled historical archive rows and is not numerically comparable to
-the dashboard rank sum against the actual one-submission-per-UID field. The
-live placement, not a bootstrap placement estimate, is authoritative.
+This proves that the pipeline can produce and transport valid, repeat-stable
+live submissions, but the initial attribution was wrong. The 167.5 sequence
+was submitted in epoch 25021 and the API scored it 231 (rank 46). Epoch 25022
+used the third repeat-qualified bank sequence, locally recorded as 169.75, and
+the API scored that exact sequence hash 53 (rank 2 of 42), two points behind
+the winner.
+
+The discrepancy was partly a reporting-category error and partly an actual
+implementation bug: the validator assigns dense ranks to each metric while the
+R&D utilities used pandas' default average ranks. Against the exact epoch-25022
+API field, the runner-up's API vector scores 53 with dense ranks—the exact API
+result—but 106.5 with average ranks. Every selection and proposal-ranking path
+now uses the validator-compatible dense method and labels bootstrap field scores
+as field-relative statistics, not predictions of the next live score.
 
 The failure is structural rather than a Layer-1/Layer-2 problem. Against the
 latest 300 archive rows, the repeat winner ranked 206/301 on `design_iiptm`,

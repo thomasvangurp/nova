@@ -22,7 +22,7 @@ from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 
-from nanobody_opt.simulate_round import METRICS
+from nanobody_opt.simulate_round import METRICS, dense_rank_sums
 
 
 COMMIT_API = (
@@ -102,13 +102,9 @@ def rank_epoch(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"archive lacks score metrics: {sorted(missing)}")
     ranked = frame.copy()
-    total = np.zeros(len(ranked), dtype=np.float64)
-    for metric, direction in METRICS.items():
-        values = pd.to_numeric(ranked[metric], errors="coerce")
-        total += values.rank(
-            ascending=(direction == "min"), method="average", na_option="bottom"
-        ).to_numpy()
-    ranked["epoch_rank_sum"] = total
+    ranked["epoch_rank_sum"] = dense_rank_sums(
+        ranked, METRICS, na_option="bottom"
+    )
     return ranked.sort_values(
         ["epoch_rank_sum", "sequence"], kind="stable"
     ).reset_index(drop=True)

@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from nanobody_opt.simulate_round import dense_rank_sums
+
 
 STRUCTURAL_METRICS = {
     "design_iiptm": "max",
@@ -33,13 +35,7 @@ def structural_rank_sum(frame: pd.DataFrame) -> np.ndarray:
     missing = set(STRUCTURAL_METRICS) - set(frame.columns)
     if missing:
         raise ValueError(f"archive lacks structural metrics: {sorted(missing)}")
-    total = np.zeros(len(frame), dtype=np.float64)
-    for metric, direction in STRUCTURAL_METRICS.items():
-        values = pd.to_numeric(frame[metric], errors="coerce")
-        total += values.rank(
-            ascending=(direction == "min"), method="average", na_option="bottom"
-        ).to_numpy()
-    return total
+    return dense_rank_sums(frame, STRUCTURAL_METRICS, na_option="bottom")
 
 
 def select_teachers(frame: pd.DataFrame, recent: int, count: int) -> pd.DataFrame:

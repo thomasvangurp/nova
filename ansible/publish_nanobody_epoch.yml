@@ -159,6 +159,8 @@
           --exclude-file {{ published_ledger | quote }}
           --minimum-observations 2 --recent 300 --field-size 49
           --bootstrap-fields 64 --limit 30
+          --before-epoch {{ nanobody_epoch | int }}
+          --api-field-count 10 --minimum-api-fields 3
       changed_when: true
 
     - name: Revalidate the ranked shortlist with the current Layer-2 gates

@@ -24,7 +24,7 @@ DIR = {"design_iiptm":"max","design_ptm":"max","design_to_target_iptm":"max",
        "min_design_to_target_pae":"min","interaction_pae":"min","plip_hbonds_refolded":"max",
        "plip_saltbridge_refolded":"max","delta_sasa_refolded":"max",
        "liability_score":"min","liability_num_violations":"min"}
-y = sum(df[m].rank(ascending=(d=="min")).values for m,d in DIR.items())
+y = sum(df[m].rank(method="dense", ascending=(d=="min")).values for m,d in DIR.items())
 arr = np.array([list(s) for s in df.sequence]); order = np.argsort(y)
 existing = set(df.sequence.values)
 top50 = arr[order[:50]]

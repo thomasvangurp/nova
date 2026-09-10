@@ -12,7 +12,9 @@ eras (oldest rows average design_iiptm 0.385 and delta_sasa 1223; recent rows
 0.758 and 717), and our scorer was validated against the recent era only.
 
 Each candidate is evaluated in its own field so the candidates do not compete
-with each other, which is what actually happens: only one is submitted.
+with each other, which is what actually happens: only one is submitted.  The
+validator uses pandas ``method="dense"`` for every metric.  Ties therefore
+consume one rank, not the average of all occupied ordinal positions.
 """
 from __future__ import annotations
 import argparse, json
@@ -24,15 +26,69 @@ METRICS = {"design_iiptm": "max", "design_ptm": "max", "design_to_target_iptm": 
            "delta_sasa_refolded": "max", "liability_score": "min",
            "liability_num_violations": "min"}
 
+METRIC_CATEGORIES = {
+    "confidence": (
+        "design_iiptm",
+        "design_ptm",
+        "design_to_target_iptm",
+        "min_design_to_target_pae",
+        "interaction_pae",
+    ),
+    "physical_interaction": (
+        "plip_hbonds_refolded",
+        "plip_saltbridge_refolded",
+        "delta_sasa_refolded",
+    ),
+    "developability": (
+        "liability_score",
+        "liability_num_violations",
+    ),
+}
+
+
+def dense_rank_sums(
+    frame: pd.DataFrame,
+    metrics: dict[str, str] = METRICS,
+    *,
+    na_option: str = "keep",
+) -> np.ndarray:
+    """Mirror ``BoltzgenWrapper._rank_metrics_dataframe`` exactly.
+
+    The upstream validator calls ``Series.rank(method="dense")`` independently
+    for each configured metric, then sums those dense ranks.  Keeping this in
+    one helper prevents proposal generators and live selection from silently
+    reverting to pandas' default average-tie behavior.
+    """
+    missing = set(metrics) - set(frame.columns)
+    if missing:
+        raise ValueError(f"field lacks validator metrics: {sorted(missing)}")
+    total = np.zeros(len(frame), dtype=np.float64)
+    for metric, direction in metrics.items():
+        values = pd.to_numeric(frame[metric], errors="coerce")
+        total += values.rank(
+            method="dense",
+            ascending=(direction == "min"),
+            na_option=na_option,
+        ).to_numpy()
+    return total
+
+
+def category_rank_sums(mine: dict, field: pd.DataFrame) -> dict[str, float]:
+    """Return the three dashboard category sums for one candidate."""
+    combined = pd.concat(
+        [field[list(METRICS)], pd.DataFrame([{m: mine[m] for m in METRICS}])],
+        ignore_index=True,
+    )
+    result = {}
+    for category, names in METRIC_CATEGORIES.items():
+        directions = {name: METRICS[name] for name in names}
+        result[category] = float(dense_rank_sums(combined, directions)[-1])
+    return result
+
 
 def rank_sum_in_field(mine: dict, field: pd.DataFrame) -> float:
-    """rank_sum of `mine` against `field`, ties averaged, exactly as upstream."""
-    total = 0.0
-    for m, d in METRICS.items():
-        col = np.append(field[m].values, mine[m])
-        s = pd.Series(col).rank(ascending=(d == "min"), method="average")
-        total += float(s.iloc[-1])
-    return total
+    """Validator ``rank_sum`` of ``mine`` against a competitor field."""
+    return float(sum(category_rank_sums(mine, field).values()))
 
 
 def main():
