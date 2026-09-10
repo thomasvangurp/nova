@@ -6,6 +6,7 @@ from nanobody_opt.backtest_mutation_ranker import (
     Proposal,
     allocate_budget,
     generate_proposals,
+    live_acceptance,
     mutation_context_diagnostics,
     percentile_targets,
     select_parents,
@@ -105,3 +106,14 @@ def test_mutation_context_diagnostic_checks_repeated_ordering():
     assert np.isclose(
         summary["recurring_mutations"]["M29L"]["ordering_spearman"], 1.0
     )
+
+
+def test_live_acceptance_fails_closed_on_near_random_ranker():
+    summary = pd.DataFrame({
+        "winner_predicted_rank": [12] * 20,
+        "winner_predicted_percentile": [0.4] * 20,
+        "field_spearman": [0.0] * 20,
+    })
+    accepted, checks = live_acceptance(summary)
+    assert accepted is False
+    assert not any(checks.values())

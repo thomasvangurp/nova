@@ -49,17 +49,47 @@ AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 AA_INDEX = {residue: index for index, residue in enumerate(AMINO_ACIDS)}
 DEFAULT_RANDOM_SEED = 20260910
 MODEL_SPECS: dict[str, dict[str, Any]] = {
-    "extra_trees": {
+    "extra_trees_metrics": {
+        "family": "extra_trees",
+        "target": "metric_percentiles",
         "n_estimators": 192,
         "max_features": 0.35,
         "min_samples_leaf": 2,
     },
-    "random_forest": {
+    "random_forest_metrics": {
+        "family": "random_forest",
+        "target": "metric_percentiles",
         "n_estimators": 192,
         "max_features": 0.25,
         "min_samples_leaf": 2,
         "max_samples": 0.80,
     },
+    "extra_trees_rank": {
+        "family": "extra_trees",
+        "target": "final_rank_percentile",
+        "n_estimators": 192,
+        "max_features": 0.35,
+        "min_samples_leaf": 2,
+    },
+    "random_forest_rank": {
+        "family": "random_forest",
+        "target": "final_rank_percentile",
+        "n_estimators": 192,
+        "max_features": 0.25,
+        "min_samples_leaf": 2,
+        "max_samples": 0.80,
+    },
+    "ridge_rank": {
+        "family": "ridge",
+        "target": "final_rank_percentile",
+        "alpha": 100.0,
+    },
+}
+
+LIVE_ACCEPTANCE = {
+    "minimum_internal_top5_rate": 0.35,
+    "minimum_internal_median_field_spearman": 0.15,
+    "maximum_internal_median_winner_percentile": 0.25,
 }
 
 
@@ -294,8 +324,8 @@ def training_examples(
         for row_index, sequence in enumerate(usable.sequence.astype(str)):
             sequences.append(sequence)
             parents.append(nearest_parent(sequence, bank))
-            targets.append(target[row_index])
             percentile = (float(actual[sequence]) - 1.0) / max(len(usable) - 1, 1)
+            targets.append(np.append(target[row_index], percentile))
             weights.append(1.0 + 4.0 * math.exp(-5.0 * percentile))
             epochs.append(epoch)
     return (
@@ -317,20 +347,36 @@ def fit_model(
 ):
     # Imported lazily: pure proposal/split tests do not require scikit-learn.
     from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+    from sklearn.linear_model import Ridge
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
-    spec = MODEL_SPECS[name]
+    spec = dict(MODEL_SPECS[name])
+    family = spec.pop("family")
+    target = spec.pop("target")
+    fitted_target = y[:, : len(METRICS)] if target == "metric_percentiles" else y[:, -1]
     common = dict(
         random_state=seed,
         n_jobs=workers,
         **spec,
     )
-    if name == "extra_trees":
+    if family == "extra_trees":
         model = ExtraTreesRegressor(**common)
-    elif name == "random_forest":
+    elif family == "random_forest":
         model = RandomForestRegressor(bootstrap=True, **common)
+    elif family == "ridge":
+        common.pop("random_state")
+        common.pop("n_jobs")
+        model = make_pipeline(
+            StandardScaler(with_mean=False),
+            Ridge(solver="lsqr", max_iter=4000, **common),
+        )
     else:
-        raise ValueError(f"unsupported model {name}")
-    model.fit(x, y, sample_weight=weights)
+        raise ValueError(f"unsupported model family {family}")
+    if family == "ridge":
+        model.fit(x, fitted_target, ridge__sample_weight=weights)
+    else:
+        model.fit(x, fitted_target, sample_weight=weights)
     return model
 
 
@@ -412,6 +458,20 @@ def choose_model(summary_by_model: dict[str, pd.DataFrame]) -> str:
             name,
         )
     return min(summary_by_model, key=key)
+
+
+def live_acceptance(summary: pd.DataFrame) -> tuple[bool, dict[str, bool]]:
+    """Fail closed using development-period evidence only."""
+    checks = {
+        "top5_rate": float((summary.winner_predicted_rank <= 5).mean())
+        >= LIVE_ACCEPTANCE["minimum_internal_top5_rate"],
+        "median_field_spearman": float(summary.field_spearman.median())
+        >= LIVE_ACCEPTANCE["minimum_internal_median_field_spearman"],
+        "median_winner_percentile": float(
+            summary.winner_predicted_percentile.median()
+        ) <= LIVE_ACCEPTANCE["maximum_internal_median_winner_percentile"],
+    }
+    return all(checks.values()), checks
 
 
 def _proposal(
@@ -881,6 +941,7 @@ def main() -> None:
         "output_dir": str(args.output_dir.resolve()),
         "metric_directions": METRICS,
         "model_specs": MODEL_SPECS,
+        "live_acceptance": LIVE_ACCEPTANCE,
         "protocol": "warmup -> train/internal-selection -> sealed holdout",
         "oracle_pool_warning": (
             "heldout field sequences are appended only after organic generation; "
@@ -956,7 +1017,13 @@ def main() -> None:
         selection_summaries[name] = summary
         selection_payload[name] = _summarize_fields(summary)
     chosen_name = choose_model(selection_summaries)
+    accepted_for_live, acceptance_checks = live_acceptance(
+        selection_summaries[chosen_name]
+    )
     selection_payload["chosen_model"] = chosen_name
+    selection_payload["accepted_for_live"] = accepted_for_live
+    selection_payload["acceptance_thresholds"] = LIVE_ACCEPTANCE
+    selection_payload["acceptance_checks"] = acceptance_checks
     selection_payload["selection_rule"] = (
         "lowest median winner percentile, then highest top-5 rate, then "
         "highest median field Spearman; internal validation only"
@@ -1012,6 +1079,7 @@ def main() -> None:
 
     summary = {
         "chosen_model": chosen_name,
+        "accepted_for_live": accepted_for_live,
         "training_examples": len(sequences),
         "training_epoch_count": args.train_epochs,
         "holdout_epoch_count": args.holdout_epochs,
