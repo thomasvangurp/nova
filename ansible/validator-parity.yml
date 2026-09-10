@@ -1,0 +1,89 @@
+---
+# Install the validator's documented Python/PyTorch scoring environment beside
+# the production scorer.  This playbook never activates, restarts, or stops the
+# live producer; it exists solely for controlled cross-environment A/B runs.
+- name: Install locked validator parity environment
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Require committed parity source
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: controller_status
+      changed_when: false
+      failed_when: controller_status.stdout | length > 0
+
+    - name: Create parity runtime directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /root/.cache/triton-validator-bgen
+        - /root/artifacts/rd/validator_parity
+        - /root/bgen_shim
+
+    - name: Ship locked Pixi parity definition
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/root/{{ item | basename }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - "{{ repo }}/pixi.toml"
+        - "{{ repo }}/pixi.lock"
+
+    - name: Ship scorer shim including diagnostic seeding
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/files/root/bgen_shim/"
+        dest: /root/bgen_shim/
+        checksum: true
+        owner: false
+        group: false
+        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+
+    - name: Install validator parity environment from lock
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - validator-bgen
+      environment:
+        PIXI_COLOR: never
+      register: parity_install
+      changed_when: >-
+        'Nothing to do' not in (parity_install.stdout ~ parity_install.stderr)
+
+    - name: Verify official cu126 wheel runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - validator-bgen
+          - check-validator-bgen
+      environment:
+        PIXI_COLOR: never
+      register: parity_check
+      changed_when: false
+
+    - name: Report validator parity environment
+      ansible.builtin.debug:
+        var: parity_check.stdout
