@@ -345,8 +345,23 @@ def main() -> None:
             and score_p90 > args.maximum_p90_rank_sum
         ):
             continue
+        # Score sharing averages each raw metric across validators before the
+        # epoch field is ranked.  Our independent repeats are a local estimate
+        # of that same expectation, so their arithmetic mean is the only
+        # validator-shaped aggregate.  The observation-by-field p90 below is
+        # retained as a qualification stress test; it must not leak into the
+        # metric vector presented as the local validator-score estimate.
         aggregate = {
-            name: float(np.median([item[name] for item in observations]))
+            name: float(np.mean([item[name] for item in observations]))
+            for name in METRICS
+        }
+        metric_standard_errors = {
+            name: float(
+                np.std([item[name] for item in observations], ddof=1)
+                / math.sqrt(len(observations))
+            )
+            if len(observations) > 1
+            else 0.0
             for name in METRICS
         }
         aggregate_field_scores = [
@@ -435,7 +450,9 @@ def main() -> None:
                 category: float(np.median(scores))
                 for category, scores in aggregate_category_scores.items()
             },
+            "metric_aggregation": "arithmetic_mean",
             "metrics": aggregate,
+            "metric_standard_errors": metric_standard_errors,
             "observations": observations,
             "pose_stability": pose_summary,
         })
@@ -498,9 +515,10 @@ def main() -> None:
         "rank_method": "dense",
         "selection_order": args.selection_order,
         "score_semantics": (
-            "validator-compatible per-metric dense rank sums over independent exact "
-            "observations and historical live fields; a robustness distribution, "
-            "not a prediction of the next stochastic observation"
+            "raw metrics use the validator score-share arithmetic mean; dense ranks "
+            "are replayed over historical live fields because the current field is "
+            "unknowable before reveal; observation-by-field p90 is a separate "
+            "qualification stress test"
         ),
         "reference": reference,
         "excluded_sequence_count": len(excluded_sequences),

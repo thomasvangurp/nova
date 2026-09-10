@@ -294,6 +294,9 @@ def main() -> None:
                 "exact": True,
                 "runtime_matched": True,
                 "stochastic": True,
+                "metric_aggregation": winner.get(
+                    "metric_aggregation", "arithmetic_mean"
+                ),
                 "rank_method": "dense",
                 "metrics": metrics,
             },
@@ -302,6 +305,7 @@ def main() -> None:
             "scorer": EXACT_SCORER,
             "observation_count": observation_count,
             "metrics": metrics,
+            "metric_standard_errors": winner.get("metric_standard_errors", {}),
             "observations": winner.get("observations", []),
             "per_observation_median_rank_sum": winner[
                 "per_observation_median_rank_sum"
@@ -325,9 +329,10 @@ def main() -> None:
             "score_worst": float(winner["score_worst"]),
             "p90_category_rank_sums": winner.get("p90_category_rank_sums", {}),
             "score_semantics": (
-                "validator-compatible dense-rank robustness distribution over "
-                "repeated exact observations and historical live fields; not a "
-                "prediction of the next stochastic validator observation"
+                "published raw metrics are the arithmetic mean of independent "
+                "local observations, matching validator score sharing; the current "
+                "field is unavailable before reveal, while p90 is only a robustness "
+                "qualification guard"
             ),
             "reference": ranking.get("reference", {}),
             "aggregate_median_rank_sum": float(

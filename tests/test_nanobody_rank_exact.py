@@ -2,6 +2,7 @@ import json
 import sys
 
 import pandas as pd
+import pytest
 
 from nanobody_opt import rank_exact
 from nanobody_opt.simulate_round import (
@@ -79,6 +80,46 @@ def test_duplicate_scoring_sweep_is_only_one_observation(tmp_path):
     observations = rank_exact._observations([first, duplicate], "P20809")
 
     assert observations == {"FRESH": [_metrics(1)]}
+
+
+def test_published_metric_vector_uses_validator_score_share_mean(
+    tmp_path, monkeypatch
+):
+    archive = tmp_path / "archive.csv"
+    pd.DataFrame([
+        {"sequence": f"ARCHIVE{index:02d}", **_metrics(index + 1)}
+        for index in range(60)
+    ]).to_csv(archive, index=False)
+    exact_args = []
+    for index, value in enumerate((1, 1, 10)):
+        path = tmp_path / f"exact-{index}.json"
+        path.write_text(json.dumps({
+            "target": "P20809",
+            "observation_id": f"observation-{index}",
+            "per_nanobody_components": {
+                "0": {"FRESH": {"P20809": _metrics(value)}}
+            },
+        }))
+        exact_args.extend(["--exact", str(path)])
+    output = tmp_path / "ranking.json"
+    monkeypatch.setattr(sys, "argv", [
+        "rank_exact.py", *exact_args,
+        "--archive", str(archive),
+        "--target", "P20809",
+        "--output", str(output),
+        "--recent", "50",
+        "--field-size", "10",
+        "--minimum-observations", "3",
+    ])
+
+    rank_exact.main()
+
+    candidate = json.loads(output.read_text())["candidates"][0]
+    assert candidate["metric_aggregation"] == "arithmetic_mean"
+    assert set(candidate["metrics"].values()) == {4.0}
+    assert list(candidate["metric_standard_errors"].values()) == pytest.approx(
+        [3.0] * len(METRICS)
+    )
 
 
 def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch):
