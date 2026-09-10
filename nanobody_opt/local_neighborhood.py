@@ -1,8 +1,9 @@
-"""Propose target-preserving nanobody neighborhoods for an exact-score pilot.
+"""Propose target-preserving nanobody neighborhoods for exact scoring.
 
-Seeds must be recent archive designs that already passed the current Layer-2
-pipeline. Proposals either make one to three supported substitutions inside a
-single seed's CDRs or transplant one complete observed CDR motif. This avoids
+Seeds come from a current Layer-2-qualified shortlist. They may be recent
+archive designs or novel, exact-scored leaders that have not reached the public
+archive yet. Proposals either make one to three supported substitutions inside
+a single seed's CDRs or transplant one complete observed CDR motif. This avoids
 the independent many-position recombination that destroyed binding geometry in
 the 2026-09-09 probe.
 
@@ -39,14 +40,13 @@ METRICS = {
 }
 
 
-def _layer2_passes(path: Path) -> set[str]:
+def _layer2_candidates(path: Path) -> list[dict[str, object]]:
     payload = json.loads(path.read_text())
-    candidates = payload.get("candidates", [])
-    return {
-        str(candidate["sequence"]).strip().upper()
-        for candidate in candidates
-        if candidate.get("layer2_passed")
-    }
+    return [
+        candidate
+        for candidate in payload.get("candidates", [])
+        if candidate.get("layer2_passed") and candidate.get("sequence")
+    ]
 
 
 def _rank_sum(frame: pd.DataFrame) -> np.ndarray:
@@ -108,18 +108,27 @@ def main() -> None:
         frame, k=int(requirements.get("num_top_sequences", 50))
     )
     top_kmers = [diversity.kmers(sequence, 5) for sequence in top.sequence]
-    current_passes = _layer2_passes(args.layer2_seeds)
-
-    eligible: list[tuple[float, str, float]] = []
-    for row in recent.sort_values("recent_rank_sum").itertuples():
-        sequence = str(row.sequence)
-        if sequence not in current_passes:
+    recent_scores = dict(zip(recent.sequence, recent.recent_rank_sum))
+    eligible: list[tuple[float, str, float, str]] = []
+    for candidate in _layer2_candidates(args.layer2_seeds):
+        sequence = str(candidate["sequence"]).strip().upper()
+        if len(sequence) != length:
+            continue
+        selection_score = candidate.get("selection_score")
+        if selection_score is not None:
+            parent_score = float(selection_score)
+            parent_source = "exact_shortlist"
+        elif sequence in recent_scores:
+            parent_score = float(recent_scores[sequence])
+            parent_source = "recent_archive"
+        else:
             continue
         diverse, max_jaccard = diversity.passes_diversity(
             sequence, top_kmers, threshold=0.9, k=5
         )
         if diverse:
-            eligible.append((float(row.recent_rank_sum), sequence, max_jaccard))
+            eligible.append((parent_score, sequence, max_jaccard, parent_source))
+    eligible.sort(key=lambda item: (item[0], item[1]))
     seeds = eligible[: args.seed_count]
     if len(seeds) < args.seed_count:
         raise SystemExit(
@@ -129,7 +138,7 @@ def main() -> None:
 
     donor_sequences = [
         sequence
-        for _, sequence, _ in eligible[: min(args.donor_count, len(eligible))]
+        for _, sequence, _, _ in eligible[: min(args.donor_count, len(eligible))]
     ]
     if not donor_sequences:
         raise SystemExit("no current-gate donor sequences found")
@@ -154,7 +163,7 @@ def main() -> None:
     proposals: list[dict[str, object]] = []
     rng = np.random.default_rng(args.random_seed)
 
-    for parent_rank, parent, parent_jaccard in seeds:
+    for parent_score, parent, parent_jaccard, parent_source in seeds:
         regions = find_regions(parent)
         cdr_positions = list(regions.cdr_positions())
         bounds = [regions.cdr1, regions.cdr2, regions.cdr3]
@@ -221,7 +230,8 @@ def main() -> None:
             proposals.append({
                 "sequence": candidate,
                 "parent_sequence": parent,
-                "parent_recent_rank_sum": parent_rank,
+                "parent_selection_score": parent_score,
+                "parent_source": parent_source,
                 "parent_max_jaccard_to_top50": parent_jaccard,
                 "proposal_type": source,
                 "edit_distance": len(mutations),
@@ -233,7 +243,7 @@ def main() -> None:
         if accepted < args.per_seed:
             raise SystemExit(
                 f"only generated {accepted}/{args.per_seed} candidates for seed "
-                f"with recent rank-sum {parent_rank:.1f}"
+                f"with selection score {parent_score:.1f}"
             )
 
     output = pd.DataFrame(proposals)
@@ -241,8 +251,11 @@ def main() -> None:
     output.to_csv(args.output, index=False)
     print(f"eligible current-gate seeds: {len(eligible)}")
     print("selected seeds:")
-    for rank_sum, sequence, max_jaccard in seeds:
-        print(f"  rank_sum={rank_sum:.1f} jaccard={max_jaccard:.3f} {sequence}")
+    for score, sequence, max_jaccard, source in seeds:
+        print(
+            f"  score={score:.1f} source={source} "
+            f"jaccard={max_jaccard:.3f} {sequence}"
+        )
     print(f"wrote {len(output)} balanced proposals to {args.output}")
     print(output.groupby(["proposal_type", "edit_distance"]).size().to_string())
 
