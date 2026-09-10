@@ -294,6 +294,24 @@
       register: metanano_build
       changed_when: "'Nothing to do' not in (metanano_build.stdout ~ metanano_build.stderr)"
 
+    - name: Verify Pixi activation owns the Layer-2 runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --environment
+          - metanano
+          - python
+          - -c
+          - >-
+            import os,shutil,metanano;
+            assert os.environ['IGDATA']=='/root/external_tools/igblast';
+            assert shutil.which('TNP')=='/root/metanano_shim/bin/TNP',shutil.which('TNP');
+            print('METANANO_PIXI_ACTIVATION_OK')
+      changed_when: false
+
     - name: Locate Pixi's built-in human IgBLAST internal data
       ansible.builtin.shell: |
         find /root/.pixi/envs/metanano -type d -path '*/internal_data/human' -print -quit

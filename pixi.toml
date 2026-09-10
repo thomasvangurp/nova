@@ -101,6 +101,15 @@ igblast = "1.22.0"
 immunebuilder = { git = "https://github.com/oxpig/ImmuneBuilder.git", rev = "0df4e2ad82a1aa60f37ea9dae335d1198159ef78" }
 theraprofnano = { git = "https://github.com/oxpig/TNP.git", rev = "29dcac72f1380e8538e8870f45a699d3c6156162" }
 
+# MetaNano is vendored and its GPU-spreading TNP entrypoint is an explicit
+# runtime shim. Keep all discovery in Pixi so direct tasks and spawned Python
+# workers see exactly the same paths as compatibility wrappers and Ansible.
+[feature.metanano.activation.env]
+PYTHONPATH = "/root/metanano_shim:/root/external_tools/NOVA-nanobody-filter"
+PATH = "/root/metanano_shim/bin:/root/.pixi/envs/metanano/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+IGDATA = "/root/external_tools/igblast"
+MPLCONFIGDIR = "/root/.cache/matplotlib"
+
 [feature.bgen.tasks]
 check = "python -c \"import torch; from triton.runtime import driver; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count(), driver.active.get_current_device())\""
 boltzgen = "python -m boltzgen.cli.boltzgen"
@@ -112,6 +121,6 @@ summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contac
 scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_terminals"
 
 [feature.metanano.tasks]
-check = "python -c \"import Bio, anarci; print(Bio.__version__)\""
+check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""
 build-teacher-redesign-spec = "python /root/nanobody_opt/build_teacher_redesign_spec.py"
 filter-layer2 = "cd /root && python -m nanobody_opt.filter_layer2"
