@@ -51,6 +51,11 @@ def test_screen_budget_is_split_into_publishable_twenty_candidate_tranches():
     assert [item for batch in batches for item in batch] == sequences
 
 
+def test_screen_tranche_loads_each_gpu_pipeline_only_once():
+    assert race._screen_execution_shape(20, 10) == (20, 2)
+    assert race._screen_execution_shape(7, 10) == (7, 1)
+
+
 def test_chain_reserve_prevents_new_gpu_wave(tmp_path):
     state = tmp_path / "chain.json"
     state.write_text(json.dumps({

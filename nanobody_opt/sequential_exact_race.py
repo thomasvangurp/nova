@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -81,6 +82,20 @@ def _batches(items: list[str], size: int) -> list[list[str]]:
     return [items[start : start + size] for start in range(0, len(items), size)]
 
 
+def _screen_execution_shape(candidate_count: int, gpu_count: int) -> tuple[int, int]:
+    """Keep one publishable tranche in one model-loading wave.
+
+    The sharded scorer assigns candidates round-robin to GPUs.  Giving the
+    worker its entire shard in one wrapper call lets BoltzGen load each model
+    once for all candidates on that GPU.  The old ``wave_size=gpu_count`` and
+    ``predict_batch_size=1`` combination reloaded the complete pipeline once
+    per candidate even though publication only happened after the full tranche.
+    """
+    if candidate_count < 1 or gpu_count < 1:
+        raise ValueError("candidate and GPU counts must be positive")
+    return candidate_count, math.ceil(candidate_count / gpu_count)
+
+
 def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bool:
     if path is None:
         return True
@@ -147,6 +162,9 @@ def _run_screen(
     completed = output_dir / "exact_all.json"
     if completed.is_file():
         return completed
+    wave_size, predict_batch_size = _screen_execution_shape(
+        candidate_limit, len(gpus)
+    )
     command = [
         sys.executable,
         "-m",
@@ -156,8 +174,8 @@ def _run_screen(
         "--target", target,
         "--output-dir", str(output_dir),
         "--gpus", ",".join(gpus),
-        "--wave-size", str(len(gpus)),
-        "--predict-batch-size", "1",
+        "--wave-size", str(wave_size),
+        "--predict-batch-size", str(predict_batch_size),
         "--limit", str(candidate_limit),
         "--capture-structures",
     ]
