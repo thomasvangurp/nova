@@ -120,6 +120,7 @@ rank-exact = "cd /root && python -m nanobody_opt.rank_exact"
 interface-contacts = "python /root/nanobody_opt/interface_contacts.py"
 summarize-teacher-contacts = "python /root/nanobody_opt/summarize_teacher_contacts.py"
 scan-teacher-terminals = "cd /root && python -m nanobody_opt.scan_teacher_terminals"
+harvest-inverse-fold = "cd /root && python -m nanobody_opt.harvest_inverse_fold"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""
