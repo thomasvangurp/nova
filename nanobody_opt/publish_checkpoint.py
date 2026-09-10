@@ -161,7 +161,6 @@ def main() -> None:
             "boltzgen": {
                 "exact": True,
                 "runtime_matched": True,
-                "validator_matched": True,
                 "stochastic": True,
                 "rank_method": "dense",
                 "metrics": metrics,
@@ -217,7 +216,7 @@ def main() -> None:
     _atomic_json(args.output, payload)
     print(
         f"published qualified epoch {args.epoch} {args.target} checkpoint to "
-        f"{args.output}: score={selection_score:.1f} sequence={sequence}"
+        f"{args.output}: robustness_p90={selection_score:.1f} sequence={sequence}"
     )
 
 
