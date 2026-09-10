@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt.rank_exact import LEADERBOARD_API_ROOT
 from nanobody_opt.simulate_round import METRICS, category_rank_sums
 

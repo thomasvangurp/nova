@@ -400,7 +400,9 @@ Do not pass the entire epoch bank to `score_boltzgen_batch.py`. Its result is
 fail-closed and appears only after the complete input finishes, so a large input
 prevents the producer from publishing interim improvements. Run
 `score_boltzgen_waves.py` with 80-candidate waves on ten GPUs (eight candidates
-per GPU, `--predict-batch-size 8`). Each wave is independently validated and
+per GPU, `--predict-batch-size 1`). The workers still process eight candidates
+per GPU, but each BoltzGen call contains one sequence, matching the validator.
+Each wave is independently validated and
 atomically promoted, and the manifest permits safe resume. After every
 `WAVE_READY`, rank the accumulated observations and repeat-score only new
 candidates whose first observation can still beat the published worst-repeat
