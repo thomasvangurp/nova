@@ -148,15 +148,32 @@ def _round_robin_by_parent(proposals: list[dict[str, object]]) -> list[dict[str,
         "whole_cdr_motif": 6,
         "local_substitution": 7,
     }
-    for items in grouped.values():
-        items.sort(key=lambda item: (
-            source_priority.get(str(item.get("proposal_type")), 9),
+    def ranking_key(item: dict[str, object]) -> tuple[object, ...]:
+        return (
             float(item.get("predecessor_potential_score", math.inf)),
             float(item.get("predecessor_consensus_score", math.inf)),
+            source_priority.get(str(item.get("proposal_type")), 9),
             -float(item["proposal_prior_score"]),
             int(item["edit_distance"]),
             str(item["sequence"]),
-        ))
+        )
+
+    for parent, items in list(grouped.items()):
+        singles = sorted(
+            (item for item in items if int(item["edit_distance"]) == 1),
+            key=ranking_key,
+        )
+        multi = sorted(
+            (item for item in items if int(item["edit_distance"]) > 1),
+            key=ranking_key,
+        )
+        interleaved = []
+        for index in range(max(len(singles), len(multi))):
+            if index < len(singles):
+                interleaved.append(singles[index])
+            if index < len(multi):
+                interleaved.append(multi[index])
+        grouped[parent] = interleaved
     ordered = []
     parents = sorted(
         grouped,
@@ -354,7 +371,7 @@ def main() -> None:
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
     parser.add_argument("--terminal-width", type=int, default=17)
-    parser.add_argument("--maximum-terminal-haplotype-mutations", type=int, default=3)
+    parser.add_argument("--maximum-terminal-haplotype-mutations", type=int, default=6)
     parser.add_argument("--donor-count", type=int, default=100)
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--min-mutations", type=int, default=1)
@@ -640,7 +657,6 @@ def main() -> None:
         cdr_positions = list(regions.cdr_positions())
         bounds = [regions.cdr1, regions.cdr2, regions.cdr3]
         attempts = 0
-        accepted = 0
 
         # Deterministic coverage floor: every novel, supported, one-residue CDR
         # substitution is emitted before stochastic exploration.  The exact
@@ -667,7 +683,6 @@ def main() -> None:
                 "core_cdr",
                 core_proposals,
             ):
-                accepted += 1
                 exhaustive_single_count += 1
                 if exhaustive_single_count > args.maximum_exhaustive_singles:
                     raise SystemExit(
@@ -675,7 +690,11 @@ def main() -> None:
                         f"--maximum-exhaustive-singles={args.maximum_exhaustive_singles}"
                     )
 
-        while accepted < args.per_seed and attempts < args.per_seed * 500:
+        stochastic_accepted = 0
+        while (
+            stochastic_accepted < args.per_seed
+            and attempts < args.per_seed * 500
+        ):
             attempts += 1
             sequence = list(parent)
             source = "local_substitution"
@@ -760,11 +779,12 @@ def main() -> None:
                 "core_cdr",
                 core_proposals,
             ):
-                accepted += 1
+                stochastic_accepted += 1
 
-        if accepted < args.per_seed:
+        if stochastic_accepted < args.per_seed:
             raise SystemExit(
-                f"only generated {accepted}/{args.per_seed} candidates for seed "
+                f"only generated {stochastic_accepted}/{args.per_seed} "
+                "stochastic candidates for seed "
                 f"with selection score {parent_score:.1f}"
             )
 
@@ -783,8 +803,28 @@ def main() -> None:
                 args.maximum_terminal_haplotype_mutations
             ),
         )
-        accepted = 0
-        for candidate, source in candidates:
+        singles = [item for item in candidates if "haplotype" not in item[1]]
+        haplotypes = [item for item in candidates if "haplotype" in item[1]]
+        lane_limit = args.framework_per_seed // 2
+        selected_counts = {"single": 0, "haplotype": 0}
+        leftovers: list[tuple[str, str]] = []
+        for lane, items in (("single", singles), ("haplotype", haplotypes)):
+            for candidate, source in items:
+                if selected_counts[lane] >= lane_limit:
+                    leftovers.append((candidate, source))
+                    continue
+                if add_candidate(
+                    parent_record,
+                    candidate,
+                    source,
+                    "framework_terminal",
+                    framework_proposals,
+                ):
+                    selected_counts[lane] += 1
+        accepted = sum(selected_counts.values())
+        for candidate, source in leftovers:
+            if accepted >= args.framework_per_seed:
+                break
             if add_candidate(
                 parent_record,
                 candidate,
@@ -793,8 +833,6 @@ def main() -> None:
                 framework_proposals,
             ):
                 accepted += 1
-                if accepted >= args.framework_per_seed:
-                    break
 
     proposals = balanced_proposal_order(
         _round_robin_by_parent(core_proposals),

@@ -50,6 +50,24 @@ def test_proposals_are_interleaved_across_structural_parents():
     assert [item["proposal_prior_score"] for item in ordered[:2]] == [2.0, 2.0]
 
 
+def test_each_parent_interleaves_single_and_multi_edit_proposals():
+    proposals = [
+        {
+            "parent_sequence": "PARENT",
+            "parent_selection_score": 50,
+            "proposal_prior_score": 1.0,
+            "predecessor_potential_score": float(index),
+            "edit_distance": edits,
+            "sequence": f"SEQ{index}",
+        }
+        for index, edits in enumerate((1, 1, 1, 2, 3, 4))
+    ]
+
+    ordered = _round_robin_by_parent(proposals)
+
+    assert [item["edit_distance"] for item in ordered] == [1, 2, 1, 3, 1, 4]
+
+
 def test_terminal_lane_never_changes_cdr_or_protected_positions():
     parent = "AAAAAAAAAAAAAAAAAAAA"
     allowed = [["A", "C"] for _ in parent]

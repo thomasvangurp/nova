@@ -41,6 +41,24 @@ def test_candidate_loader_requires_layer2_pass_and_deduplicates(tmp_path):
     assert race._candidate_sequences(source, 10) == ["DDD", "AAA", "CCC"]
 
 
+def test_candidate_loader_preserves_graph_ranked_screen_priority(tmp_path):
+    source = tmp_path / "layer2.json"
+    source.write_text(json.dumps({"candidates": [
+        {
+            "sequence": "AAA",
+            "screen_priority": 2,
+            "proposal_type": "exhaustive_single_substitution",
+        },
+        {
+            "sequence": "BBB",
+            "screen_priority": 1,
+            "proposal_type": "c_terminal_single_substitution",
+        },
+    ]}))
+
+    assert race._candidate_sequences(source, 10) == ["BBB", "AAA"]
+
+
 def test_screen_budget_is_split_into_publishable_twenty_candidate_tranches():
     sequences = [f"SEQ{index}" for index in range(320)]
 

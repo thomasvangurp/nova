@@ -67,6 +67,8 @@ def _candidate_sequences(path: Path, limit: int) -> list[str]:
     )
     if items and all(isinstance(item, dict) for item in items):
         items = sorted(items, key=lambda item: (
+            0 if item.get("screen_priority") is not None else 1,
+            int(item.get("screen_priority", 0)),
             0
             if item.get("proposal_type") == "exhaustive_single_substitution"
             else 1

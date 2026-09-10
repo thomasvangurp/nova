@@ -284,11 +284,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--framework-per-seed", type=int, default=64)
     parser.add_argument("--terminal-width", type=int, default=17)
     parser.add_argument(
-        "--maximum-terminal-haplotype-mutations", type=int, default=3
+        "--maximum-terminal-haplotype-mutations", type=int, default=6
     )
     parser.add_argument("--motif-fraction", type=float, default=0.25)
     parser.add_argument("--single-mutation-fraction", type=float, default=0.75)
-    parser.add_argument("--maximum-motif-mutations", type=int, default=3)
+    parser.add_argument("--maximum-motif-mutations", type=int, default=6)
     parser.add_argument("--maximum-exhaustive-singles", type=int, default=320)
     parser.add_argument("--layer2-concurrency", type=int, default=40)
     parser.add_argument(
