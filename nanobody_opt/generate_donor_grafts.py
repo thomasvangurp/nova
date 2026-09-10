@@ -87,6 +87,18 @@ def select_donors(
     ).head(min(limit, len(frame)))
 
 
+def scaffold_candidates(donors: pd.DataFrame) -> list[dict[str, Any]]:
+    """Project archived rows into Layer-2 inputs for current gate replay."""
+    keep = [
+        "sequence", "donor_rank_sum", "liability_score",
+        "liability_num_violations", *METRICS,
+    ]
+    # METRICS also contains both liability columns.  Preserve a stable,
+    # duplicate-free projection so the output stays easy to audit.
+    columns = list(dict.fromkeys(column for column in keep if column in donors))
+    return donors[columns].to_dict("records")
+
+
 def graft_sequence(
     teacher_sequence: str,
     donor_sequence: str,
@@ -219,8 +231,9 @@ def main() -> None:
     parser.add_argument("--donors", type=int, default=200)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument(
-        "--mode", choices=("full", "progressive"), default="full",
-        help="whole framework graft or conservative teacher-side donor swaps",
+        "--mode", choices=("full", "progressive", "scaffolds"), default="full",
+        help=("whole framework graft, conservative teacher-side donor swaps, "
+              "or current-gate replay inputs for the selected donor scaffolds"),
     )
     parser.add_argument(
         "--swap-counts", default="2,4,6,8,10,12",
@@ -250,6 +263,23 @@ def main() -> None:
         max_liability_score=args.max_donor_liability,
         limit=args.donors,
     )
+
+    if args.mode == "scaffolds":
+        cases = scaffold_candidates(donor_frame)
+        payload = {
+            "purpose": "R&D current-validator replay of low-liability scaffolds",
+            "target": target,
+            "mode": args.mode,
+            "max_donor_liability": args.max_donor_liability,
+            "donor_count": len(donor_frame),
+            "cases": cases,
+        }
+        _atomic_json(args.output, payload)
+        print(
+            f"SCAFFOLDS_READY target={target} candidates={len(cases)} "
+            f"output={args.output}"
+        )
+        return
 
     archive_sequences = set(
         archive.sequence.dropna().astype(str).str.strip().str.upper()

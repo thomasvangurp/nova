@@ -71,6 +71,15 @@ hybrids must independently pass current IgBLAST/humanness, TNP, historical and
 top-50 novelty, and repeated exact target-complex scoring. This makes donor
 evidence a proposal distribution, never a substitute for the live gates.
 
+The 2026-09-09 experiments also tested the narrower version of this idea:
+progressively introduce only BLOSUM-conservative donor substitutions while
+freezing CDR, antigen-contact, Vernier, and VHH-hallmark positions. Of 416
+hybrids, only four passed current IgBLAST and TNP; each had only two swaps and
+retained the teacher's 265/30 liability. Every liability-reducing hybrid failed
+the current humanness threshold. The result does not invalidate conservative
+donor substitution in general, but it closes this teacher framework as a
+productive repair path. See `RD_2026-09-09.md` for the complete results.
+
 ## Immediate experimental design
 
 1. Refold strong recent public submissions with the exact NOVA scorer and keep
