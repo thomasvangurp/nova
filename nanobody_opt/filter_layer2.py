@@ -143,6 +143,15 @@ async def _developability(sequences: list[str], concurrency: int) -> list[dict[s
         await manager.shutdown()
 
 
+def _measured_developability(result: Any) -> bool:
+    """Distinguish a biological TNP decision from an execution failure."""
+    return (
+        isinstance(result, dict)
+        and isinstance(result.get("passed"), bool)
+        and isinstance(result.get("flags"), dict)
+    )
+
+
 def _cached_developability(
     rows: list[dict[str, Any]], cache_dir: Path, concurrency: int
 ) -> list[dict[str, Any]]:
@@ -155,7 +164,10 @@ def _cached_developability(
         path = cache_dir / f"{digest}.json"
         try:
             cached = json.loads(path.read_text())
-            if cached.get("sequence") == row["sequence"]:
+            if (
+                cached.get("sequence") == row["sequence"]
+                and _measured_developability(cached.get("developability"))
+            ):
                 results[index] = cached["developability"]
                 continue
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -172,8 +184,9 @@ def _cached_developability(
         for index, result in zip(indices, wave, strict=True):
             results[index] = result
             digest = hashlib.sha256(rows[index]["sequence"].encode("ascii")).hexdigest()
-            payload = {"sequence": rows[index]["sequence"], "developability": result}
-            (cache_dir / f"{digest}.json").write_text(json.dumps(payload) + "\n")
+            if _measured_developability(result):
+                payload = {"sequence": rows[index]["sequence"], "developability": result}
+                (cache_dir / f"{digest}.json").write_text(json.dumps(payload) + "\n")
         print(f"TNP checkpoint: {min(start + len(indices), len(missing)):,}/"
               f"{len(missing):,} newly measured", flush=True)
 
