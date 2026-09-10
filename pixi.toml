@@ -152,6 +152,7 @@ train-pairwise-ranker-v2 = "cd /root && python -m nanobody_opt.train_pairwise_ra
 backtest-pairwise-beam = "cd /root && python -m nanobody_opt.backtest_pairwise_beam"
 audit-pairwise-shortlist = "cd /root && python -m nanobody_opt.audit_pairwise_shortlist"
 seed-mutation-database = "cd /root && python -m nanobody_opt.seed_mutation_database"
+audit-live-generator-recall = "cd /root && python -m nanobody_opt.audit_live_generator_recall"
 
 # Layer-2 remains isolated from the scorer, but ImmuneBuilder automatically uses
 # CUDA when available. Its neural structure-prediction stage therefore gets its
@@ -221,6 +222,7 @@ train-pairwise-ranker-v2 = "cd /root && python -m nanobody_opt.train_pairwise_ra
 backtest-pairwise-beam = "cd /root && python -m nanobody_opt.backtest_pairwise_beam"
 audit-pairwise-shortlist = "cd /root && python -m nanobody_opt.audit_pairwise_shortlist"
 seed-mutation-database = "cd /root && python -m nanobody_opt.seed_mutation_database"
+audit-live-generator-recall = "cd /root && python -m nanobody_opt.audit_live_generator_recall"
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""
