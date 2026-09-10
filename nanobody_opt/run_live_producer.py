@@ -144,6 +144,9 @@ def _run_iteration(
             "--terminal-variants-per-residue", str(
                 args.terminal_variants_per_residue
             ),
+            "--recent-epoch-window", str(args.recent_parent_epoch_window),
+            "--recent-anchor-limit", str(args.recent_anchor_parent_limit),
+            "--recent-neighbor-limit", str(args.recent_neighbor_parent_limit),
             "--scan-limit", str(args.parent_scan_limit),
             "--observation-database", str(args.mutation_database),
             "--output", str(elite_parents),
@@ -270,6 +273,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--neighbor-parent-distance", type=int, default=6)
     parser.add_argument("--neighbor-parent-limit", type=int, default=32)
     parser.add_argument("--terminal-variants-per-residue", type=int, default=3)
+    parser.add_argument("--recent-parent-epoch-window", type=int, default=16)
+    parser.add_argument("--recent-anchor-parent-limit", type=int, default=16)
+    parser.add_argument("--recent-neighbor-parent-limit", type=int, default=16)
     parser.add_argument("--seed-count", type=int, default=32)
     parser.add_argument("--neighbor-seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)

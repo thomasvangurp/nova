@@ -24,6 +24,9 @@
     nanobody_parent_epochs: 0
     nanobody_parent_limit: 64
     nanobody_neighbor_parent_limit: 32
+    nanobody_recent_parent_epoch_window: 16
+    nanobody_recent_anchor_parent_limit: 16
+    nanobody_recent_neighbor_parent_limit: 16
     nanobody_neighbor_seed_count: 32
     nanobody_proposals_per_seed: 12
     nanobody_proposal_limit: 384
@@ -612,6 +615,12 @@
           - "{{ nanobody_parent_limit }}"
           - --neighbor-parent-limit
           - "{{ nanobody_neighbor_parent_limit }}"
+          - --recent-parent-epoch-window
+          - "{{ nanobody_recent_parent_epoch_window }}"
+          - --recent-anchor-parent-limit
+          - "{{ nanobody_recent_anchor_parent_limit }}"
+          - --recent-neighbor-parent-limit
+          - "{{ nanobody_recent_neighbor_parent_limit }}"
           - --neighbor-seed-count
           - "{{ nanobody_neighbor_seed_count }}"
           - --per-seed

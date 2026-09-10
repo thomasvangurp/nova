@@ -44,6 +44,9 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.seed_count == 32
     assert args.neighbor_seed_count == 32
     assert args.neighbor_parent_limit == 32
+    assert args.recent_parent_epoch_window == 16
+    assert args.recent_anchor_parent_limit == 16
+    assert args.recent_neighbor_parent_limit == 16
     assert args.minimum_seeds == 8
     assert args.per_seed == 12
     assert args.proposal_limit == 384

@@ -155,3 +155,34 @@ def test_older_better_elite_is_not_replaced_by_newer_mediocre_parent():
 
     assert selected[0]["sequence"] == old_elite
     assert selected[0]["validator_final_score"] == 30
+
+
+def test_active_bank_balances_recent_lineage_and_global_quality():
+    old_elite = PARENT_25022
+    recent_elite = PARENT_25026
+    payloads = {
+        24000: _payload(
+            _nanobody(old_elite, 30),
+            _nanobody("A" * 127, 31),
+        ),
+        25039: _payload(
+            _nanobody(recent_elite, 90),
+            _nanobody("C" * 127, 91),
+        ),
+    }
+
+    selected = select_elite_parents(
+        payloads,
+        target=TARGET,
+        per_epoch=1,
+        limit=2,
+        neighbor_per_epoch=1,
+        neighbor_limit=1,
+        recent_epoch_window=1,
+        recent_anchor_limit=1,
+        recent_neighbor_limit=0,
+    )
+
+    assert [item["sequence"] for item in selected] == [recent_elite, old_elite]
+    assert selected[0]["parent_history_scope"] == "recent"
+    assert selected[1]["parent_history_scope"] == "global"

@@ -87,8 +87,16 @@ def select_elite_parents(
     neighbor_distance: int = 6,
     neighbor_limit: int = 0,
     terminal_variants_per_residue: int = 3,
+    recent_epoch_window: int = 16,
+    recent_anchor_limit: int = 16,
+    recent_neighbor_limit: int = 16,
 ) -> list[dict[str, Any]]:
-    """Select epoch elites plus bounded, terminally diverse family neighbours."""
+    """Select a balanced bank of global and recent family representatives.
+
+    Every historical observation remains eligible.  The recent quotas prevent
+    globally good but stale families from consuming the complete active bank;
+    the remainder is still selected globally so recency never replaces quality.
+    """
     if per_epoch < 1 or limit < 1:
         raise ValueError("per_epoch and limit must be positive")
     if min(
@@ -96,6 +104,9 @@ def select_elite_parents(
         neighbor_distance,
         neighbor_limit,
         terminal_variants_per_residue,
+        recent_epoch_window,
+        recent_anchor_limit,
+        recent_neighbor_limit,
     ) < 0:
         raise ValueError("neighbour selection arguments cannot be negative")
 
@@ -183,7 +194,75 @@ def select_elite_parents(
     # neighbours exist.
     neighbor_capacity = min(neighbor_limit, max(0, limit - 1))
     anchor_capacity = limit - neighbor_capacity
-    selected_anchors = ordered_anchors[:anchor_capacity]
+    recent_epochs = set(sorted(ranked_epochs, reverse=True)[:recent_epoch_window])
+
+    def recent_observations(item: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            entry for entry in item["public_observations"]
+            if int(entry["epoch"]) in recent_epochs
+        ]
+
+    def recent_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Round-robin recent epochs so one prolific round cannot own a quota."""
+        chosen: list[dict[str, Any]] = []
+        chosen_sequences: set[str] = set()
+        maximum_rank = max(
+            (
+                int(entry["epoch_rank"])
+                for item in items
+                for entry in recent_observations(item)
+            ),
+            default=0,
+        )
+        for epoch_rank in range(1, maximum_rank + 1):
+            for epoch in sorted(recent_epochs, reverse=True):
+                eligible = [
+                    item for item in items
+                    if str(item["sequence"]) not in chosen_sequences
+                    and any(
+                        int(entry["epoch"]) == epoch
+                        and int(entry["epoch_rank"]) == epoch_rank
+                        for entry in recent_observations(item)
+                    )
+                ]
+                if not eligible:
+                    continue
+                item = min(
+                    eligible,
+                    key=lambda value: (
+                        value["validator_final_score"], value["sequence"]
+                    ),
+                )
+                chosen.append(item)
+                chosen_sequences.add(str(item["sequence"]))
+        return chosen
+
+    # Scale the configured quota down for tests/smaller deployments while
+    # always leaving at least half of each lane available to global quality.
+    recent_anchor_capacity = min(
+        recent_anchor_limit,
+        (anchor_capacity + 1) // 2,
+    )
+    recent_anchors = recent_order(ordered_anchors)
+    selected_anchors = recent_anchors[:recent_anchor_capacity]
+    selected_anchor_sequences = {
+        str(item["sequence"]) for item in selected_anchors
+    }
+    selected_anchors.extend(
+        item for item in ordered_anchors
+        if str(item["sequence"]) not in selected_anchor_sequences
+    )
+    selected_anchors = selected_anchors[:anchor_capacity]
+    selected_anchor_sequences = {
+        str(item["sequence"]) for item in selected_anchors
+    }
+    for item in selected_anchors:
+        item["parent_history_scope"] = (
+            "recent" if str(item["sequence"]) in {
+                str(value["sequence"])
+                for value in recent_anchors[:recent_anchor_capacity]
+            } else "global"
+        )
 
     anchor_sequences = [str(item["sequence"]) for item in ordered_anchors]
     neighbours: dict[str, dict[str, Any]] = {}
@@ -243,31 +322,59 @@ def select_elite_parents(
     # Reserve several strong examples for each observed C-terminal residue.
     # UID 2 in epoch 25037 came from precisely such a rank-nine, D-terminal
     # family member and was invisible to the former global score truncation.
-    diverse: list[dict[str, Any]] = []
-    per_terminal: dict[str, int] = {}
-    for item in neighbour_order:
-        terminal = str(item["sequence"])[-1]
-        if per_terminal.get(terminal, 0) >= terminal_variants_per_residue:
-            continue
-        diverse.append(item)
-        per_terminal[terminal] = per_terminal.get(terminal, 0) + 1
     chosen: list[dict[str, Any]] = []
     chosen_sequences: set[str] = set()
-    for item in [*diverse, *neighbour_order]:
-        sequence = str(item["sequence"])
-        if sequence in chosen_sequences:
-            continue
-        chosen.append(item)
-        chosen_sequences.add(sequence)
-        if len(chosen) >= neighbor_capacity:
-            break
+    per_terminal: dict[str, int] = {}
+
+    def add_neighbours(
+        candidates: list[dict[str, Any]], capacity: int, scope: str
+    ) -> None:
+        if capacity <= 0:
+            return
+        added = 0
+        # Terminal diversity is a first pass, not a hard exclusion: a sparse
+        # cohort must still fill its promised recent/global coverage quota.
+        for enforce_diversity in (True, False):
+            for item in candidates:
+                sequence = str(item["sequence"])
+                if sequence in chosen_sequences:
+                    continue
+                terminal = sequence[-1]
+                if (
+                    enforce_diversity
+                    and per_terminal.get(terminal, 0)
+                    >= terminal_variants_per_residue
+                ):
+                    continue
+                item["parent_history_scope"] = scope
+                chosen.append(item)
+                chosen_sequences.add(sequence)
+                per_terminal[terminal] = per_terminal.get(terminal, 0) + 1
+                added += 1
+                if added >= capacity:
+                    return
+
+    recent_neighbor_capacity = min(
+        recent_neighbor_limit,
+        (neighbor_capacity + 1) // 2,
+    )
+    add_neighbours(
+        recent_order(neighbour_order), recent_neighbor_capacity, "recent"
+    )
+    add_neighbours(
+        neighbour_order,
+        neighbor_capacity - len(chosen),
+        "global",
+    )
     selected_sequences = {
         str(item["sequence"]) for item in [*selected_anchors, *chosen]
     }
     backfill = [
-        item for item in ordered_anchors[anchor_capacity:]
+        item for item in ordered_anchors
         if str(item["sequence"]) not in selected_sequences
     ]
+    for item in backfill:
+        item["parent_history_scope"] = "global"
     return [*selected_anchors, *chosen, *backfill][:limit]
 
 
@@ -347,6 +454,9 @@ def main() -> None:
     parser.add_argument("--neighbor-distance", type=int, default=6)
     parser.add_argument("--neighbor-limit", type=int, default=32)
     parser.add_argument("--terminal-variants-per-residue", type=int, default=3)
+    parser.add_argument("--recent-epoch-window", type=int, default=16)
+    parser.add_argument("--recent-anchor-limit", type=int, default=16)
+    parser.add_argument("--recent-neighbor-limit", type=int, default=16)
     parser.add_argument("--scan-limit", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--api-root", default=LEADERBOARD_API_ROOT)
@@ -366,6 +476,9 @@ def main() -> None:
         "neighbor_distance",
         "neighbor_limit",
         "terminal_variants_per_residue",
+        "recent_epoch_window",
+        "recent_anchor_limit",
+        "recent_neighbor_limit",
     ):
         if getattr(args, name) < 0:
             parser.error(f"--{name.replace('_', '-')} cannot be negative")
@@ -404,6 +517,9 @@ def main() -> None:
         neighbor_distance=args.neighbor_distance,
         neighbor_limit=args.neighbor_limit,
         terminal_variants_per_residue=args.terminal_variants_per_residue,
+        recent_epoch_window=args.recent_epoch_window,
+        recent_anchor_limit=args.recent_anchor_limit,
+        recent_neighbor_limit=args.recent_neighbor_limit,
     )
     if not selected:
         raise SystemExit("no complete public nanobody parents were available")
@@ -417,6 +533,9 @@ def main() -> None:
         "neighbor_distance": args.neighbor_distance,
         "neighbor_limit": args.neighbor_limit,
         "terminal_variants_per_residue": args.terminal_variants_per_residue,
+        "recent_epoch_window": args.recent_epoch_window,
+        "recent_anchor_limit": args.recent_anchor_limit,
+        "recent_neighbor_limit": args.recent_neighbor_limit,
         "sequences": [item["sequence"] for item in selected],
         "candidates": selected,
     })
