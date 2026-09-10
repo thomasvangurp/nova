@@ -1,12 +1,11 @@
 """Build a live, score-qualified parent bank from completed public rounds.
 
-Parent sequences are public and are therefore never submitted.  They are used
-only as proposal centers.  Selection is based on the validator-published final
-score, not file recency or an archive-wide proxy.  The primary lane keeps the
-leading two sequences from each completed epoch.  A bounded family-neighbour
-lane also inspects ranks immediately below them, retaining close sequence
-neighbours with diverse terminal residues.  That lane preserves useful local
-precursors which a top-two-only policy silently discarded.
+Parent sequences are public and are therefore never submitted. They are used
+only as proposal centers. Eligibility spans every public observation in the
+persistent mutation database; recency is provenance, never an exclusion rule.
+Selection is based on validator-published score and family coverage. A bounded
+family-neighbour lane inspects ranks immediately below the epoch elites and is
+reserved capacity even when the global elite anchor set is already large.
 """
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from nanobody_opt.rank_exact import LEADERBOARD_API_ROOT
+from nanobody_opt.mutation_network import load_observations
 from nanobody_opt.simulate_round import METRICS
 
 
@@ -174,8 +174,16 @@ def select_elite_parents(
             item["sequence"],
         ),
     )
-    if neighbor_per_epoch == 0 or neighbor_limit == 0 or len(ordered_anchors) >= limit:
+    if neighbor_per_epoch == 0 or neighbor_limit == 0:
         return ordered_anchors[:limit]
+
+    # The former early return here silently disabled this lane as soon as the
+    # elite bank itself filled ``limit``. Reserve the requested neighbour
+    # capacity first, then backfill it with anchors only when no supported
+    # neighbours exist.
+    neighbor_capacity = min(neighbor_limit, max(0, limit - 1))
+    anchor_capacity = limit - neighbor_capacity
+    selected_anchors = ordered_anchors[:anchor_capacity]
 
     anchor_sequences = [str(item["sequence"]) for item in ordered_anchors]
     neighbours: dict[str, dict[str, Any]] = {}
@@ -251,9 +259,50 @@ def select_elite_parents(
             continue
         chosen.append(item)
         chosen_sequences.add(sequence)
-        if len(chosen) >= min(neighbor_limit, limit - len(ordered_anchors)):
+        if len(chosen) >= neighbor_capacity:
             break
-    return [*ordered_anchors, *chosen][:limit]
+    selected_sequences = {
+        str(item["sequence"]) for item in [*selected_anchors, *chosen]
+    }
+    backfill = [
+        item for item in ordered_anchors[anchor_capacity:]
+        if str(item["sequence"]) not in selected_sequences
+    ]
+    return [*selected_anchors, *chosen, *backfill][:limit]
+
+
+def _database_payloads(
+    path: Path,
+    *,
+    target: str,
+    before_epoch: int,
+) -> dict[int, Any]:
+    """Rehydrate public validator rows without imposing a recency window."""
+    payloads: dict[int, list[dict[str, Any]]] = {}
+    for item in load_observations(path, target=target):
+        epoch = item.get("epoch")
+        if (
+            item.get("score_kind") != "validator_final_rank_sum"
+            or epoch is None
+            or int(epoch) >= before_epoch
+        ):
+            continue
+        metrics = item.get("metrics") or {}
+        if any(name not in metrics for name in METRICS):
+            continue
+        payloads.setdefault(int(epoch), []).append({
+            "protein_name": target,
+            "sequence": item["sequence"],
+            "final_score": item["score"],
+            "confidence_rank": math.nan,
+            "physical_interaction_rank": math.nan,
+            "developability_rank": math.nan,
+            **{name: metrics[name] for name in METRICS},
+        })
+    return {
+        epoch: {"success": True, "data": [{"nanobodies": candidates}]}
+        for epoch, candidates in payloads.items()
+    }
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -281,7 +330,12 @@ def main() -> None:
     parser.add_argument("--target", required=True)
     parser.add_argument("--before-epoch", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--epochs", type=int, default=16)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=0,
+        help="completed epochs to retain; zero uses all database/API history",
+    )
     parser.add_argument("--per-epoch", type=int, default=2)
     parser.add_argument("--limit", type=int, default=64)
     parser.add_argument(
@@ -296,10 +350,17 @@ def main() -> None:
     parser.add_argument("--scan-limit", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--api-root", default=LEADERBOARD_API_ROOT)
+    parser.add_argument(
+        "--observation-database",
+        type=Path,
+        help="SQLite scored mutation store; all prior public epochs are eligible",
+    )
     args = parser.parse_args()
-    for name in ("epochs", "per_epoch", "limit", "scan_limit", "workers"):
+    for name in ("per_epoch", "limit", "scan_limit", "workers"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.epochs < 0:
+        parser.error("--epochs cannot be negative")
     for name in (
         "neighbor_per_epoch",
         "neighbor_distance",
@@ -314,14 +375,26 @@ def main() -> None:
         max(args.before_epoch - args.scan_limit - 1, 0),
         -1,
     )
-    payloads: dict[int, Any] = {}
+    payloads: dict[int, Any] = (
+        _database_payloads(
+            args.observation_database,
+            target=args.target,
+            before_epoch=args.before_epoch,
+        )
+        if args.observation_database is not None
+        and args.observation_database.is_file()
+        else {}
+    )
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [executor.submit(_fetch, args.api_root, epoch) for epoch in epochs]
         for future in as_completed(futures):
             epoch, payload = future.result()
             if payload is not None and _epoch_candidates(payload, args.target):
                 payloads[epoch] = payload
-    complete_epochs = sorted(payloads, reverse=True)[: args.epochs]
+    ordered_epochs = sorted(payloads, reverse=True)
+    complete_epochs = (
+        ordered_epochs[: args.epochs] if args.epochs else ordered_epochs
+    )
     selected = select_elite_parents(
         {epoch: payloads[epoch] for epoch in complete_epochs},
         target=args.target,

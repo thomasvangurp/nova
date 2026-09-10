@@ -138,6 +138,14 @@ def _run_iteration(
             "--epochs", str(args.parent_epochs),
             "--per-epoch", str(args.parents_per_epoch),
             "--limit", str(args.parent_limit),
+            "--neighbor-per-epoch", str(args.neighbor_parents_per_epoch),
+            "--neighbor-distance", str(args.neighbor_parent_distance),
+            "--neighbor-limit", str(args.neighbor_parent_limit),
+            "--terminal-variants-per-residue", str(
+                args.terminal_variants_per_residue
+            ),
+            "--scan-limit", str(args.parent_scan_limit),
+            "--observation-database", str(args.mutation_database),
             "--output", str(elite_parents),
         ])
     seed = producer_root / "elite_parents_layer2.json"
@@ -166,8 +174,17 @@ def _run_iteration(
             "--winner-priors", str(winner_priors),
             "--output", str(candidates),
             "--seed-count", str(args.seed_count),
+            "--neighbor-seed-count", str(args.neighbor_seed_count),
             "--minimum-seeds", str(args.minimum_seeds),
             "--per-seed", str(args.per_seed),
+            "--proposal-limit", str(args.proposal_limit),
+            "--framework-fraction", str(args.framework_fraction),
+            "--framework-per-seed", str(args.framework_per_seed),
+            "--terminal-width", str(args.terminal_width),
+            "--maximum-terminal-haplotype-mutations", str(
+                args.maximum_terminal_haplotype_mutations
+            ),
+            "--mutation-observations", str(args.mutation_database),
             "--motif-fraction", str(args.motif_fraction),
             "--single-mutation-fraction", str(args.single_mutation_fraction),
             "--maximum-motif-mutations", str(args.maximum_motif_mutations),
@@ -205,6 +222,7 @@ def _run_iteration(
         "--epoch", str(epoch),
         "--output-dir", str(iteration_root / "race"),
         "--ledger", str(args.ledger),
+        "--mutation-database", str(args.mutation_database),
         "--chain-state", str(args.chain_state),
         "--reserve-blocks", str(args.reserve_blocks),
         "--gpus", args.gpus,
@@ -228,20 +246,43 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("/root/artifacts/nanobody_published_sequences.txt"),
     )
+    parser.add_argument(
+        "--mutation-database",
+        type=Path,
+        default=Path("/root/artifacts/nanobody_mutations.sqlite"),
+    )
     parser.add_argument("--maximum-chain-state-age", type=float, default=90)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--poll-interval", type=float, default=30)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
-    parser.add_argument("--parent-epochs", type=int, default=16)
+    parser.add_argument(
+        "--parent-epochs",
+        type=int,
+        default=0,
+        help="zero keeps every historical epoch in the mutation database",
+    )
     parser.add_argument("--parents-per-epoch", type=int, default=2)
-    parser.add_argument("--parent-limit", type=int, default=32)
+    parser.add_argument("--parent-limit", type=int, default=64)
+    parser.add_argument("--parent-scan-limit", type=int, default=40)
+    parser.add_argument("--neighbor-parents-per-epoch", type=int, default=8)
+    parser.add_argument("--neighbor-parent-distance", type=int, default=6)
+    parser.add_argument("--neighbor-parent-limit", type=int, default=32)
+    parser.add_argument("--terminal-variants-per-residue", type=int, default=3)
     parser.add_argument("--seed-count", type=int, default=32)
+    parser.add_argument("--neighbor-seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)
     parser.add_argument(
         "--per-seed",
         type=int,
         default=12,
         help="proposals generated per elite parent before Layer-2 filtering",
+    )
+    parser.add_argument("--proposal-limit", type=int, default=384)
+    parser.add_argument("--framework-fraction", type=float, default=0.5)
+    parser.add_argument("--framework-per-seed", type=int, default=64)
+    parser.add_argument("--terminal-width", type=int, default=17)
+    parser.add_argument(
+        "--maximum-terminal-haplotype-mutations", type=int, default=3
     )
     parser.add_argument("--motif-fraction", type=float, default=0.25)
     parser.add_argument("--single-mutation-fraction", type=float, default=0.75)

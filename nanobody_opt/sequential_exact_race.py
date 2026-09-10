@@ -18,6 +18,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from nanobody_opt.mutation_network import (
+    ranking_observations,
+    update_observation_store,
+)
+
 
 STRICT_RANK_ARGUMENTS = (
     "--minimum-observations", "8",
@@ -301,6 +306,40 @@ def _challenger_can_overtake(
     return screen_p90 <= incumbent_p90 + margin
 
 
+def _store_ranking(
+    database: Path | None,
+    ranking: Path,
+    *,
+    epoch: int,
+    target: str,
+    source: str,
+) -> None:
+    if database is None or not ranking.is_file():
+        return
+    try:
+        count = update_observation_store(
+            database,
+            ranking_observations(
+                ranking,
+                epoch=epoch,
+                target=target,
+                source=source,
+            ),
+        )
+    except Exception as error:
+        # Historical learning must never suppress a publishable result.
+        print(
+            f"MUTATION_DB_UPDATE_FAILED source={source} "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+    else:
+        print(
+            f"MUTATION_DB_UPDATED source={source} observations={count}",
+            flush=True,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--layer2", required=True, type=Path)
@@ -310,6 +349,7 @@ def main() -> None:
     parser.add_argument("--epoch", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--mutation-database", type=Path)
     parser.add_argument("--chain-state", type=Path)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
@@ -397,6 +437,13 @@ def main() -> None:
             ),
             check=True,
         )
+        _store_ranking(
+            args.mutation_database,
+            screen_ranking,
+            epoch=args.epoch,
+            target=args.target,
+            source="live_exact_screen",
+        )
         screen_candidates = _ranking_by_sequence(screen_ranking)
         ranked_sequences = json.loads(screen_ranking.read_text())["sequences"]
         print(
@@ -458,6 +505,13 @@ def main() -> None:
             output=output,
             ledger=args.ledger,
         ):
+            _store_ranking(
+                args.mutation_database,
+                output,
+                epoch=args.epoch,
+                target=args.target,
+                source="live_exact_repeat",
+            )
             qualified_outputs.append(output)
             incumbent_p90 = _best_confirmed_p90(output)
             print(

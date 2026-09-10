@@ -38,12 +38,15 @@ def test_live_producer_rejects_stale_chain_state(tmp_path):
 def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     args = _parser().parse_args([])
 
-    assert args.parent_epochs == 16
+    assert args.parent_epochs == 0
     assert args.parents_per_epoch == 2
-    assert args.parent_limit == 32
+    assert args.parent_limit == 64
     assert args.seed_count == 32
+    assert args.neighbor_seed_count == 32
+    assert args.neighbor_parent_limit == 32
     assert args.minimum_seeds == 8
     assert args.per_seed == 12
+    assert args.proposal_limit == 384
     assert args.maximum_exhaustive_singles == 320
     assert args.candidate_limit == 320
     assert args.screen_tranche_size == 20

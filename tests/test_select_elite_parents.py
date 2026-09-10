@@ -105,3 +105,53 @@ def test_terminally_diverse_neighbor_lane_retains_uid2_direct_predecessor():
     assert predecessor["public_observations"] == [
         {"epoch": 25033, "epoch_rank": 9, "validator_final_score": 93.0}
     ]
+
+
+def test_neighbor_capacity_is_reserved_even_when_elite_bank_fills_limit():
+    payloads = {
+        25030: _payload(
+            _nanobody(UID63_25032, 50),
+            _nanobody("A" * 127, 51),
+            _nanobody(UID40_25033, 70),
+        ),
+        25031: _payload(
+            _nanobody("C" * 127, 52),
+            _nanobody("D" * 127, 53),
+        ),
+        25032: _payload(
+            _nanobody("E" * 127, 54),
+            _nanobody("F" * 127, 55),
+        ),
+    }
+
+    selected = select_elite_parents(
+        payloads,
+        target=TARGET,
+        per_epoch=2,
+        limit=4,
+        neighbor_per_epoch=1,
+        neighbor_distance=6,
+        neighbor_limit=2,
+        terminal_variants_per_residue=2,
+    )
+
+    assert len(selected) == 4
+    predecessor = next(
+        item for item in selected if item["sequence"] == UID40_25033
+    )
+    assert predecessor["parent_selection_lane"] == "family_neighbor"
+
+
+def test_older_better_elite_is_not_replaced_by_newer_mediocre_parent():
+    old_elite = PARENT_25022
+    payloads = {
+        24000: _payload(_nanobody(old_elite, 30)),
+        25039: _payload(_nanobody("A" * 127, 100)),
+    }
+
+    selected = select_elite_parents(
+        payloads, target=TARGET, per_epoch=1, limit=1
+    )
+
+    assert selected[0]["sequence"] == old_elite
+    assert selected[0]["validator_final_score"] == 30
