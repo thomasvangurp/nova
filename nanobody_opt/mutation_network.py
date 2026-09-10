@@ -46,6 +46,8 @@ class MutationNeighbour:
     mutations: tuple[str, ...]
     observations: int
     sources: tuple[str, ...]
+    supported_effect_count: int = 0
+    effect_uncertainty: float = 0.0
 
 
 def mutations(left: str, right: str) -> tuple[str, ...]:
@@ -111,7 +113,12 @@ def mutation_contexts(
 class MutationNetwork:
     """Compact position-vector store with virtual-node nearest neighbours."""
 
-    def __init__(self, records: Iterable[dict[str, Any]]):
+    def __init__(
+        self,
+        records: Iterable[dict[str, Any]],
+        *,
+        mutation_effects: Iterable[dict[str, Any]] = (),
+    ):
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in records:
             sequence = str(record.get("sequence", "")).strip().upper()
@@ -167,6 +174,49 @@ class MutationNetwork:
             [AA_INDEX[residue] for residue in node.sequence]
             for node in self.nodes
         ], dtype=np.uint8)
+        self._effects: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
+        for effect in mutation_effects:
+            key = (
+                int(effect["position"]),
+                str(effect["from_residue"]),
+                str(effect["to_residue"]),
+                str(effect["region"]),
+                str(effect["contact_class"]),
+            )
+            self._effects[key] = effect
+
+    def _prospective_adjustment(
+        self,
+        source: str,
+        candidate: str,
+        *,
+        distance_penalty: float,
+    ) -> tuple[float, int, float]:
+        adjustment = 0.0
+        supported = 0
+        uncertainty_squared = 0.0
+        for context in mutation_contexts(source, candidate):
+            key = (
+                int(context["position"]),
+                str(context["from_residue"]),
+                str(context["to_residue"]),
+                str(context["region"]),
+                str(context["contact_class"]),
+            )
+            effect = self._effects.get(key)
+            if effect is None:
+                adjustment += distance_penalty
+                continue
+            support = int(effect["support"])
+            shrinkage = support / (support + 3.0)
+            uncertainty = float(effect["uncertainty"])
+            adjustment += (
+                shrinkage * float(effect["median_score_delta"])
+                + uncertainty / math.sqrt(max(support, 1))
+            )
+            supported += 1
+            uncertainty_squared += uncertainty**2
+        return adjustment, supported, math.sqrt(uncertainty_squared)
 
     def neighbours(
         self,
@@ -185,7 +235,7 @@ class MutationNetwork:
             raise ValueError("invalid neighbour query configuration")
         vector = np.asarray([AA_INDEX[residue] for residue in sequence], dtype=np.uint8)
         distances = np.count_nonzero(self._vectors != vector, axis=1)
-        order = sorted(
+        baseline_order = sorted(
             range(len(self.nodes)),
             key=lambda index: (
                 self.nodes[index].score + distance_penalty * int(distances[index]),
@@ -193,20 +243,45 @@ class MutationNetwork:
                 self.nodes[index].sequence,
             ),
         )
-        found = []
-        for index in order:
+        compatible = [
+            index for index in baseline_order
+            if maximum_distance is None
+            or int(distances[index]) <= maximum_distance
+        ]
+        # Refine a generous vector shortlist with contextual directional
+        # effects. This keeps virtual-node queries cheap even after thousands
+        # of historical sequences have been ingested.
+        refined = []
+        for index in compatible[: max(256, limit * 16)]:
             distance = int(distances[index])
-            if maximum_distance is not None and distance > maximum_distance:
-                continue
+            node = self.nodes[index]
+            adjustment, supported, uncertainty = self._prospective_adjustment(
+                node.sequence,
+                sequence,
+                distance_penalty=distance_penalty,
+            )
+            refined.append((
+                node.score + adjustment,
+                distance,
+                node.sequence,
+                index,
+                supported,
+                uncertainty,
+            ))
+        refined.sort()
+        found = []
+        for adjusted_score, distance, _, index, supported, uncertainty in refined:
             node = self.nodes[index]
             found.append(MutationNeighbour(
                 sequence=node.sequence,
                 score=node.score,
                 distance=distance,
-                adjusted_score=node.score + distance_penalty * distance,
+                adjusted_score=adjusted_score,
                 mutations=mutations(node.sequence, sequence),
                 observations=node.observations,
                 sources=node.sources,
+                supported_effect_count=supported,
+                effect_uncertainty=uncertainty,
             ))
             if len(found) >= limit:
                 break
@@ -238,6 +313,11 @@ class MutationNetwork:
         return {
             "predecessor_min_distance": min(item.distance for item in neighbours),
             "predecessor_potential_score": neighbours[0].adjusted_score,
+            "prospective_score": neighbours[0].adjusted_score,
+            "prospective_effect_support": (
+                neighbours[0].supported_effect_count
+            ),
+            "prospective_uncertainty": neighbours[0].effect_uncertainty,
             "predecessor_consensus_score": float(np.mean([
                 item.adjusted_score for item in consensus
             ])),
@@ -485,10 +565,48 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
     ]
 
 
+def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
+    """Load the latest complete directional-effect snapshot for a target."""
+    if not path.is_file():
+        return []
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key=?",
+            (f"graph_version:{target}",),
+        ).fetchone()
+        if row is None:
+            return []
+        graph_version = str(row[0])
+        rows = connection.execute(
+            """
+            SELECT position, from_residue, to_residue, region, contact_class,
+                   support, median_score_delta, uncertainty, graph_version
+            FROM mutation_effects
+            WHERE target=? AND graph_version=?
+            """,
+            (target, graph_version),
+        ).fetchall()
+    return [
+        {
+            "position": row[0],
+            "from_residue": row[1],
+            "to_residue": row[2],
+            "region": row[3],
+            "contact_class": row[4],
+            "support": row[5],
+            "median_score_delta": row[6],
+            "uncertainty": row[7],
+            "graph_version": row[8],
+        }
+        for row in rows
+    ]
+
+
 def _robust_node_scores(
     connection: sqlite3.Connection,
     *,
     target: str,
+    sequence_length: int,
 ) -> tuple[list[int], list[str], np.ndarray, dict[str, float]]:
     rows = connection.execute(
         """
@@ -496,10 +614,10 @@ def _robust_node_scores(
                o.epoch, o.source, o.observation_count
         FROM nodes n
         JOIN observations o ON o.node_id=n.id
-        WHERE n.target=?
+        WHERE n.target=? AND n.length=?
         ORDER BY n.id, o.observation_id
         """,
-        (target,),
+        (target, sequence_length),
     ).fetchall()
     records = [
         {
@@ -521,13 +639,10 @@ def _robust_node_scores(
         first_by_id.setdefault(int(node_id), (str(sequence), bytes(vector)))
     node_ids = sorted(first_by_id)
     sequences = [first_by_id[node_id][0] for node_id in node_ids]
-    lengths = {len(sequence) for sequence in sequences}
-    if len(lengths) != 1:
-        raise ValueError("nearest-edge rebuild requires one VHH sequence length")
     vectors = np.frombuffer(
         b"".join(first_by_id[node_id][1] for node_id in node_ids),
         dtype=np.uint8,
-    ).reshape(len(node_ids), lengths.pop())
+    ).reshape(len(node_ids), sequence_length)
     return node_ids, sequences, vectors, score_by_sequence
 
 
@@ -543,51 +658,69 @@ def rebuild_nearest_edges(
     if edge_limit < 1 or maximum_distance < 1 or workers < 1:
         raise ValueError("invalid nearest-edge rebuild configuration")
     with _connect(path) as connection:
-        node_ids, sequences, vectors, scores = _robust_node_scores(
-            connection, target=target
-        )
-        node_count = len(node_ids)
-        index_by_node_id = {
-            node_id: index for index, node_id in enumerate(node_ids)
-        }
-        neighbour_count = min(edge_limit + 1, node_count)
-
-        # Each worker handles independent query rows. NumPy releases the GIL in
-        # the vector comparison/count, while the small chunk bounds peak RAM.
-        def nearest(index: int) -> list[tuple[int, int]]:
-            distances = np.count_nonzero(vectors != vectors[index], axis=1)
-            if neighbour_count == node_count:
-                candidates = np.arange(node_count)
-            else:
-                candidates = np.argpartition(
-                    distances, neighbour_count - 1
-                )[:neighbour_count]
-            ordered = sorted(
-                (
-                    (int(distances[other]), int(other))
-                    for other in candidates
-                    if other != index
-                    and int(distances[other]) <= maximum_distance
-                ),
-                key=lambda item: (item[0], sequences[item[1]]),
-            )
-            return ordered[:edge_limit]
-
         edge_rows: dict[tuple[int, int], tuple[int, int, int, str, str]] = {}
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for index, neighbours in enumerate(executor.map(nearest, range(node_count))):
-                for distance, other in neighbours:
-                    left_index, right_index = sorted((index, other))
-                    key = (node_ids[left_index], node_ids[right_index])
-                    left = sequences[left_index]
-                    right = sequences[right_index]
-                    edge_rows[key] = (
-                        key[0],
-                        key[1],
-                        distance,
-                        json.dumps(mutations(left, right)),
-                        json.dumps(mutation_contexts(left, right), sort_keys=True),
-                    )
+        sequence_by_node_id: dict[int, str] = {}
+        scores: dict[str, float] = {}
+        lengths = connection.execute(
+            """
+            SELECT length, COUNT(*) FROM nodes
+            WHERE target=? GROUP BY length ORDER BY length
+            """,
+            (target,),
+        ).fetchall()
+        if not lengths:
+            raise ValueError(f"mutation database has no observations for {target}")
+        node_count = 0
+        for sequence_length, _ in lengths:
+            node_ids, sequences, vectors, partition_scores = _robust_node_scores(
+                connection,
+                target=target,
+                sequence_length=int(sequence_length),
+            )
+            node_count += len(node_ids)
+            scores.update(partition_scores)
+            sequence_by_node_id.update(zip(node_ids, sequences, strict=True))
+            neighbour_count = min(edge_limit + 1, len(node_ids))
+
+            # Each worker handles independent query rows. NumPy releases the
+            # GIL in the comparison/count, while the query-row design bounds
+            # peak RAM even for a large historical bank.
+            def nearest(index: int) -> list[tuple[int, int]]:
+                distances = np.count_nonzero(vectors != vectors[index], axis=1)
+                if neighbour_count == len(node_ids):
+                    candidates = np.arange(len(node_ids))
+                else:
+                    candidates = np.argpartition(
+                        distances, neighbour_count - 1
+                    )[:neighbour_count]
+                ordered = sorted(
+                    (
+                        (int(distances[other]), int(other))
+                        for other in candidates
+                        if other != index
+                        and int(distances[other]) <= maximum_distance
+                    ),
+                    key=lambda item: (item[0], sequences[item[1]]),
+                )
+                return ordered[:edge_limit]
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                results = executor.map(nearest, range(len(node_ids)))
+                for index, neighbours in enumerate(results):
+                    for distance, other in neighbours:
+                        left_index, right_index = sorted((index, other))
+                        key = (node_ids[left_index], node_ids[right_index])
+                        left = sequences[left_index]
+                        right = sequences[right_index]
+                        edge_rows[key] = (
+                            key[0],
+                            key[1],
+                            distance,
+                            json.dumps(mutations(left, right)),
+                            json.dumps(
+                                mutation_contexts(left, right), sort_keys=True
+                            ),
+                        )
 
         connection.execute(
             """
@@ -608,7 +741,7 @@ def rebuild_nearest_edges(
 
         graph_material = "\n".join(
             f"{sequence}\t{scores[sequence]:.8f}"
-            for sequence in sorted(sequences)
+            for sequence in sorted(scores)
         )
         import hashlib
 
@@ -617,10 +750,8 @@ def rebuild_nearest_edges(
         for source_id, target_id, distance, _, context_json in edge_rows.values():
             if distance != 1:
                 continue
-            source_index = index_by_node_id[source_id]
-            target_index = index_by_node_id[target_id]
-            source_sequence = sequences[source_index]
-            target_sequence = sequences[target_index]
+            source_sequence = sequence_by_node_id[source_id]
+            target_sequence = sequence_by_node_id[target_id]
             context = json.loads(context_json)[0]
             delta = scores[target_sequence] - scores[source_sequence]
             forward = (

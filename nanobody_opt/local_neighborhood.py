@@ -26,7 +26,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import diversity, gates
-from nanobody_opt.mutation_network import MutationNetwork, load_observations
+from nanobody_opt.mutation_network import (
+    MutationNetwork,
+    load_mutation_effects,
+    load_observations,
+    mutation_contexts,
+)
 from nanobody_opt.regions import find_regions
 from nanobody_opt.simulate_round import dense_rank_sums
 
@@ -503,11 +508,22 @@ def main() -> None:
     ]
     network_records.extend(_winner_records(args.winner_priors, length))
     if args.mutation_observations is not None:
-        network_records.extend(load_observations(
-            args.mutation_observations,
-            target=target,
-        ))
-    mutation_network = MutationNetwork(network_records)
+        network_records.extend(
+            item for item in load_observations(
+                args.mutation_observations,
+                target=target,
+            )
+            if len(str(item.get("sequence", ""))) == length
+        )
+    effects = (
+        load_mutation_effects(args.mutation_observations, target=target)
+        if args.mutation_observations is not None
+        else []
+    )
+    mutation_network = MutationNetwork(
+        network_records,
+        mutation_effects=effects,
+    )
     if args.mutation_network_output is not None:
         mutation_network.save(args.mutation_network_output)
 
@@ -582,6 +598,11 @@ def main() -> None:
         )
         evidence = mutation_network.evidence(candidate)
         neighbours = evidence.pop("predecessor_neighbours")
+        contexts = mutation_contexts(
+            parent,
+            candidate,
+            contact_positions=protected,
+        )
         seen.add(candidate)
         destination.append({
             "sequence": candidate,
@@ -597,6 +618,7 @@ def main() -> None:
                 f"{before}{index + 1}{after}"
                 for index, before, after in changed
             ),
+            "mutation_contexts": json.dumps(contexts, sort_keys=True),
             "proposal_prior_score": proposal_prior_score,
             "protected_parent_contact_count": len(protected),
             "max_jaccard_to_top50": max_jaccard,
