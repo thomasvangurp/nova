@@ -107,7 +107,7 @@ def test_parallel_edge_rebuild_learns_directional_single_mutation_effects(tmp_pa
             "sequence": "AAAC",
             "score": 50,
             "score_kind": "validator_final_rank_sum",
-            "epoch": 2,
+            "epoch": 1,
             "target": "P20809",
         },
         {

@@ -659,7 +659,6 @@ def rebuild_nearest_edges(
         raise ValueError("invalid nearest-edge rebuild configuration")
     with _connect(path) as connection:
         edge_rows: dict[tuple[int, int], tuple[int, int, int, str, str]] = {}
-        sequence_by_node_id: dict[int, str] = {}
         scores: dict[str, float] = {}
         lengths = connection.execute(
             """
@@ -679,7 +678,6 @@ def rebuild_nearest_edges(
             )
             node_count += len(node_ids)
             scores.update(partition_scores)
-            sequence_by_node_id.update(zip(node_ids, sequences, strict=True))
             neighbour_count = min(edge_limit + 1, len(node_ids))
 
             # Each worker handles independent query rows. NumPy releases the
@@ -739,6 +737,23 @@ def rebuild_nearest_edges(
             edge_rows.values(),
         )
 
+        observation_rows = connection.execute(
+            """
+            SELECT n.id, o.epoch, o.score_kind, o.source, o.score
+            FROM nodes n
+            JOIN observations o ON o.node_id=n.id
+            WHERE n.target=? AND o.epoch IS NOT NULL
+            """,
+            (target,),
+        ).fetchall()
+        matched_scores: dict[
+            int, dict[tuple[int, str, str], list[float]]
+        ] = defaultdict(lambda: defaultdict(list))
+        for node_id, epoch, score_kind, source, score in observation_rows:
+            matched_scores[int(node_id)][
+                (int(epoch), str(score_kind), str(source))
+            ].append(float(score))
+
         graph_material = "\n".join(
             f"{sequence}\t{scores[sequence]:.8f}"
             for sequence in sorted(scores)
@@ -750,10 +765,7 @@ def rebuild_nearest_edges(
         for source_id, target_id, distance, _, context_json in edge_rows.values():
             if distance != 1:
                 continue
-            source_sequence = sequence_by_node_id[source_id]
-            target_sequence = sequence_by_node_id[target_id]
             context = json.loads(context_json)[0]
-            delta = scores[target_sequence] - scores[source_sequence]
             forward = (
                 int(context["position"]),
                 str(context["from_residue"]),
@@ -762,8 +774,20 @@ def rebuild_nearest_edges(
                 str(context["contact_class"]),
             )
             reverse = (forward[0], forward[2], forward[1], forward[3], forward[4])
-            effects[forward].append(delta)
-            effects[reverse].append(-delta)
+            common = (
+                matched_scores[source_id].keys()
+                & matched_scores[target_id].keys()
+            )
+            for comparison in common:
+                source_score = float(np.mean(
+                    matched_scores[source_id][comparison]
+                ))
+                target_score = float(np.mean(
+                    matched_scores[target_id][comparison]
+                ))
+                delta = target_score - source_score
+                effects[forward].append(delta)
+                effects[reverse].append(-delta)
         connection.execute(
             "DELETE FROM mutation_effects WHERE target=? AND graph_version=?",
             (target, graph_version),
