@@ -58,6 +58,17 @@
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
 
+    - name: Sync the locked Pixi workspace metadata
+      ansible.builtin.copy:
+        src: "{{ repo }}/{{ item }}"
+        dest: "/root/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - pixi.toml
+        - pixi.lock
+
     - name: Create the current epoch workspace
       ansible.builtin.file:
         path: "{{ live_root }}/epoch{{ nanobody_epoch }}"
