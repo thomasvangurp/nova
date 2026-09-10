@@ -60,6 +60,15 @@ RUN --mount=type=cache,id=nova-nanobody-pixi,target=/root/.cache/rattler,sharing
     pixi install --locked --environment bgen \
     && pixi install --locked --environment metanano
 
+# Pinned ImmuneBuilder passes a set instead of OpenMM's required property map
+# only when its strained-sidechain repair branch runs. Apply the same reviewed
+# compatibility fix as Ansible and fail the build if the upstream text drifts.
+RUN refine_file="$(find /root/.pixi/envs/metanano/lib -path '*/site-packages/ImmuneBuilder/refine.py' -print -quit)" \
+    && test -n "${refine_file}" \
+    && grep -Fq "{'Threads', str(n_threads)}" "${refine_file}" \
+    && sed -i "s/{'Threads', str(n_threads)}/{'Threads': str(n_threads)}/" "${refine_file}" \
+    && ! grep -Fq "{'Threads', str(n_threads)}" "${refine_file}"
+
 # The validator's IgBLAST adapter has a stable legacy binary path. The binary is
 # supplied by the locked MetaNano Pixi environment; only a compatibility link is
 # created here (there is no out-of-band BLAST installation). Image builds

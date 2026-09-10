@@ -353,6 +353,38 @@
         group: root
         mode: "0644"
 
+    - name: Locate the Pixi-installed ImmuneBuilder refinement module
+      ansible.builtin.shell: |
+        find /root/.pixi/envs/metanano/lib -path '*/site-packages/ImmuneBuilder/refine.py' -print -quit
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: immunebuilder_refine
+      failed_when: not immunebuilder_refine.stdout
+
+    # ImmuneBuilder's strained-sidechain path passes a set to OpenMM where its
+    # API requires a property dictionary. Ordinary structures never enter this
+    # branch, so retain the pinned revision and apply the one-character fix.
+    - name: Apply the OpenMM property-map fix to locked ImmuneBuilder
+      ansible.builtin.replace:
+        path: "{{ immunebuilder_refine.stdout }}"
+        regexp: >-
+          \{'Threads', str\(n_threads\)\}
+        replace: "{'Threads': str(n_threads)}"
+
+    - name: Verify the ImmuneBuilder OpenMM fix is present
+      ansible.builtin.command:
+        argv:
+          - /root/metanano_python.sh
+          - -c
+          - >-
+            import inspect,ImmuneBuilder.refine as r;
+            s=inspect.getsource(r.strained_sidechain_bonds_fixer);
+            assert "{'Threads': str(n_threads)}" in s,s;
+            assert "{'Threads', str(n_threads)}" not in s,s;
+            print('IMMUNEBUILDER_OPENMM_PATCH_OK')
+      changed_when: false
+
     - name: Assert the wrapper rejects an inherited cross-environment PYTHONPATH
       ansible.builtin.command: >-
         /root/bgen_python.sh -c
