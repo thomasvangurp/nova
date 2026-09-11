@@ -44,16 +44,21 @@ nanobody_maximum_exhaustive_singles: 32768
 # remaining non-GPU cost is one model load per invocation, so large waves are
 # what converts the speedup into throughput; multi-worker packing and predict
 # batching were both measured as dead ends.
-nanobody_candidate_limit: 2400
-nanobody_screen_tranche_size: 800
-nanobody_weak_initial_fallback_after: 1200
+# Per generation, not per epoch.  Four generations of 600 screen the same 2,400
+# candidates as one flat pass, but generations two through four are proposed
+# from what the earlier ones actually scored, so the pool itself improves
+# instead of only the selection within a fixed pool.  600 candidates is 60 per
+# worker, which is past the scorer's amortisation floor.
+nanobody_candidate_limit: 600
+nanobody_screen_tranche_size: 600
+nanobody_weak_initial_fallback_after: 600
 nanobody_finalists: 60
 nanobody_qualification_observations: 13
 
-# The screen loop admits at most one finalist per tranche, so the shortlist is
-# replicated explicitly after screening: nine rounds, each one scorer
-# invocation over all sixty candidates, giving every one of them ten
-# independent observations.
+# Replication is spent once per epoch, in the generation that opens inside the
+# closing window, over the pooled best of every generation.  The generator does
+# not re-propose what it has already screened, so without pooling a strong hit
+# from generation one could never be confirmed later.
 nanobody_replication_rounds: 12
 
 # Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54

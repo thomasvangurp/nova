@@ -543,3 +543,31 @@ def test_layer2_gate_is_inert_without_a_command(tmp_path):
     assert race._layer2_gate(
         ["AAA", "BBB"], command=[], root=tmp_path, target="P20809"
     ) == ["AAA", "BBB"]
+
+
+def test_pooled_exact_paths_reach_earlier_generations(tmp_path):
+    producer = tmp_path / "producer"
+    for iteration in (1, 2):
+        root = producer / f"iteration_{iteration:02d}" / "race" / "screen" / "t"
+        root.mkdir(parents=True)
+        (root / "exact_all.json").write_text("{}")
+    current = producer / "iteration_03" / "race"
+    current.mkdir(parents=True)
+    local = producer / "iteration_03" / "race" / "screen" / "t"
+    local.mkdir(parents=True)
+    local_path = local / "exact_all.json"
+    local_path.write_text("{}")
+
+    pooled = race._pooled_exact_paths([local_path], producer, current)
+
+    # the closing generation sees every earlier generation's observations,
+    # and its own are not duplicated
+    assert len(pooled) == 3
+    assert pooled.count(local_path) == 1
+    assert any("iteration_01" in str(path) for path in pooled)
+
+
+def test_pooled_exact_paths_are_inert_without_a_root(tmp_path):
+    local = [tmp_path / "exact_all.json"]
+
+    assert race._pooled_exact_paths(local, None, tmp_path) == local

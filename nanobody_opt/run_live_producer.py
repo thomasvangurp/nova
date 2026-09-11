@@ -230,6 +230,22 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
+    # Generate-score-regenerate: every iteration screens a fresh generation
+    # steered by the observations the previous ones wrote to the mutation
+    # database.  Replication is spent once, in the iteration that opens inside
+    # the closing window, over the pooled best of the whole epoch -- doing it
+    # per iteration would burn the budget on the first generation's leader.
+    remaining_blocks = int(state["epoch_length"]) - (
+        int(state["block"]) % int(state["epoch_length"])
+    )
+    closing = remaining_blocks <= args.replication_reserve_blocks + args.reserve_blocks
+    replication_rounds = args.replication_rounds if closing else 0
+    print(
+        f"PRODUCER_GENERATION iteration={iteration} "
+        f"remaining_blocks={remaining_blocks} closing={closing} "
+        f"replication_rounds={replication_rounds}",
+        flush=True,
+    )
     race_command = [
         sys.executable,
         "-m", "nanobody_opt.sequential_exact_race",
@@ -256,7 +272,8 @@ def _run_iteration(
         "--qualification-observations", str(args.qualification_observations),
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
-        "--replication-rounds", str(args.replication_rounds),
+        "--replication-rounds", str(replication_rounds),
+        "--pooled-exact-root", str(producer_root),
         "--replication-reserve-blocks", str(args.replication_reserve_blocks),
         "--strict-gates", str(args.strict_gates or ""),
     ]

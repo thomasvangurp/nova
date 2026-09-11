@@ -284,6 +284,31 @@ def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bo
     return current_epoch == epoch and block % epoch_length < epoch_length - reserve_blocks
 
 
+def _pooled_exact_paths(
+    local: list[Path], pooled_root: Path | None, output_dir: Path
+) -> list[Path]:
+    """Every exact observation this epoch has produced, not just this iteration.
+
+    A generate-score-regenerate epoch screens several generations.  Ranking and
+    replication must see all of them: the generator deliberately does not
+    re-propose candidates it has already screened, so a strong hit from the
+    first generation can never be confirmed later unless the closing iteration
+    can still reach its observations.
+    """
+    paths = list(local)
+    if pooled_root is None:
+        return paths
+    seen = {path.resolve() for path in paths}
+    own = output_dir.resolve()
+    for path in sorted(pooled_root.glob("iteration_*/race/**/exact_all.json")):
+        resolved = path.resolve()
+        if resolved in seen or own in resolved.parents:
+            continue
+        seen.add(resolved)
+        paths.append(path)
+    return paths
+
+
 def _layer2_gate(
     shortlist: list[str],
     *,
@@ -700,6 +725,7 @@ def _score_repeats(
 def _try_strict_rank(
     *,
     root: Path,
+    pooled_root: Path | None = None,
     archive: Path,
     config: Path,
     target: str,
@@ -711,7 +737,7 @@ def _try_strict_rank(
     try:
         subprocess.run(
             _rank_command(
-                exact=_exact_paths(root),
+                exact=_pooled_exact_paths(_exact_paths(root), pooled_root, root),
                 archive=archive,
                 config=config,
                 target=target,
@@ -948,6 +974,15 @@ def main() -> None:
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
     parser.add_argument(
+        "--pooled-exact-root",
+        type=Path,
+        help=(
+            "producer root whose earlier iterations' observations join ranking "
+            "and replication, so an epoch can screen several generations and "
+            "still confirm the best candidate from any of them"
+        ),
+    )
+    parser.add_argument(
         "--layer2-gate-command",
         help=(
             "command template run over the replication shortlist to obtain full "
@@ -1150,7 +1185,9 @@ def main() -> None:
         screened += len(job.tranche)
         subprocess.run(
             _rank_command(
-                exact=screen_exact_paths,
+                exact=_pooled_exact_paths(
+                    screen_exact_paths, args.pooled_exact_root, args.output_dir
+                ),
                 archive=args.archive,
                 config=args.config,
                 target=args.target,
@@ -1303,6 +1340,7 @@ def main() -> None:
             epoch=args.epoch,
             output=output,
             ledger=args.ledger,
+            pooled_root=args.pooled_exact_root,
             strict_gate_overrides=strict_gate_overrides,
         ):
             _store_ranking(
@@ -1326,6 +1364,25 @@ def main() -> None:
     replication_rounds_completed = 0
     replication_shortlist: list[str] = []
     if args.replication_rounds:
+        if not screen_ranking.is_file() and args.pooled_exact_root is not None:
+            # The closing iteration may screen nothing at all: it opens inside
+            # the replication window on purpose.  Rank the epoch's pooled
+            # observations so the shortlist is the best of every generation.
+            subprocess.run(
+                _rank_command(
+                    exact=_pooled_exact_paths(
+                        [], args.pooled_exact_root, args.output_dir
+                    ),
+                    archive=args.archive,
+                    config=args.config,
+                    target=args.target,
+                    epoch=args.epoch,
+                    output=screen_ranking,
+                    ledger=args.ledger,
+                    strict=False,
+                ),
+                check=True,
+            )
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
         )
@@ -1360,6 +1417,7 @@ def main() -> None:
                 epoch=args.epoch,
                 output=output,
                 ledger=args.ledger,
+                pooled_root=args.pooled_exact_root,
                 strict_gate_overrides=strict_gate_overrides,
             ):
                 _store_ranking(
