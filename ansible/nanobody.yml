@@ -31,6 +31,7 @@
     nanobody_neighbor_seed_count: 32
     nanobody_proposals_per_seed: 12
     nanobody_proposal_limit: 384
+    nanobody_maximum_exhaustive_singles: 8192
     nanobody_candidate_limit: 320
     nanobody_screen_tranche_size: 20
     ckpts:
@@ -692,6 +693,8 @@
           - "{{ nanobody_proposals_per_seed }}"
           - --proposal-limit
           - "{{ nanobody_proposal_limit }}"
+          - --maximum-exhaustive-singles
+          - "{{ nanobody_maximum_exhaustive_singles }}"
           - --candidate-limit
           - "{{ nanobody_candidate_limit }}"
           - --screen-tranche-size
