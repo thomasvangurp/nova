@@ -20,6 +20,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from nanobody_opt.basins import basin_id, rank_basin_evidence
 from nanobody_opt.rank_exact import LEADERBOARD_API_ROOT
 from nanobody_opt.mutation_network import load_observations
 from nanobody_opt.simulate_round import METRICS
@@ -90,6 +91,8 @@ def select_elite_parents(
     recent_epoch_window: int = 16,
     recent_anchor_limit: int = 16,
     recent_neighbor_limit: int = 16,
+    basin_core_limit: int = 5,
+    basin_parent_limit: int = 32,
 ) -> list[dict[str, Any]]:
     """Select a balanced bank of global and recent family representatives.
 
@@ -107,6 +110,8 @@ def select_elite_parents(
         recent_epoch_window,
         recent_anchor_limit,
         recent_neighbor_limit,
+        basin_core_limit,
+        basin_parent_limit,
     ) < 0:
         raise ValueError("neighbour selection arguments cannot be negative")
 
@@ -166,6 +171,118 @@ def select_elite_parents(
             }
             destination[sequence] = {**candidate, **preserved}
 
+    def allocate_by_basin(
+        legacy_selection: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Reserve parent capacity by strong core, not by individual sequence."""
+        if basin_core_limit == 0 or basin_parent_limit == 0:
+            return legacy_selection[:limit]
+        all_sequences: dict[str, dict[str, Any]] = {}
+        evidence_rows: list[dict[str, Any]] = []
+        for epoch in sorted(ranked_epochs, reverse=True):
+            for epoch_rank, candidate in enumerate(ranked_epochs[epoch], start=1):
+                sequence = str(candidate["sequence"])
+                evidence_rows.append({
+                    "sequence": sequence,
+                    "score": candidate["validator_final_score"],
+                    "epoch": epoch,
+                })
+                current = all_sequences.get(sequence)
+                entry = observation(epoch, epoch_rank, candidate)
+                if current is None:
+                    all_sequences[sequence] = {
+                        **candidate,
+                        "parent_source": "public_leaderboard_api",
+                        "parent_selection_lane": "basin_core",
+                        "nearest_elite_distance": 0,
+                        "public_observations": [entry],
+                    }
+                else:
+                    current["public_observations"].append(entry)
+                    if (
+                        candidate["validator_final_score"]
+                        < current["validator_final_score"]
+                    ):
+                        preserved = {
+                            key: current[key]
+                            for key in (
+                                "parent_source",
+                                "parent_selection_lane",
+                                "nearest_elite_distance",
+                                "public_observations",
+                            )
+                        }
+                        all_sequences[sequence] = {**candidate, **preserved}
+
+        basin_evidence = rank_basin_evidence(
+            evidence_rows,
+            recent_epoch_window=recent_epoch_window,
+        )
+        top_ids = [
+            identifier
+            for identifier, stats in sorted(
+                basin_evidence.items(), key=lambda pair: int(pair[1]["basin_rank"])
+            )
+            if int(stats["basin_rank"]) <= basin_core_limit
+        ]
+
+        def annotate(item: dict[str, Any]) -> dict[str, Any]:
+            identifier = basin_id(str(item["sequence"]))
+            stats = basin_evidence.get(identifier, {})
+            return {**item, "basin_core_id": identifier, **stats}
+
+        grouped: dict[str, list[dict[str, Any]]] = {identifier: [] for identifier in top_ids}
+        for item in all_sequences.values():
+            identifier = basin_id(str(item["sequence"]))
+            if identifier in grouped:
+                grouped[identifier].append(annotate(item))
+        for identifier in grouped:
+            grouped[identifier].sort(key=lambda item: (
+                float(item["validator_final_score"]),
+                -max(int(entry["epoch"]) for entry in item["public_observations"]),
+                str(item["sequence"]),
+            ))
+
+        reserved: list[dict[str, Any]] = []
+        capacity = min(limit, basin_parent_limit)
+        index = 0
+        while len(reserved) < capacity:
+            added = False
+            for identifier in top_ids:
+                items = grouped[identifier]
+                if index >= len(items):
+                    continue
+                item = items[index]
+                item["basin_allocation_reserved"] = True
+                item["parent_history_scope"] = (
+                    "recent"
+                    if any(
+                        int(entry["epoch"])
+                        in set(sorted(ranked_epochs, reverse=True)[:recent_epoch_window])
+                        for entry in item["public_observations"]
+                    )
+                    else "global"
+                )
+                reserved.append(item)
+                added = True
+                if len(reserved) >= capacity:
+                    break
+            if not added:
+                break
+            index += 1
+
+        selected = list(reserved)
+        used = {str(item["sequence"]) for item in selected}
+        for item in legacy_selection:
+            sequence = str(item["sequence"])
+            if sequence in used:
+                continue
+            selected.append(annotate(item))
+            used.add(sequence)
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
+
     anchors: dict[str, dict[str, Any]] = {}
     for epoch in sorted(ranked_epochs, reverse=True):
         for epoch_rank, candidate in enumerate(ranked_epochs[epoch][:per_epoch], start=1):
@@ -186,7 +303,7 @@ def select_elite_parents(
         ),
     )
     if neighbor_per_epoch == 0 or neighbor_limit == 0:
-        return ordered_anchors[:limit]
+        return allocate_by_basin(ordered_anchors[:limit])
 
     # The former early return here silently disabled this lane as soon as the
     # elite bank itself filled ``limit``. Reserve the requested neighbour
@@ -375,7 +492,7 @@ def select_elite_parents(
     ]
     for item in backfill:
         item["parent_history_scope"] = "global"
-    return [*selected_anchors, *chosen, *backfill][:limit]
+    return allocate_by_basin([*selected_anchors, *chosen, *backfill][:limit])
 
 
 def _database_payloads(
@@ -457,6 +574,8 @@ def main() -> None:
     parser.add_argument("--recent-epoch-window", type=int, default=16)
     parser.add_argument("--recent-anchor-limit", type=int, default=16)
     parser.add_argument("--recent-neighbor-limit", type=int, default=16)
+    parser.add_argument("--basin-core-limit", type=int, default=5)
+    parser.add_argument("--basin-parent-limit", type=int, default=32)
     parser.add_argument("--scan-limit", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--api-root", default=LEADERBOARD_API_ROOT)
@@ -479,6 +598,8 @@ def main() -> None:
         "recent_epoch_window",
         "recent_anchor_limit",
         "recent_neighbor_limit",
+        "basin_core_limit",
+        "basin_parent_limit",
     ):
         if getattr(args, name) < 0:
             parser.error(f"--{name.replace('_', '-')} cannot be negative")
@@ -520,6 +641,8 @@ def main() -> None:
         recent_epoch_window=args.recent_epoch_window,
         recent_anchor_limit=args.recent_anchor_limit,
         recent_neighbor_limit=args.recent_neighbor_limit,
+        basin_core_limit=args.basin_core_limit,
+        basin_parent_limit=args.basin_parent_limit,
     )
     if not selected:
         raise SystemExit("no complete public nanobody parents were available")
@@ -536,6 +659,8 @@ def main() -> None:
         "recent_epoch_window": args.recent_epoch_window,
         "recent_anchor_limit": args.recent_anchor_limit,
         "recent_neighbor_limit": args.recent_neighbor_limit,
+        "basin_core_limit": args.basin_core_limit,
+        "basin_parent_limit": args.basin_parent_limit,
         "sequences": [item["sequence"] for item in selected],
         "candidates": selected,
     })

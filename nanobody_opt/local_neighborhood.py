@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+import hashlib
 import json
 import math
 import sys
@@ -26,6 +27,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import diversity, gates
+from nanobody_opt.basins import basin_id, structural_core
 from nanobody_opt.mutation_network import (
     MutationNetwork,
     load_mutation_effects,
@@ -145,10 +147,13 @@ def _proposal_ranking_key(item: dict[str, object]) -> tuple[object, ...]:
         "lineage_terminal_single_substitution": 1,
         "lineage_cdr_single_substitution": 1,
         "lineage_haplotype": 2,
+        "basin_terminal_single_substitution": 0,
+        "basin_terminal_haplotype": 1,
         "whole_cdr_motif": 6,
         "local_substitution": 7,
     }
     return (
+        int(item.get("parent_basin_rank", 10**9)),
         float(item.get("predecessor_potential_score", math.inf)),
         float(item.get("predecessor_consensus_score", math.inf)),
         float(item.get("parent_selection_score", math.inf)),
@@ -214,6 +219,42 @@ def _round_robin_by_parent(proposals: list[dict[str, object]]) -> list[dict[str,
             grouped[parent][index]
             for parent in parents
             if index < len(grouped[parent])
+        )
+    return ordered
+
+
+def _round_robin_by_basin(proposals: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Allocate proposal turns to structural cores before individual parents."""
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for proposal in proposals:
+        identifier = str(
+            proposal.get("parent_basin_core_id")
+            or proposal.get("basin_core_id")
+            or proposal.get("parent_sequence")
+        )
+        grouped[identifier].append(proposal)
+    for identifier, items in grouped.items():
+        grouped[identifier] = _round_robin_by_parent(items)
+    core_order = sorted(
+        grouped,
+        key=lambda identifier: (
+            min(
+                int(item.get("parent_basin_rank", 10**9))
+                for item in grouped[identifier]
+            ),
+            min(
+                float(item.get("parent_selection_score", math.inf))
+                for item in grouped[identifier]
+            ),
+            identifier,
+        ),
+    )
+    ordered: list[dict[str, object]] = []
+    for index in range(max(map(len, grouped.values()), default=0)):
+        ordered.extend(
+            grouped[identifier][index]
+            for identifier in core_order
+            if index < len(grouped[identifier])
         )
     return ordered
 
@@ -385,6 +426,144 @@ def supported_lineage_candidates(
     return list(candidates.items())
 
 
+def supported_basin_terminal_candidates(
+    parent: str,
+    *,
+    basin_sequences: list[str],
+    protected: set[int],
+    terminal_width: int = 17,
+    maximum_haplotype_mutations: int = 6,
+) -> list[tuple[str, str, str]]:
+    """Enumerate terminal variants observed within one masked binding core.
+
+    Single substitutions provide combinatorial coverage of residues already
+    seen in the basin.  Short haplotypes preserve co-observed terminal residue
+    combinations.  Candidates remain distinct: sharing a core allocates budget
+    but does not imply equal validator behavior.
+    """
+    length = len(parent)
+    if terminal_width < 1 or maximum_haplotype_mutations < 2:
+        raise ValueError("invalid basin terminal configuration")
+    compatible = [
+        sequence
+        for sequence in basin_sequences
+        if len(sequence) == length and structural_core(sequence) == structural_core(parent)
+    ]
+    if not compatible:
+        return []
+    mutable = (
+        set(range(min(10, length)))
+        | set(range(max(0, length - terminal_width), length))
+    ) - protected
+    candidates: dict[str, tuple[str, str]] = {}
+    # Every historical terminal haplotype is a legitimate parent inside an
+    # already qualified basin.  Mutating only the selected representative
+    # would still miss winners that are one step from a lower-ranked sibling.
+    # Exhaust the supported one-step shell around every observed haplotype.
+    supported_residues = {
+        position: sorted({sequence[position] for sequence in compatible})
+        for position in mutable
+    }
+    for base in compatible:
+        for position in sorted(mutable):
+            for residue in supported_residues[position]:
+                if residue == base[position] or residue not in gates.ALLOWED_AAS:
+                    continue
+                candidate = base[:position] + residue + base[position + 1 :]
+                candidates.setdefault(
+                    candidate,
+                    ("basin_terminal_single_substitution", base),
+                )
+    for donor in compatible:
+        changes = [
+            position for position in sorted(mutable)
+            if donor[position] != parent[position]
+        ]
+        if not 2 <= len(changes) <= maximum_haplotype_mutations:
+            continue
+        candidate = list(parent)
+        for position in changes:
+            candidate[position] = donor[position]
+        candidates.setdefault(
+            "".join(candidate), ("basin_terminal_haplotype", parent)
+        )
+    return [
+        (candidate, source, base)
+        for candidate, (source, base) in candidates.items()
+    ]
+
+
+def bounded_basin_terminal_routes(
+    routes: list[tuple[str, str, str]],
+    *,
+    base_scores: dict[str, float],
+    limit: int,
+    exploration_fraction: float = 0.20,
+) -> list[tuple[str, str, str]]:
+    """Bound a combinatorial basin shell while retaining haplotype diversity."""
+    if limit < 1 or not 0 <= exploration_fraction <= 1:
+        raise ValueError("invalid basin route budget")
+    grouped: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    for route in routes:
+        grouped[route[2]].append(route)
+
+    def route_key(route: tuple[str, str, str]) -> tuple[object, ...]:
+        candidate, source, base = route
+        changed = [
+            index for index, (left, right) in enumerate(zip(base, candidate, strict=True))
+            if left != right
+        ]
+        terminal_depth = min(
+            (min(position + 1, len(candidate) - position) for position in changed),
+            default=len(candidate),
+        )
+        return (
+            0 if source == "basin_terminal_single_substitution" else 1,
+            len(changed),
+            terminal_depth,
+            hashlib.sha256(candidate.encode("ascii")).hexdigest(),
+        )
+
+    for base in grouped:
+        grouped[base].sort(key=route_key)
+    bases = sorted(
+        grouped,
+        key=lambda base: (base_scores.get(base, math.inf), base),
+    )
+    exploit_limit = round(limit * (1.0 - exploration_fraction))
+    selected: list[tuple[str, str, str]] = []
+    used: set[str] = set()
+    for index in range(max(map(len, grouped.values()), default=0)):
+        for base in bases:
+            if index >= len(grouped[base]):
+                continue
+            route = grouped[base][index]
+            if route[0] in used:
+                continue
+            selected.append(route)
+            used.add(route[0])
+            if len(selected) >= exploit_limit:
+                break
+        if len(selected) >= exploit_limit:
+            break
+
+    remaining = [
+        route for route in routes if route[0] not in used
+    ]
+    remaining.sort(key=lambda route: (
+        hashlib.sha256(f"explore:{route[0]}".encode("ascii")).hexdigest(),
+        route[0],
+    ))
+    for route in remaining:
+        if route[0] in used:
+            continue
+        selected.append(route)
+        used.add(route[0])
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def balanced_proposal_order(
     core: list[dict[str, object]],
     framework: list[dict[str, object]],
@@ -527,12 +706,24 @@ def main() -> None:
     )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument(
+        "--basin-fraction",
+        type=float,
+        default=0.70,
+        help="proposal share reserved across the strongest masked structural cores",
+    )
+    parser.add_argument(
         "--lineage-fraction",
         type=float,
         default=0.2,
         help="bounded share reserved for the broader terminal/CDR lineage grammar",
     )
     parser.add_argument("--framework-per-seed", type=int, default=64)
+    parser.add_argument(
+        "--basin-routes-per-core",
+        type=int,
+        default=192,
+        help="bounded pre-gate terminal routes generated for each reserved core",
+    )
     parser.add_argument("--terminal-width", type=int, default=17)
     parser.add_argument("--maximum-terminal-haplotype-mutations", type=int, default=6)
     parser.add_argument("--donor-count", type=int, default=100)
@@ -592,6 +783,8 @@ def main() -> None:
         parser.error("--single-mutation-fraction must be between zero and one")
     if not 0 <= args.framework_fraction <= 1:
         parser.error("--framework-fraction must be between zero and one")
+    if not 0 <= args.basin_fraction <= 1:
+        parser.error("--basin-fraction must be between zero and one")
     if not 0 <= args.lineage_fraction <= 1:
         parser.error("--lineage-fraction must be between zero and one")
     if args.maximum_motif_mutations < 1:
@@ -600,6 +793,7 @@ def main() -> None:
         "recent", "seed_count", "minimum_seeds", "per_seed", "donor_count",
         "min_support", "maximum_exhaustive_singles", "proposal_limit",
         "framework_per_seed", "terminal_width",
+        "basin_routes_per_core",
         "maximum_terminal_haplotype_mutations",
     ):
         if getattr(args, name) <= 0:
@@ -623,7 +817,9 @@ def main() -> None:
     )
     top_kmers = [diversity.kmers(sequence, 5) for sequence in top.sequence]
     recent_scores = dict(zip(recent.sequence, recent.recent_rank_sum))
-    eligible: list[tuple[float, str, float, str, set[int], str]] = []
+    eligible: list[
+        tuple[float, str, float, str, set[int], str, str, int, bool]
+    ] = []
     for candidate in _layer2_candidates(args.layer2_seeds):
         sequence = str(candidate["sequence"]).strip().upper()
         if len(sequence) != length:
@@ -656,24 +852,36 @@ def main() -> None:
                 parent_source,
                 protected,
                 str(candidate.get("parent_selection_lane") or "epoch_elite"),
+                str(candidate.get("basin_core_id") or basin_id(sequence)),
+                int(candidate.get("basin_rank") or 10**9),
+                bool(candidate.get("basin_allocation_reserved", False)),
             ))
-    eligible.sort(key=lambda item: (item[0], item[1]))
-    core_seeds = [
-        item for item in eligible if item[5] == "epoch_elite"
-    ][: args.seed_count]
+    eligible.sort(key=lambda item: (
+        0 if item[8] else 1,
+        item[7],
+        item[0],
+        item[1],
+    ))
+    reserved_seeds = [item for item in eligible if item[8]]
+    reserved_sequences = {item[1] for item in reserved_seeds}
+    legacy_seeds = [
+        item for item in eligible
+        if item[5] == "epoch_elite" and item[1] not in reserved_sequences
+    ]
+    core_seeds = [*reserved_seeds, *legacy_seeds][: args.seed_count]
     if len(core_seeds) < args.minimum_seeds:
         raise SystemExit(
             f"only {len(core_seeds)} elite seeds passed current Layer-2 and diversity; "
             f"require at least {args.minimum_seeds}"
         )
     neighbor_seeds = [
-        item for item in eligible if item[5] == "family_neighbor"
+        item for item in eligible
+        if item[5] == "family_neighbor" and item[1] not in {seed[1] for seed in core_seeds}
     ][: args.neighbor_seed_count]
     seeds = [*core_seeds, *neighbor_seeds]
 
     donor_sequences = [
-        sequence
-        for _, sequence, _, _, _, _ in eligible[: min(args.donor_count, len(eligible))]
+        item[1] for item in eligible[: min(args.donor_count, len(eligible))]
     ]
     if not donor_sequences:
         raise SystemExit("no current-gate donor sequences found")
@@ -682,6 +890,14 @@ def main() -> None:
         for sequence in recent.sequence
         if len(str(sequence).strip()) == length
     ]
+    all_background_sequences = [
+        str(sequence).strip().upper()
+        for sequence in frame.sequence
+        if len(str(sequence).strip()) == length
+    ]
+    background_by_basin: dict[str, list[str]] = defaultdict(list)
+    for sequence in all_background_sequences:
+        background_by_basin[basin_id(sequence)].append(sequence)
     priors = residue_prior_weights(
         background_sequences,
         _winner_sequences(args.winner_priors, length),
@@ -694,7 +910,7 @@ def main() -> None:
             "score": score,
             "source": f"parent:{lane}",
         }
-        for score, sequence, _, _, _, lane in eligible
+        for score, sequence, _, _, _, lane, _, _, _ in eligible
     ]
     network_records.extend(_winner_records(args.winner_priors, length))
     if args.mutation_observations is not None:
@@ -748,11 +964,14 @@ def main() -> None:
     core_proposals: list[dict[str, object]] = []
     framework_proposals: list[dict[str, object]] = []
     lineage_proposals: list[dict[str, object]] = []
+    basin_proposals: list[dict[str, object]] = []
     exhaustive_single_count = 0
     rng = np.random.default_rng(args.random_seed)
 
     def add_candidate(
-        parent_record: tuple[float, str, float, str, set[int], str],
+        parent_record: tuple[
+            float, str, float, str, set[int], str, str, int, bool
+        ],
         candidate: str,
         source: str,
         proposal_lane: str,
@@ -767,6 +986,9 @@ def main() -> None:
             parent_source,
             protected,
             parent_lane,
+            parent_basin_core_id,
+            parent_basin_rank,
+            basin_reserved,
         ) = parent_record
         attribution = (parent, candidate, proposal_lane)
         if (
@@ -814,6 +1036,10 @@ def main() -> None:
             "parent_selection_score": parent_score,
             "parent_source": parent_source,
             "parent_selection_lane": parent_lane,
+            "parent_basin_core_id": parent_basin_core_id,
+            "parent_basin_rank": parent_basin_rank,
+            "basin_allocation_reserved": basin_reserved,
+            "basin_core_id": basin_id(candidate),
             "proposal_lane": proposal_lane,
             "parent_max_jaccard_to_top50": parent_jaccard,
             "proposal_type": source,
@@ -838,6 +1064,9 @@ def main() -> None:
             _,
             _,
             protected,
+            _,
+            _,
+            _,
             _,
         ) = parent_record
         regions = find_regions(parent)
@@ -975,6 +1204,58 @@ def main() -> None:
                 f"with selection score {parent_score:.1f}"
             )
 
+    base_scores = {node.sequence: node.score for node in mutation_network.nodes}
+    basin_representatives: dict[str, tuple[
+        float, str, float, str, set[int], str, str, int, bool
+    ]] = {}
+    reserved_core_seeds = [item for item in core_seeds if item[8]]
+    for parent_record in reserved_core_seeds or core_seeds:
+        basin_representatives.setdefault(parent_record[6], parent_record)
+    for parent_record in basin_representatives.values():
+        parent = parent_record[1]
+        protected = parent_record[4]
+        routes = supported_basin_terminal_candidates(
+            parent,
+            basin_sequences=background_by_basin[parent_record[6]],
+            protected=protected,
+            terminal_width=args.terminal_width,
+            maximum_haplotype_mutations=args.maximum_terminal_haplotype_mutations,
+        )
+        candidates = bounded_basin_terminal_routes(
+            routes,
+            base_scores=base_scores,
+            limit=args.basin_routes_per_core,
+        )
+        parent_proposals: list[dict[str, object]] = []
+        for candidate, source, base_parent in candidates:
+            attributed_parent = (
+                parent_record
+                if base_parent == parent
+                else (
+                    base_scores.get(base_parent, parent_record[0]),
+                    base_parent,
+                    parent_record[2],
+                    "historical_basin_member",
+                    parent_record[4],
+                    parent_record[5],
+                    parent_record[6],
+                    parent_record[7],
+                    parent_record[8],
+                )
+            )
+            add_candidate(
+                attributed_parent,
+                candidate,
+                source,
+                "basin_terminal",
+                parent_proposals,
+                allow_seen_sequence=True,
+            )
+        parent_proposals = sorted(
+            _deduplicate_proposals(parent_proposals), key=_proposal_ranking_key
+        )
+        basin_proposals.extend(parent_proposals)
+
     for parent_record in seeds:
         parent = parent_record[1]
         protected = parent_record[4]
@@ -1079,25 +1360,36 @@ def main() -> None:
             accepted += 1
 
     baseline_proposals = balanced_proposal_order(
-        _round_robin_by_parent(core_proposals),
-        _round_robin_by_parent(framework_proposals),
+        _round_robin_by_basin(core_proposals),
+        _round_robin_by_basin(framework_proposals),
         limit=args.proposal_limit,
         framework_fraction=args.framework_fraction,
     )
-    proposals = interleave_novel_lane(
+    baseline_with_lineage = interleave_novel_lane(
         baseline_proposals,
-        _round_robin_by_parent(_deduplicate_proposals(lineage_proposals)),
+        _round_robin_by_basin(_deduplicate_proposals(lineage_proposals)),
         limit=args.proposal_limit,
         novel_fraction=args.lineage_fraction,
+    )
+    proposals = interleave_novel_lane(
+        _round_robin_by_basin(_deduplicate_proposals(basin_proposals)),
+        baseline_with_lineage,
+        limit=args.proposal_limit,
+        novel_fraction=1.0 - args.basin_fraction,
     )
     output = pd.DataFrame(proposals)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(args.output, index=False)
     print(f"eligible current-gate seeds: {len(eligible)}")
     print("selected seeds:")
-    for score, sequence, max_jaccard, source, protected, lane in seeds:
+    for (
+        score, sequence, max_jaccard, source, protected, lane,
+        core_identifier, core_rank, basin_reserved,
+    ) in seeds:
         print(
             f"  score={score:.1f} source={source} lane={lane} "
+            f"basin={core_identifier} basin_rank={core_rank} "
+            f"basin_reserved={basin_reserved} "
             f"jaccard={max_jaccard:.3f} protected_contacts={len(protected)} "
             f"{sequence}"
         )

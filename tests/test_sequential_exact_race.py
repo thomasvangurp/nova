@@ -90,6 +90,23 @@ def test_next_screen_tranche_balances_actual_parent_counts():
     assert selected == ["CCCC", "CCCA", "AAAA"]
 
 
+def test_next_screen_tranche_balances_basin_before_individual_parent():
+    pending = ["A1", "A2", "A3", "B1", "B2"]
+    metadata = {
+        "A1": {"parent_sequence": "PA1", "parent_basin_core_id": "CORE_A", "parent_basin_rank": 1},
+        "A2": {"parent_sequence": "PA2", "parent_basin_core_id": "CORE_A", "parent_basin_rank": 1},
+        "A3": {"parent_sequence": "PA3", "parent_basin_core_id": "CORE_A", "parent_basin_rank": 1},
+        "B1": {"parent_sequence": "PB1", "parent_basin_core_id": "CORE_B", "parent_basin_rank": 2},
+        "B2": {"parent_sequence": "PB2", "parent_basin_core_id": "CORE_B", "parent_basin_rank": 2},
+    }
+
+    selected = race._balanced_screen_tranche(
+        pending, metadata, Counter(), 4
+    )
+
+    assert selected == ["A1", "B1", "A2", "B2"]
+
+
 def test_balanced_screen_preserves_priority_without_parent_metadata():
     assert race._balanced_screen_tranche(
         ["AAAA", "CCCC", "DDDD"], {}, Counter(), 2
@@ -173,6 +190,36 @@ def test_initial_repeat_requires_strict_candidate_or_one_explicit_fallback():
     ) == ("WEAK", True)
 
 
+def test_terminal_one_shot_score_is_shrunk_toward_its_basin(tmp_path):
+    ranking = tmp_path / "ranking.json"
+    ranking.write_text(json.dumps({
+        "sequences": ["LUCKY", "A2", "A3", "SOLID"],
+        "candidates": [
+            {"sequence": "LUCKY", "score_p90": 40.0},
+            {"sequence": "A2", "score_p90": 160.0},
+            {"sequence": "A3", "score_p90": 170.0},
+            {"sequence": "SOLID", "score_p90": 80.0},
+        ],
+    }))
+    metadata = {
+        sequence: {
+            "proposal_lane": "basin_terminal",
+            "parent_basin_core_id": "CORE_A",
+        }
+        for sequence in ("LUCKY", "A2", "A3")
+    }
+    metadata["SOLID"] = {"proposal_lane": "core_cdr"}
+
+    payload = race._apply_basin_shrinkage(
+        ranking, metadata, prior_strength=2.0, minimum_samples=3
+    )
+
+    by_sequence = {item["sequence"]: item for item in payload["candidates"]}
+    assert by_sequence["LUCKY"]["score_p90"] == 40.0
+    assert by_sequence["LUCKY"]["basin_adjusted_score"] == 120.0
+    assert payload["sequences"][0] == "SOLID"
+
+
 def test_best_confirmed_p90_uses_best_candidate_not_file_order(tmp_path):
     ranking = tmp_path / "ranking.json"
     ranking.write_text(json.dumps({"candidates": [
@@ -198,6 +245,7 @@ def test_provisional_tranche_ranking_skips_slow_pose_and_api_replay(tmp_path):
     assert "--pose-config" not in command
     assert "--api-field-count" not in command
     assert command[command.index("--selection-order") + 1] == "p90"
+    assert command[command.index("--limit") + 1] == "10000"
 
 
 def test_screen_ranking_persists_true_proposal_lineage(tmp_path):

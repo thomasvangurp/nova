@@ -147,6 +147,8 @@ def _run_iteration(
             "--recent-epoch-window", str(args.recent_parent_epoch_window),
             "--recent-anchor-limit", str(args.recent_anchor_parent_limit),
             "--recent-neighbor-limit", str(args.recent_neighbor_parent_limit),
+            "--basin-core-limit", str(args.basin_core_limit),
+            "--basin-parent-limit", str(args.basin_parent_limit),
             "--scan-limit", str(args.parent_scan_limit),
             "--observation-database", str(args.mutation_database),
             "--output", str(elite_parents),
@@ -182,6 +184,8 @@ def _run_iteration(
             "--minimum-seeds", str(args.minimum_seeds),
             "--per-seed", str(args.per_seed),
             "--proposal-limit", str(args.proposal_limit),
+            "--basin-fraction", str(args.basin_fraction),
+            "--basin-routes-per-core", str(args.basin_routes_per_core),
             "--framework-fraction", str(args.framework_fraction),
             "--framework-per-seed", str(args.framework_per_seed),
             "--terminal-width", str(args.terminal_width),
@@ -237,6 +241,8 @@ def _run_iteration(
         "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
         "--finalists", str(args.finalists),
         "--challenger-p90-margin", str(args.challenger_p90_margin),
+        "--basin-shrinkage-strength", str(args.basin_shrinkage_strength),
+        "--minimum-basin-samples", str(args.minimum_basin_samples),
     ])
 
 
@@ -278,6 +284,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--recent-parent-epoch-window", type=int, default=16)
     parser.add_argument("--recent-anchor-parent-limit", type=int, default=16)
     parser.add_argument("--recent-neighbor-parent-limit", type=int, default=16)
+    parser.add_argument("--basin-core-limit", type=int, default=5)
+    parser.add_argument("--basin-parent-limit", type=int, default=32)
     parser.add_argument("--seed-count", type=int, default=32)
     parser.add_argument("--neighbor-seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)
@@ -288,6 +296,8 @@ def _parser() -> argparse.ArgumentParser:
         help="proposals generated per elite parent before Layer-2 filtering",
     )
     parser.add_argument("--proposal-limit", type=int, default=384)
+    parser.add_argument("--basin-fraction", type=float, default=0.70)
+    parser.add_argument("--basin-routes-per-core", type=int, default=192)
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
     parser.add_argument("--terminal-width", type=int, default=17)
@@ -308,8 +318,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen-tranche-size", type=int, default=20)
     parser.add_argument("--maximum-initial-screen-p90", type=float, default=90.0)
     parser.add_argument("--weak-initial-fallback-after", type=int, default=80)
-    parser.add_argument("--finalists", type=int, default=3)
+    parser.add_argument(
+        "--finalists",
+        type=int,
+        default=5,
+        help="repeat capacity; five permits evidence from each leading basin",
+    )
     parser.add_argument("--challenger-p90-margin", type=float, default=20.0)
+    parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
+    parser.add_argument("--minimum-basin-samples", type=int, default=3)
     parser.add_argument("--once", action="store_true")
     return parser
 

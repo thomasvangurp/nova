@@ -2,10 +2,12 @@ import numpy as np
 
 from nanobody_opt.local_neighborhood import (
     _deduplicate_proposals,
+    _round_robin_by_basin,
     _round_robin_by_parent,
     _weighted_choice,
     interleave_novel_lane,
     supported_framework_candidates,
+    supported_basin_terminal_candidates,
     supported_lineage_candidates,
     residue_prior_weights,
 )
@@ -69,6 +71,32 @@ def test_each_parent_interleaves_single_and_multi_edit_proposals():
     ordered = _round_robin_by_parent(proposals)
 
     assert [item["edit_distance"] for item in ordered] == [1, 2, 1, 3, 1, 4]
+
+
+def test_proposal_allocation_round_robins_cores_before_parents():
+    proposals = [
+        {
+            "sequence": f"{core}{parent}{index}",
+            "parent_sequence": parent,
+            "parent_basin_core_id": core,
+            "parent_basin_rank": rank,
+            "parent_selection_score": 50.0,
+            "proposal_prior_score": 1.0,
+            "predecessor_potential_score": 50.0,
+            "predecessor_consensus_score": 50.0,
+            "edit_distance": 1,
+        }
+        for core, rank in (("CORE_A", 1), ("CORE_B", 2))
+        for parent in (f"{core}_P1", f"{core}_P2")
+        for index in range(2)
+    ]
+
+    ordered = _round_robin_by_basin(proposals)
+
+    assert [item["parent_basin_core_id"] for item in ordered[:4]] == [
+        "CORE_A", "CORE_B", "CORE_A", "CORE_B"
+    ]
+    assert len({item["parent_sequence"] for item in ordered[:4]}) == 4
 
 
 def test_duplicate_sequence_keeps_strongest_parent_attribution():
@@ -220,3 +248,23 @@ def test_lineage_lane_never_changes_protected_positions():
 
     assert all(sequence[5] == "A" for sequence, _ in candidates)
     assert donor not in dict(candidates)
+
+
+def test_basin_terminal_lane_recombines_only_within_masked_core():
+    core = "A" * 100
+    parent = "A" * 10 + core + "A" * 17
+    same_core = "C" + "A" * 9 + core + "A" * 16 + "D"
+    other_core = "D" * 10 + "C" * 100 + "E" * 17
+
+    routes = supported_basin_terminal_candidates(
+        parent,
+        basin_sequences=[parent, same_core, other_core],
+        protected=set(),
+        maximum_haplotype_mutations=3,
+    )
+    candidates = {sequence: source for sequence, source, _ in routes}
+
+    assert ("C" + parent[1:]) in candidates
+    assert (parent[:-1] + "D") in candidates
+    assert ("C" + parent[1:-1] + "D") in candidates
+    assert all(sequence[10:-17] == core for sequence in candidates)

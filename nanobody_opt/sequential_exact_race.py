@@ -110,7 +110,7 @@ def _balanced_screen_tranche(
     screened_parent_counts: Counter[str],
     size: int,
 ) -> list[str]:
-    """Select the next tranche without oversampling one parent family.
+    """Select the next tranche without oversampling one structural basin.
 
     The proposal generator normally interleaves parents already.  This second
     guard rebuilds the queue after every completed tranche, so a Layer-2 pass
@@ -123,10 +123,16 @@ def _balanced_screen_tranche(
         raise ValueError("tranche size must be positive")
     if not pending:
         return []
-    if not any(
-        str(metadata.get(sequence, {}).get("parent_sequence") or "").strip()
-        for sequence in pending
-    ):
+    def allocation_key(sequence: str) -> str:
+        record = metadata.get(sequence, {})
+        return str(
+            record.get("parent_basin_core_id")
+            or record.get("basin_core_id")
+            or record.get("parent_sequence")
+            or "__unattributed__"
+        )
+
+    if not any(allocation_key(sequence) != "__unattributed__" for sequence in pending):
         return pending[:size]
 
     available = list(enumerate(pending))
@@ -136,19 +142,17 @@ def _balanced_screen_tranche(
         choice = min(
             range(len(available)),
             key=lambda index: (
-                counts[
-                    str(
-                        metadata.get(available[index][1], {}).get("parent_sequence")
-                        or "__unattributed__"
+                counts[allocation_key(available[index][1])],
+                int(
+                    metadata.get(available[index][1], {}).get(
+                        "parent_basin_rank", 10**9
                     )
-                ],
+                ),
                 available[index][0],
             ),
         )
         _, sequence = available.pop(choice)
-        parent = str(
-            metadata.get(sequence, {}).get("parent_sequence") or "__unattributed__"
-        )
+        parent = allocation_key(sequence)
         selected.append(sequence)
         counts[parent] += 1
     return selected
@@ -194,7 +198,12 @@ def _initial_repeat_candidate(
     """
     unseen = [sequence for sequence in ranked_sequences if sequence not in repeated]
     for sequence in unseen:
-        if float(candidates[sequence]["score_p90"]) <= maximum_screen_p90:
+        score = float(
+            candidates[sequence].get(
+                "basin_adjusted_score", candidates[sequence]["score_p90"]
+            )
+        )
+        if score <= maximum_screen_p90:
             return sequence, False
     if allow_weak_fallback and unseen:
         return unseen[0], True
@@ -252,7 +261,9 @@ def _rank_command(
         "--output", str(output),
         "--recent", "300",
         "--field-size", "49",
-        "--limit", "30",
+        # Provisional basin shrinkage needs the complete screened cohort, not
+        # only the raw top 30. Strict publication files remain compact.
+        "--limit", "30" if strict else "10000",
     ])
     if ledger is not None:
         command.extend(["--exclude-file", str(ledger)])
@@ -403,6 +414,79 @@ def _ranking_by_sequence(path: Path) -> dict[str, dict[str, Any]]:
     }
 
 
+def _apply_basin_shrinkage(
+    path: Path,
+    metadata: dict[str, dict[str, Any]],
+    *,
+    prior_strength: float = 2.0,
+    minimum_samples: int = 3,
+) -> dict[str, Any]:
+    """Stabilize one-shot terminal ranks while keeping every raw score intact.
+
+    Only terminal candidates whose parent belongs to the same masked core are
+    pooled.  Their one-shot p90 is shrunk toward the currently screened basin
+    median.  This prevents a single lucky terminal sample from dominating a
+    broad weak cohort; repeated exact evidence still decides qualification.
+    """
+    if prior_strength < 0 or minimum_samples < 1:
+        raise ValueError("invalid basin shrinkage configuration")
+    payload = json.loads(path.read_text())
+    candidates = [
+        candidate for candidate in payload.get("candidates", [])
+        if isinstance(candidate, dict) and candidate.get("sequence")
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        sequence = str(candidate["sequence"])
+        record = metadata.get(sequence, {})
+        identifier = str(record.get("parent_basin_core_id") or "")
+        if not identifier or record.get("proposal_lane") != "basin_terminal":
+            continue
+        grouped.setdefault(identifier, []).append(candidate)
+
+    for identifier, items in grouped.items():
+        if len(items) < minimum_samples:
+            continue
+        scores = sorted(float(item["score_p90"]) for item in items)
+        midpoint = len(scores) // 2
+        basin_median = (
+            scores[midpoint]
+            if len(scores) % 2
+            else (scores[midpoint - 1] + scores[midpoint]) / 2
+        )
+        for item in items:
+            raw = float(item["score_p90"])
+            adjusted = (
+                raw + prior_strength * basin_median
+            ) / (1.0 + prior_strength)
+            item["basin_adjusted_score"] = adjusted
+            item["basin_screen_median"] = basin_median
+            item["basin_screen_sample_count"] = len(items)
+            item["basin_shrinkage_strength"] = prior_strength
+            item["basin_core_id"] = identifier
+
+    original_order = {
+        str(candidate["sequence"]): index for index, candidate in enumerate(candidates)
+    }
+    candidates.sort(key=lambda item: (
+        float(item.get("basin_adjusted_score", item["score_p90"])),
+        float(item["score_p90"]),
+        original_order[str(item["sequence"])],
+    ))
+    payload["candidates"] = candidates
+    payload["sequences"] = [str(item["sequence"]) for item in candidates]
+    payload["basin_ranking"] = {
+        "enabled": True,
+        "prior_strength": prior_strength,
+        "minimum_samples": minimum_samples,
+        "eligible_basin_count": sum(
+            len(items) >= minimum_samples for items in grouped.values()
+        ),
+    }
+    _atomic_json(path, payload)
+    return payload
+
+
 def _best_confirmed_p90(path: Path) -> float:
     scores = [
         float(candidate["score_p90"])
@@ -451,6 +535,10 @@ def _store_ranking(
                         "parent_selection_lane",
                         "parent_selection_score",
                         "screen_priority",
+                        "parent_basin_core_id",
+                        "parent_basin_rank",
+                        "basin_core_id",
+                        "basin_allocation_reserved",
                     )
                     if metadata.get(key) is not None
                 }
@@ -527,6 +615,8 @@ def main() -> None:
         ),
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
+    parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
+    parser.add_argument("--minimum-basin-samples", type=int, default=3)
     args = parser.parse_args()
     if not 1 <= args.finalists <= args.candidate_limit:
         parser.error("require 1 <= --finalists <= --candidate-limit")
@@ -540,6 +630,10 @@ def main() -> None:
         parser.error("--maximum-initial-screen-p90 cannot be negative")
     if args.weak_initial_fallback_after < 1:
         parser.error("--weak-initial-fallback-after must be positive")
+    if args.basin_shrinkage_strength < 0:
+        parser.error("--basin-shrinkage-strength cannot be negative")
+    if args.minimum_basin_samples < 1:
+        parser.error("--minimum-basin-samples must be positive")
     gpus = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
     if not gpus:
         parser.error("at least one GPU is required")
@@ -590,8 +684,11 @@ def main() -> None:
             _atomic_json(source, {"target": args.target, "sequences": tranche})
         for sequence in tranche:
             pending.remove(sequence)
+            record = candidate_metadata.get(sequence, {})
             parent = str(
-                candidate_metadata.get(sequence, {}).get("parent_sequence")
+                record.get("parent_basin_core_id")
+                or record.get("basin_core_id")
+                or record.get("parent_sequence")
                 or "__unattributed__"
             )
             screened_parent_counts[parent] += 1
@@ -616,6 +713,12 @@ def main() -> None:
                 strict=False,
             ),
             check=True,
+        )
+        _apply_basin_shrinkage(
+            screen_ranking,
+            candidate_metadata,
+            prior_strength=args.basin_shrinkage_strength,
+            minimum_samples=args.minimum_basin_samples,
         )
         _store_ranking(
             args.mutation_database,
@@ -666,7 +769,11 @@ def main() -> None:
         if weak_fallback:
             weak_initial_fallback_spent = True
         finalist_index = len(repeated_finalists) + 1
-        screen_p90 = float(screen_candidates[sequence]["score_p90"])
+        screen_p90 = float(
+            screen_candidates[sequence].get(
+                "basin_adjusted_score", screen_candidates[sequence]["score_p90"]
+            )
+        )
         if incumbent_p90 is not None and not _challenger_can_overtake(
             screen_p90=screen_p90,
             incumbent_p90=incumbent_p90,
@@ -745,6 +852,8 @@ def main() -> None:
             "maximum_initial_screen_p90": args.maximum_initial_screen_p90,
             "weak_initial_fallback_after": args.weak_initial_fallback_after,
             "weak_initial_fallback_spent": weak_initial_fallback_spent,
+            "basin_shrinkage_strength": args.basin_shrinkage_strength,
+            "minimum_basin_samples": args.minimum_basin_samples,
             "incumbent_p90": incumbent_p90,
             "qualified_rankings": [str(path) for path in qualified_outputs],
             "exact_files": [str(path) for path in _exact_paths(args.output_dir)],

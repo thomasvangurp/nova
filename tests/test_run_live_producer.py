@@ -47,14 +47,20 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.recent_parent_epoch_window == 16
     assert args.recent_anchor_parent_limit == 16
     assert args.recent_neighbor_parent_limit == 16
+    assert args.basin_core_limit == 5
+    assert args.basin_parent_limit == 32
     assert args.minimum_seeds == 8
     assert args.per_seed == 12
     assert args.proposal_limit == 384
+    assert args.basin_fraction == 0.70
+    assert args.basin_routes_per_core == 192
     assert args.maximum_exhaustive_singles == 8192
     assert args.candidate_limit == 320
     assert args.screen_tranche_size == 20
     assert args.maximum_initial_screen_p90 == 90.0
     assert args.weak_initial_fallback_after == 80
-    assert args.finalists == 3
+    assert args.finalists == 5
+    assert args.basin_shrinkage_strength == 2.0
+    assert args.minimum_basin_samples == 3
     assert args.challenger_p90_margin == 20.0
     assert args.single_mutation_fraction == 0.75

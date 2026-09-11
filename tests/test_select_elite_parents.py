@@ -52,7 +52,7 @@ def test_top_two_per_epoch_retains_both_proven_successful_parents():
     }
 
     selected = select_elite_parents(
-        payloads, target=TARGET, per_epoch=2, limit=4
+        payloads, target=TARGET, per_epoch=2, limit=4, basin_core_limit=0
     )
 
     sequences = [item["sequence"] for item in selected]
@@ -95,6 +95,7 @@ def test_terminally_diverse_neighbor_lane_retains_uid2_direct_predecessor():
         neighbor_distance=6,
         neighbor_limit=8,
         terminal_variants_per_residue=1,
+        basin_core_limit=0,
     )
 
     predecessor = next(
@@ -133,6 +134,7 @@ def test_neighbor_capacity_is_reserved_even_when_elite_bank_fills_limit():
         neighbor_distance=6,
         neighbor_limit=2,
         terminal_variants_per_residue=2,
+        basin_core_limit=0,
     )
 
     assert len(selected) == 4
@@ -150,7 +152,7 @@ def test_older_better_elite_is_not_replaced_by_newer_mediocre_parent():
     }
 
     selected = select_elite_parents(
-        payloads, target=TARGET, per_epoch=1, limit=1
+        payloads, target=TARGET, per_epoch=1, limit=1, basin_core_limit=0
     )
 
     assert selected[0]["sequence"] == old_elite
@@ -181,8 +183,34 @@ def test_active_bank_balances_recent_lineage_and_global_quality():
         recent_epoch_window=1,
         recent_anchor_limit=1,
         recent_neighbor_limit=0,
+        basin_core_limit=0,
     )
 
     assert [item["sequence"] for item in selected] == [recent_elite, old_elite]
     assert selected[0]["parent_history_scope"] == "recent"
     assert selected[1]["parent_history_scope"] == "global"
+
+
+def test_parent_capacity_is_reserved_across_strong_masked_cores():
+    core_a = "A" * 100
+    core_b = "C" * 100
+    a1 = "A" * 10 + core_a + "D" * 17
+    a2 = "C" * 10 + core_a + "E" * 17
+    b1 = "D" * 10 + core_b + "F" * 17
+    payloads = {
+        25040: _payload(_nanobody(a1, 45), _nanobody(b1, 60)),
+        25041: _payload(_nanobody(a2, 50), _nanobody("G" * 127, 90)),
+    }
+
+    selected = select_elite_parents(
+        payloads,
+        target=TARGET,
+        per_epoch=1,
+        limit=3,
+        basin_core_limit=2,
+        basin_parent_limit=3,
+    )
+
+    assert [item["sequence"] for item in selected] == [a1, b1, a2]
+    assert [item["basin_rank"] for item in selected] == [1, 2, 1]
+    assert all(item["basin_allocation_reserved"] for item in selected)

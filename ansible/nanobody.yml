@@ -28,14 +28,21 @@
     nanobody_recent_parent_epoch_window: 16
     nanobody_recent_anchor_parent_limit: 16
     nanobody_recent_neighbor_parent_limit: 16
+    nanobody_basin_core_limit: 5
+    nanobody_basin_parent_limit: 32
     nanobody_neighbor_seed_count: 32
     nanobody_proposals_per_seed: 12
     nanobody_proposal_limit: 384
+    nanobody_basin_fraction: 0.70
+    nanobody_basin_routes_per_core: 192
     nanobody_maximum_exhaustive_singles: 8192
     nanobody_candidate_limit: 320
     nanobody_screen_tranche_size: 20
     nanobody_maximum_initial_screen_p90: 90
     nanobody_weak_initial_fallback_after: 80
+    nanobody_finalists: 5
+    nanobody_basin_shrinkage_strength: 2.0
+    nanobody_minimum_basin_samples: 3
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -467,6 +474,8 @@
           - -m
           - py_compile
           - /root/nanobody_opt/pose_stability.py
+          - /root/nanobody_opt/basins.py
+          - /root/nanobody_opt/local_neighborhood.py
           - /root/nanobody_opt/sequential_exact_race.py
           - /root/nanobody_opt/run_live_producer.py
           - /root/nanobody_opt/select_elite_parents.py
@@ -698,12 +707,20 @@
           - "{{ nanobody_recent_anchor_parent_limit }}"
           - --recent-neighbor-parent-limit
           - "{{ nanobody_recent_neighbor_parent_limit }}"
+          - --basin-core-limit
+          - "{{ nanobody_basin_core_limit }}"
+          - --basin-parent-limit
+          - "{{ nanobody_basin_parent_limit }}"
           - --neighbor-seed-count
           - "{{ nanobody_neighbor_seed_count }}"
           - --per-seed
           - "{{ nanobody_proposals_per_seed }}"
           - --proposal-limit
           - "{{ nanobody_proposal_limit }}"
+          - --basin-fraction
+          - "{{ nanobody_basin_fraction }}"
+          - --basin-routes-per-core
+          - "{{ nanobody_basin_routes_per_core }}"
           - --maximum-exhaustive-singles
           - "{{ nanobody_maximum_exhaustive_singles }}"
           - --candidate-limit
@@ -714,6 +731,12 @@
           - "{{ nanobody_maximum_initial_screen_p90 }}"
           - --weak-initial-fallback-after
           - "{{ nanobody_weak_initial_fallback_after }}"
+          - --finalists
+          - "{{ nanobody_finalists }}"
+          - --basin-shrinkage-strength
+          - "{{ nanobody_basin_shrinkage_strength }}"
+          - --minimum-basin-samples
+          - "{{ nanobody_minimum_basin_samples }}"
       changed_when: true
       when: nanobody_producer_activate | bool
 
