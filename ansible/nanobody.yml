@@ -57,6 +57,15 @@
       changed_when: false
       failed_when: controller_status.stdout | length > 0
 
+    - name: Resolve committed deployment revision
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", rev-parse, HEAD]
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: controller_revision
+      changed_when: false
+
     - name: Count effective CPUs
       ansible.builtin.shell: |
         if [ -f /sys/fs/cgroup/cpu.max ]; then
@@ -713,6 +722,14 @@
         argv: [tmux, has-session, -t, "{{ nanobody_producer_session }}"]
       changed_when: false
       when: nanobody_producer_activate | bool
+
+    - name: Record successfully validated deployment revision
+      ansible.builtin.copy:
+        content: "{{ controller_revision.stdout }}\n"
+        dest: /root/artifacts/nanobody_deployed_commit.txt
+        owner: root
+        group: root
+        mode: "0644"
 
     - name: Report successful provisioning
       ansible.builtin.debug:
