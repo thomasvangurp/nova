@@ -234,6 +234,23 @@ def _run_iteration(
             if previous != candidates:
                 command.extend(["--exclude", str(previous)])
         _run(command)
+        if args.public_neighbourhood_distance:
+            # Every winner in the leakage-free replay sat one substitution from
+            # a sequence another hotkey had already published, and about forty
+            # per cent of each generation sits further out than that.  A
+            # 320-candidate budget had to gamble beyond the shell; a
+            # several-thousand-observation budget can cover it instead.
+            filtered = iteration_root / "candidates_public.csv"
+            _run([
+                sys.executable,
+                "-m", "nanobody_opt.filter_public_neighborhood",
+                "--input", str(candidates),
+                "--archive", str(archive),
+                "--output", str(filtered),
+                "--maximum-distance", str(args.public_neighbourhood_distance),
+                "--minimum-keep", str(args.candidate_limit),
+            ])
+            os.replace(filtered, candidates)
     layer2 = iteration_root / "layer2.json"
     if not layer2.is_file():
         _run([
@@ -428,6 +445,15 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="cores the evidence lane concentrates on once exploiting",
+    )
+    parser.add_argument(
+        "--public-neighbourhood-distance",
+        type=int,
+        default=0,
+        help=(
+            "keep only proposals within this Hamming distance of a public "
+            "sequence; 0 disables the filter"
+        ),
     )
     parser.add_argument("--layer2-concurrency", type=int, default=40)
     parser.add_argument(

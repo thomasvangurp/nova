@@ -93,6 +93,13 @@ nanobody_replication_reserve_blocks: 104
 # the eventual winner's core in the top five in 6/6 epochs, and we lose inside
 # the core rather than between cores -- same masked core as the winner in three
 # epochs, and our terminal variant ranked 6/10, 4/11 and 6/10 within it.
+# Winners live one substitution from a published sequence: all six in the
+# leakage-free replay did.  Measured on the live bank, ~40% of each generation
+# sits at distance two or more from anything public -- local_substitution 0%
+# within distance one, whole_cdr_motif 3%, the haplotype lanes ~30%.  At 320
+# candidates that gamble was forced; at several thousand it is not.
+nanobody_public_neighbourhood_distance: 1
+
 nanobody_scout_iterations: 1
 nanobody_exploit_basin_fraction: 0.95
 nanobody_exploit_basin_core_limit: 5
