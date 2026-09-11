@@ -255,6 +255,16 @@ def _run_iteration(
     # database.  Replication is spent once, in the iteration that opens inside
     # the closing window, over the pooled best of the whole epoch -- doing it
     # per iteration would burn the budget on the first generation's leader.
+    # Re-read the chain rather than trusting the snapshot main() took: the work
+    # between then and here -- downloads, parent selection, elite Layer 2,
+    # proposal generation over thousands of candidates, pool IgBLAST -- is
+    # minutes long, and a stale snapshot decides the closing generation wrongly.
+    try:
+        current = json.loads(Path(args.chain_state).read_text())
+        if int(current["epoch"]) == epoch:
+            state = current
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
     remaining_blocks = int(state["epoch_length"]) - (
         int(state["block"]) % int(state["epoch_length"])
     )

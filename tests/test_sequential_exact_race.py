@@ -679,3 +679,89 @@ def test_shrinkage_reorders_the_sequences_the_shortlist_reads(tmp_path):
     # the lucky single draw is pulled toward its basin rather than trusted whole
     lucky = next(i for i in shrunk["candidates"] if i["sequence"] == "LUCKY")
     assert lucky["basin_adjusted_score"] > lucky["score_p90"]
+
+
+def test_replication_reserve_holds_on_every_generation():
+    # The reserve must bind on generations that spend no rounds themselves,
+    # or they screen until only the commitment reserve is left and the closing
+    # generation has no window.
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--two-stage", type=int, default=0)
+    parser.add_argument("--replication-rounds", type=int, default=0)
+    parser.add_argument("--reserve-blocks", type=int, default=55)
+    parser.add_argument("--replication-reserve-blocks", type=int, default=104)
+
+    early = parser.parse_args(["--two-stage", "1", "--replication-rounds", "0"])
+    reserve = early.reserve_blocks + (
+        early.replication_reserve_blocks
+        if (early.two_stage or early.replication_rounds)
+        else 0
+    )
+    assert reserve == 159
+
+
+def test_completed_rounds_survive_a_restart(tmp_path, monkeypatch):
+    # Rounds already on disk must count before the clock is consulted; the
+    # chain state here is inside the commitment reserve.
+    for index in (1, 2):
+        done = tmp_path / "rounds" / f"round_{index:02d}"
+        done.mkdir(parents=True)
+        (done / "exact_all.json").write_text("{}")
+    state = tmp_path / "chain.json"
+    state.write_text(json.dumps({
+        "epoch": 25061, "block": 25061 * 361 + 350, "epoch_length": 361,
+    }))
+    monkeypatch.setattr(race, "_run_screen", lambda **kwargs: tmp_path)
+
+    completed = race._run_replication_rounds(
+        shortlist=["AAA"],
+        rounds=3,
+        root=tmp_path,
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        gpus=["0"],
+        scorer=tmp_path / "scorer.py",
+        chain_state=state,
+        epoch=25061,
+        reserve_blocks=55,
+        predict_batch_size=None,
+        timings=tmp_path / "timings.jsonl",
+    )
+
+    assert completed == 2
+
+
+def test_zero_window_narrows_instead_of_failing_open():
+    shortlist = [f"SEQ{index}" for index in range(60)]
+
+    narrowed = race._affordable_shortlist(
+        shortlist,
+        rounds=12,
+        minimum_observations=8,
+        remaining_blocks=0,
+        load_seconds=39.0,
+        seconds_per_observation=9.2,
+        gpu_count=10,
+    )
+
+    assert narrowed == shortlist[:1]
+
+
+def test_pooled_candidate_metadata_covers_earlier_generations(tmp_path):
+    producer = tmp_path / "producer"
+    for iteration, sequence in ((1, "EARLY"), (2, "MIDDLE")):
+        root = producer / f"iteration_{iteration:02d}"
+        root.mkdir(parents=True)
+        (root / "layer2.json").write_text(json.dumps({"candidates": [
+            {"sequence": sequence, "parent_basin_core_id": "core_1",
+             "proposal_lane": "basin_terminal"},
+        ]}))
+
+    merged = race._pooled_candidate_metadata({"LOCAL": {"sequence": "LOCAL"}}, producer)
+
+    # shrinkage keys on this metadata, so a pooled candidate without it is
+    # silently left un-shrunk
+    assert set(merged) == {"EARLY", "MIDDLE", "LOCAL"}
+    assert merged["EARLY"]["proposal_lane"] == "basin_terminal"

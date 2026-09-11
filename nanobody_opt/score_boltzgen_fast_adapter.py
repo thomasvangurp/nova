@@ -44,6 +44,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from nanobody_opt.diffusion_sample_selection import EXPECTED_DIFFUSION_SAMPLES
+
 DEFAULT_CONFIG_PATH = Path("/root/artifacts/nanobody_fast_scorer.json")
 DEFAULT_SCORER = Path("/root/fastscore/release/fast_score_batch.py")
 
@@ -167,6 +169,13 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings(args.settings)
+    samples = settings.get("fold_diffusion_samples")
+    if samples is not None and int(samples) != EXPECTED_DIFFUSION_SAMPLES:
+        raise SystemExit(
+            f"refusing to run with fold_diffusion_samples={samples}: the "
+            f"reported metrics are a maximum over samples, and the wave "
+            f"validator requires {EXPECTED_DIFFUSION_SAMPLES}"
+        )
     require_pinned_scorer(
         Path(settings.get("scorer", DEFAULT_SCORER)),
         settings.get("scorer_sha256"),

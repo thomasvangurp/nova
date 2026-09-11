@@ -298,6 +298,29 @@ def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bo
     return current_epoch == epoch and block % epoch_length < epoch_length - reserve_blocks
 
 
+def _pooled_candidate_metadata(
+    local: dict[str, dict[str, Any]], pooled_root: Path | None
+) -> dict[str, dict[str, Any]]:
+    """Proposal metadata for every generation this epoch has screened.
+
+    Basin shrinkage keys on a candidate's parent core and proposal lane, which
+    live in the Layer-2 file of the generation that proposed it.  Loading only
+    this generation's file makes shrinkage a silent no-op on pooled candidates,
+    so the closing shortlist fills with un-shrunk lucky outliers from earlier
+    generations -- the opposite of the intent.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    if pooled_root is not None:
+        for path in sorted(pooled_root.glob("iteration_*/layer2.json")):
+            try:
+                for record in _candidate_records(path):
+                    merged.setdefault(str(record["sequence"]), record)
+            except (OSError, ValueError, KeyError):
+                continue
+    merged.update(local)
+    return merged
+
+
 def _pooled_exact_paths(
     local: list[Path], pooled_root: Path | None, output_dir: Path
 ) -> list[Path]:
@@ -410,8 +433,14 @@ def _affordable_shortlist(
     at all -- so when the window is tight the shortlist shrinks rather than the
     observation count.
     """
-    if not shortlist or rounds < 1 or remaining_blocks <= 0:
+    if not shortlist or rounds < 1:
         return shortlist
+    if remaining_blocks <= 0:
+        # No window left at all (the epoch rolled over mid-screen).  Narrow to
+        # one candidate rather than failing open to the widest shortlist, which
+        # is the inverse of this function's purpose.
+        print("EXACT_SHORTLIST_NARROWED remaining_blocks=0 to=1", flush=True)
+        return shortlist[:1]
     required_rounds = max(minimum_observations - 1, 1)
     budget = remaining_blocks * block_seconds
 
@@ -462,6 +491,13 @@ def _run_replication_rounds(
     _atomic_json(source, {"target": target, "sequences": shortlist})
     completed = 0
     for index in range(1, rounds + 1):
+        already = root / "rounds" / f"round_{index:02d}" / "exact_all.json"
+        if already.is_file():
+            # Resume must count work already on disk before consulting the
+            # clock: turning completed observations into a qualified ranking is
+            # pure CPU work, and discarding them publishes nothing.
+            completed += 1
+            continue
         if not _chain_allows_work(chain_state, epoch, reserve_blocks):
             print(
                 f"EXACT_REPLICATION_RESERVE_REACHED rounds={completed}/{rounds}",
@@ -1057,8 +1093,14 @@ def main() -> None:
     parser.add_argument(
         "--replication-seconds-per-observation",
         type=float,
-        default=6.5,
-        help="measured GPU-seconds per observation, for shortlist sizing",
+        default=9.2,
+        help=(
+            "GPU-seconds per observation for shortlist sizing.  Deliberately "
+            "conservative against the measured 6.23: the profile's own figure "
+            "is about 94 seconds for a sixty-candidate round, not the 78 a "
+            "6.23 model predicts, and an optimistic model returns a shortlist "
+            "too wide exactly in the tight window this sizing exists for"
+        ),
     )
     parser.add_argument(
         "--minimum-publishable-observations",
@@ -1179,6 +1221,9 @@ def main() -> None:
     candidate_metadata = {
         str(record["sequence"]): record for record in candidate_records
     }
+    candidate_metadata = _pooled_candidate_metadata(
+        candidate_metadata, args.pooled_exact_root
+    )
     if not sequences:
         raise SystemExit("Layer-2 input has no passing candidates")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1214,8 +1259,14 @@ def main() -> None:
         nonlocal tranche_index
         if not pending:
             return None
+        # The replication reserve must hold on EVERY generation, not only the
+        # one that spends it.  Gating it on this generation's round count let
+        # non-closing generations screen until only the commitment reserve
+        # remained, consuming the window the closing generation needs.
         screen_reserve = args.reserve_blocks + (
-            args.replication_reserve_blocks if args.replication_rounds else 0
+            args.replication_reserve_blocks
+            if (args.two_stage or args.replication_rounds)
+            else 0
         )
         if not _chain_allows_work(args.chain_state, args.epoch, screen_reserve):
             print(
@@ -1260,13 +1311,34 @@ def main() -> None:
             predict_batch_size=args.screen_predict_batch_size,
         )
 
+    def _dispatch_bootstrap_tranche() -> ScreenJob | None:
+        saved = args.replication_reserve_blocks
+        args.replication_reserve_blocks = 0
+        try:
+            return _dispatch_next_tranche()
+        finally:
+            args.replication_reserve_blocks = saved
+
     in_flight = _dispatch_next_tranche()
+    if in_flight is None and not _pooled_exact_paths(
+        [], args.pooled_exact_root, args.output_dir
+    ):
+        # The reserve blocked screening and the epoch has no observations at all,
+        # so there is nothing to replicate and nothing to publish.  One
+        # observation of something beats none of nothing: screen a single
+        # tranche against the commitment reserve alone.
+        print("EXACT_RACE_BOOTSTRAP_TRANCHE no pooled evidence", flush=True)
+        if _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
+            in_flight = _dispatch_bootstrap_tranche()
     while in_flight is not None:
         job = in_flight
         in_flight = None
         job.wait()
-        # The scorer owns every GPU, so the next tranche is dispatched first and
-        # the CPU-only bookkeeping below runs while it folds.
+        # The scorer owns every GPU, so with pipelining the next tranche is
+        # dispatched before the CPU-only bookkeeping below runs against it.
+        # Without pipelining the next tranche is dispatched after bookkeeping,
+        # which is serial -- but it is still dispatched, or the loop would screen
+        # exactly one tranche.
         if args.pipeline_depth:
             in_flight = _dispatch_next_tranche()
         bookkeeping_started = time.monotonic()
@@ -1308,6 +1380,8 @@ def main() -> None:
             f"screened={screened}/{len(sequences)} leader={ranked_sequences[0]}",
             flush=True,
         )
+        if not args.pipeline_depth:
+            in_flight = _dispatch_next_tranche()
         bookkeeping_seconds = time.monotonic() - bookkeeping_started
         _append_timing(
             timings_path,
@@ -1385,14 +1459,16 @@ def main() -> None:
                 flush=True,
             )
             continue
+        if in_flight is not None:
+            # Replication needs every GPU, and so does leaving.  Never break out
+            # of this loop with a scorer still folding: the interpreter would
+            # exit without reaping it, leaving all ten GPUs busy inside the
+            # commitment reserve and OOM-ing the next generation.
+            in_flight.wait()
+            in_flight = None
         if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
             print("EXACT_RACE_RESERVE_REACHED before next finalist", flush=True)
             break
-        if in_flight is not None:
-            # Replication needs every GPU; finish the prefetched tranche first
-            # and let the next loop iteration do its bookkeeping.
-            in_flight.wait()
-        repeated_finalists.append(sequence)
         repeats_started = time.monotonic()
         try:
             _score_repeats(
@@ -1405,12 +1481,18 @@ def main() -> None:
                 scorer=args.scorer,
             )
         except subprocess.CalledProcessError as error:
+            # A transient failure must not consume a finalist slot: five CUDA
+            # OOMs would otherwise exhaust the repeat budget and publish
+            # nothing despite a fully screened candidate bank.
+            if sequence not in skipped_finalists:
+                skipped_finalists.append(sequence)
             print(
                 f"EXACT_REPEAT_FAILED index={finalist_index} "
-                f"returncode={error.returncode}; continuing screen",
+                f"returncode={error.returncode}; slot not consumed",
                 flush=True,
             )
             continue
+        repeated_finalists.append(sequence)
         _append_timing(
             timings_path,
             {
