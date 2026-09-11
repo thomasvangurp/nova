@@ -44,7 +44,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from nanobody_opt.diffusion_sample_selection import EXPECTED_DIFFUSION_SAMPLES
+# The live path invokes this as a script, not a module, so the repository root
+# is not on sys.path.  Insert it before importing the shared contract.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nanobody_opt.diffusion_sample_selection import (  # noqa: E402
+    EXPECTED_DIFFUSION_SAMPLES,
+)
 
 DEFAULT_CONFIG_PATH = Path("/root/artifacts/nanobody_fast_scorer.json")
 DEFAULT_SCORER = Path("/root/fastscore/release/fast_score_batch.py")

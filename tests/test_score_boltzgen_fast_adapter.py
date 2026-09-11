@@ -107,3 +107,21 @@ def test_an_unpinned_scorer_is_allowed(tmp_path):
     scorer.write_text("print('dev tree')")
 
     assert adapter.require_pinned_scorer(scorer, None) is None
+
+
+def test_adapter_runs_as_a_direct_script():
+    # The live path invokes this by file path, not as a module, so an import of
+    # the shared contract must not depend on the repository being on sys.path.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(adapter.__file__)
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        cwd="/",
+    )
+
+    assert completed.returncode == 0, completed.stderr
