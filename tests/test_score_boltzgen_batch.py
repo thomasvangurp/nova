@@ -46,7 +46,7 @@ def test_refolded_complex_is_copied_before_work_tree_cleanup(tmp_path):
     sample_metrics = {
         "iptm": np.asarray([0.90, 0.50]),
         "ptm": np.asarray([0.90, 0.50]),
-        "design_iiptm": np.asarray([0.31, 0.42]),
+        "design_iiptm": np.asarray([0.31, 0.7959588766098022]),
         "design_ptm": np.asarray([0.40, 0.90]),
         "design_to_target_iptm": np.asarray([0.40, 0.90]),
         "min_design_to_target_pae": np.asarray([4.0, 2.0]),
@@ -73,7 +73,10 @@ def test_refolded_complex_is_copied_before_work_tree_cleanup(tmp_path):
         writer.writerow({
             "id": record_id,
             "file_name": writer_source.name,
-            **confidence_metrics,
+            **{
+                name: f"{float(value):.5f}"
+                for name, value in confidence_metrics.items()
+            },
         })
 
     copied = _copy_refolded_complexes(

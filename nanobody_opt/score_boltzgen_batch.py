@@ -158,7 +158,11 @@ def _copy_refolded_complexes(
                             selection.analyze_sample_index
                         ]
                     )
-                    if not np.isclose(reported, selected, rtol=1e-6, atol=1e-7):
+                    # BoltzGen serializes aggregate_metrics_analyze.csv with
+                    # five digits after the decimal point. The NPZ keeps full
+                    # float precision, so an exact-value assertion must admit
+                    # one half-unit in the CSV's last reported place.
+                    if not np.isclose(reported, selected, rtol=0, atol=5.01e-6):
                         raise ValueError(
                             f"aggregate {metric}={reported} does not match "
                             f"analyze sample {selection.analyze_sample_index}={selected}"

@@ -59,7 +59,8 @@ Every replacement scorer must emit the existing CLI/output contract used by
   `writer_path`, hashes, and `sample_selection` with both indices and all five
   sample score vectors;
 - prove the aggregate five confidence metrics equal the selected analysis
-  sample exactly;
+  sample within half a unit of the validator CSV's fifth decimal place (the NPZ
+  retains more precision than `aggregate_metrics_analyze.csv`);
 - fail without promoting partial output on a missing sequence or artifact.
 
 `run_live_producer.py --exact-scorer PATH` now carries a replacement scorer
