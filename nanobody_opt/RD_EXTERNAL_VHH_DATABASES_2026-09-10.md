@@ -135,15 +135,16 @@ explicit matching:
 
 ```sql
 external_datasets(
-  dataset_id TEXT PRIMARY KEY, name TEXT, release TEXT, retrieved_at TEXT,
-  source_url TEXT, license_id TEXT, commercial_use_allowed INTEGER,
+  dataset_id TEXT PRIMARY KEY, name TEXT, release TEXT, release_date TEXT,
+  retrieved_at TEXT, source_url TEXT, license_id TEXT, commercial_use_allowed INTEGER,
   tdm_ai_allowed INTEGER, redistribution_allowed INTEGER,
   artifact_sha256 TEXT, terms_snapshot_uri TEXT
 )
 
 external_records(
   record_id TEXT PRIMARY KEY, dataset_id TEXT, source_accession TEXT,
-  source_url TEXT, released_at TEXT, record_sha256 TEXT, raw_json TEXT,
+  source_url TEXT, released_at TEXT, source_updated_at TEXT,
+  record_sha256 TEXT, ingest_status TEXT, quality_flags_json TEXT, raw_json TEXT,
   UNIQUE(dataset_id, source_accession)
 )
 
@@ -169,8 +170,8 @@ external_interactions(
 )
 
 external_complexes(
-  complex_id TEXT PRIMARY KEY, interaction_id TEXT, pdb_id TEXT,
-  assembly_id TEXT, vhh_chain_ids TEXT, antigen_chain_ids TEXT,
+  complex_id TEXT PRIMARY KEY, interaction_id TEXT, record_id TEXT, pdb_id TEXT,
+  assembly_id TEXT, model_id TEXT, vhh_chain_ids TEXT, antigen_chain_ids TEXT,
   method TEXT, resolution REAL, structure_sha256 TEXT, structure_uri TEXT,
   release_date TEXT
 )
@@ -181,15 +182,17 @@ external_record_links(
 )
 
 external_nova_links(
-  external_vhh_id TEXT, nova_node_id INTEGER, alignment_method TEXT,
+  dataset_id TEXT, record_id TEXT, external_vhh_id TEXT,
+  nova_node_id INTEGER, alignment_method TEXT,
   sequence_identity REAL, query_coverage REAL, target_coverage REAL,
   cdr1_identity REAL, cdr2_identity REAL, cdr3_identity REAL,
   is_exact INTEGER, cutoff_snapshot TEXT,
-  PRIMARY KEY(external_vhh_id, nova_node_id, alignment_method, cutoff_snapshot)
+  PRIMARY KEY(record_id, nova_node_id, alignment_method, cutoff_snapshot)
 )
 
 proposal_external_features(
-  epoch INTEGER, node_id INTEGER, feature_version TEXT, features_json TEXT,
+  epoch INTEGER, node_id INTEGER, feature_version TEXT, evidence_cutoff TEXT,
+  dataset_manifest_json TEXT, features_json TEXT,
   PRIMARY KEY(epoch, node_id, feature_version)
 )
 ```
@@ -199,6 +202,74 @@ interaction row per measurement rather than overwriting measurements. Generate
 `proposal_external_features` only from a license- and date-allowlisted view.
 Feature generation should be reproducible from dataset/file hashes and a
 feature-version string.
+
+### Implemented SAbDab2-first adapter
+
+`nanobody_opt/external_evidence.py` implements this schema as an additive
+extension to an existing mutation-network SQLite database. Its CLI accepts only
+a locally downloaded SAbDab2 single-domain CSV whose bytes match a required
+SHA-256. The dataset ID, UI/API release, release date, timezone-qualified
+retrieval time, official HTTPS source URL, CC-BY-4.0 policy declaration, and
+terms URI are mandatory. `latest`, `current`, bad hashes, non-CC-BY licensing,
+and rows whose SAbDab availability/update dates postdate the declared release
+fail closed before external records are written.
+
+Only canonical 80-180 aa `SD-H` records become usable `external_vhh` entities.
+Other single-domain modalities are out of this VHH adapter; noncanonical SD-H
+records are retained as quarantined source records. The adapter creates no
+NOVA node or observation and assigns no affinity. It does not infer UniProt
+accessions from antigen names. An optional exact-link command can connect a
+usable external VHH to an already-existing target node, but only when the
+dataset release and record availability/update dates are on or before an
+explicit `as_of` cutoff.
+
+Every exact link carries its dataset and source-record IDs. Consumers should
+read the `eligible_external_nova_links` view, which re-applies the license,
+record-status, and temporal checks at query time; changing a permission flag
+therefore removes previously materialized links from the eligible view. Feature
+rows reserve both an evidence cutoff and a dataset manifest, preventing an
+otherwise reproducible feature version from silently drifting across releases.
+
+Example for a separately archived snapshot:
+
+```bash
+python -m nanobody_opt.external_evidence ingest-sabdab2 \
+  --database /path/to/copied-graph.sqlite \
+  --summary-csv /path/to/sabdab_summary_all_single_domain.csv \
+  --dataset-id sabdab2:ui-2.1.0-api-2.0.10:2026-09-10 \
+  --release ui-2.1.0-api-2.0.10-2026-09-10 \
+  --release-date 2026-09-10 \
+  --retrieved-at 2026-09-11T02:00:34Z \
+  --source-url https://sabdab.opig.stats.ox.ac.uk/api/download/all-single-domain-summary \
+  --expected-sha256 ddc0d3a2bed5b3a53629ba390e6421f72880d34d16d2c99d9f94ac0b41ae2444 \
+  --terms-snapshot-uri https://sabdab.opig.stats.ox.ac.uk/about
+```
+
+The live-format smoke test used a temporary database and did not retain or
+commit source data. It read 4,788 rows: 4,602 SD-H records, 186 non-SD-H rows,
+4,561 usable SD-H records, and 41 quarantined SD-H records with noncanonical
+residues. Deduplication produced 1,342 canonical VHH entities. Of 4,307 SD-H
+rows with antigen chains, 4,267 were usable structural-interaction records,
+representing 4,083 PDB/model/antigen-chain entities. All 4,561 usable records
+had release/update dates eligible as of the declared 2026-09-10 snapshot.
+
+Seeding a temporary graph with all 10,092 NOVA public observations and running
+the cutoff-gated exact-link command produced zero links, consistent with the
+independent overlap audit. The snapshot CSV contains summaries only: antigen
+sequences, downloaded mmCIF coordinates, biological assembly IDs, affinity,
+and P20809-specific evidence remain absent. Therefore the implemented adapter
+is a provenance-safe **input layer**, not yet a binding-ranker PoV. A byte-for-
+byte source artifact and terms snapshot should be retained in approved storage
+before relying on this release beyond R&D.
+
+Local validation: Ruff passed, the external-evidence plus mutation-network
+tests passed (`12 passed`), and the CLI parser/import path compiled under the
+host Python. The locked Pixi environments are Linux/CUDA-only and cannot run on
+the current `osx-arm64` workstation (`unsupported-platform`). An unrestricted
+repository-wide Pytest collection also reaches vendored MetaNano/Boltz and
+compound-miner tests whose optional `bittensor`, Lightning/Triton, and RDKit
+dependencies are absent on the host; those collection errors are unrelated to
+this standard-library-only adapter.
 
 ## Small proof-of-value experiment
 
