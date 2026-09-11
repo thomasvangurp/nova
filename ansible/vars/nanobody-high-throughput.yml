@@ -21,7 +21,7 @@ nanobody_basin_core_limit: 40
 nanobody_basin_parent_limit: 160
 nanobody_neighbor_seed_count: 128
 nanobody_proposals_per_seed: 24
-nanobody_proposal_limit: 3200
+nanobody_proposal_limit: 5000
 nanobody_basin_fraction: 0.80
 nanobody_basin_routes_per_core: 256
 nanobody_basin_evidence_fraction: 0.50
@@ -54,9 +54,9 @@ nanobody_maximum_exhaustive_singles: 32768
 # pool -- which is what binds, since a two-stage policy already captures about
 # 97% of the best candidate the pool contains.  800 is 80 per worker, well past
 # the scorer's amortisation floor.
-nanobody_candidate_limit: 800
-nanobody_screen_tranche_size: 800
-nanobody_weak_initial_fallback_after: 800
+nanobody_candidate_limit: 1250
+nanobody_screen_tranche_size: 1250
+nanobody_weak_initial_fallback_after: 1250
 nanobody_finalists: 60
 nanobody_qualification_observations: 13
 

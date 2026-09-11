@@ -271,6 +271,20 @@ def _screen_execution_shape(
     return candidate_count, math.ceil(candidate_count / gpu_count)
 
 
+def _remaining_blocks(path: Path | None, epoch: int) -> float:
+    """Blocks left in ``epoch``, or infinity when the chain state is unusable."""
+    if path is None:
+        return float("inf")
+    try:
+        state = json.loads(path.read_text())
+        if int(state["epoch"]) != epoch:
+            return 0.0
+        epoch_length = int(state["epoch_length"])
+        return float(epoch_length - (int(state["block"]) % epoch_length))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return float("inf")
+
+
 def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bool:
     if path is None:
         return True
@@ -374,6 +388,49 @@ def _replication_shortlist(
         if str(sequence) not in exclude
     ]
     return sequences[:limit]
+
+
+def _affordable_shortlist(
+    shortlist: list[str],
+    *,
+    rounds: int,
+    minimum_observations: int,
+    remaining_blocks: float,
+    load_seconds: float,
+    seconds_per_observation: float,
+    gpu_count: int,
+    block_seconds: float = 12.0,
+) -> list[str]:
+    """Trade shortlist width for depth when the closing window is short.
+
+    A round costs one model load plus the shortlist's folding, so a narrower
+    shortlist buys more rounds in the same time.  Publishing nothing is the
+    worst outcome available -- strict qualification needs a fixed number of
+    independent observations, and an epoch that cannot reach it scores nothing
+    at all -- so when the window is tight the shortlist shrinks rather than the
+    observation count.
+    """
+    if not shortlist or rounds < 1 or remaining_blocks <= 0:
+        return shortlist
+    required_rounds = max(minimum_observations - 1, 1)
+    budget = remaining_blocks * block_seconds
+
+    def affordable(width: int) -> bool:
+        per_round = load_seconds + seconds_per_observation * width / gpu_count
+        return per_round * required_rounds <= budget
+
+    if affordable(len(shortlist)):
+        return shortlist
+    width = len(shortlist)
+    while width > 1 and not affordable(width):
+        width -= 1
+    print(
+        f"EXACT_SHORTLIST_NARROWED from={len(shortlist)} to={width} "
+        f"remaining_blocks={remaining_blocks:.0f} "
+        f"required_rounds={required_rounds}",
+        flush=True,
+    )
+    return shortlist[:width]
 
 
 def _run_replication_rounds(
@@ -992,6 +1049,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--replication-load-seconds",
+        type=float,
+        default=39.0,
+        help="measured scorer start-up per invocation, for shortlist sizing",
+    )
+    parser.add_argument(
+        "--replication-seconds-per-observation",
+        type=float,
+        default=6.5,
+        help="measured GPU-seconds per observation, for shortlist sizing",
+    )
+    parser.add_argument(
         "--minimum-publishable-observations",
         type=int,
         default=8,
@@ -1384,15 +1453,16 @@ def main() -> None:
     replication_rounds_completed = 0
     replication_shortlist: list[str] = []
     if args.replication_rounds:
-        if not screen_ranking.is_file() and args.pooled_exact_root is not None:
+        pooled_for_ranking = _pooled_exact_paths(
+            [], args.pooled_exact_root, args.output_dir
+        )
+        if not screen_ranking.is_file() and pooled_for_ranking:
             # The closing iteration may screen nothing at all: it opens inside
             # the replication window on purpose.  Rank the epoch's pooled
             # observations so the shortlist is the best of every generation.
             subprocess.run(
                 _rank_command(
-                    exact=_pooled_exact_paths(
-                        [], args.pooled_exact_root, args.output_dir
-                    ),
+                    exact=pooled_for_ranking,
                     archive=args.archive,
                     config=args.config,
                     target=args.target,
@@ -1405,6 +1475,19 @@ def main() -> None:
             )
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
+        )
+        replication_shortlist = _affordable_shortlist(
+            replication_shortlist,
+            rounds=args.replication_rounds,
+            minimum_observations=args.minimum_publishable_observations,
+            remaining_blocks=max(
+                _remaining_blocks(args.chain_state, args.epoch)
+                - args.reserve_blocks,
+                0.0,
+            ),
+            load_seconds=args.replication_load_seconds,
+            seconds_per_observation=args.replication_seconds_per_observation,
+            gpu_count=len(gpus),
         )
         if args.layer2_gate_command:
             replication_shortlist = _layer2_gate(

@@ -607,3 +607,37 @@ def test_closing_window_must_fit_the_observations_qualification_needs():
     assert observations(110) < minimum_observations
     # entered at the corrected 104-block reserve it comfortably can
     assert observations(104 + 55) >= minimum_observations
+
+
+def test_shortlist_narrows_rather_than_missing_qualification(tmp_path):
+    shortlist = [f"SEQ{index}" for index in range(60)]
+    shared = dict(
+        rounds=12,
+        minimum_observations=8,
+        load_seconds=39.0,
+        seconds_per_observation=6.5,
+        gpu_count=10,
+    )
+
+    # a full window keeps the whole shortlist
+    assert race._affordable_shortlist(
+        shortlist, remaining_blocks=104, **shared
+    ) == shortlist
+
+    # a short window trades width for the observations qualification needs
+    narrowed = race._affordable_shortlist(shortlist, remaining_blocks=40, **shared)
+    assert 0 < len(narrowed) < len(shortlist)
+    per_round = 39.0 + 6.5 * len(narrowed) / 10
+    assert per_round * 7 <= 40 * 12.0
+
+
+def test_remaining_blocks_reads_the_chain(tmp_path):
+    state = tmp_path / "chain.json"
+    state.write_text(json.dumps({
+        "epoch": 25061, "block": 25061 * 361 + 300, "epoch_length": 361,
+    }))
+
+    assert race._remaining_blocks(state, 25061) == 61
+    # a stale epoch means no time left, never "infinite"
+    assert race._remaining_blocks(state, 25062) == 0.0
+    assert race._remaining_blocks(None, 25061) == float("inf")
