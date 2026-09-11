@@ -294,9 +294,18 @@ def backtest(
     parent_floor: int,
     exploration: int,
     seed: int,
+    target_epochs: set[int] | None = None,
 ) -> pd.DataFrame:
     fields = _epoch_fields(snapshot)
     holdout = {epoch for epoch, _ in fields[-holdout_epochs:]}
+    if target_epochs is not None:
+        unavailable = target_epochs - holdout
+        if unavailable:
+            raise ValueError(
+                "target epochs must be inside the sealed holdout: "
+                + ",".join(str(epoch) for epoch in sorted(unavailable))
+            )
+        holdout &= target_epochs
     rows: list[dict[str, Any]] = []
     for index, (epoch, field) in enumerate(fields):
         if epoch not in holdout:
@@ -390,6 +399,24 @@ def summarize(frame: pd.DataFrame) -> dict[str, Any]:
                 comparable.baseline_best_matched_field_rank
                 == comparable.model_best_matched_field_rank
             ).sum()),
+            "baseline_epochs_with_top1_match": int((
+                group.baseline_best_matched_field_rank <= 1
+            ).sum()),
+            "model_epochs_with_top1_match": int((
+                group.model_best_matched_field_rank <= 1
+            ).sum()),
+            "baseline_epochs_with_top5_match": int((
+                group.baseline_best_matched_field_rank <= 5
+            ).sum()),
+            "model_epochs_with_top5_match": int((
+                group.model_best_matched_field_rank <= 5
+            ).sum()),
+            "baseline_epochs_with_top10_match": int((
+                group.baseline_best_matched_field_rank <= 10
+            ).sum()),
+            "model_epochs_with_top10_match": int((
+                group.model_best_matched_field_rank <= 10
+            ).sum()),
         }
     return {"budgets": by_budget}
 
@@ -410,10 +437,22 @@ def main() -> None:
     parser.add_argument("--parent-floor", type=int, default=32)
     parser.add_argument("--exploration", type=int, default=16)
     parser.add_argument("--random-seed", type=int, default=20260910)
+    parser.add_argument(
+        "--target-epochs",
+        help=(
+            "optional comma-separated subset of the sealed holdout; used by "
+            "the resumable shard runner"
+        ),
+    )
     args = parser.parse_args()
     budgets = tuple(sorted({int(value) for value in args.budgets.split(",")}))
     if not budgets or min(budgets) < 1:
         parser.error("budgets must be positive")
+    target_epochs = (
+        None
+        if not args.target_epochs
+        else {int(value) for value in args.target_epochs.split(",")}
+    )
     snapshot = pd.read_csv(args.api_snapshot)
     snapshot.sequence = snapshot.sequence.astype(str).str.strip().str.upper()
     snapshot = snapshot[
@@ -432,6 +471,7 @@ def main() -> None:
         parent_floor=args.parent_floor,
         exploration=args.exploration,
         seed=args.random_seed,
+        target_epochs=target_epochs,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     placements.to_csv(args.output_dir / "placements.csv", index=False)
@@ -446,6 +486,9 @@ def main() -> None:
         "parent_floor": args.parent_floor,
         "exploration": args.exploration,
         "random_seed": args.random_seed,
+        "target_epochs": (
+            None if target_epochs is None else sorted(target_epochs)
+        ),
         "heldout_sequences_inserted_into_proposals": False,
         "api_snapshot_sha256": _sha256(args.api_snapshot),
         "model_sha256": _sha256(args.model),
