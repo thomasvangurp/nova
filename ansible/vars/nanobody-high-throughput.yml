@@ -11,24 +11,30 @@ nanobody_producer_activate: false
 # through the adapter rather than invoked directly.  Rollback is this one path.
 nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_fast_adapter.py
 
-# Proposal generation still explores breadth-first; the exact screen consumes
-# only the strongest Layer-2 survivors.
-nanobody_parent_limit: 256
-nanobody_neighbor_parent_limit: 128
-nanobody_recent_anchor_parent_limit: 32
-nanobody_recent_neighbor_parent_limit: 64
-nanobody_basin_core_limit: 40
-nanobody_basin_parent_limit: 160
-nanobody_neighbor_seed_count: 128
-nanobody_proposals_per_seed: 24
+# Proposal generation is deliberately UNCHANGED from the configuration that
+# produced rank 3 and rank 4.  Widening it to 40 cores and 256 parents diluted
+# the pool with weak basins: epoch 25059's replicated finalists came back with
+# p90 rank sums of 199, 225 and 252 against a 90 ceiling, and competitive rates
+# of 0.14, 0.13 and 0.04 against 0.75.  Held-out replay already showed the
+# winner's core sits in the top five, so breadth across cores buys nothing and
+# costs pool quality.  The throughput is spent screening MORE of the same good
+# neighbourhoods, not wider ones.
+nanobody_parent_limit: 64
+nanobody_neighbor_parent_limit: 32
+nanobody_recent_anchor_parent_limit: 16
+nanobody_recent_neighbor_parent_limit: 16
+nanobody_basin_core_limit: 5
+nanobody_basin_parent_limit: 32
+nanobody_neighbor_seed_count: 32
+nanobody_proposals_per_seed: 12
 nanobody_proposal_limit: 5000
-nanobody_basin_fraction: 0.80
-nanobody_basin_routes_per_core: 256
-nanobody_basin_evidence_fraction: 0.50
-nanobody_basin_evidence_core_limit: 16
+nanobody_basin_fraction: 0.7
+nanobody_basin_routes_per_core: 192
+nanobody_basin_evidence_fraction: 0.4
+nanobody_basin_evidence_core_limit: 1
 nanobody_basin_top_core_weight: 2
-nanobody_basin_exploration_residues_per_position: 6
-nanobody_maximum_exhaustive_singles: 32768
+nanobody_basin_exploration_residues_per_position: 5
+nanobody_maximum_exhaustive_singles: 8192
 
 # Measured on the box against this scorer: 200 sequences in 183.7 seconds on
 # ten GPUs, 0.9 seconds per observation wall-clock, while the live miner was
