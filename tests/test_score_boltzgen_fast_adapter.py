@@ -86,3 +86,24 @@ def test_settings_file_must_be_an_object(tmp_path):
 
     with pytest.raises(ValueError, match="must be an object"):
         adapter.load_settings(path)
+
+
+def test_a_modified_scorer_is_refused(tmp_path):
+    scorer = tmp_path / "fast_score_batch.py"
+    scorer.write_text("print('validated')")
+    import hashlib
+
+    digest = hashlib.sha256(scorer.read_bytes()).hexdigest()
+
+    adapter.require_pinned_scorer(scorer, digest)  # unchanged: allowed
+
+    scorer.write_text("print('edited mid-epoch')")
+    with pytest.raises(SystemExit, match="has been modified"):
+        adapter.require_pinned_scorer(scorer, digest)
+
+
+def test_an_unpinned_scorer_is_allowed(tmp_path):
+    scorer = tmp_path / "fast_score_batch.py"
+    scorer.write_text("print('dev tree')")
+
+    assert adapter.require_pinned_scorer(scorer, None) is None

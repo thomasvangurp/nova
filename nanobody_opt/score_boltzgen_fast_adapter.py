@@ -21,6 +21,7 @@ from ``NANOBODY_FAST_SCORER_CONFIG`` or ``/root/artifacts/nanobody_fast_scorer.j
       "scorer": "/root/fastscore/release/fast_score_batch.py",
       "python": "/root/fastscore/release/release_python.sh",
       "synth_reference": "/root/fastscore/release/refdesign/<design>.cif",
+      "scorer_sha256": "<sha256 of the validated scorer>",
       "fold_sampling_steps": 50,
       "fold_diffusion_samples": 5
     }
@@ -35,6 +36,7 @@ diffusion design stage, which is slower but correct.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -57,6 +59,29 @@ def load_settings(path: Path | None = None) -> dict[str, Any]:
     if not isinstance(settings, dict):
         raise ValueError(f"fast scorer settings must be an object: {location}")
     return settings
+
+
+def require_pinned_scorer(scorer: Path, expected: str | None) -> None:
+    """Refuse a scorer whose contents are not the ones that were validated.
+
+    A scorer under active development is not a scorer: an edit lands in the live
+    miner with no deploy, no test and no notice, and the first symptom is every
+    shard raising mid-epoch.  Pinning ``scorer_sha256`` in the settings makes the
+    live path refuse to run anything but the validated bytes.  Omit it only when
+    deliberately running against a tree you expect to change.
+    """
+    if not expected:
+        return
+    digest = hashlib.sha256()
+    with scorer.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise SystemExit(
+            f"refusing to run {scorer}: sha256 {actual} does not match the "
+            f"pinned {expected}; the validated scorer has been modified"
+        )
 
 
 def _sequence_lengths(path: Path) -> set[int]:
@@ -142,6 +167,10 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings(args.settings)
+    require_pinned_scorer(
+        Path(settings.get("scorer", DEFAULT_SCORER)),
+        settings.get("scorer_sha256"),
+    )
     command = build_command(args, settings)
     completed = subprocess.run(command)
     raise SystemExit(completed.returncode)
