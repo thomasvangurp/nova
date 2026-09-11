@@ -444,3 +444,37 @@ def test_replication_rounds_stop_at_the_commitment_reserve(tmp_path, monkeypatch
     )
 
     assert completed == 0
+
+
+def test_strict_gates_are_overridable_per_scorer(tmp_path):
+    baseline = race.strict_rank_arguments()
+    assert baseline[baseline.index("--maximum-p90-rank-sum") + 1] == "90"
+
+    overridden = race.strict_rank_arguments({"maximum_p90_rank_sum": 104})
+    assert overridden[overridden.index("--maximum-p90-rank-sum") + 1] == "104"
+    # every other gate is preserved exactly
+    assert len(overridden) == len(baseline)
+    assert (
+        overridden[overridden.index("--minimum-observations") + 1]
+        == baseline[baseline.index("--minimum-observations") + 1]
+    )
+
+
+def test_unknown_strict_gate_is_refused():
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown strict rank gate"):
+        race.strict_rank_arguments({"maximum_p90_invented_gate": 1})
+
+
+def test_strict_gate_overrides_load_from_either_shape(tmp_path):
+    flat = tmp_path / "flat.json"
+    flat.write_text(json.dumps({"maximum_p90_rank_sum": 104}))
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text(json.dumps({"gates": {"maximum_p90_rank_sum": 104}}))
+
+    assert race.load_strict_gate_overrides(flat) == {"maximum_p90_rank_sum": 104}
+    assert race.load_strict_gate_overrides(wrapped) == {
+        "maximum_p90_rank_sum": 104
+    }
+    assert race.load_strict_gate_overrides(None) == {}

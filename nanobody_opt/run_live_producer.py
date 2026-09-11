@@ -256,6 +256,7 @@ def _run_iteration(
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
         "--replication-rounds", str(args.replication_rounds),
+        "--strict-gates", str(args.strict_gates or ""),
     ]
     _run(race_command)
 
@@ -361,6 +362,11 @@ def _parser() -> argparse.ArgumentParser:
             "independent observations per finalist; one observation of a fixed "
             "sequence is a wide draw, so this is the main accuracy control"
         ),
+    )
+    parser.add_argument(
+        "--strict-gates",
+        default="",
+        help="re-derived strict qualification thresholds for the active scorer",
     )
     parser.add_argument(
         "--replication-rounds",

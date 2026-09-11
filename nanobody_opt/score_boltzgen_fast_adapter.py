@@ -1,0 +1,151 @@
+"""Drive the fast exact scorer through the live scorer contract.
+
+``score_boltzgen_waves`` invokes a scorer with a fixed argument list:
+``--sequences --config --target --gpus --shards-per-gpu --batch-size
+--work-root --out``, plus ``--structure-dir`` and ``--require-structures`` when
+structures must be retained.  The fast scorer spells two of those differently
+(``--shard-root`` and ``--capture-structures``) and takes tuning knobs the
+contract has no room for.
+
+This adapter absorbs that difference so the pipeline keeps one scorer contract
+and a replacement stays one path change away from rollback.  It deliberately
+does not reinterpret anything else: the sequences, config, target, GPU list,
+shard count and batch size are passed straight through, and the scorer's own
+output is written to ``--out`` untouched for the wave validator to check.
+
+Box-specific tuning lives in a JSON file rather than in this repository, since
+the reference design and scorer location differ per host.  The file is read
+from ``NANOBODY_FAST_SCORER_CONFIG`` or ``/root/artifacts/nanobody_fast_scorer.json``:
+
+    {
+      "scorer": "/root/fastscore/release/fast_score_batch.py",
+      "python": "/root/fastscore/release/release_python.sh",
+      "synth_reference": "/root/fastscore/release/refdesign/<design>.cif",
+      "fold_sampling_steps": 50,
+      "fold_diffusion_samples": 5
+    }
+
+``synth_reference`` replaces the design stage with side-chain grafting and is
+what makes the scorer fast.  It is only passed when every candidate sequence has
+the same length, because grafting requires a reference whose designed chain
+matches the candidates; otherwise the adapter omits it and the scorer runs its
+diffusion design stage, which is slower but correct.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+DEFAULT_CONFIG_PATH = Path("/root/artifacts/nanobody_fast_scorer.json")
+DEFAULT_SCORER = Path("/root/fastscore/release/fast_score_batch.py")
+
+
+def load_settings(path: Path | None = None) -> dict[str, Any]:
+    """Read box-specific scorer settings, tolerating an absent file."""
+    location = path or Path(
+        os.environ.get("NANOBODY_FAST_SCORER_CONFIG", DEFAULT_CONFIG_PATH)
+    )
+    if not location.is_file():
+        return {}
+    settings = json.loads(location.read_text())
+    if not isinstance(settings, dict):
+        raise ValueError(f"fast scorer settings must be an object: {location}")
+    return settings
+
+
+def _sequence_lengths(path: Path) -> set[int]:
+    payload = json.loads(path.read_text())
+    items = (
+        payload
+        if isinstance(payload, list)
+        else payload.get("sequences") or payload.get("cases") or []
+    )
+    lengths = set()
+    for item in items:
+        sequence = item.get("sequence") if isinstance(item, dict) else item
+        if isinstance(sequence, str) and sequence.strip():
+            lengths.add(len(sequence.strip()))
+    return lengths
+
+
+def build_command(
+    args: argparse.Namespace, settings: dict[str, Any]
+) -> list[str]:
+    """Translate the contract arguments into the fast scorer's own flags."""
+    scorer = Path(settings.get("scorer", DEFAULT_SCORER))
+    launcher = settings.get("python")
+    command = [str(launcher)] if launcher else [sys.executable]
+    command.append(str(scorer))
+    command.extend([
+        "--sequences", str(args.sequences),
+        "--config", str(args.config),
+        "--target", args.target,
+        "--gpus", args.gpus,
+        "--shards-per-gpu", str(args.shards_per_gpu),
+        "--batch-size", str(args.batch_size),
+        "--shard-root", str(args.work_root),
+        "--out", str(args.out),
+    ])
+    if args.structure_dir is not None:
+        command.extend(["--capture-structures", str(args.structure_dir)])
+    if args.require_structures:
+        command.append("--require-structures")
+
+    reference = settings.get("synth_reference")
+    if reference:
+        lengths = _sequence_lengths(Path(args.sequences))
+        if len(lengths) == 1:
+            command.extend(["--synth-reference", str(reference)])
+        else:
+            # Grafting needs a reference whose designed chain matches the
+            # candidates.  A mixed-length wave is rare, and running the real
+            # design stage is the correct fallback rather than a failure.
+            print(
+                "FAST_SCORER_SYNTH_REFERENCE_SKIPPED "
+                f"candidate_lengths={sorted(lengths)}",
+                flush=True,
+            )
+    for key, flag in (
+        ("fold_sampling_steps", "--fold-sampling-steps"),
+        ("fold_diffusion_samples", "--fold-diffusion-samples"),
+        ("design_sampling_steps", "--design-sampling-steps"),
+        ("fold_matmul_precision", "--fold-matmul-precision"),
+    ):
+        if settings.get(key) is not None:
+            command.extend([flag, str(settings[key])])
+    return command
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sequences", required=True, type=Path)
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--gpus", default="0,1")
+    parser.add_argument("--shards-per-gpu", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--work-root", required=True, type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--structure-dir", type=Path)
+    parser.add_argument("--require-structures", action="store_true")
+    parser.add_argument(
+        "--settings",
+        type=Path,
+        help="box-specific scorer settings; defaults to the documented location",
+    )
+    args = parser.parse_args()
+
+    settings = load_settings(args.settings)
+    command = build_command(args, settings)
+    completed = subprocess.run(command)
+    raise SystemExit(completed.returncode)
+
+
+if __name__ == "__main__":
+    main()

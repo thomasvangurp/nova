@@ -27,20 +27,47 @@ from nanobody_opt.mutation_network import (
 from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
 
 
-STRICT_RANK_ARGUMENTS = (
-    "--minimum-observations", "8",
-    "--competitive-score-threshold", "75",
-    "--minimum-competitive-rate", "0.75",
-    "--minimum-observation-competitive-rate", "0.75",
-    "--maximum-p90-rank-sum", "90",
-    "--maximum-p90-confidence-rank-sum", "70",
-    "--maximum-p90-physical-interaction-rank-sum", "40",
-    "--maximum-p90-developability-rank-sum", "15",
-    "--minimum-structure-observations", "8",
-    "--minimum-median-contact-jaccard", "0.35",
-    "--maximum-cdr3-rmsd", "5",
-    "--minimum-epitope-occupancy", "0",
-)
+# Absolute qualification gates, calibrated against observations from the
+# production scorer.  They are thresholds on field-relative rank sums, so a
+# replacement scorer with even a small systematic offset moves how often they
+# fire.  Keep them overridable rather than compiled in: switching scorers means
+# re-deriving these from that scorer's own observations, not inheriting them.
+STRICT_RANK_GATES: dict[str, str] = {
+    "--minimum-observations": "8",
+    "--competitive-score-threshold": "75",
+    "--minimum-competitive-rate": "0.75",
+    "--minimum-observation-competitive-rate": "0.75",
+    "--maximum-p90-rank-sum": "90",
+    "--maximum-p90-confidence-rank-sum": "70",
+    "--maximum-p90-physical-interaction-rank-sum": "40",
+    "--maximum-p90-developability-rank-sum": "15",
+    "--minimum-structure-observations": "8",
+    "--minimum-median-contact-jaccard": "0.35",
+    "--maximum-cdr3-rmsd": "5",
+    "--minimum-epitope-occupancy": "0",
+}
+
+
+def strict_rank_arguments(overrides: dict[str, Any] | None = None) -> list[str]:
+    """Flatten the strict gates, applying calibrated overrides by flag name."""
+    gates = dict(STRICT_RANK_GATES)
+    for flag, value in (overrides or {}).items():
+        name = flag if flag.startswith("--") else f"--{flag.replace('_', '-')}"
+        if name not in gates:
+            raise ValueError(f"unknown strict rank gate: {flag}")
+        gates[name] = str(value)
+    return [item for flag, value in gates.items() for item in (flag, value)]
+
+
+def load_strict_gate_overrides(path: Path | None) -> dict[str, Any]:
+    """Read re-derived gate thresholds, refusing anything but a flat object."""
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text())
+    gates = payload.get("gates", payload) if isinstance(payload, dict) else None
+    if not isinstance(gates, dict):
+        raise ValueError(f"strict gate overrides must be an object: {path}")
+    return gates
 DEFAULT_SCORER = Path("/root/nanobody_opt/score_boltzgen_batch.py")
 
 
@@ -362,6 +389,7 @@ def _rank_command(
     output: Path,
     ledger: Path | None,
     strict: bool,
+    strict_gate_overrides: dict[str, Any] | None = None,
 ) -> list[str]:
     command = [sys.executable, "-m", "nanobody_opt.rank_exact"]
     for path in exact:
@@ -385,7 +413,7 @@ def _rank_command(
             "--api-field-count", "10",
             "--minimum-api-fields", "3",
         ])
-        command.extend(STRICT_RANK_ARGUMENTS)
+        command.extend(strict_rank_arguments(strict_gate_overrides))
     else:
         command.extend(["--selection-order", "p90"])
     return command
@@ -625,6 +653,7 @@ def _try_strict_rank(
     epoch: int,
     output: Path,
     ledger: Path | None,
+    strict_gate_overrides: dict[str, Any] | None = None,
 ) -> bool:
     try:
         subprocess.run(
@@ -637,6 +666,7 @@ def _try_strict_rank(
                 output=output,
                 ledger=ledger,
                 strict=True,
+                strict_gate_overrides=strict_gate_overrides,
             ),
             check=True,
         )
@@ -865,6 +895,15 @@ def main() -> None:
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
     parser.add_argument(
+        "--strict-gates",
+        default="",
+        help=(
+            "JSON object of re-derived strict qualification thresholds by flag "
+            "name; these are calibrated per scorer, so a replacement scorer "
+            "must not inherit the production scorer's values"
+        ),
+    )
+    parser.add_argument(
         "--replication-rounds",
         type=int,
         default=0,
@@ -924,6 +963,18 @@ def main() -> None:
     gpus = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
     if not gpus:
         parser.error("at least one GPU is required")
+    try:
+        strict_gate_overrides = load_strict_gate_overrides(
+            Path(args.strict_gates) if args.strict_gates else None
+        )
+    except (OSError, ValueError) as error:
+        parser.error(f"unusable strict gate overrides: {error}")
+    if strict_gate_overrides:
+        print(
+            "EXACT_STRICT_GATES_OVERRIDDEN "
+            f"{json.dumps(strict_gate_overrides, sort_keys=True)}",
+            flush=True,
+        )
     candidate_records = _candidate_records(args.layer2)[: args.candidate_limit]
     sequences = [str(record["sequence"]) for record in candidate_records]
     candidate_metadata = {
@@ -1170,6 +1221,7 @@ def main() -> None:
             epoch=args.epoch,
             output=output,
             ledger=args.ledger,
+            strict_gate_overrides=strict_gate_overrides,
         ):
             _store_ranking(
                 args.mutation_database,
@@ -1219,6 +1271,7 @@ def main() -> None:
                 epoch=args.epoch,
                 output=output,
                 ledger=args.ledger,
+                strict_gate_overrides=strict_gate_overrides,
             ):
                 _store_ranking(
                     args.mutation_database,

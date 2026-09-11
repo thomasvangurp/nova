@@ -1,4 +1,4 @@
-# Dormant profile for the validated 12.2x exact scorer.
+# Dormant profile for the validated 21.2x exact scorer.
 #
 # Keep activation false until the gates in
 # nanobody_opt/RD_BUDGET_ALLOCATION_2026-09-11.md pass on the box.  The shape
@@ -7,7 +7,9 @@
 # throughput buys independent observations of a shortlist rather than more
 # one-shot candidates.
 nanobody_producer_activate: false
-nanobody_exact_scorer: /root/fastscore/release/fast_score_batch.py
+# The fast scorer spells two contract flags differently, so it is driven
+# through the adapter rather than invoked directly.  Rollback is this one path.
+nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_fast_adapter.py
 
 # Proposal generation still explores breadth-first; the exact screen consumes
 # only the strongest Layer-2 survivors.
@@ -28,15 +30,18 @@ nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 6
 nanobody_maximum_exhaustive_singles: 32768
 
-# Measured operating point: 1,600 one-shot screens in tranches of 200, then a
-# 60-candidate shortlist re-observed ten times, is about 2,140 observations and
-# fits the 3,672-second scoring window with the commitment reserve intact.
-# Tranches of 200 give each of ten shards twenty sequences, which is what
-# amortises the scorer's model load; smaller tranches spend the speedup on
-# process startup.
-nanobody_candidate_limit: 1600
-nanobody_screen_tranche_size: 200
-nanobody_weak_initial_fallback_after: 400
+# Measured operating point at 8.3 GPU-seconds per sequence: 3,200 one-shot
+# screens in tranches of 800, then a 60-candidate shortlist re-observed ten
+# times.  About 3,740 observations, fitting the 3,672-second scoring window
+# with the commitment reserve intact.
+#
+# Tranches of 800 give each of ten workers eighty sequences.  The only
+# remaining non-GPU cost is one model load per invocation, so large waves are
+# what converts the speedup into throughput; multi-worker packing and predict
+# batching were both measured as dead ends.
+nanobody_candidate_limit: 3200
+nanobody_screen_tranche_size: 800
+nanobody_weak_initial_fallback_after: 1600
 nanobody_finalists: 60
 nanobody_qualification_observations: 10
 
@@ -53,7 +58,15 @@ nanobody_replication_rounds: 9
 # rounds.
 nanobody_pipeline_depth: 1
 
-# Scores depend on which candidates share one BoltzGen predict call.  The live
-# 20-candidate tranche implies two per call; keep that grouping when the tranche
-# grows to 200 rather than letting it become twenty.
+# With resident models the chunk no longer amortises a model load, so this is
+# only work-directory size and failure blast radius.  Keep it small and fixed so
+# a larger tranche cannot change how candidates are grouped.
 nanobody_screen_predict_batch_size: 2
+
+# Strict qualification thresholds are calibrated against the production
+# scorer's observations.  Point this at re-derived thresholds before activating
+# a replacement scorer; do not inherit the production values.
+nanobody_strict_gates: ""
+
+# Multi-worker packing measured 1.21x for triple the memory, so the wave layer
+# stays at one shard per GPU; there is deliberately no knob for it.
