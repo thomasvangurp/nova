@@ -1,0 +1,44 @@
+{
+  "epoch": 25046,
+  "target": "P20809",
+  "benchmark_host": "ssh9.vast.ai:20868",
+  "protocol": {
+    "mode": "provisional rank_exact",
+    "exact_files": 200,
+    "ranked_candidates": 1362,
+    "api_field_count": 10,
+    "selection_order": "p90",
+    "minimum_observations": 1,
+    "note": "Patched code ran from /tmp without changing or restarting live processes. Both runs used the exact_files recorded by the live legacy output."
+  },
+  "timing_seconds": {
+    "legacy_live_rank": 282.56,
+    "vectorized_rank": 9.673144077183679,
+    "separately_measured_api_fetch": 7.063235393026844,
+    "separately_measured_exact_json_load": 0.025502867065370083
+  },
+  "end_to_end_speedup": 29.210771363003094,
+  "equivalence": {
+    "candidate_count": true,
+    "top_sequence": true,
+    "selection_score": true,
+    "score_median": true,
+    "score_p90": true,
+    "score_worst": true,
+    "competitive_rate": true,
+    "observation_competitive_rate": true,
+    "per_observation_field_rank_sums": true,
+    "p90_category_rank_sums": true,
+    "aggregate_median_rank_sum": true,
+    "aggregate_p90_rank_sum": true,
+    "aggregate_median_category_rank_sums": true,
+    "metrics": true,
+    "metric_standard_errors": true,
+    "observations": true
+  },
+  "strict_smoke": {
+    "elapsed_seconds": 8.173365832073614,
+    "legacy_result": "no complete exact candidates met the observation requirement",
+    "vectorized_result": "no complete exact candidates met the observation requirement"
+  }
+}

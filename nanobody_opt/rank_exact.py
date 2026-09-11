@@ -26,8 +26,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt.simulate_round import (
     METRICS,
-    category_rank_sums,
-    rank_sum_in_field,
+    METRIC_CATEGORIES,
 )
 from nanobody_opt.pose_stability import (
     exact_structure_paths,
@@ -37,6 +36,46 @@ from nanobody_opt.pose_stability import (
 
 
 LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
+
+
+def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Precompute the unique values that define each dense-rank scale."""
+    return {
+        metric: np.sort(np.unique(
+            pd.to_numeric(field[metric], errors="coerce")
+            .dropna()
+            .to_numpy(dtype=np.float64)
+        ))
+        for metric in METRICS
+    }
+
+
+def _compiled_category_rank_sums(
+    metrics: dict[str, float], compiled: dict[str, np.ndarray]
+) -> dict[str, float]:
+    """Exactly reproduce pandas dense ranks without rebuilding DataFrames.
+
+    A candidate's ascending dense rank is one plus the number of distinct field
+    values below it; descending is one plus the number above it.  Computing
+    those counts with binary search is equivalent to the validator's
+    ``Series.rank(method="dense")`` and makes runtime scale with observations,
+    not pandas object construction.
+    """
+    ranks: dict[str, float] = {}
+    for metric, direction in METRICS.items():
+        values = compiled[metric]
+        value = float(metrics[metric])
+        if direction == "min":
+            rank = int(np.searchsorted(values, value, side="left")) + 1
+        else:
+            rank = len(values) - int(
+                np.searchsorted(values, value, side="right")
+            ) + 1
+        ranks[metric] = float(rank)
+    return {
+        category: float(sum(ranks[metric] for metric in names))
+        for category, names in METRIC_CATEGORIES.items()
+    }
 
 
 def _observations(paths: list[Path], target: str) -> dict[str, list[dict[str, float]]]:
@@ -296,6 +335,7 @@ def main() -> None:
             "field_count": len(fields),
             "random_seed": args.random_seed,
         }
+    compiled_fields = [_compile_validator_field(field) for field in fields]
     structure_paths: dict[str, list[Path]] = {}
     pose_challenge: dict[str, Any] | None = None
     if args.pose_config is not None:
@@ -317,9 +357,16 @@ def main() -> None:
             continue
         if len(observations) < args.minimum_observations:
             continue
-        score_matrix = [
-            [float(rank_sum_in_field(metrics, field)) for field in fields]
+        category_matrix = [
+            [
+                _compiled_category_rank_sums(metrics, field)
+                for field in compiled_fields
+            ]
             for metrics in observations
+        ]
+        score_matrix = [
+            [float(sum(categories.values())) for categories in by_field]
+            for by_field in category_matrix
         ]
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]
@@ -364,21 +411,25 @@ def main() -> None:
             else 0.0
             for name in METRICS
         }
+        aggregate_categories = [
+            _compiled_category_rank_sums(aggregate, field)
+            for field in compiled_fields
+        ]
         aggregate_field_scores = [
-            rank_sum_in_field(aggregate, field) for field in fields
+            float(sum(categories.values()))
+            for categories in aggregate_categories
         ]
         aggregate_category_scores = {
             category: [
-                category_rank_sums(aggregate, field)[category]
-                for field in fields
+                categories[category] for categories in aggregate_categories
             ]
             for category in ("confidence", "physical_interaction", "developability")
         }
         category_distributions = {
             category: [
-                float(category_rank_sums(metrics, field)[category])
-                for metrics in observations
-                for field in fields
+                float(categories[category])
+                for by_field in category_matrix
+                for categories in by_field
             ]
             for category in ("confidence", "physical_interaction", "developability")
         }

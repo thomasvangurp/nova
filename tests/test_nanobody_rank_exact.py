@@ -1,6 +1,7 @@
 import json
 import sys
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -28,6 +29,34 @@ def test_rank_sum_uses_validator_dense_ties():
         "developability": 2.0,
     }
     assert rank_sum_in_field(mine, field) == 10.0
+
+
+def test_compiled_dense_ranks_match_validator_randomized_fields():
+    rng = np.random.default_rng(20260911)
+    for _ in range(200):
+        size = int(rng.integers(1, 100))
+        field = pd.DataFrame({
+            metric: rng.choice(
+                np.asarray([-np.inf, -2.0, -0.0, 0.0, 1.0, 4.0, np.inf]),
+                size=size,
+                replace=True,
+            )
+            for metric in METRICS
+        })
+        for metric in METRICS:
+            field.loc[rng.random(size) < 0.1, metric] = np.nan
+        mine = {
+            metric: float(rng.choice([-3.0, -0.0, 0.0, 1.0, 5.0]))
+            for metric in METRICS
+        }
+
+        expected = category_rank_sums(mine, field)
+        actual = rank_exact._compiled_category_rank_sums(
+            mine, rank_exact._compile_validator_field(field)
+        )
+
+        assert actual == expected
+        assert sum(actual.values()) == rank_sum_in_field(mine, field)
 
 
 def test_dashboard_payload_becomes_unique_validator_field():
