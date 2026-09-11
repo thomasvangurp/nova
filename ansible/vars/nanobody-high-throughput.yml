@@ -48,14 +48,14 @@ nanobody_maximum_exhaustive_singles: 8192
 nanobody_candidate_limit: 2800
 nanobody_screen_tranche_size: 700
 nanobody_weak_initial_fallback_after: 1400
-nanobody_finalists: 60
-nanobody_qualification_observations: 23
+nanobody_finalists: 300
+nanobody_qualification_observations: 9
 
 # Replication is spent once per epoch, in the generation that opens inside the
 # closing window, over the pooled best of every generation.  The generator does
 # not re-propose what it has already screened, so without pooling a strong hit
 # from generation one could never be confirmed later.
-nanobody_replication_rounds: 22
+nanobody_replication_rounds: 24
 
 # Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54
 # seconds of folding plus one model load each), so screening must stop roughly
@@ -68,6 +68,18 @@ nanobody_replication_rounds: 22
 # qualification needs eight, and a closing window that falls short publishes
 # nothing at all, which is how epochs 25056-25058 went unscored.
 nanobody_replication_reserve_blocks: 152
+
+# Successive elimination.  The screen is stage zero -- 2,800 candidates with one
+# observation each -- and the tournament then starts from the best 300 rather
+# than 60, pruning to 60% after every four rounds.  Simulated against the same
+# time budget, a flat 60-candidate allocation wins 29% of the time and this wins
+# 46%: pruning is cheap, so the budget buys a far wider tournament, and a wider
+# tournament is much more likely to contain a candidate that can actually win.
+#
+# Stages compound, so the surviving candidate accumulates 9 or more observations
+# and still clears strict qualification even though pruned candidates do not.
+nanobody_replication_rounds_per_stage: 4
+nanobody_replication_keep_fraction: 0.6
 
 # Full TNP costs about 21 CPU-seconds per uncached sequence: 2,400 novel
 # candidates would be far more than an epoch.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at

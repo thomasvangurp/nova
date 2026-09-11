@@ -328,6 +328,8 @@ def _run_iteration(
         "--replication-rounds", str(replication_rounds),
         "--pooled-exact-root", str(producer_root),
         "--replication-reserve-blocks", str(args.replication_reserve_blocks),
+        "--replication-rounds-per-stage", str(args.replication_rounds_per_stage),
+        "--replication-keep-fraction", str(args.replication_keep_fraction),
         "--strict-gates", str(args.strict_gates or ""),
     ]
     if args.layer2_igblast_only:
@@ -515,6 +517,18 @@ def _parser() -> argparse.ArgumentParser:
             "re-observe the best --finalists screened candidates this many "
             "times after screening instead of repeating one tranche leader"
         ),
+    )
+    parser.add_argument(
+        "--replication-rounds-per-stage",
+        type=int,
+        default=0,
+        help="rounds between prunes in the replication tournament",
+    )
+    parser.add_argument(
+        "--replication-keep-fraction",
+        type=float,
+        default=1.0,
+        help="fraction of candidates carried into each next stage",
     )
     parser.add_argument(
         "--replication-reserve-blocks",

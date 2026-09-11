@@ -410,7 +410,7 @@ def test_replication_rounds_reobserve_the_whole_shortlist(tmp_path, monkeypatch)
         "round_01", "round_02", "round_03"
     ]
     assert {call["predict_batch_size"] for call in calls} == {2}
-    source = json.loads((tmp_path / "rounds" / "shortlist.json").read_text())
+    source = json.loads((tmp_path / "rounds" / "stage_01.json").read_text())
     assert source["sequences"] == ["AAA", "CCC"]
     records = [
         json.loads(line)
@@ -767,3 +767,69 @@ def test_pooled_candidate_metadata_covers_earlier_generations(tmp_path):
     # silently left un-shrunk
     assert set(merged) == {"EARLY", "MIDDLE", "LOCAL"}
     assert merged["EARLY"]["proposal_lane"] == "basin_terminal"
+
+
+def test_elimination_prunes_between_stages_and_compounds_depth(tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_screen(**kwargs):
+        calls.append(kwargs["candidate_limit"])
+        return kwargs["output_dir"] / "exact_all.json"
+
+    monkeypatch.setattr(race, "_run_screen", _fake_screen)
+    pruned_to = []
+
+    def _rerank(alive, keep):
+        pruned_to.append((len(alive), keep))
+        return alive[:keep]
+
+    completed = race._run_replication_rounds(
+        shortlist=[f"S{i}" for i in range(10)],
+        rounds=9,
+        root=tmp_path,
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        gpus=["0"],
+        scorer=tmp_path / "scorer.py",
+        chain_state=None,
+        epoch=25070,
+        reserve_blocks=55,
+        predict_batch_size=None,
+        timings=tmp_path / "timings.jsonl",
+        rounds_per_stage=3,
+        keep_fraction=0.5,
+        rerank=_rerank,
+    )
+
+    assert completed == 9
+    # three stages of three rounds, halving the alive set between them
+    assert calls == [10, 10, 10, 5, 5, 5, 2, 2, 2]
+    assert pruned_to == [(10, 5), (5, 2), (2, 1)]
+    # the survivor accumulated every round, so it still reaches qualification
+    # depth even though pruned candidates did not
+    assert completed + 1 >= 8
+
+
+def test_a_flat_allocation_is_still_available(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        race, "_run_screen",
+        lambda **kw: calls.append(kw["candidate_limit"]) or kw["output_dir"],
+    )
+
+    race._run_replication_rounds(
+        shortlist=["A", "B", "C"],
+        rounds=4,
+        root=tmp_path,
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        gpus=["0"],
+        scorer=tmp_path / "scorer.py",
+        chain_state=None,
+        epoch=25070,
+        reserve_blocks=55,
+        predict_batch_size=None,
+        timings=tmp_path / "timings.jsonl",
+    )
+
+    assert calls == [3, 3, 3, 3]

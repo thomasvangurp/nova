@@ -52,6 +52,8 @@
     nanobody_pipeline_depth: 1
     nanobody_replication_rounds: 0
     nanobody_replication_reserve_blocks: 0
+    nanobody_replication_rounds_per_stage: 0
+    nanobody_replication_keep_fraction: 1.0
     nanobody_layer2_igblast_only: false
     nanobody_public_neighbourhood_distance: 0
     nanobody_scout_iterations: 1
@@ -829,6 +831,10 @@
           - "{{ nanobody_replication_rounds }}"
           - --replication-reserve-blocks
           - "{{ nanobody_replication_reserve_blocks }}"
+          - --replication-rounds-per-stage
+          - "{{ nanobody_replication_rounds_per_stage }}"
+          - --replication-keep-fraction
+          - "{{ nanobody_replication_keep_fraction }}"
           - --igblast-batch-size
           - "{{ nanobody_igblast_batch_size }}"
           # A replacement scorer needs its own calibrated qualification
