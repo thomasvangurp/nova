@@ -1,4 +1,4 @@
-# Dormant profile for the validated 21.2x exact scorer.
+# Dormant profile for the validated ~28x exact scorer.
 #
 # Keep activation false until the gates in
 # nanobody_opt/RD_BUDGET_ALLOCATION_2026-09-11.md pass on the box.  The shape
@@ -30,11 +30,15 @@ nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 6
 nanobody_maximum_exhaustive_singles: 32768
 
-# Measured operating point at 8.3 GPU-seconds per sequence: 2,400 one-shot
-# screens in tranches of 800, then a 60-candidate shortlist re-observed ten
-# times -- about 2,940 observations.  The screen window is not the whole epoch:
-# Layer 2 takes 13-22 minutes at this proposal count, so the budget is sized
-# against roughly 40 minutes of scoring, not 61.
+# Measured on the box against this scorer: 200 sequences in 183.7 seconds on
+# ten GPUs, 0.9 seconds per observation wall-clock, while the live miner was
+# also running.  2,400 one-shot screens is about 36 minutes, and a 60-candidate
+# shortlist re-observed thirteen times is about 19 minutes, inside the
+# 3,672-second window left after the commitment reserve.
+#
+# Layer 2 is no longer the constraint it was: screening the pool on IgBLAST
+# alone costs about 50 seconds at this candidate count instead of 13-22
+# minutes, and full TNP is spent only on the shortlist.
 #
 # Tranches of 800 give each of ten workers eighty sequences.  The only
 # remaining non-GPU cost is one model load per invocation, so large waves are
@@ -44,23 +48,23 @@ nanobody_candidate_limit: 2400
 nanobody_screen_tranche_size: 800
 nanobody_weak_initial_fallback_after: 1200
 nanobody_finalists: 60
-nanobody_qualification_observations: 10
+nanobody_qualification_observations: 13
 
 # The screen loop admits at most one finalist per tranche, so the shortlist is
 # replicated explicitly after screening: nine rounds, each one scorer
 # invocation over all sixty candidates, giving every one of them ten
 # independent observations.
-nanobody_replication_rounds: 9
+nanobody_replication_rounds: 12
 
-# Nine rounds over sixty candidates is about 810 seconds of GPU work, so
-# screening must stop roughly 68 blocks before the commitment reserve.  Without
-# this, a long screen consumes the epoch and every candidate is published on a
-# single observation -- the exact failure the shortlist exists to prevent.
-nanobody_replication_reserve_blocks: 68
+# Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54
+# seconds of folding plus one model load each), so screening must stop roughly
+# 95 blocks before the commitment reserve.  Without this, a long screen consumes
+# the epoch and every candidate is published on a single observation -- the
+# exact failure the shortlist exists to prevent.
+nanobody_replication_reserve_blocks: 95
 
-# Full TNP costs about two seconds per uncached sequence and is GPU-resident:
-# 3,200 novel candidates would be roughly 107 minutes, which does not fit an
-# epoch at all.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at
+# Full TNP costs about 21 CPU-seconds per uncached sequence: 2,400 novel
+# candidates would be far more than an epoch.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at
 # batch eight) and spend full TNP only on the replication shortlist, which the
 # race gates before anything can be published.
 nanobody_layer2_igblast_only: true
