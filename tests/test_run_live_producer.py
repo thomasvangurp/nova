@@ -60,6 +60,7 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.maximum_initial_screen_p90 == 90.0
     assert args.weak_initial_fallback_after == 80
     assert args.finalists == 5
+    assert args.exact_scorer.as_posix() == "/root/nanobody_opt/score_boltzgen_batch.py"
     assert args.basin_shrinkage_strength == 2.0
     assert args.minimum_basin_samples == 3
     assert args.challenger_p90_margin == 20.0

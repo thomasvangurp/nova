@@ -1,0 +1,33 @@
+---
+# Dormant profile for the incoming validator-compatible ~10x exact scorer.
+# Keep activation false until the scorer passes the dual-sample parity canary
+# described in docs/CLAUDE_FAST_SCORER_HANDOFF.md.
+nanobody_producer_activate: false
+nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_batch_fast.py
+
+# Spend the added throughput primarily on breadth. Small exact tranches retain
+# frequent provisional publication and allow adaptive allocation between basins.
+nanobody_parent_limit: 256
+nanobody_neighbor_parent_limit: 128
+nanobody_recent_anchor_parent_limit: 32
+nanobody_recent_neighbor_parent_limit: 64
+nanobody_basin_core_limit: 40
+nanobody_basin_parent_limit: 160
+nanobody_neighbor_seed_count: 128
+nanobody_proposals_per_seed: 24
+nanobody_proposal_limit: 3200
+nanobody_basin_fraction: 0.80
+nanobody_basin_routes_per_core: 256
+nanobody_basin_evidence_fraction: 0.50
+nanobody_basin_evidence_core_limit: 16
+nanobody_basin_top_core_weight: 2
+nanobody_basin_exploration_residues_per_position: 6
+nanobody_maximum_exhaustive_singles: 32768
+
+# Initial budget envelope: 2,400 unique one-shot observations plus repeat
+# evidence for up to eight finalists. Recalibrate from measured wall time before
+# increasing this; do not simply consume a nominal 10x multiplier on repeats.
+nanobody_candidate_limit: 2400
+nanobody_screen_tranche_size: 20
+nanobody_weak_initial_fallback_after: 160
+nanobody_finalists: 8

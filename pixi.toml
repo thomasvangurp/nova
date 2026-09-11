@@ -204,6 +204,10 @@ PYTHONPATH = "/root/metanano_shim:/root/external_tools/NOVA-nanobody-filter"
 PATH = "/root/metanano_shim/bin:/root/.pixi/envs/metanano/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 IGDATA = "/root/external_tools/igblast"
 MPLCONFIGDIR = "/root/.cache/matplotlib"
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+OPENBLAS_NUM_THREADS = "1"
+NUMEXPR_NUM_THREADS = "1"
 
 [feature.bgen.tasks]
 check = "python -c \"import torch; from triton.runtime import driver; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count(), driver.active.get_current_device())\""

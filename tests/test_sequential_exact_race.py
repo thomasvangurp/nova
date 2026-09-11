@@ -140,6 +140,20 @@ def test_screen_tranche_loads_each_gpu_pipeline_only_once():
     assert race._screen_execution_shape(7, 10) == (7, 1)
 
 
+def test_replacement_scorer_is_forwarded_to_wave_runner(tmp_path):
+    scorer = tmp_path / "fast_scorer.py"
+    command = race._repeat_command(
+        input_path=tmp_path / "input.json",
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        output_dir=tmp_path / "repeat",
+        gpu="3",
+        scorer=scorer,
+    )
+
+    assert command[command.index("--scorer") + 1] == str(scorer)
+
+
 def test_chain_reserve_prevents_new_gpu_wave(tmp_path):
     state = tmp_path / "chain.json"
     state.write_text(json.dumps({

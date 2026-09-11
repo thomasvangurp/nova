@@ -243,6 +243,7 @@ def _run_iteration(
         "--chain-state", str(args.chain_state),
         "--reserve-blocks", str(args.reserve_blocks),
         "--gpus", args.gpus,
+        "--scorer", str(args.exact_scorer),
         "--candidate-limit", str(args.candidate_limit),
         "--screen-tranche-size", str(args.screen_tranche_size),
         "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
@@ -276,6 +277,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--poll-interval", type=float, default=30)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument(
+        "--exact-scorer",
+        type=Path,
+        default=Path("/root/nanobody_opt/score_boltzgen_batch.py"),
+        help="validator-protocol-compatible exact scorer entry point",
+    )
     parser.add_argument(
         "--parent-epochs",
         type=int,

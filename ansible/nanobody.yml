@@ -45,6 +45,7 @@
     nanobody_maximum_initial_screen_p90: 90
     nanobody_weak_initial_fallback_after: 80
     nanobody_finalists: 5
+    nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_batch.py
     nanobody_basin_shrinkage_strength: 2.0
     nanobody_minimum_basin_samples: 3
     ckpts:
@@ -362,6 +363,8 @@
           - >-
             import os,shutil,metanano;
             assert os.environ['IGDATA']=='/root/external_tools/igblast';
+            assert all(os.environ[k]=='1' for k in
+            ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','NUMEXPR_NUM_THREADS'));
             assert shutil.which('TNP')=='/root/metanano_shim/bin/TNP',shutil.which('TNP');
             print('METANANO_PIXI_ACTIVATION_OK')
       changed_when: false
@@ -701,6 +704,30 @@
       changed_when: "'REPAIRED' in ownership.stdout"
       register: ownership
 
+    - name: Check the configured live exact scorer before activation
+      ansible.builtin.stat:
+        path: "{{ nanobody_exact_scorer }}"
+      register: configured_exact_scorer
+      when: nanobody_producer_activate | bool
+
+    - name: Require the configured live exact scorer before stopping the producer
+      ansible.builtin.assert:
+        that:
+          - configured_exact_scorer.stat.isreg | default(false)
+        fail_msg: >-
+          Exact scorer {{ nanobody_exact_scorer }} is absent; the existing live
+          producer was not stopped.
+      when: nanobody_producer_activate | bool
+
+    - name: Verify the configured exact scorer CLI before stopping the producer
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - "{{ nanobody_exact_scorer }}"
+          - --help
+      changed_when: false
+      when: nanobody_producer_activate | bool
+
     - name: Stop prior autonomous nanobody producer before activation
       ansible.builtin.command:
         argv: [tmux, kill-session, -t, "{{ nanobody_producer_session }}"]
@@ -776,6 +803,8 @@
           - "{{ nanobody_weak_initial_fallback_after }}"
           - --finalists
           - "{{ nanobody_finalists }}"
+          - --exact-scorer
+          - "{{ nanobody_exact_scorer }}"
           - --basin-shrinkage-strength
           - "{{ nanobody_basin_shrinkage_strength }}"
           - --minimum-basin-samples

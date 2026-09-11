@@ -40,6 +40,7 @@ STRICT_RANK_ARGUMENTS = (
     "--maximum-cdr3-rmsd", "5",
     "--minimum-epitope-occupancy", "0",
 )
+DEFAULT_SCORER = Path("/root/nanobody_opt/score_boltzgen_batch.py")
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -289,6 +290,7 @@ def _run_screen(
     output_dir: Path,
     gpus: list[str],
     candidate_limit: int,
+    scorer: Path = DEFAULT_SCORER,
 ) -> Path:
     completed = output_dir / "exact_all.json"
     if completed.is_file():
@@ -327,6 +329,7 @@ def _run_screen(
         "--wave-size", str(wave_size),
         "--predict-batch-size", str(predict_batch_size),
         "--limit", str(candidate_limit),
+        "--scorer", str(scorer),
         "--capture-structures",
     ]
     subprocess.run(command, check=True)
@@ -340,6 +343,7 @@ def _repeat_command(
     target: str,
     output_dir: Path,
     gpu: str,
+    scorer: Path = DEFAULT_SCORER,
 ) -> list[str]:
     return [
         sys.executable,
@@ -353,6 +357,7 @@ def _repeat_command(
         "--wave-size", "1",
         "--predict-batch-size", "1",
         "--limit", "1",
+        "--scorer", str(scorer),
         "--capture-structures",
     ]
 
@@ -376,6 +381,7 @@ def _score_repeats(
     config: Path,
     target: str,
     gpus: list[str],
+    scorer: Path = DEFAULT_SCORER,
 ) -> None:
     digest = hashlib.sha256(sequence.encode("ascii")).hexdigest()
     candidate_root = root / "candidates" / digest
@@ -390,6 +396,7 @@ def _score_repeats(
                 target=target,
                 output_dir=candidate_root / f"repeat_{repeat:02d}",
                 gpu=gpus[index],
+                scorer=scorer,
             )
             for index, repeat in enumerate(group)
         ]
@@ -594,6 +601,15 @@ def main() -> None:
     parser.add_argument("--chain-state", type=Path)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument(
+        "--scorer",
+        type=Path,
+        default=DEFAULT_SCORER,
+        help=(
+            "validator-protocol-compatible scorer entry point; replacement "
+            "scorers must emit the same dual-sample artifact contract"
+        ),
+    )
     parser.add_argument("--candidate-limit", type=int, default=320)
     parser.add_argument(
         "--screen-tranche-size",
@@ -719,6 +735,7 @@ def main() -> None:
             output_dir=tranche_root,
             gpus=gpus,
             candidate_limit=len(tranche),
+            scorer=args.scorer,
         ))
         screened += len(tranche)
         subprocess.run(
@@ -820,6 +837,7 @@ def main() -> None:
                 config=args.config,
                 target=args.target,
                 gpus=gpus,
+                scorer=args.scorer,
             )
         except subprocess.CalledProcessError as error:
             print(
