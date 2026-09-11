@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import csv
 import os
 import shlex
 import subprocess
@@ -26,6 +27,10 @@ from nanobody_opt.mutation_network import (
     update_observation_store,
 )
 from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
+from nanobody_opt.metric_outliers import (
+    field_distribution,
+    without_catastrophic_outliers,
+)
 
 
 # Absolute qualification gates, calibrated against observations from the
@@ -424,6 +429,67 @@ def _replication_shortlist(
         if str(sequence) not in exclude
     ]
     return sequences[:limit]
+
+
+def _drop_metric_outliers(
+    shortlist: list[str],
+    *,
+    ranking: Path,
+    archive: Path,
+    maximum_percentile: float,
+    recent: int = 300,
+) -> list[str]:
+    """Remove candidates whose weakest metric sits near the bottom of the field.
+
+    The rank sum already charges for a weak metric; what it does not express is
+    that one catastrophic metric is disqualifying when only rank one pays.  Epoch
+    25061 published a candidate ranked 47th of 48 on min_design_to_target_pae
+    with two hydrogen bonds against a field median of four.
+    """
+    if maximum_percentile >= 1.0 or not shortlist or not ranking.is_file():
+        return shortlist
+    try:
+        payload = json.loads(ranking.read_text())
+        by_sequence = {
+            str(item["sequence"]): item.get("metrics") or {}
+            for item in payload.get("candidates", [])
+            if isinstance(item, dict) and item.get("sequence")
+        }
+        with archive.open() as handle:
+            rows = list(csv.DictReader(handle))[-recent:]
+    except (OSError, ValueError, KeyError) as error:
+        print(
+            f"EXACT_OUTLIER_GUARD_SKIPPED {type(error).__name__}",
+            flush=True,
+        )
+        return shortlist
+    candidates = [
+        (sequence, by_sequence[sequence])
+        for sequence in shortlist
+        if by_sequence.get(sequence)
+    ]
+    if not candidates:
+        return shortlist
+    kept, dropped = without_catastrophic_outliers(
+        candidates,
+        field_distribution(rows),
+        maximum_percentile=maximum_percentile,
+        minimum_keep=max(len(shortlist) // 4, 1),
+    )
+    unscored = [item for item in shortlist if not by_sequence.get(item)]
+    for sequence, fraction, culprit in dropped[:5]:
+        print(
+            f"  dropped {sequence[:12]} worst_metric={culprit} "
+            f"field_fraction_better={fraction:.2f}",
+            flush=True,
+        )
+    print(
+        f"EXACT_OUTLIER_GUARD kept={len(kept)}/{len(candidates)} "
+        f"threshold={maximum_percentile}",
+        flush=True,
+    )
+    order = {sequence: index for index, sequence in enumerate(shortlist)}
+    return sorted(kept + unscored, key=lambda item: order.get(item, 10**9))
 
 
 def _affordable_shortlist(
@@ -1132,6 +1198,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--maximum-metric-percentile",
+        type=float,
+        default=1.0,
+        help=(
+            "drop shortlist candidates whose weakest metric is beaten by more "
+            "than this fraction of the recent field; 1.0 disables the guard"
+        ),
+    )
+    parser.add_argument(
         "--replication-rounds-per-stage",
         type=int,
         default=0,
@@ -1636,6 +1711,12 @@ def main() -> None:
             )
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
+        )
+        replication_shortlist = _drop_metric_outliers(
+            replication_shortlist,
+            ranking=screen_ranking,
+            archive=args.archive,
+            maximum_percentile=args.maximum_metric_percentile,
         )
         replication_shortlist = _affordable_shortlist(
             replication_shortlist,
