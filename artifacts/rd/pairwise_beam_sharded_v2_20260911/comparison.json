@@ -1,0 +1,72 @@
+{
+  "protocol": "relative comparison on the same leakage-free final-20-epoch P20809 snapshot",
+  "holdout_epoch_range": [25015, 25034],
+  "holdout_epochs": 20,
+  "api_snapshot_sha256": "50400f75fab8802a72fe3c2294657c7f727eb65d65186b37133d888f139badbd",
+  "cohort_denominators": {
+    "top1_tied_sequences": 22,
+    "top5_sequences": 104,
+    "top10_sequences": 200
+  },
+  "deployed_lineage_v3": {
+    "source_summary": "../live_generator_lineage_v3_20260911/summary.json",
+    "source_summary_sha256": "a72ecf907b475475c2b7d6ac0ad62398a5690453c5e41aee160c48455f54091b",
+    "budget_160": {
+      "top1_selected": 0,
+      "top5_selected": 0,
+      "top10_selected": 0
+    },
+    "budget_320": {
+      "top1_selected": 1,
+      "top5_selected": 1,
+      "top10_selected": 3,
+      "hits": [
+        {"epoch": 25028, "field_rank": 1, "screen_rank": 175},
+        {"epoch": 25029, "field_rank": 10, "screen_rank": 308},
+        {"epoch": 25033, "field_rank": 7, "screen_rank": 169}
+      ]
+    }
+  },
+  "pairwise_beam_v2": {
+    "source_summary": "summary.json",
+    "source_summary_sha256": "5a48a049bd1560bb6ac1c58101bffc1be6efdaa8799d4781f8cad4a419a0f745",
+    "source_placements": "placements.csv",
+    "source_placements_sha256": "e32900a1da7c3d2966d46aa3e16afe2f62c7178d886678ac89a4b5f2206dfbce",
+    "model_sha256": "87579b2749f4587588cd18daf4e97706d4931e41dddd3704229a39ba2d47507c",
+    "budget_160": {
+      "top1_selected": 0,
+      "top5_selected": 0,
+      "top10_selected": 1,
+      "hits": [
+        {"epoch": 25026, "field_rank": 7, "final_score": 86.0}
+      ]
+    },
+    "budget_320": {
+      "top1_selected": 0,
+      "top5_selected": 0,
+      "top10_selected": 1,
+      "hits": [
+        {"epoch": 25026, "field_rank": 7, "final_score": 86.0}
+      ],
+      "additional_non_top10_match": {
+        "epoch": 25023,
+        "field_rank": 33,
+        "final_score": 177.0
+      }
+    },
+    "winner_generation_diagnostic": {
+      "generated_epoch_winners": [25022, 25031],
+      "selected_epoch_winners": [],
+      "interpretation": "the beam reached two winners, but the frozen allocator ranked neither inside 320"
+    }
+  },
+  "relative_gate": {
+    "budget_160_top10_improved": true,
+    "budget_320_top1_not_regressed": false,
+    "budget_320_top5_not_regressed": false,
+    "budget_320_top10_not_regressed": false,
+    "accepted_for_live_integration": false
+  },
+  "decision": "reject pairwise beam v2 for live allocation; preserve deployed lineage-v3",
+  "reason": "one extra rank-7 hit at 160 does not compensate for losing the known winner, top-5 recall, and two of three top-10 hits at the full 320 budget"
+}

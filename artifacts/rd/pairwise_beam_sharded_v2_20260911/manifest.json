@@ -1,0 +1,172 @@
+{
+  "files": {
+    "placements.csv": {
+      "bytes": 8676,
+      "sha256": "e32900a1da7c3d2966d46aa3e16afe2f62c7178d886678ac89a4b5f2206dfbce"
+    },
+    "shards/epoch25015/placements.csv": {
+      "bytes": 829,
+      "sha256": "18c8c515de82aed62463c32b9f1a1bc7c06aaf0eb46492ae73f6842f09a667ea"
+    },
+    "shards/epoch25015/summary.json": {
+      "bytes": 2093,
+      "sha256": "ff5ee44b0f3dc5f7851d053e2a336458797cd49924bc3519ca46ebf09cff8309"
+    },
+    "shards/epoch25016/placements.csv": {
+      "bytes": 829,
+      "sha256": "8dbccc573633cb5370eee571fc4ebdbce6aa40f5545f062768b8204113a12ebf"
+    },
+    "shards/epoch25016/summary.json": {
+      "bytes": 2093,
+      "sha256": "c4c24232af7ebae2a60aa28bc051f23f39630dcb4b7fb49b452ad7d1b44c19a9"
+    },
+    "shards/epoch25017/placements.csv": {
+      "bytes": 838,
+      "sha256": "63287e9375ccbbfac4d34a85bb695665bf3b2e53f8467353419933325431cb45"
+    },
+    "shards/epoch25017/summary.json": {
+      "bytes": 2093,
+      "sha256": "e7f872a6ab5d9b1f474e0282b946b9c89f0c95225ebf239cb2cefc0fd76f500b"
+    },
+    "shards/epoch25018/placements.csv": {
+      "bytes": 829,
+      "sha256": "1464903a60910506b5942e4cc645e8d03ad6ae6a103528cde59a78afbfc59ae1"
+    },
+    "shards/epoch25018/summary.json": {
+      "bytes": 2093,
+      "sha256": "b243bcf3d9f3780fbd31d0d0f47ff77f36ab35a70ade6f12ab7241ac645b364b"
+    },
+    "shards/epoch25019/placements.csv": {
+      "bytes": 829,
+      "sha256": "0b39592f3755cc3df63a41befce1fc7e18939b8967839d354047a78b2b2651e2"
+    },
+    "shards/epoch25019/summary.json": {
+      "bytes": 2093,
+      "sha256": "db48f3c31a2a0f652873fa92a0482142df08d6786cbd9b6a7dc065bb8580750c"
+    },
+    "shards/epoch25020/placements.csv": {
+      "bytes": 838,
+      "sha256": "f610fe60bbd15b930224ac38bc33e15b36c57d0e9441d3eb001ad6a73e5bf92a"
+    },
+    "shards/epoch25020/summary.json": {
+      "bytes": 2093,
+      "sha256": "9badcb9642969fa39258e85ded3353ab63662889fd9df833779976e7d44bc4b8"
+    },
+    "shards/epoch25021/placements.csv": {
+      "bytes": 836,
+      "sha256": "aaec77a1d6d56f41d2a128d648198babdbf1af937999e1e889be79273fc68f29"
+    },
+    "shards/epoch25021/summary.json": {
+      "bytes": 2093,
+      "sha256": "199cc0daad88fe824284e498b9adae11be3aa8693f573948d54ed92072b2a76e"
+    },
+    "shards/epoch25022/placements.csv": {
+      "bytes": 832,
+      "sha256": "f228cf27bf97c1fc4b842e91405314861aaa7b649a4bc920b44b665e2937f6d6"
+    },
+    "shards/epoch25022/summary.json": {
+      "bytes": 2093,
+      "sha256": "531640418e948f6db6651c9ee5201420d361c4a9bc32515826582bdbf4bd5f6f"
+    },
+    "shards/epoch25023/placements.csv": {
+      "bytes": 836,
+      "sha256": "1aad50bf0a23c199eb8c63ab51f462164259e23d38a40ca8a2c7354b9cfca896"
+    },
+    "shards/epoch25023/summary.json": {
+      "bytes": 2093,
+      "sha256": "30e1410132382ec67e3665c29471a9454aceee207c3c3a33d1eb1b0ef797e0d0"
+    },
+    "shards/epoch25024/placements.csv": {
+      "bytes": 827,
+      "sha256": "e692077d1d68e29e966f9b5d2c79eb81ec1776eea88853a3c9dc44a08d58066f"
+    },
+    "shards/epoch25024/summary.json": {
+      "bytes": 2093,
+      "sha256": "33c67a2cb699528f8e0a392dc3107eb248499b4ea959eed8ecd8c6dfd1c7413f"
+    },
+    "shards/epoch25025/placements.csv": {
+      "bytes": 827,
+      "sha256": "72a79f801b9f9105faa3eb5f27ba5d96dabaa546a7eebc45fdd52d742abbe59f"
+    },
+    "shards/epoch25025/summary.json": {
+      "bytes": 2093,
+      "sha256": "6ad6a643f99162dfbac0036e89b66c6c4cb032f9ae27fe8bfbea45bf6d8fec86"
+    },
+    "shards/epoch25026/placements.csv": {
+      "bytes": 835,
+      "sha256": "c3ea4e036253795299f8ee0ad2e3c92be3726d32c2043b8b6163385d3667719e"
+    },
+    "shards/epoch25026/summary.json": {
+      "bytes": 2093,
+      "sha256": "3b06b27c62bf9c4efbefe2d8d15f157926db16d4a3d17d0c63ed0062c5af6e59"
+    },
+    "shards/epoch25027/placements.csv": {
+      "bytes": 827,
+      "sha256": "1ff6973f99de651454811fd7ddfa3bc535f72dbff122f8ffc9c94dc514cd7581"
+    },
+    "shards/epoch25027/summary.json": {
+      "bytes": 2093,
+      "sha256": "d58838240c0833f3a53a470293962c30ca2afadeb1adde364aedbbc29cba3ca4"
+    },
+    "shards/epoch25028/placements.csv": {
+      "bytes": 827,
+      "sha256": "98265cdb5c27669e56829d14441af53f52056527ee70c6b05f9256ac94cc3e06"
+    },
+    "shards/epoch25028/summary.json": {
+      "bytes": 2093,
+      "sha256": "c38eeb282c73b2e39dedc9ecbc1a84de6dbb17a824627fc31eeb90fdc57c60ac"
+    },
+    "shards/epoch25029/placements.csv": {
+      "bytes": 827,
+      "sha256": "5a9488eb6823e06635df9b59e15ab26b91b384c8e9407880ebecd6deefd4653f"
+    },
+    "shards/epoch25029/summary.json": {
+      "bytes": 2093,
+      "sha256": "9b192c5faf8900b54b86adcbda10e56bfa6d13446632b24f646566a56ee22476"
+    },
+    "shards/epoch25030/placements.csv": {
+      "bytes": 827,
+      "sha256": "8c38b624d3f2caf19f432ed1df2df080569fd7d1812cb64ee0143c2487b250c3"
+    },
+    "shards/epoch25030/summary.json": {
+      "bytes": 2093,
+      "sha256": "70af5d29bcaf8feb2f6efae8a8988c2888113cb8c797ecf68cf46f867c15c4b5"
+    },
+    "shards/epoch25031/placements.csv": {
+      "bytes": 823,
+      "sha256": "2425623d2a8e1d465d16f7c0dc96f7d3389244ed11f2a596b91f936e0f7c0fb3"
+    },
+    "shards/epoch25031/summary.json": {
+      "bytes": 2093,
+      "sha256": "c2ebb82cebdcc30633bab2cf37ca5c32819cfb16471e57d109a558c016ba1667"
+    },
+    "shards/epoch25032/placements.csv": {
+      "bytes": 825,
+      "sha256": "3f7b75af112e67db95d41f1d68013895231f1bc7e3d9886a0ded0cb46e700ce0"
+    },
+    "shards/epoch25032/summary.json": {
+      "bytes": 2093,
+      "sha256": "9c2036b51c10e8dbdca94eecf8eac4a74783605377f596e29915f648dc106b96"
+    },
+    "shards/epoch25033/placements.csv": {
+      "bytes": 827,
+      "sha256": "3e86aeb5e9a2029e5845944dd6bd5447f79c0b3b32d4ae511d6befef80937eb2"
+    },
+    "shards/epoch25033/summary.json": {
+      "bytes": 2093,
+      "sha256": "ed81e18abccfc57bfabd18c093ad1c309287a380039ae42784a4aa48ce4a55f9"
+    },
+    "shards/epoch25034/placements.csv": {
+      "bytes": 827,
+      "sha256": "eee4933bb6451e826049680a720ffed5ba2015090ff2c807d39533ed7c7e7ed7"
+    },
+    "shards/epoch25034/summary.json": {
+      "bytes": 2093,
+      "sha256": "12228b661b284dbd6e58ae315bb6cb20769228dd965e673e10e3acfb33ec790f"
+    },
+    "summary.json": {
+      "bytes": 2693,
+      "sha256": "5a48a049bd1560bb6ac1c58101bffc1be6efdaa8799d4781f8cad4a419a0f745"
+    }
+  }
+}

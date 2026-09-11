@@ -1,0 +1,93 @@
+{
+  "budgets": {
+    "160": {
+      "all_parent_epochs_precede_target": true,
+      "baseline_better_paired_epochs": 0,
+      "baseline_epochs_with_top10_match": 0,
+      "baseline_epochs_with_top1_match": 0,
+      "baseline_epochs_with_top5_match": 0,
+      "baseline_total_field_matches": 0,
+      "baseline_winner_generation_rate": 0.2,
+      "baseline_winner_selection_rate": 0.0,
+      "epochs": 20,
+      "model_better_paired_epochs": 0,
+      "model_epochs_with_top10_match": 1,
+      "model_epochs_with_top1_match": 0,
+      "model_epochs_with_top5_match": 0,
+      "model_total_field_matches": 1,
+      "model_winner_generation_rate": 0.1,
+      "model_winner_selection_rate": 0.0,
+      "paired_epochs_with_field_matches": 0,
+      "ties_paired_epochs": 0
+    },
+    "320": {
+      "all_parent_epochs_precede_target": true,
+      "baseline_better_paired_epochs": 0,
+      "baseline_epochs_with_top10_match": 0,
+      "baseline_epochs_with_top1_match": 0,
+      "baseline_epochs_with_top5_match": 0,
+      "baseline_total_field_matches": 4,
+      "baseline_winner_generation_rate": 0.2,
+      "baseline_winner_selection_rate": 0.0,
+      "epochs": 20,
+      "model_better_paired_epochs": 0,
+      "model_epochs_with_top10_match": 1,
+      "model_epochs_with_top1_match": 0,
+      "model_epochs_with_top5_match": 0,
+      "model_total_field_matches": 2,
+      "model_winner_generation_rate": 0.1,
+      "model_winner_selection_rate": 0.0,
+      "paired_epochs_with_field_matches": 0,
+      "ties_paired_epochs": 0
+    }
+  },
+  "config": {
+    "api_snapshot": "/root/artifacts/rd/mutation_ranker_v1_20260910/api_field_snapshot.csv.gz",
+    "api_snapshot_sha256": "50400f75fab8802a72fe3c2294657c7f727eb65d65186b37133d888f139badbd",
+    "beam_width": 64,
+    "budgets": [
+      160,
+      320
+    ],
+    "child_nice_increment": 0,
+    "executed_epochs": [
+      25015,
+      25016,
+      25017,
+      25018,
+      25019,
+      25020,
+      25021,
+      25022,
+      25023,
+      25024,
+      25025,
+      25026,
+      25027,
+      25028,
+      25029,
+      25030,
+      25031,
+      25032,
+      25033,
+      25034
+    ],
+    "exploration": 32,
+    "heldout_epoch_range": [
+      25015,
+      25034
+    ],
+    "heldout_sequences_inserted_into_proposals": false,
+    "holdout_epochs": 20,
+    "maximum_edits": 6,
+    "model": "/root/artifacts/rd/pairwise_ranker_v2_20260910/model.joblib",
+    "model_sha256": "87579b2749f4587588cd18daf4e97706d4931e41dddd3704229a39ba2d47507c",
+    "one_sealed_epoch_per_process": true,
+    "parent_floor": 32,
+    "random_candidates_per_parent": 500,
+    "random_seed": 20260910,
+    "reused_epochs": [],
+    "sequence_length": 127,
+    "workers": 4
+  }
+}

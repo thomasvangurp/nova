@@ -1,0 +1,64 @@
+{
+  "budgets": {
+    "160": {
+      "all_parent_epochs_precede_target": true,
+      "baseline_better_paired_epochs": 0,
+      "baseline_epochs_with_top10_match": 0,
+      "baseline_epochs_with_top1_match": 0,
+      "baseline_epochs_with_top5_match": 0,
+      "baseline_total_field_matches": 0,
+      "baseline_winner_generation_rate": 0.0,
+      "baseline_winner_selection_rate": 0.0,
+      "epochs": 1,
+      "model_better_paired_epochs": 0,
+      "model_epochs_with_top10_match": 0,
+      "model_epochs_with_top1_match": 0,
+      "model_epochs_with_top5_match": 0,
+      "model_total_field_matches": 0,
+      "model_winner_generation_rate": 0.0,
+      "model_winner_selection_rate": 0.0,
+      "paired_epochs_with_field_matches": 0,
+      "ties_paired_epochs": 0
+    },
+    "320": {
+      "all_parent_epochs_precede_target": true,
+      "baseline_better_paired_epochs": 0,
+      "baseline_epochs_with_top10_match": 0,
+      "baseline_epochs_with_top1_match": 0,
+      "baseline_epochs_with_top5_match": 0,
+      "baseline_total_field_matches": 0,
+      "baseline_winner_generation_rate": 0.0,
+      "baseline_winner_selection_rate": 0.0,
+      "epochs": 1,
+      "model_better_paired_epochs": 0,
+      "model_epochs_with_top10_match": 0,
+      "model_epochs_with_top1_match": 0,
+      "model_epochs_with_top5_match": 0,
+      "model_total_field_matches": 0,
+      "model_winner_generation_rate": 0.0,
+      "model_winner_selection_rate": 0.0,
+      "paired_epochs_with_field_matches": 0,
+      "ties_paired_epochs": 0
+    }
+  },
+  "config": {
+    "api_snapshot_sha256": "50400f75fab8802a72fe3c2294657c7f727eb65d65186b37133d888f139badbd",
+    "beam_width": 64,
+    "budgets": [
+      160,
+      320
+    ],
+    "exploration": 32,
+    "heldout_sequences_inserted_into_proposals": false,
+    "holdout_epochs": 20,
+    "maximum_edits": 6,
+    "model_sha256": "87579b2749f4587588cd18daf4e97706d4931e41dddd3704229a39ba2d47507c",
+    "parent_floor": 32,
+    "random_candidates_per_parent": 500,
+    "random_seed": 20260910,
+    "sequence_length": 127,
+    "target_epochs": [
+      25028
+    ]
+  }
+}
