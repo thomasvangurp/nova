@@ -77,6 +77,15 @@ nanobody_replication_reserve_blocks: 95
 # candidates would be far more than an epoch.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at
 # batch eight) and spend full TNP only on the replication shortlist, which the
 # race gates before anything can be published.
+# Generation one scouts across forty cores; generations two onward concentrate
+# on the five that this epoch's own observations rank best.  Held-out replay put
+# the eventual winner's core in the top five in 6/6 epochs, and we lose inside
+# the core rather than between cores -- same masked core as the winner in three
+# epochs, and our terminal variant ranked 6/10, 4/11 and 6/10 within it.
+nanobody_scout_iterations: 1
+nanobody_exploit_basin_fraction: 0.95
+nanobody_exploit_basin_core_limit: 5
+
 nanobody_layer2_igblast_only: true
 nanobody_igblast_batch_size: 8
 

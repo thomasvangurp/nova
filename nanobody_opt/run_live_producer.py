@@ -170,6 +170,28 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ])
+    # Scout, then exploit.  The first generation spreads across the strongest
+    # historical cores; later generations narrow onto the cores that scored best
+    # in this epoch's own observations, which the race has already written to
+    # the mutation database.  Held-out replay puts the eventual winner's core in
+    # the top five 6/6 times, so the epoch's remaining budget is better spent
+    # deepening those than re-spreading across cores already measured as weak.
+    exploiting = iteration > args.scout_iterations
+    basin_fraction = (
+        args.exploit_basin_fraction if exploiting else args.basin_fraction
+    )
+    basin_evidence_core_limit = (
+        args.exploit_basin_core_limit
+        if exploiting
+        else args.basin_evidence_core_limit
+    )
+    print(
+        f"PRODUCER_LANE iteration={iteration} "
+        f"mode={'exploit' if exploiting else 'scout'} "
+        f"basin_fraction={basin_fraction} "
+        f"evidence_core_limit={basin_evidence_core_limit}",
+        flush=True,
+    )
     candidates = iteration_root / "candidates.csv"
     if not candidates.is_file():
         command = [
@@ -185,12 +207,10 @@ def _run_iteration(
             "--minimum-seeds", str(args.minimum_seeds),
             "--per-seed", str(args.per_seed),
             "--proposal-limit", str(args.proposal_limit),
-            "--basin-fraction", str(args.basin_fraction),
+            "--basin-fraction", str(basin_fraction),
             "--basin-routes-per-core", str(args.basin_routes_per_core),
             "--basin-evidence-fraction", str(args.basin_evidence_fraction),
-            "--basin-evidence-core-limit", str(
-                args.basin_evidence_core_limit
-            ),
+            "--basin-evidence-core-limit", str(basin_evidence_core_limit),
             "--basin-top-core-weight", str(args.basin_top_core_weight),
             "--basin-exploration-residues-per-position", str(
                 args.basin_exploration_residues_per_position
@@ -372,6 +392,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--single-mutation-fraction", type=float, default=0.75)
     parser.add_argument("--maximum-motif-mutations", type=int, default=6)
     parser.add_argument("--maximum-exhaustive-singles", type=int, default=8192)
+    parser.add_argument(
+        "--scout-iterations",
+        type=int,
+        default=1,
+        help=(
+            "generations that spread across the strongest historical cores "
+            "before the epoch narrows onto what it has actually scored"
+        ),
+    )
+    parser.add_argument(
+        "--exploit-basin-fraction",
+        type=float,
+        default=0.95,
+        help="basin lane share once the epoch switches from scouting",
+    )
+    parser.add_argument(
+        "--exploit-basin-core-limit",
+        type=int,
+        default=5,
+        help="cores the evidence lane concentrates on once exploiting",
+    )
     parser.add_argument("--layer2-concurrency", type=int, default=40)
     parser.add_argument(
         "--igblast-batch-size",

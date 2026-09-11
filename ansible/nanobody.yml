@@ -53,6 +53,9 @@
     nanobody_replication_rounds: 0
     nanobody_replication_reserve_blocks: 0
     nanobody_layer2_igblast_only: false
+    nanobody_scout_iterations: 1
+    nanobody_exploit_basin_fraction: 0.95
+    nanobody_exploit_basin_core_limit: 5
     nanobody_igblast_batch_size: 8
     nanobody_strict_gates: ""
     nanobody_screen_predict_batch_size: 0
@@ -833,6 +836,12 @@
           - "{{ nanobody_strict_gates }}"
           - --layer2-igblast-only
           - "{{ 1 if nanobody_layer2_igblast_only | bool else 0 }}"
+          - --scout-iterations
+          - "{{ nanobody_scout_iterations }}"
+          - --exploit-basin-fraction
+          - "{{ nanobody_exploit_basin_fraction }}"
+          - --exploit-basin-core-limit
+          - "{{ nanobody_exploit_basin_core_limit }}"
           - --screen-predict-batch-size
           - "{{ nanobody_screen_predict_batch_size }}"
       changed_when: true
