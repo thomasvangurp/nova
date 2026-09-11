@@ -188,6 +188,7 @@
         owner: false
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        use_ssh_args: true
 
     - name: Sync the pinned NOVA-nanobody-filter submodule
       ansible.posix.synchronize:
@@ -197,6 +198,7 @@
         owner: false
         group: false
         rsync_opts: ["--exclude=.git", "--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        use_ssh_args: true
 
     - name: Sync nanobody optimization code
       ansible.posix.synchronize:
@@ -206,6 +208,7 @@
         owner: false
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        use_ssh_args: true
 
     - name: Install interpreter wrappers and scorer shims
       ansible.posix.synchronize:
@@ -215,6 +218,7 @@
         owner: false
         group: false
         rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        use_ssh_args: true
 
     - name: Install the MetaNano bittensor logging shim outside site-packages
       ansible.builtin.copy:
