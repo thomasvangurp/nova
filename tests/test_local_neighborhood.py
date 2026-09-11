@@ -2,15 +2,19 @@ import numpy as np
 
 from nanobody_opt.local_neighborhood import (
     _deduplicate_proposals,
+    _interleave_rankings,
     _round_robin_by_basin,
     _round_robin_by_parent,
     _weighted_choice,
     interleave_novel_lane,
+    ordered_basin_proposals,
     supported_framework_candidates,
     supported_basin_terminal_candidates,
     supported_lineage_candidates,
+    bounded_basin_terminal_routes,
     residue_prior_weights,
 )
+from nanobody_opt.terminal_policy import TerminalPriors
 
 
 def test_winner_enrichment_weights_residues_without_banning_alternatives():
@@ -268,3 +272,82 @@ def test_basin_terminal_lane_recombines_only_within_masked_core():
     assert (parent[:-1] + "D") in candidates
     assert ("C" + parent[1:-1] + "D") in candidates
     assert all(sequence[10:-17] == core for sequence in candidates)
+
+
+def test_basin_route_bound_reserves_winner_position_evidence():
+    base = "A" * 30
+    legacy = base[:-1] + "C"
+    hotspot = "C" + base[1:]
+    priors = TerminalPriors(
+        position_rank={0: 1, 29: 2},
+        residue_rank={0: {"C": 1}, 29: {"C": 1}},
+        exploration_residues={},
+        sequence_latest_epoch={base: 10},
+        sequence_score={base: 50.0},
+        winner_step_count={0: 3},
+        public_epoch_count=10,
+    )
+
+    selected = bounded_basin_terminal_routes(
+        [
+            (legacy, "basin_terminal_single_substitution", base),
+            (hotspot, "basin_terminal_single_substitution", base),
+        ],
+        base_scores={base: 50.0},
+        limit=2,
+        exploration_fraction=0,
+        terminal_priors=priors,
+        evidence_fraction=0.5,
+    )
+
+    assert {route[0] for route in selected} == {legacy, hotspot}
+
+
+def test_interleaved_rankings_preserve_both_prefixes():
+    primary = [{"sequence": f"P{index}"} for index in range(4)]
+    evidence = [{"sequence": f"E{index}"} for index in range(4)]
+
+    selected = _interleave_rankings(
+        primary, evidence, limit=4, evidence_fraction=0.5
+    )
+
+    assert [item["sequence"] for item in selected] == ["P0", "E0", "P1", "E1"]
+
+
+def test_top_basin_gets_evidence_and_an_extra_allocation_turn():
+    def proposal(core, rank, policy, index):
+        return {
+            "sequence": f"{core}_{policy}_{index}",
+            "parent_sequence": f"{core}_P{index}",
+            "parent_basin_core_id": core,
+            "parent_basin_rank": rank,
+            "parent_selection_score": 50.0,
+            "proposal_prior_score": 1.0,
+            "predecessor_potential_score": 50.0,
+            "predecessor_consensus_score": 50.0,
+            "edit_distance": 1,
+            "basin_route_policy": policy,
+            "basin_position_rank": 1,
+            "basin_residue_rank": 1,
+            "basin_parent_recency_rank": index + 1,
+        }
+
+    proposals = [
+        proposal(core, rank, policy, index)
+        for core, rank in (("CORE_A", 1), ("CORE_B", 2))
+        for policy in ("legacy", "winner_position")
+        for index in range(3)
+    ]
+    ordered = ordered_basin_proposals(
+        proposals,
+        evidence_fraction=0.5,
+        evidence_core_limit=1,
+        top_core_weight=2,
+    )
+
+    assert [item["parent_basin_core_id"] for item in ordered[:3]] == [
+        "CORE_A", "CORE_A", "CORE_B"
+    ]
+    assert [item["basin_route_policy"] for item in ordered[:3]] == [
+        "legacy", "winner_position", "legacy"
+    ]

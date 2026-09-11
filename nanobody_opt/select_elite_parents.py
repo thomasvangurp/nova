@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 from nanobody_opt.basins import basin_id, rank_basin_evidence
 from nanobody_opt.rank_exact import LEADERBOARD_API_ROOT
-from nanobody_opt.mutation_network import load_observations
+from nanobody_opt.mutation_network import load_observations, update_observation_store
 from nanobody_opt.simulate_round import METRICS
 
 
@@ -619,12 +619,37 @@ def main() -> None:
         and args.observation_database.is_file()
         else {}
     )
+    api_payloads: dict[int, Any] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [executor.submit(_fetch, args.api_root, epoch) for epoch in epochs]
         for future in as_completed(futures):
             epoch, payload = future.result()
             if payload is not None and _epoch_candidates(payload, args.target):
                 payloads[epoch] = payload
+                api_payloads[epoch] = payload
+    if args.observation_database is not None and api_payloads:
+        update_observation_store(
+            args.observation_database,
+            (
+                {
+                    "observation_id": (
+                        f"public-validator-api:epoch{epoch}:"
+                        f"{candidate['sequence']}"
+                    ),
+                    "sequence": candidate["sequence"],
+                    "score": candidate["validator_final_score"],
+                    "score_kind": "validator_final_rank_sum",
+                    "source": "public_validator_api",
+                    "epoch": epoch,
+                    "target": args.target,
+                    "observation_count": 1,
+                    "metrics": candidate["metrics"],
+                }
+                for epoch, payload in api_payloads.items()
+                for candidate in _epoch_candidates(payload, args.target)
+                if epoch < args.before_epoch
+            ),
+        )
     ordered_epochs = sorted(payloads, reverse=True)
     complete_epochs = (
         ordered_epochs[: args.epochs] if args.epochs else ordered_epochs

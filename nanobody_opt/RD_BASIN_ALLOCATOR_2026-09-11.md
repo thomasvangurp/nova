@@ -55,3 +55,30 @@ exact scoring must still select the variant.
 This policy improves the demonstrated failure mode—choosing only one poor
 terminal sample from a good basin—without asserting that terminal changes are
 biologically irrelevant or allowing one lucky local score to dominate.
+
+## Terminal-policy follow-up
+
+The original six-epoch replay did not load the older mutation database.  A fair
+comparison was therefore rerun with the same 10,277 public validator
+observations from 245 completed epochs (24074-25039) on both sides.
+
+The old allocator retained the epoch-25047 exact winner at screen rank 256.  A
+pure winner-position allocator instead retained the epoch-25050 exact winner
+and displaced 25047, so replacing the old policy was rejected.  The production
+policy now preserves the old diverse-parent order and adds a bounded
+winner-position/residue order only in basin rank one.  Basin rank one receives
+two proposal turns per turn allocated to each other basin.  At the unchanged
+320 ceiling this retained 25047 at rank 308 and added 25050 at rank 156,
+improving exact-winner inclusion from 1/6 to 2/6 while keeping 96 non-basin
+proposals in the first 320.
+
+The learned evidence is intentionally hierarchical: winning mutation position,
+target-residue frequency among prior public winners and competitive sequences,
+then parent recency.  The five best prior residue classes at each terminal
+position form the exploration fallback, which makes previously unseen-in-core
+routes such as A121Q generatable without enumerating every amino acid.
+
+This is retrospective development evidence, not a sealed estimate: the policy
+was designed after inspecting these six outcomes, and candidate Layer-2 was not
+retroactively rerun.  The compact, hash-addressed result is preserved in
+`rd_results/terminal_policy_replay_2026-09-11.json`.

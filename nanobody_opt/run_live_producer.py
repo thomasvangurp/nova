@@ -186,6 +186,14 @@ def _run_iteration(
             "--proposal-limit", str(args.proposal_limit),
             "--basin-fraction", str(args.basin_fraction),
             "--basin-routes-per-core", str(args.basin_routes_per_core),
+            "--basin-evidence-fraction", str(args.basin_evidence_fraction),
+            "--basin-evidence-core-limit", str(
+                args.basin_evidence_core_limit
+            ),
+            "--basin-top-core-weight", str(args.basin_top_core_weight),
+            "--basin-exploration-residues-per-position", str(
+                args.basin_exploration_residues_per_position
+            ),
             "--framework-fraction", str(args.framework_fraction),
             "--framework-per-seed", str(args.framework_per_seed),
             "--terminal-width", str(args.terminal_width),
@@ -298,6 +306,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--proposal-limit", type=int, default=384)
     parser.add_argument("--basin-fraction", type=float, default=0.70)
     parser.add_argument("--basin-routes-per-core", type=int, default=192)
+    parser.add_argument("--basin-evidence-fraction", type=float, default=0.40)
+    parser.add_argument("--basin-evidence-core-limit", type=int, default=1)
+    parser.add_argument("--basin-top-core-weight", type=int, default=2)
+    parser.add_argument(
+        "--basin-exploration-residues-per-position", type=int, default=5
+    )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
     parser.add_argument("--terminal-width", type=int, default=17)

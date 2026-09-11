@@ -35,6 +35,10 @@
     nanobody_proposal_limit: 384
     nanobody_basin_fraction: 0.70
     nanobody_basin_routes_per_core: 192
+    nanobody_basin_evidence_fraction: 0.40
+    nanobody_basin_evidence_core_limit: 1
+    nanobody_basin_top_core_weight: 2
+    nanobody_basin_exploration_residues_per_position: 5
     nanobody_maximum_exhaustive_singles: 8192
     nanobody_candidate_limit: 320
     nanobody_screen_tranche_size: 20
@@ -446,11 +450,14 @@
     - name: Verify BoltzGen imports and sees every rented GPU
       ansible.builtin.command: >-
         /root/bgen_python.sh -c
-        "import sys,torch,boltzgen; from triton.runtime import driver;
+        "import os,sys,torch,boltzgen; from triton.runtime import driver;
         assert torch.cuda.is_available();
         assert sys.version_info[:2]==(3,12),sys.version;
         assert torch.__version__=='2.7.1+cu126',torch.__version__;
         assert torch.version.cuda=='12.6',torch.version.cuda;
+        assert all(os.environ.get(k)=='1' for k in
+        ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS',
+        'NUMEXPR_NUM_THREADS'));
         print('BOLTZGEN_OK', torch.__version__, torch.cuda.device_count(),
         driver.active.get_current_device())"
       changed_when: false
@@ -480,6 +487,7 @@
           - /root/nanobody_opt/pose_stability.py
           - /root/nanobody_opt/basins.py
           - /root/nanobody_opt/local_neighborhood.py
+          - /root/nanobody_opt/terminal_policy.py
           - /root/nanobody_opt/sequential_exact_race.py
           - /root/nanobody_opt/run_live_producer.py
           - /root/nanobody_opt/select_elite_parents.py
@@ -725,6 +733,14 @@
           - "{{ nanobody_basin_fraction }}"
           - --basin-routes-per-core
           - "{{ nanobody_basin_routes_per_core }}"
+          - --basin-evidence-fraction
+          - "{{ nanobody_basin_evidence_fraction }}"
+          - --basin-evidence-core-limit
+          - "{{ nanobody_basin_evidence_core_limit }}"
+          - --basin-top-core-weight
+          - "{{ nanobody_basin_top_core_weight }}"
+          - --basin-exploration-residues-per-position
+          - "{{ nanobody_basin_exploration_residues_per_position }}"
           - --maximum-exhaustive-singles
           - "{{ nanobody_maximum_exhaustive_singles }}"
           - --candidate-limit

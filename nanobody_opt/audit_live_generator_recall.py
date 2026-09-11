@@ -21,7 +21,7 @@ from typing import Any
 
 import pandas as pd
 
-from nanobody_opt.mutation_network import update_observation_store
+from nanobody_opt.mutation_network import load_observations, update_observation_store
 from nanobody_opt.select_elite_parents import select_elite_parents
 from nanobody_opt.simulate_round import METRICS, dense_rank_sums
 
@@ -82,6 +82,7 @@ def _replay_epoch(
     budget: int,
     proposal_pool_limit: int,
     minimum_residue_support: int,
+    history_database: Path | None,
 ) -> list[dict[str, Any]]:
     prior_epochs = [value for value in sorted(fields) if value < epoch]
     prior = pd.concat([fields[value] for value in prior_epochs], ignore_index=True)
@@ -116,6 +117,28 @@ def _replay_epoch(
         ],
     })
     mutation_database = epoch_dir / "prior_observations.sqlite"
+    if history_database is not None:
+        historical = [
+            item
+            for item in load_observations(history_database, target=target)
+            if item.get("score_kind") == "validator_final_rank_sum"
+            and item.get("epoch") is not None
+            and int(item["epoch"]) < epoch
+        ]
+        update_observation_store(
+            mutation_database,
+            (
+                {
+                    **item,
+                    "observation_id": (
+                        f"audit-history:{index}:epoch{int(item['epoch'])}:"
+                        f"{item['sequence']}"
+                    ),
+                    "target": target,
+                }
+                for index, item in enumerate(historical)
+            ),
+        )
     update_observation_store(
         mutation_database,
         (
@@ -255,6 +278,11 @@ def main() -> None:
     parser.add_argument("--budget", type=int, default=320)
     parser.add_argument("--proposal-pool-limit", type=int, default=384)
     parser.add_argument("--minimum-residue-support", type=int, default=1)
+    parser.add_argument(
+        "--history-database",
+        type=Path,
+        help="older public validator observations, filtered before each holdout",
+    )
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
     if min(
@@ -285,6 +313,7 @@ def main() -> None:
                 budget=args.budget,
                 proposal_pool_limit=args.proposal_pool_limit,
                 minimum_residue_support=args.minimum_residue_support,
+                history_database=args.history_database,
             ): epoch
             for epoch in heldout
         }

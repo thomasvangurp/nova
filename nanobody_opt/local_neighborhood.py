@@ -36,6 +36,12 @@ from nanobody_opt.mutation_network import (
 )
 from nanobody_opt.regions import find_regions
 from nanobody_opt.simulate_round import dense_rank_sums
+from nanobody_opt.terminal_policy import (
+    TerminalPriors,
+    basin_parent_recency_ranks,
+    learn_terminal_priors,
+    terminal_route_priority,
+)
 
 METRICS = {
     "design_iiptm": "max",
@@ -431,6 +437,7 @@ def supported_basin_terminal_candidates(
     *,
     basin_sequences: list[str],
     protected: set[int],
+    exploration_residues: dict[int, frozenset[str]] | None = None,
     terminal_width: int = 17,
     maximum_haplotype_mutations: int = 6,
 ) -> list[tuple[str, str, str]]:
@@ -461,7 +468,10 @@ def supported_basin_terminal_candidates(
     # would still miss winners that are one step from a lower-ranked sibling.
     # Exhaust the supported one-step shell around every observed haplotype.
     supported_residues = {
-        position: sorted({sequence[position] for sequence in compatible})
+        position: sorted(
+            {sequence[position] for sequence in compatible}
+            | set((exploration_residues or {}).get(position, ()))
+        )
         for position in mutable
     }
     for base in compatible:
@@ -499,9 +509,15 @@ def bounded_basin_terminal_routes(
     base_scores: dict[str, float],
     limit: int,
     exploration_fraction: float = 0.20,
+    terminal_priors: TerminalPriors | None = None,
+    evidence_fraction: float = 0.50,
 ) -> list[tuple[str, str, str]]:
-    """Bound a combinatorial basin shell while retaining haplotype diversity."""
-    if limit < 1 or not 0 <= exploration_fraction <= 1:
+    """Bound a basin shell with legacy diversity and prior-evidence lanes."""
+    if (
+        limit < 1
+        or not 0 <= exploration_fraction <= 1
+        or not 0 <= evidence_fraction <= 1
+    ):
         raise ValueError("invalid basin route budget")
     grouped: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
     for route in routes:
@@ -531,7 +547,7 @@ def bounded_basin_terminal_routes(
         key=lambda base: (base_scores.get(base, math.inf), base),
     )
     exploit_limit = round(limit * (1.0 - exploration_fraction))
-    selected: list[tuple[str, str, str]] = []
+    legacy: list[tuple[str, str, str]] = []
     used: set[str] = set()
     for index in range(max(map(len, grouped.values()), default=0)):
         for base in bases:
@@ -540,11 +556,11 @@ def bounded_basin_terminal_routes(
             route = grouped[base][index]
             if route[0] in used:
                 continue
-            selected.append(route)
+            legacy.append(route)
             used.add(route[0])
-            if len(selected) >= exploit_limit:
+            if len(legacy) >= exploit_limit:
                 break
-        if len(selected) >= exploit_limit:
+        if len(legacy) >= exploit_limit:
             break
 
     remaining = [
@@ -557,11 +573,159 @@ def bounded_basin_terminal_routes(
     for route in remaining:
         if route[0] in used:
             continue
-        selected.append(route)
+        legacy.append(route)
         used.add(route[0])
+        if len(legacy) >= limit:
+            break
+    if terminal_priors is None or evidence_fraction == 0:
+        return legacy
+
+    base_rank = basin_parent_recency_ranks(grouped, terminal_priors)
+    evidence = sorted(
+        routes,
+        key=lambda route: terminal_route_priority(
+            route[0],
+            route[2],
+            priors=terminal_priors,
+            base_rank=base_rank,
+        ),
+    )
+    evidence_limit = round(limit * evidence_fraction)
+    legacy_limit = limit - evidence_limit
+    selected = legacy[:legacy_limit]
+    selected_sequences = {route[0] for route in selected}
+    for route in evidence:
+        if route[0] in selected_sequences:
+            continue
+        selected.append(route)
+        selected_sequences.add(route[0])
+        if len(selected) >= legacy_limit + evidence_limit:
+            break
+    for route in legacy[legacy_limit:]:
+        if route[0] in selected_sequences:
+            continue
+        selected.append(route)
+        selected_sequences.add(route[0])
         if len(selected) >= limit:
             break
     return selected
+
+
+def _interleave_rankings(
+    primary: list[dict[str, object]],
+    evidence: list[dict[str, object]],
+    *,
+    limit: int,
+    evidence_fraction: float,
+) -> list[dict[str, object]]:
+    """Merge two complete rankings while reserving a prefix share for each."""
+    if limit < 1 or not 0 <= evidence_fraction <= 1:
+        raise ValueError("invalid evidence ranking budget")
+    selected: list[dict[str, object]] = []
+    used: set[str] = set()
+    indices = {"primary": 0, "evidence": 0}
+    evidence_count = 0
+    for position in range(1, limit + 1):
+        choose_evidence = evidence_count < math.floor(
+            position * evidence_fraction
+        )
+        lanes = (
+            ((evidence, "evidence"), (primary, "primary"))
+            if choose_evidence
+            else ((primary, "primary"), (evidence, "evidence"))
+        )
+        appended = False
+        for rows, lane in lanes:
+            index = indices[lane]
+            while index < len(rows) and str(rows[index]["sequence"]) in used:
+                index += 1
+            indices[lane] = index
+            if index >= len(rows):
+                continue
+            item = rows[index]
+            indices[lane] += 1
+            selected.append(item)
+            used.add(str(item["sequence"]))
+            evidence_count += int(lane == "evidence")
+            appended = True
+            break
+        if not appended:
+            break
+    return selected
+
+
+def ordered_basin_proposals(
+    proposals: list[dict[str, object]],
+    *,
+    evidence_fraction: float,
+    evidence_core_limit: int = 1,
+    top_core_weight: int = 2,
+) -> list[dict[str, object]]:
+    """Balance cores while mixing proven legacy and terminal-prior rankings."""
+    if evidence_core_limit < 0 or top_core_weight < 1:
+        raise ValueError("invalid basin allocation policy")
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for proposal in proposals:
+        grouped[str(proposal["parent_basin_core_id"])].append(proposal)
+    for identifier, items in grouped.items():
+        primary = _round_robin_by_parent([
+            item for item in items
+            if item.get("basin_route_policy") == "legacy"
+        ])
+        evidence = sorted(
+            (
+                item for item in items
+                if item.get("basin_route_policy") == "winner_position"
+            ),
+            key=lambda item: (
+                int(item.get("basin_position_rank", 10**9)),
+                int(item.get("basin_residue_rank", 10**9)),
+                int(item.get("basin_parent_recency_rank", 10**9)),
+                str(item["sequence"]),
+            ),
+        )
+        basin_rank = min(
+            int(item.get("parent_basin_rank", 10**9)) for item in items
+        )
+        grouped[identifier] = _interleave_rankings(
+            primary,
+            evidence,
+            limit=len(items),
+            evidence_fraction=(
+                evidence_fraction
+                if basin_rank <= evidence_core_limit
+                else 0.0
+            ),
+        )
+    core_order = sorted(
+        grouped,
+        key=lambda identifier: (
+            min(
+                int(item.get("parent_basin_rank", 10**9))
+                for item in grouped[identifier]
+            ),
+            identifier,
+        ),
+    )
+    weighted_core_order = [
+        identifier
+        for index, identifier in enumerate(core_order)
+        for _ in range(top_core_weight if index == 0 else 1)
+    ]
+    ordered: list[dict[str, object]] = []
+    offsets = {identifier: 0 for identifier in core_order}
+    while len(ordered) < sum(map(len, grouped.values())):
+        added = False
+        for identifier in weighted_core_order:
+            index = offsets[identifier]
+            if index >= len(grouped[identifier]):
+                continue
+            ordered.append(grouped[identifier][index])
+            offsets[identifier] += 1
+            added = True
+        if not added:
+            break
+    return ordered
 
 
 def balanced_proposal_order(
@@ -724,6 +888,33 @@ def main() -> None:
         default=192,
         help="bounded pre-gate terminal routes generated for each reserved core",
     )
+    parser.add_argument(
+        "--basin-evidence-fraction",
+        type=float,
+        default=0.40,
+        help=(
+            "share of each basin prefix selected by historical winner-position "
+            "and residue evidence"
+        ),
+    )
+    parser.add_argument(
+        "--basin-evidence-core-limit",
+        type=int,
+        default=1,
+        help="highest basin rank receiving winner-position allocation",
+    )
+    parser.add_argument(
+        "--basin-top-core-weight",
+        type=int,
+        default=2,
+        help="proposal turns for basin rank one per turn for every other basin",
+    )
+    parser.add_argument(
+        "--basin-exploration-residues-per-position",
+        type=int,
+        default=5,
+        help="top public residue priors admitted beyond same-core alleles",
+    )
     parser.add_argument("--terminal-width", type=int, default=17)
     parser.add_argument("--maximum-terminal-haplotype-mutations", type=int, default=6)
     parser.add_argument("--donor-count", type=int, default=100)
@@ -785,6 +976,8 @@ def main() -> None:
         parser.error("--framework-fraction must be between zero and one")
     if not 0 <= args.basin_fraction <= 1:
         parser.error("--basin-fraction must be between zero and one")
+    if not 0 <= args.basin_evidence_fraction <= 1:
+        parser.error("--basin-evidence-fraction must be between zero and one")
     if not 0 <= args.lineage_fraction <= 1:
         parser.error("--lineage-fraction must be between zero and one")
     if args.maximum_motif_mutations < 1:
@@ -794,6 +987,8 @@ def main() -> None:
         "min_support", "maximum_exhaustive_singles", "proposal_limit",
         "framework_per_seed", "terminal_width",
         "basin_routes_per_core",
+        "basin_exploration_residues_per_position",
+        "basin_top_core_weight",
         "maximum_terminal_haplotype_mutations",
     ):
         if getattr(args, name) <= 0:
@@ -802,6 +997,8 @@ def main() -> None:
         parser.error("--minimum-seeds cannot exceed --seed-count")
     if args.neighbor_seed_count < 0:
         parser.error("--neighbor-seed-count cannot be negative")
+    if args.basin_evidence_core_limit < 0:
+        parser.error("--basin-evidence-core-limit cannot be negative")
 
     config_payload = yaml.safe_load(args.config.read_text())
     requirements = config_payload["nanobody_requirements"]
@@ -930,6 +1127,14 @@ def main() -> None:
         network_records,
         mutation_effects=effects,
     )
+    terminal_priors = learn_terminal_priors(
+        network_records,
+        length=length,
+        terminal_width=args.terminal_width,
+        exploration_residues_per_position=(
+            args.basin_exploration_residues_per_position
+        ),
+    )
     if args.mutation_network_output is not None:
         mutation_network.save(args.mutation_network_output)
 
@@ -978,6 +1183,7 @@ def main() -> None:
         destination: list[dict[str, object]],
         *,
         allow_seen_sequence: bool = False,
+        extra_evidence: dict[str, object] | None = None,
     ) -> bool:
         (
             parent_score,
@@ -1054,6 +1260,7 @@ def main() -> None:
             "max_jaccard_to_top50": max_jaccard,
             **evidence,
             "predecessor_neighbours": json.dumps(neighbours, sort_keys=True),
+            **(extra_evidence or {}),
         })
         return True
 
@@ -1214,43 +1421,82 @@ def main() -> None:
     for parent_record in basin_representatives.values():
         parent = parent_record[1]
         protected = parent_record[4]
-        routes = supported_basin_terminal_candidates(
+        basin_sequences = background_by_basin[parent_record[6]]
+        parent_recency_rank = basin_parent_recency_ranks(
+            basin_sequences,
+            terminal_priors,
+        )
+        legacy_routes = supported_basin_terminal_candidates(
             parent,
-            basin_sequences=background_by_basin[parent_record[6]],
+            basin_sequences=basin_sequences,
             protected=protected,
             terminal_width=args.terminal_width,
             maximum_haplotype_mutations=args.maximum_terminal_haplotype_mutations,
         )
-        candidates = bounded_basin_terminal_routes(
-            routes,
+        legacy_candidates = bounded_basin_terminal_routes(
+            legacy_routes,
             base_scores=base_scores,
             limit=args.basin_routes_per_core,
         )
+        evidence_routes = supported_basin_terminal_candidates(
+            parent,
+            basin_sequences=basin_sequences,
+            protected=protected,
+            exploration_residues=terminal_priors.exploration_residues,
+            terminal_width=args.terminal_width,
+            maximum_haplotype_mutations=args.maximum_terminal_haplotype_mutations,
+        )
+        evidence_candidates = bounded_basin_terminal_routes(
+            evidence_routes,
+            base_scores=base_scores,
+            limit=args.basin_routes_per_core,
+            terminal_priors=terminal_priors,
+            evidence_fraction=1.0,
+        )
         parent_proposals: list[dict[str, object]] = []
-        for candidate, source, base_parent in candidates:
-            attributed_parent = (
-                parent_record
-                if base_parent == parent
-                else (
-                    base_scores.get(base_parent, parent_record[0]),
+        for route_policy, candidates in (
+            ("legacy", legacy_candidates),
+            ("winner_position", evidence_candidates),
+        ):
+            for candidate, source, base_parent in candidates:
+                route_priority = terminal_route_priority(
+                    candidate,
                     base_parent,
-                    parent_record[2],
-                    "historical_basin_member",
-                    parent_record[4],
-                    parent_record[5],
-                    parent_record[6],
-                    parent_record[7],
-                    parent_record[8],
+                    priors=terminal_priors,
+                    base_rank=parent_recency_rank,
                 )
-            )
-            add_candidate(
-                attributed_parent,
-                candidate,
-                source,
-                "basin_terminal",
-                parent_proposals,
-                allow_seen_sequence=True,
-            )
+                attributed_parent = (
+                    parent_record
+                    if base_parent == parent
+                    else (
+                        base_scores.get(base_parent, parent_record[0]),
+                        base_parent,
+                        parent_record[2],
+                        "historical_basin_member",
+                        parent_record[4],
+                        parent_record[5],
+                        parent_record[6],
+                        parent_record[7],
+                        parent_record[8],
+                    )
+                )
+                add_candidate(
+                    attributed_parent,
+                    candidate,
+                    source,
+                    "basin_terminal",
+                    parent_proposals,
+                    allow_seen_sequence=True,
+                    extra_evidence={
+                        "basin_route_policy": route_policy,
+                        "basin_position_rank": route_priority[0],
+                        "basin_residue_rank": route_priority[1],
+                        "basin_parent_recency_rank": route_priority[2],
+                        "basin_prior_public_epochs": (
+                            terminal_priors.public_epoch_count
+                        ),
+                    },
+                )
         parent_proposals = sorted(
             _deduplicate_proposals(parent_proposals), key=_proposal_ranking_key
         )
@@ -1372,7 +1618,12 @@ def main() -> None:
         novel_fraction=args.lineage_fraction,
     )
     proposals = interleave_novel_lane(
-        _round_robin_by_basin(_deduplicate_proposals(basin_proposals)),
+        ordered_basin_proposals(
+            _deduplicate_proposals(basin_proposals),
+            evidence_fraction=args.basin_evidence_fraction,
+            evidence_core_limit=args.basin_evidence_core_limit,
+            top_core_weight=args.basin_top_core_weight,
+        ),
         baseline_with_lineage,
         limit=args.proposal_limit,
         novel_fraction=1.0 - args.basin_fraction,

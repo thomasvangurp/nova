@@ -1,0 +1,46 @@
+{
+  "objective": "organic exact-winner inclusion in the 320-candidate production shortlist",
+  "target": "P20809",
+  "holdout_epochs": [25046, 25047, 25048, 25049, 25050, 25051],
+  "history": {
+    "validator_observations": 10277,
+    "completed_epochs": 245,
+    "epoch_range": [24074, 25039],
+    "database_sha256": "dc3eb6250b71783b6890f2a5159fbc14190564d71c0b24a375f34df12b00991e",
+    "holdout_snapshot_sha256": "31688efb8c2d4cf37ed77a9931d4fc5917c982ea5bb5468d9433e07263101c7a"
+  },
+  "leakage_controls": {
+    "all_parent_epochs_precede_target": true,
+    "heldout_sequences_inserted_into_generation": false,
+    "policy_was_developed_after_inspecting_these_holdouts": true,
+    "interpretation": "retrospective development evidence, not a sealed generalization estimate"
+  },
+  "budgets": {
+    "proposal_pool": 384,
+    "exact_shortlist": 320,
+    "basin_terminal_in_first_320": 224,
+    "legacy_basin_in_first_320": 194,
+    "winner_position_basin_in_first_320": 30,
+    "other_lanes_in_first_320": 96
+  },
+  "old_policy_same_history": {
+    "exact_winner_recall": 0.16666666666666666,
+    "included_epochs": [25047],
+    "screen_ranks": {"25047": 256}
+  },
+  "mixed_policy_same_history": {
+    "exact_winner_recall": 0.3333333333333333,
+    "included_epochs": [25047, 25050],
+    "screen_ranks": {"25047": 308, "25050": 156},
+    "selected_core_count_each_epoch": 5,
+    "candidate_layer2_replayed": false
+  },
+  "candidate_sha256": {
+    "25046": "5d643e44f346d0412974a40d25847511a3c93ea879bbd09741aa233373bbb334",
+    "25047": "d4562180ccb1517ebe201449f000178da386e0086a881347b8e8f41470dfeb09",
+    "25048": "06ad26556877118bfd1693e051a7c7ac15fd9d511abe02f573567f69ffc98f95",
+    "25049": "6932cff7649808ffd944664f3f053a0b8e349249b3354693327ce6bdb7fbcef3",
+    "25050": "b3b2621b0c6b212d9905a9a2c3d32fd59cc31fe100e9acb54bd8509c6d2cf386",
+    "25051": "5f0b8ca25c57b5a70086301b6901ccc0517bc586350989ea5f425d4b05a8409c"
+  }
+}
