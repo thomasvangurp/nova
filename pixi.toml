@@ -73,6 +73,10 @@ CUDA_CACHE_PATH = "/root/.nv/ComputeCache"
 CUDA_CACHE_MAXSIZE = "4294967296"
 BOLTZGEN_CACHE = "/root/.boltzgen"
 PYTHONPATH = "/root/bgen_shim:/root/external_tools/boltzgen/src"
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+OPENBLAS_NUM_THREADS = "1"
+NUMEXPR_NUM_THREADS = "1"
 
 # Runtime for the validator's documented install_deps.sh path. Live scoring and
 # parity diagnostics both use Python 3.12 and PyTorch's official cu126 wheels;
@@ -122,6 +126,10 @@ CUDA_CACHE_PATH = "/root/.nv/ComputeCache"
 CUDA_CACHE_MAXSIZE = "4294967296"
 BOLTZGEN_CACHE = "/root/.boltzgen"
 PYTHONPATH = "/root/bgen_shim:/root/external_tools/boltzgen/src"
+OMP_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+OPENBLAS_NUM_THREADS = "1"
+NUMEXPR_NUM_THREADS = "1"
 
 [feature.validator-bgen.tasks]
 check-validator-bgen = "python -c \"import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.device_count())\""
