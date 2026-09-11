@@ -30,18 +30,19 @@ nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 6
 nanobody_maximum_exhaustive_singles: 32768
 
-# Measured operating point at 8.3 GPU-seconds per sequence: 3,200 one-shot
+# Measured operating point at 8.3 GPU-seconds per sequence: 2,400 one-shot
 # screens in tranches of 800, then a 60-candidate shortlist re-observed ten
-# times.  About 3,740 observations, fitting the 3,672-second scoring window
-# with the commitment reserve intact.
+# times -- about 2,940 observations.  The screen window is not the whole epoch:
+# Layer 2 takes 13-22 minutes at this proposal count, so the budget is sized
+# against roughly 40 minutes of scoring, not 61.
 #
 # Tranches of 800 give each of ten workers eighty sequences.  The only
 # remaining non-GPU cost is one model load per invocation, so large waves are
 # what converts the speedup into throughput; multi-worker packing and predict
 # batching were both measured as dead ends.
-nanobody_candidate_limit: 3200
+nanobody_candidate_limit: 2400
 nanobody_screen_tranche_size: 800
-nanobody_weak_initial_fallback_after: 1600
+nanobody_weak_initial_fallback_after: 1200
 nanobody_finalists: 60
 nanobody_qualification_observations: 10
 
@@ -50,6 +51,12 @@ nanobody_qualification_observations: 10
 # invocation over all sixty candidates, giving every one of them ten
 # independent observations.
 nanobody_replication_rounds: 9
+
+# Nine rounds over sixty candidates is about 810 seconds of GPU work, so
+# screening must stop roughly 68 blocks before the commitment reserve.  Without
+# this, a long screen consumes the epoch and every candidate is published on a
+# single observation -- the exact failure the shortlist exists to prevent.
+nanobody_replication_reserve_blocks: 68
 
 # One observation of a fixed sequence lands within about 34 leaderboard rank
 # points of its own mean, so a shortlist of five chosen on single observations

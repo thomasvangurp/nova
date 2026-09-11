@@ -478,3 +478,18 @@ def test_strict_gate_overrides_load_from_either_shape(tmp_path):
         "maximum_p90_rank_sum": 104
     }
     assert race.load_strict_gate_overrides(None) == {}
+
+
+def test_screening_stops_early_enough_to_leave_room_for_replication(tmp_path):
+    # 100 blocks remain before the commitment reserve would bite
+    state = tmp_path / "chain.json"
+    state.write_text(json.dumps({
+        "epoch": 25060,
+        "block": 25060 * 361 + 361 - 100,
+        "epoch_length": 361,
+    }))
+
+    # screening alone may continue
+    assert race._chain_allows_work(state, 25060, reserve_blocks=55) is True
+    # but not once the replication rounds are reserved as well
+    assert race._chain_allows_work(state, 25060, reserve_blocks=55 + 68) is False

@@ -256,6 +256,7 @@ def _run_iteration(
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
         "--replication-rounds", str(args.replication_rounds),
+        "--replication-reserve-blocks", str(args.replication_reserve_blocks),
         "--strict-gates", str(args.strict_gates or ""),
     ]
     _run(race_command)
@@ -376,6 +377,12 @@ def _parser() -> argparse.ArgumentParser:
             "re-observe the best --finalists screened candidates this many "
             "times after screening instead of repeating one tranche leader"
         ),
+    )
+    parser.add_argument(
+        "--replication-reserve-blocks",
+        type=int,
+        default=0,
+        help="stop screening this many blocks early so replication still fits",
     )
     parser.add_argument(
         "--pipeline-depth",

@@ -895,6 +895,17 @@ def main() -> None:
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
     parser.add_argument(
+        "--replication-reserve-blocks",
+        type=int,
+        default=0,
+        help=(
+            "stop screening this many blocks before the commitment reserve so "
+            "the replication rounds still fit; screening that consumes the "
+            "whole epoch leaves every candidate on one observation, which is "
+            "the failure the shortlist exists to prevent"
+        ),
+    )
+    parser.add_argument(
         "--strict-gates",
         default="",
         help=(
@@ -957,6 +968,8 @@ def main() -> None:
         parser.error("--pipeline-depth must be 0 or 1")
     if args.replication_rounds < 0:
         parser.error("--replication-rounds cannot be negative")
+    if args.replication_reserve_blocks < 0:
+        parser.error("--replication-reserve-blocks cannot be negative")
     if args.screen_predict_batch_size < 0:
         parser.error("--screen-predict-batch-size cannot be negative")
     args.screen_predict_batch_size = args.screen_predict_batch_size or None
@@ -1015,8 +1028,15 @@ def main() -> None:
         nonlocal tranche_index
         if not pending:
             return None
-        if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
-            print("EXACT_RACE_RESERVE_REACHED before next screen tranche", flush=True)
+        screen_reserve = args.reserve_blocks + (
+            args.replication_reserve_blocks if args.replication_rounds else 0
+        )
+        if not _chain_allows_work(args.chain_state, args.epoch, screen_reserve):
+            print(
+                "EXACT_RACE_RESERVE_REACHED before next screen tranche "
+                f"screen_reserve_blocks={screen_reserve}",
+                flush=True,
+            )
             return None
         tranche_index += 1
         tranche_root = args.output_dir / "screen" / f"tranche_{tranche_index:02d}"
