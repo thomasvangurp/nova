@@ -36,41 +36,26 @@ nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 5
 nanobody_maximum_exhaustive_singles: 8192
 
-# Measured on the box against this scorer: 200 sequences in 183.7 seconds on
-# ten GPUs, 0.9 seconds per observation wall-clock, while the live miner was
-# also running.  2,400 one-shot screens is about 36 minutes, and a 60-candidate
-# shortlist re-observed thirteen times is about 19 minutes, inside the
-# 3,672-second window left after the commitment reserve.
+# One pass over the whole filtered shell, then every remaining second on
+# replication.  At 0.623 seconds per observation a 2,800-candidate pass is about
+# 32 minutes of the 61-minute window, leaving room for roughly 22 rounds over a
+# 60-candidate shortlist -- 23 independent observations each.
 #
-# Layer 2 is no longer the constraint it was: screening the pool on IgBLAST
-# alone costs about 50 seconds at this candidate count instead of 13-22
-# minutes, and full TNP is spent only on the shortlist.
-#
-# Tranches of 800 give each of ten workers eighty sequences.  The only
-# remaining non-GPU cost is one model load per invocation, so large waves are
-# what converts the speedup into throughput; multi-worker packing and predict
-# batching were both measured as dead ends.
-# Per generation, not per epoch.  At the measured rate a generation of 800 is
-# about nine minutes including proposal generation and IgBLAST, so roughly four
-# fit alongside the closing replication: about 3,200 screens and 720 replication
-# observations, against 137 observations per epoch before any of this.
-#
-# Generations two through four are proposed from what the earlier ones actually
-# scored, so the pool improves rather than only the selection within a fixed
-# pool -- which is what binds, since a two-stage policy already captures about
-# 97% of the best candidate the pool contains.  800 is 80 per worker, well past
-# the scorer's amortisation floor.
-nanobody_candidate_limit: 1800
-nanobody_screen_tranche_size: 900
-nanobody_weak_initial_fallback_after: 900
+# Simulation says the shortlist/depth split barely matters between 40 and 150,
+# so this is sized for a comfortable margin rather than a knife edge.  What does
+# matter is that the shell is covered once: a candidate never screened cannot be
+# replicated, and a winner outside the shell cannot be proposed at all.
+nanobody_candidate_limit: 2800
+nanobody_screen_tranche_size: 700
+nanobody_weak_initial_fallback_after: 1400
 nanobody_finalists: 60
-nanobody_qualification_observations: 13
+nanobody_qualification_observations: 23
 
 # Replication is spent once per epoch, in the generation that opens inside the
 # closing window, over the pooled best of every generation.  The generator does
 # not re-propose what it has already screened, so without pooling a strong hit
 # from generation one could never be confirmed later.
-nanobody_replication_rounds: 12
+nanobody_replication_rounds: 22
 
 # Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54
 # seconds of folding plus one model load each), so screening must stop roughly
@@ -82,7 +67,7 @@ nanobody_replication_rounds: 12
 # it can actually finish thirteen observations per finalist -- strict
 # qualification needs eight, and a closing window that falls short publishes
 # nothing at all, which is how epochs 25056-25058 went unscored.
-nanobody_replication_reserve_blocks: 104
+nanobody_replication_reserve_blocks: 152
 
 # Full TNP costs about 21 CPU-seconds per uncached sequence: 2,400 novel
 # candidates would be far more than an epoch.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at
