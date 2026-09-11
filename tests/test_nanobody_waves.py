@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from nanobody_opt import score_boltzgen_waves as waves
+from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
 
 
 def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
@@ -27,6 +28,7 @@ def test_waves_are_promoted_and_resumed(tmp_path, monkeypatch):
                 {
                     "target": target,
                     "n": len(items),
+                    "scorer_protocol": SCORER_PROTOCOL,
                     "per_nanobody_components": {
                         "0": {item: {target: {}} for item in items}
                     },

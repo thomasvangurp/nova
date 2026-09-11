@@ -29,6 +29,7 @@ from nanobody_opt.simulate_round import (
     METRIC_CATEGORIES,
 )
 from nanobody_opt.pose_stability import (
+    exact_sample_selections,
     exact_structure_paths,
     residue_numbers,
     summarize_sequence_structures,
@@ -337,6 +338,8 @@ def main() -> None:
         }
     compiled_fields = [_compile_validator_field(field) for field in fields]
     structure_paths: dict[str, list[Path]] = {}
+    writer_structure_paths: dict[str, list[Path]] = {}
+    sample_selections: dict[str, list[dict[str, Any]]] = {}
     pose_challenge: dict[str, Any] | None = None
     if args.pose_config is not None:
         import yaml
@@ -346,7 +349,13 @@ def main() -> None:
         ]["nanobody"]
         if str(pose_challenge["target"]) != args.target:
             raise SystemExit("pose config target does not match exact target")
-        structure_paths = exact_structure_paths(args.exact, args.target)
+        structure_paths = exact_structure_paths(
+            args.exact, args.target, pose_kind="confidence"
+        )
+        writer_structure_paths = exact_structure_paths(
+            args.exact, args.target, pose_kind="writer"
+        )
+        sample_selections = exact_sample_selections(args.exact, args.target)
     ranked = []
     for sequence, observations in _observations(args.exact, args.target).items():
         normalized_sequence = sequence.strip().upper()
@@ -450,10 +459,22 @@ def main() -> None:
         ):
             continue
         pose_summary: dict[str, Any] = {"structure_observation_count": 0}
+        writer_pose_summary: dict[str, Any] = {
+            "structure_observation_count": 0
+        }
         if pose_challenge is not None:
             pose_summary = summarize_sequence_structures(
                 normalized_sequence,
                 structure_paths.get(normalized_sequence, []),
+                target_chain=str(pose_challenge["structure_chain"]),
+                nanobody_chain="B",
+                epitope=residue_numbers(
+                    str(pose_challenge["structure_binding_site"])
+                ),
+            )
+            writer_pose_summary = summarize_sequence_structures(
+                normalized_sequence,
+                writer_structure_paths.get(normalized_sequence, []),
                 target_chain=str(pose_challenge["structure_chain"]),
                 nanobody_chain="B",
                 epitope=residue_numbers(
@@ -481,6 +502,22 @@ def main() -> None:
             < args.minimum_epitope_occupancy
         ):
             continue
+        selections = sample_selections.get(normalized_sequence, [])
+        selection_summary = {
+            "observation_count": len(selections),
+            "disagreement_count": sum(
+                bool(item.get("sample_selection_disagrees"))
+                for item in selections
+            ),
+            "disagreement_rate": (
+                float(np.mean([
+                    bool(item.get("sample_selection_disagrees"))
+                    for item in selections
+                ]))
+                if selections else None
+            ),
+            "observations": selections,
+        }
         ranked.append({
             "sequence": normalized_sequence,
             "observation_count": len(observations),
@@ -506,6 +543,8 @@ def main() -> None:
             "metric_standard_errors": metric_standard_errors,
             "observations": observations,
             "pose_stability": pose_summary,
+            "validator_writer_pose_stability": writer_pose_summary,
+            "diffusion_sample_selection": selection_summary,
         })
 
     if args.selection_order == "p90":

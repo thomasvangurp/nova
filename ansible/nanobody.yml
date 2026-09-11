@@ -478,12 +478,33 @@
             print('PROTOCOL_OK',len(m))
       changed_when: false
 
+    - name: Assert validator dual-sample selection is explicit
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import inspect,numpy as np;
+            from boltzgen.task.predict.writer import FoldingWriter;
+            from nanobody_opt.diffusion_sample_selection import
+            SCORER_PROTOCOL,select_diffusion_samples;
+            x=select_diffusion_samples({'iptm':np.array([.9,.5]),
+            'ptm':np.array([.9,.5]),
+            'design_to_target_iptm':np.array([.4,.9]),
+            'design_ptm':np.array([.4,.9])});
+            assert SCORER_PROTOCOL=='validator-dual-sample-v1';
+            assert x.writer_sample_index==0 and x.analyze_sample_index==1,x;
+            assert 'refold_analyze_cif' in inspect.getsource(FoldingWriter),x;
+            print('DUAL_SAMPLE_PROTOCOL_OK')
+      changed_when: false
+
     - name: Compile autonomous producer and structure-stability modules
       ansible.builtin.command:
         argv:
           - /root/bgen_python.sh
           - -m
           - py_compile
+          - /root/nanobody_opt/diffusion_sample_selection.py
           - /root/nanobody_opt/pose_stability.py
           - /root/nanobody_opt/basins.py
           - /root/nanobody_opt/local_neighborhood.py
@@ -495,6 +516,8 @@
           - /root/nanobody_opt/seed_mutation_database.py
           - /root/nanobody_opt/import_exact_screens.py
           - /root/nanobody_opt/rank_exact.py
+          - /root/nanobody_opt/score_boltzgen_batch.py
+          - /root/nanobody_opt/score_boltzgen_waves.py
       changed_when: false
 
     - name: Verify autonomous producer entry points use the locked Pixi runtime

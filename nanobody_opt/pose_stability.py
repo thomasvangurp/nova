@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -222,8 +221,17 @@ def summarize_sequence_structures(
 
 
 def exact_structure_paths(
-    paths: list[Path], target: str
+    paths: list[Path], target: str, *, pose_kind: str = "confidence"
 ) -> dict[str, list[Path]]:
+    """Load one retained pose kind per exact observation.
+
+    ``confidence`` follows analyze_utils' design-to-target argmax. ``writer``
+    follows the whole-complex argmax used for refold_cif and delta SASA.
+    Legacy observations have only ``path`` and therefore remain readable for
+    retrospective analysis, while new live waves are validated more strictly.
+    """
+    if pose_kind not in {"confidence", "writer"}:
+        raise ValueError(f"unknown retained pose kind: {pose_kind}")
     found: dict[str, list[Path]] = {}
     seen_observations: set[str] = set()
     for path in paths:
@@ -236,11 +244,40 @@ def exact_structure_paths(
         seen_observations.add(observation)
         for sequence, by_target in (payload.get("structures") or {}).items():
             record = by_target.get(target) if isinstance(by_target, dict) else None
-            structure_path = record.get("path") if isinstance(record, dict) else record
+            if isinstance(record, dict):
+                structure_path = record.get(
+                    "writer_path" if pose_kind == "writer" else "confidence_path"
+                ) or record.get("path")
+            else:
+                structure_path = record
             if structure_path:
                 found.setdefault(str(sequence).strip().upper(), []).append(
                     Path(str(structure_path))
                 )
+    return found
+
+
+def exact_sample_selections(
+    paths: list[Path], target: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Return auditable dual-rule sample choices, once per observation."""
+    found: dict[str, list[dict[str, Any]]] = {}
+    seen_observations: set[str] = set()
+    for path in paths:
+        payload = json.loads(path.read_text())
+        if str(payload.get("target")) != target:
+            raise ValueError(f"{path} targets {payload.get('target')!r}, not {target}")
+        observation = str(payload.get("observation_id") or path.resolve())
+        if observation in seen_observations:
+            continue
+        seen_observations.add(observation)
+        for sequence, by_target in (payload.get("structures") or {}).items():
+            record = by_target.get(target) if isinstance(by_target, dict) else None
+            selection = (
+                record.get("sample_selection") if isinstance(record, dict) else None
+            )
+            if isinstance(selection, dict):
+                found.setdefault(str(sequence).strip().upper(), []).append(selection)
     return found
 
 

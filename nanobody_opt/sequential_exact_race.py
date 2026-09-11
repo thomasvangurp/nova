@@ -23,6 +23,7 @@ from nanobody_opt.mutation_network import (
     ranking_observations,
     update_observation_store,
 )
+from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
 
 
 STRICT_RANK_ARGUMENTS = (
@@ -291,7 +292,26 @@ def _run_screen(
 ) -> Path:
     completed = output_dir / "exact_all.json"
     if completed.is_file():
-        return completed
+        try:
+            protocol = json.loads(completed.read_text()).get("scorer_protocol")
+        except (OSError, json.JSONDecodeError):
+            protocol = None
+        if protocol == SCORER_PROTOCOL:
+            return completed
+        archived = completed.with_name(
+            "exact_all.legacy-pre-dual-sample.json"
+        )
+        suffix = 1
+        while archived.exists():
+            archived = completed.with_name(
+                f"exact_all.legacy-pre-dual-sample-{suffix}.json"
+            )
+            suffix += 1
+        os.replace(completed, archived)
+        print(
+            f"EXACT_SCREEN_PROTOCOL_REFRESH preserved={archived}",
+            flush=True,
+        )
     wave_size, predict_batch_size = _screen_execution_shape(
         candidate_limit, len(gpus)
     )

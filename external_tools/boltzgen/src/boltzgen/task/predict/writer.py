@@ -45,7 +45,17 @@ class FoldingWriter(BasePredictionWriter):
             if self.designfolding
             else const.refold_cif_dirname
         )
+        # The validator's analysis task selects a diffusion sample with a
+        # different rule from the historical refold_cif writer.  Preserve that
+        # second pose for downstream fidelity checks without changing the
+        # validator's existing refold_cif or aggregate metric behavior.
+        self.analyze_refold_cif_dir = Path(design_dir) / (
+            "refold_design_analyze_cif"
+            if self.designfolding
+            else "refold_analyze_cif"
+        )
         self.refold_cif_dir.mkdir(parents=True, exist_ok=True)
+        self.analyze_refold_cif_dir.mkdir(parents=True, exist_ok=True)
         self.outdir.mkdir(exist_ok=True, parents=True)
         self.failed = 0
 
@@ -68,7 +78,7 @@ class FoldingWriter(BasePredictionWriter):
                 pred_dict[key] = value.cpu().numpy()
         np.savez_compressed(self.outdir / f"{batch['id'][0]}.npz", **pred_dict)
 
-        # Get best sample
+        # Get the writer-selected sample used by refold_cif and delta SASA.
         confidence = 0.8 * pred_dict["iptm"] + 0.2 * pred_dict["ptm"]
         best_idx = np.argmax(confidence)
         best_sample_coords = pred_dict["coords"][best_idx]
@@ -91,6 +101,35 @@ class FoldingWriter(BasePredictionWriter):
         cif_text = to_mmcif(structure)
         with open(self.refold_cif_dir / f"{batch['id'][0]}.cif", "w") as f:
             f.write(cif_text)
+
+        # The analysis task reports confidence and evaluates its in-memory
+        # refolded pose from this independently selected sample.  Write it to a
+        # separate directory so local pose-stability gates inspect the same
+        # pose as the reported confidence metrics.  The canonical refold_cif
+        # above remains byte-for-byte governed by the original writer rule.
+        analyze_confidence = (
+            0.8 * pred_dict["design_to_target_iptm"]
+            + 0.2 * pred_dict["design_ptm"]
+        )
+        analyze_idx = np.argmax(analyze_confidence)
+        if analyze_idx == best_idx:
+            analyze_cif_text = cif_text
+        else:
+            prediction_out["coords"] = torch.from_numpy(
+                pred_dict["coords"][analyze_idx]
+            )
+            analyze_structure, _, _ = Structure.from_feat(prediction_out)
+            analyze_structure.atoms["bfactor"] = (
+                plddt_atom[prediction_out["atom_pad_mask"].bool()]
+                .float()
+                .cpu()
+                .numpy()
+            )
+            analyze_cif_text = to_mmcif(analyze_structure)
+        with open(
+            self.analyze_refold_cif_dir / f"{batch['id'][0]}.cif", "w"
+        ) as f:
+            f.write(analyze_cif_text)
 
         # Failed prediction handling
         if isinstance(prediction["exception"], bool):

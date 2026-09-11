@@ -70,13 +70,26 @@ def test_pose_summary_aligns_on_target_and_measures_contact_stability(
 
 
 def test_exact_structure_paths_deduplicates_one_sweep(tmp_path):
-    structure = tmp_path / "complex.cif"
-    structure.write_text("complex")
+    structure = tmp_path / "confidence.cif"
+    writer_structure = tmp_path / "writer.cif"
+    structure.write_text("confidence")
+    writer_structure.write_text("writer")
+    selection = {
+        "writer_sample_index": 2,
+        "analyze_sample_index": 4,
+        "sample_selection_disagrees": True,
+    }
     payload = {
         "target": "P20809",
         "observation_id": "one-sweep",
         "structures": {
-            SEQUENCE: {"P20809": {"path": str(structure), "sha256": "unused"}}
+            SEQUENCE: {"P20809": {
+                "path": str(structure),
+                "confidence_path": str(structure),
+                "writer_path": str(writer_structure),
+                "sha256": "unused",
+                "sample_selection": selection,
+            }}
         },
     }
     first = tmp_path / "first.json"
@@ -85,5 +98,13 @@ def test_exact_structure_paths_deduplicates_one_sweep(tmp_path):
     second.write_text(json.dumps(payload))
 
     found = pose_stability.exact_structure_paths([first, second], "P20809")
+    writer_found = pose_stability.exact_structure_paths(
+        [first, second], "P20809", pose_kind="writer"
+    )
+    selections = pose_stability.exact_sample_selections(
+        [first, second], "P20809"
+    )
 
     assert found == {SEQUENCE: [structure]}
+    assert writer_found == {SEQUENCE: [writer_structure]}
+    assert selections == {SEQUENCE: [selection]}

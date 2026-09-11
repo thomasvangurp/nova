@@ -26,6 +26,14 @@ import time
 import uuid
 from pathlib import Path
 
+import numpy as np
+
+from nanobody_opt.diffusion_sample_selection import (
+    ANALYZE_CONFIDENCE_METRICS,
+    SCORER_PROTOCOL,
+    select_diffusion_samples,
+)
+
 
 # Every subnet_config key BoltzgenWrapper reads, enumerated from its source:
 #   grep -oE "subnet_config\['[a-z_]+'\]" boltzgen_wrapper.py | sort -u
@@ -103,8 +111,8 @@ def _copy_refolded_complexes(
     chunk_dir: str,
     structure_dir: str | None,
     observation_id: str,
-) -> dict[str, dict[str, dict[str, str]]]:
-    """Copy only refolded complexes out of the disposable BoltzGen tree."""
+) -> dict[str, dict[str, dict[str, object]]]:
+    """Retain both validator-selected refolded poses and their provenance."""
     if structure_dir is None:
         return {}
     design_dir = Path(chunk_dir) / "outputs" / "intermediate_designs"
@@ -125,14 +133,45 @@ def _copy_refolded_complexes(
             if row is None:
                 continue
             filename = str(row.get("file_name") or f"{record_id}.cif")
-            source = design_dir / "refold_cif" / filename
-            if not source.is_file():
+            writer_source = design_dir / "refold_cif" / filename
+            analyze_source = design_dir / "refold_analyze_cif" / filename
+            folded_source = design_dir / "fold_out_npz" / f"{record_id}.npz"
+            if not all(path.is_file() for path in (
+                writer_source, analyze_source, folded_source
+            )):
                 continue
-            target_path = destination / f"{sequence_hash}_{target}.cif"
-            shutil.copyfile(source, target_path)
+            with np.load(folded_source) as folded:
+                selection = select_diffusion_samples(folded)
+                for metric in ANALYZE_CONFIDENCE_METRICS:
+                    if metric not in row or metric not in folded:
+                        raise ValueError(
+                            f"aggregate analysis lacks {metric} sample provenance"
+                        )
+                    reported = float(row[metric])
+                    selected = float(
+                        np.asarray(folded[metric]).reshape(-1)[
+                            selection.analyze_sample_index
+                        ]
+                    )
+                    if not np.isclose(reported, selected, rtol=1e-6, atol=1e-7):
+                        raise ValueError(
+                            f"aggregate {metric}={reported} does not match "
+                            f"analyze sample {selection.analyze_sample_index}={selected}"
+                        )
+            confidence_path = destination / f"{sequence_hash}_{target}.cif"
+            writer_path = destination / f"{sequence_hash}_{target}_writer.cif"
+            shutil.copyfile(analyze_source, confidence_path)
+            shutil.copyfile(writer_source, writer_path)
             copied.setdefault(sequence, {})[target] = {
-                "path": str(target_path),
-                "sha256": _sha256(target_path),
+                # Backward-compatible path now deliberately means the pose
+                # selected by analyze_utils for the reported confidence metrics.
+                "path": str(confidence_path),
+                "sha256": _sha256(confidence_path),
+                "confidence_path": str(confidence_path),
+                "confidence_sha256": _sha256(confidence_path),
+                "writer_path": str(writer_path),
+                "writer_sha256": _sha256(writer_path),
+                "sample_selection": selection.as_record(),
             }
     return copied
 
@@ -315,6 +354,7 @@ def main():
             f"{len(merged_structures)}. Refusing to write an incomplete result."
         )
     json.dump({"target": a.target, "n": len(seqs), "wall_seconds": wall,
+               "scorer_protocol": SCORER_PROTOCOL,
                "observation_id": observation_id,
                "diagnostic_seed": a.diagnostic_seed,
                "predict_batch_size": a.batch_size,

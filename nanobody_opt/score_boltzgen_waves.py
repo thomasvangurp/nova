@@ -18,6 +18,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
+
 
 def _sequences(path: Path) -> list[str]:
     raw = json.loads(path.read_text())
@@ -75,9 +77,31 @@ def _validated_wave(
         )
     if int(payload.get("n", -1)) != len(expected):
         raise ValueError("wave result count does not match its input")
+    if payload.get("scorer_protocol") != SCORER_PROTOCOL:
+        raise ValueError("wave predates validator dual-sample fidelity")
     if require_structures and set(payload.get("structures", {})) != set(expected):
         raise ValueError("wave result lacks required retained structures")
+    if require_structures:
+        for sequence in expected:
+            record = payload["structures"][sequence].get(target, {})
+            if not all(record.get(key) for key in (
+                "path", "writer_path", "sample_selection"
+            )):
+                raise ValueError(
+                    f"wave result lacks dual-sample structures for {sequence}"
+                )
     return payload
+
+
+def _archive_legacy_wave(path: Path) -> Path:
+    """Preserve, but never resume, an output from the old scoring protocol."""
+    archived = path.with_name(f"{path.stem}.legacy-pre-dual-sample.json")
+    if archived.exists():
+        archived = path.with_name(
+            f"{path.stem}.legacy-pre-dual-sample-{uuid.uuid4().hex}.json"
+        )
+    os.replace(path, archived)
+    return archived
 
 
 def _sha256(path: Path) -> str:
@@ -151,11 +175,20 @@ def main() -> None:
         _atomic_json(wave_input, {"target": args.target, "sequences": wave})
 
         if wave_output.exists():
-            payload = _validated_wave(
-                wave_output, wave, args.target, args.capture_structures
-            )
-            action = "RESUMED"
-        else:
+            try:
+                payload = _validated_wave(
+                    wave_output, wave, args.target, args.capture_structures
+                )
+            except ValueError as error:
+                archived = _archive_legacy_wave(wave_output)
+                print(
+                    f"WAVE_PROTOCOL_REFRESH {wave_index}: {error}; "
+                    f"preserved={archived}",
+                    flush=True,
+                )
+            else:
+                action = "RESUMED"
+        if not wave_output.exists():
             temporary_output = args.output_dir / f".{stem}_exact.incomplete.json"
             try:
                 temporary_output.unlink()
@@ -233,6 +266,7 @@ def main() -> None:
         args.output_dir / "exact_all.json",
         {
             "target": args.target,
+            "scorer_protocol": SCORER_PROTOCOL,
             "observation_id": observation_id,
             "n": len(sequences),
             "wave_count": len(completed),
