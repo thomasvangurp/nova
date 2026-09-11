@@ -258,6 +258,11 @@ def _run_iteration(
     remaining_blocks = int(state["epoch_length"]) - (
         int(state["block"]) % int(state["epoch_length"])
     )
+    # A non-closing generation stops screening at the same boundary and then
+    # exits immediately, because two-stage mode spends no budget on greedy
+    # per-tranche repeats.  The closing generation therefore starts with the
+    # whole reserve intact, which is what makes room for enough rounds to reach
+    # the observation count strict qualification requires.
     closing = remaining_blocks <= args.replication_reserve_blocks + args.reserve_blocks
     replication_rounds = args.replication_rounds if closing else 0
     print(
@@ -292,6 +297,7 @@ def _run_iteration(
         "--qualification-observations", str(args.qualification_observations),
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
+        "--two-stage", str(1 if args.replication_rounds else 0),
         "--replication-rounds", str(replication_rounds),
         "--pooled-exact-root", str(producer_root),
         "--replication-reserve-blocks", str(args.replication_reserve_blocks),

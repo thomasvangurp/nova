@@ -571,3 +571,39 @@ def test_pooled_exact_paths_are_inert_without_a_root(tmp_path):
     local = [tmp_path / "exact_all.json"]
 
     assert race._pooled_exact_paths(local, None, tmp_path) == local
+
+
+def test_two_stage_mode_is_independent_of_the_round_count():
+    # A generation that is not the closing one runs zero rounds, and must not
+    # fall back to greedy per-tranche repeats with a shortlist-sized finalist
+    # budget -- that is what consumed the epochs that went unscored.
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--two-stage", type=int, default=0)
+    parser.add_argument("--replication-rounds", type=int, default=0)
+
+    early = parser.parse_args(["--two-stage", "1", "--replication-rounds", "0"])
+    closing = parser.parse_args(["--two-stage", "1", "--replication-rounds", "12"])
+
+    assert bool(early.two_stage or early.replication_rounds)
+    assert bool(closing.two_stage or closing.replication_rounds)
+
+
+def test_closing_window_must_fit_the_observations_qualification_needs():
+    # 12 rounds at ~76s is 76 blocks, plus generation and IgBLAST for the
+    # closing generation; 104 blocks covers both before the 55-block
+    # commitment reserve.
+    round_seconds, block_seconds, generation_blocks = 76.0, 12.0, 13
+    minimum_observations = 8
+
+    def observations(entered_with_blocks, commitment=55):
+        usable = entered_with_blocks - commitment - generation_blocks
+        return 1 + max(usable, 0) * block_seconds / round_seconds
+
+    # generations run back to back, so the closing one is entered at whatever
+    # boundary the previous generation stopped screening at -- not at the top
+    # of the window.  Entered late, it cannot reach eight observations.
+    assert observations(110) < minimum_observations
+    # entered at the corrected 104-block reserve it comfortably can
+    assert observations(104 + 55) >= minimum_observations

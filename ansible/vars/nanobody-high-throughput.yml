@@ -71,7 +71,12 @@ nanobody_replication_rounds: 12
 # 95 blocks before the commitment reserve.  Without this, a long screen consumes
 # the epoch and every candidate is published on a single observation -- the
 # exact failure the shortlist exists to prevent.
-nanobody_replication_reserve_blocks: 95
+# Twelve rounds over sixty candidates is 76 blocks of GPU work, and the closing
+# generation pays proposal generation and IgBLAST first.  Reserve 104 blocks so
+# it can actually finish thirteen observations per finalist -- strict
+# qualification needs eight, and a closing window that falls short publishes
+# nothing at all, which is how epochs 25056-25058 went unscored.
+nanobody_replication_reserve_blocks: 104
 
 # Full TNP costs about 21 CPU-seconds per uncached sequence: 2,400 novel
 # candidates would be far more than an epoch.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at

@@ -992,6 +992,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--minimum-publishable-observations",
+        type=int,
+        default=8,
+        help=(
+            "observations strict qualification needs; a closing window that "
+            "cannot reach this publishes nothing at all, so it is reported"
+        ),
+    )
+    parser.add_argument(
         "--replication-reserve-blocks",
         type=int,
         default=0,
@@ -1009,6 +1018,17 @@ def main() -> None:
             "JSON object of re-derived strict qualification thresholds by flag "
             "name; these are calibrated per scorer, so a replacement scorer "
             "must not inherit the production scorer's values"
+        ),
+    )
+    parser.add_argument(
+        "--two-stage",
+        type=int,
+        default=0,
+        help=(
+            "disable the per-tranche greedy finalist repeats; the shortlist is "
+            "replicated once instead.  Independent of --replication-rounds so a "
+            "generation that is not the closing one does not silently fall back "
+            "to greedy repeats with a shortlist-sized finalist budget"
         ),
     )
     parser.add_argument(
@@ -1239,7 +1259,7 @@ def main() -> None:
             f"candidates={len(job.tranche)}",
             flush=True,
         )
-        if args.replication_rounds:
+        if args.two_stage or args.replication_rounds:
             # Two-stage mode: the whole shortlist is replicated after screening,
             # so no repeat budget is spent on a per-tranche leader.
             continue
@@ -1407,6 +1427,15 @@ def main() -> None:
             predict_batch_size=args.screen_predict_batch_size,
             timings=timings_path,
         )
+        observations = replication_rounds_completed + 1
+        if observations < args.minimum_publishable_observations:
+            print(
+                "EXACT_REPLICATION_UNDER_QUALIFIED "
+                f"observations={observations} "
+                f"required={args.minimum_publishable_observations}; "
+                "the closing window was too short to confirm a candidate",
+                flush=True,
+            )
         if replication_rounds_completed:
             output = args.output_dir / "qualified_after_rounds.json"
             if _try_strict_rank(
