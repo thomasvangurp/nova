@@ -1,0 +1,53 @@
+{
+  "protocol": "leakage-free production-generator replay on the final 20 completed API epochs",
+  "target": "P20809",
+  "holdout_epoch_range": [25015, 25034],
+  "holdout_epochs": 20,
+  "budget": 320,
+  "proposal_pool_limit": 384,
+  "minimum_residue_support": 1,
+  "parent_layer2_assumption": "historical public parents treated as valid; candidate Layer-2 not replayed",
+  "all_parent_epochs_precede_target": true,
+  "api_snapshot_sha256": "50400f75fab8802a72fe3c2294657c7f727eb65d65186b37133d888f139badbd",
+  "config_sha256": "5de1959df03138513400475a42044f3dfd4678096e461eaacfd0063e4732a45b",
+  "baseline": {
+    "top1_tied_sequences": 22,
+    "top1_generated": 0,
+    "top1_selected": 0,
+    "top5_sequences": 104,
+    "top5_generated": 0,
+    "top5_selected": 0,
+    "top10_sequences": 200,
+    "top10_generated": 3,
+    "top10_selected": 3,
+    "selected_hits": [
+      {"epoch": 25029, "field_rank": 10, "screen_rank": 247, "route": "exhaustive_single_substitution"},
+      {"epoch": 25031, "field_rank": 8, "screen_rank": 320, "route": "c_terminal_single_substitution"},
+      {"epoch": 25033, "field_rank": 7, "screen_rank": 136, "route": "framework_haplotype"}
+    ]
+  },
+  "lineage_v3": {
+    "allocation": "80% proven live route and 20% unique lineage route",
+    "top1_tied_sequences": 22,
+    "top1_generated": 1,
+    "top1_selected": 1,
+    "top5_sequences": 104,
+    "top5_generated": 1,
+    "top5_selected": 1,
+    "top10_sequences": 200,
+    "top10_generated": 3,
+    "top10_selected": 3,
+    "selected_hits": [
+      {"epoch": 25028, "field_rank": 1, "screen_rank": 175, "route": "lineage_terminal_single_substitution"},
+      {"epoch": 25029, "field_rank": 10, "screen_rank": 308, "route": "exhaustive_single_substitution"},
+      {"epoch": 25033, "field_rank": 7, "screen_rank": 169, "route": "framework_haplotype"}
+    ]
+  },
+  "relative_gate": {
+    "top1_recall_improved": true,
+    "top5_recall_improved": true,
+    "top10_recall_not_regressed": true,
+    "generator_failures": 0,
+    "accepted_for_live_canary": true
+  }
+}

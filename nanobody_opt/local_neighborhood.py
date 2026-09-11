@@ -133,10 +133,7 @@ def _winner_records(path: Path | None, length: int) -> list[dict[str, object]]:
     return records
 
 
-def _round_robin_by_parent(proposals: list[dict[str, object]]) -> list[dict[str, object]]:
-    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for proposal in proposals:
-        grouped[str(proposal["parent_sequence"])].append(proposal)
+def _proposal_ranking_key(item: dict[str, object]) -> tuple[object, ...]:
     source_priority = {
         "c_terminal_single_substitution": 0,
         "exhaustive_single_substitution": 0,
@@ -145,27 +142,58 @@ def _round_robin_by_parent(proposals: list[dict[str, object]]) -> list[dict[str,
         "n_terminal_haplotype": 3,
         "framework_single_substitution": 4,
         "framework_haplotype": 5,
+        "lineage_terminal_single_substitution": 1,
+        "lineage_cdr_single_substitution": 1,
+        "lineage_haplotype": 2,
         "whole_cdr_motif": 6,
         "local_substitution": 7,
     }
-    def ranking_key(item: dict[str, object]) -> tuple[object, ...]:
-        return (
-            float(item.get("predecessor_potential_score", math.inf)),
-            float(item.get("predecessor_consensus_score", math.inf)),
-            source_priority.get(str(item.get("proposal_type")), 9),
-            -float(item["proposal_prior_score"]),
-            int(item["edit_distance"]),
-            str(item["sequence"]),
-        )
+    return (
+        float(item.get("predecessor_potential_score", math.inf)),
+        float(item.get("predecessor_consensus_score", math.inf)),
+        float(item.get("parent_selection_score", math.inf)),
+        source_priority.get(str(item.get("proposal_type")), 9),
+        -float(item["proposal_prior_score"]),
+        int(item["edit_distance"]),
+        str(item["sequence"]),
+    )
+
+
+def _deduplicate_proposals(
+    proposals: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep the strongest parent attribution for every proposed sequence.
+
+    A sequence can be reachable from several elite families.  Generation must
+    not reserve it for whichever parent happens to be visited first: that made
+    a discarded per-parent overflow consume the sequence globally and rendered
+    genuine held-out winners unreachable.  Rank all attributions first and
+    deduplicate only after proposal evidence has been computed.
+    """
+    selected: dict[str, dict[str, object]] = {}
+    for proposal in proposals:
+        sequence = str(proposal["sequence"])
+        incumbent = selected.get(sequence)
+        if incumbent is None or _proposal_ranking_key(
+            proposal
+        ) < _proposal_ranking_key(incumbent):
+            selected[sequence] = proposal
+    return list(selected.values())
+
+
+def _round_robin_by_parent(proposals: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for proposal in proposals:
+        grouped[str(proposal["parent_sequence"])].append(proposal)
 
     for parent, items in list(grouped.items()):
         singles = sorted(
             (item for item in items if int(item["edit_distance"]) == 1),
-            key=ranking_key,
+            key=_proposal_ranking_key,
         )
         multi = sorted(
             (item for item in items if int(item["edit_distance"]) > 1),
-            key=ranking_key,
+            key=_proposal_ranking_key,
         )
         interleaved = []
         for index in range(max(len(singles), len(multi))):
@@ -298,6 +326,65 @@ def supported_framework_candidates(
     return list(candidates.items())
 
 
+def supported_lineage_candidates(
+    parent: str,
+    *,
+    allowed: list[list[str]],
+    background_sequences: list[str],
+    cdr_positions: set[int],
+    protected: set[int],
+    terminal_width: int = 17,
+    maximum_haplotype_mutations: int = 6,
+) -> list[tuple[str, str]]:
+    """Enumerate the complete supported terminal/CDR lineage grammar.
+
+    Singles cover every historically observed residue at every mutable CDR and
+    terminal position.  Haplotype proposals preserve combinations that were
+    observed together in a historical sequence, including combinations that
+    span the N terminus, a CDR, and the C terminus.  The former framework lane
+    considered those regions separately, which made mixed lineage descendants
+    unreachable even when every constituent residue was already observed.
+    """
+    length = len(parent)
+    if len(allowed) != length:
+        raise ValueError("allowed residue table has the wrong length")
+    if terminal_width < 1 or maximum_haplotype_mutations < 2:
+        raise ValueError("invalid lineage haplotype configuration")
+    terminal = set(range(min(10, length))) | set(
+        range(max(0, length - terminal_width), length)
+    )
+    mutable = (terminal | cdr_positions) - protected
+    candidates: dict[str, str] = {}
+
+    for position in sorted(mutable):
+        source = (
+            "lineage_cdr_single_substitution"
+            if position in cdr_positions
+            else "lineage_terminal_single_substitution"
+        )
+        for residue in allowed[position]:
+            if residue == parent[position]:
+                continue
+            candidate = parent[:position] + residue + parent[position + 1 :]
+            candidates.setdefault(candidate, source)
+
+    for donor in background_sequences:
+        if len(donor) != length:
+            continue
+        changes = [
+            position
+            for position in sorted(mutable)
+            if donor[position] != parent[position]
+        ]
+        if not 2 <= len(changes) <= maximum_haplotype_mutations:
+            continue
+        candidate = list(parent)
+        for position in changes:
+            candidate[position] = donor[position]
+        candidates.setdefault("".join(candidate), "lineage_haplotype")
+    return list(candidates.items())
+
+
 def balanced_proposal_order(
     core: list[dict[str, object]],
     framework: list[dict[str, object]],
@@ -322,6 +409,76 @@ def balanced_proposal_order(
             selected.append(framework_selected[index])
     used = {str(item["sequence"]) for item in selected}
     for item in [*core_remaining, *framework_remaining]:
+        sequence = str(item["sequence"])
+        if sequence in used:
+            continue
+        selected.append(item)
+        used.add(sequence)
+        if len(selected) >= limit:
+            break
+    for priority, item in enumerate(selected[:limit], start=1):
+        item["screen_priority"] = priority
+    return selected[:limit]
+
+
+def interleave_novel_lane(
+    primary: list[dict[str, object]],
+    novel: list[dict[str, object]],
+    *,
+    limit: int,
+    novel_fraction: float,
+) -> list[dict[str, object]]:
+    """Add a bounded discovery lane without replacing the proven primary head."""
+    if limit < 1 or not 0 <= novel_fraction <= 1:
+        raise ValueError("invalid novel-lane allocation")
+    novel_limit = round(limit * novel_fraction)
+    primary_limit = limit - novel_limit
+    primary_selected = primary[:primary_limit]
+    primary_sequences = {str(item["sequence"]) for item in primary}
+    unique_novel = [
+        item for item in novel
+        if str(item["sequence"]) not in primary_sequences
+    ]
+    novel_selected = unique_novel[:novel_limit]
+    primary_remaining = primary[primary_limit:]
+    novel_remaining = unique_novel[novel_limit:]
+    selected: list[dict[str, object]] = []
+    used: set[str] = set()
+    primary_index = 0
+    novel_index = 0
+    novel_count = 0
+    for position in range(1, limit + 1):
+        desired_novel = math.floor(position * novel_fraction)
+        choose_novel = novel_count < desired_novel
+        sources = (
+            ((novel_selected, "novel"), (primary_selected, "primary"))
+            if choose_novel
+            else ((primary_selected, "primary"), (novel_selected, "novel"))
+        )
+        appended = False
+        for rows, lane in sources:
+            index = novel_index if lane == "novel" else primary_index
+            while index < len(rows) and str(rows[index]["sequence"]) in used:
+                index += 1
+            if lane == "novel":
+                novel_index = index
+            else:
+                primary_index = index
+            if index >= len(rows):
+                continue
+            item = rows[index]
+            selected.append(item)
+            used.add(str(item["sequence"]))
+            if lane == "novel":
+                novel_index += 1
+                novel_count += 1
+            else:
+                primary_index += 1
+            appended = True
+            break
+        if not appended:
+            break
+    for item in [*primary_remaining, *novel_remaining]:
         sequence = str(item["sequence"])
         if sequence in used:
             continue
@@ -369,11 +526,25 @@ def main() -> None:
         help="Layer-2 oversubscribed pool before the 320-candidate exact cutoff",
     )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--lineage-fraction",
+        type=float,
+        default=0.2,
+        help="bounded share reserved for the broader terminal/CDR lineage grammar",
+    )
     parser.add_argument("--framework-per-seed", type=int, default=64)
     parser.add_argument("--terminal-width", type=int, default=17)
     parser.add_argument("--maximum-terminal-haplotype-mutations", type=int, default=6)
     parser.add_argument("--donor-count", type=int, default=100)
-    parser.add_argument("--min-support", type=int, default=2)
+    parser.add_argument(
+        "--min-support",
+        type=int,
+        default=1,
+        help=(
+            "minimum historical residue observations; one preserves rare "
+            "lineage mutations while the graph ranker controls allocation"
+        ),
+    )
     parser.add_argument("--min-mutations", type=int, default=1)
     parser.add_argument("--max-mutations", type=int, default=3)
     parser.add_argument(
@@ -421,6 +592,8 @@ def main() -> None:
         parser.error("--single-mutation-fraction must be between zero and one")
     if not 0 <= args.framework_fraction <= 1:
         parser.error("--framework-fraction must be between zero and one")
+    if not 0 <= args.lineage_fraction <= 1:
+        parser.error("--lineage-fraction must be between zero and one")
     if args.maximum_motif_mutations < 1:
         parser.error("--maximum-motif-mutations must be positive")
     for name in (
@@ -571,8 +744,10 @@ def main() -> None:
             raise SystemExit(f"exclude file has no sequence column: {path}")
         existing.update(excluded.sequence.dropna().astype(str).str.strip().str.upper())
     seen: set[str] = set()
+    lineage_attributions: set[tuple[str, str, str]] = set()
     core_proposals: list[dict[str, object]] = []
     framework_proposals: list[dict[str, object]] = []
+    lineage_proposals: list[dict[str, object]] = []
     exhaustive_single_count = 0
     rng = np.random.default_rng(args.random_seed)
 
@@ -582,6 +757,8 @@ def main() -> None:
         source: str,
         proposal_lane: str,
         destination: list[dict[str, object]],
+        *,
+        allow_seen_sequence: bool = False,
     ) -> bool:
         (
             parent_score,
@@ -591,7 +768,14 @@ def main() -> None:
             protected,
             parent_lane,
         ) = parent_record
-        if candidate in existing or candidate in seen:
+        attribution = (parent, candidate, proposal_lane)
+        if (
+            candidate in existing
+            or (
+                attribution in lineage_attributions
+                if allow_seen_sequence else candidate in seen
+            )
+        ):
             return False
         failures = gates.check_sequence(candidate, requirements)
         if failures:
@@ -620,7 +804,10 @@ def main() -> None:
             candidate,
             contact_positions=protected,
         )
-        seen.add(candidate)
+        if allow_seen_sequence:
+            lineage_attributions.add(attribution)
+        else:
+            seen.add(candidate)
         destination.append({
             "sequence": candidate,
             "parent_sequence": parent,
@@ -834,11 +1021,74 @@ def main() -> None:
             ):
                 accepted += 1
 
-    proposals = balanced_proposal_order(
+    for parent_record in seeds:
+        parent = parent_record[1]
+        protected = parent_record[4]
+        regions = find_regions(parent)
+        candidates = supported_lineage_candidates(
+            parent,
+            allowed=framework_allowed,
+            background_sequences=background_sequences,
+            cdr_positions=set(regions.cdr_positions()),
+            protected=protected,
+            terminal_width=args.terminal_width,
+            maximum_haplotype_mutations=(
+                args.maximum_terminal_haplotype_mutations
+            ),
+        )
+        parent_proposals: list[dict[str, object]] = []
+        for candidate, source in candidates:
+            add_candidate(
+                parent_record,
+                candidate,
+                source,
+                "lineage",
+                parent_proposals,
+                allow_seen_sequence=True,
+            )
+        parent_proposals = _deduplicate_proposals(parent_proposals)
+        singles = sorted(
+            (
+                item for item in parent_proposals
+                if int(item["edit_distance"]) == 1
+            ),
+            key=_proposal_ranking_key,
+        )
+        haplotypes = sorted(
+            (
+                item for item in parent_proposals
+                if int(item["edit_distance"]) > 1
+            ),
+            key=_proposal_ranking_key,
+        )
+        lane_limit = args.framework_per_seed // 2
+        selected_counts = {"single": 0, "haplotype": 0}
+        leftovers: list[dict[str, object]] = []
+        for lane, items in (("single", singles), ("haplotype", haplotypes)):
+            for item in items:
+                if selected_counts[lane] >= lane_limit:
+                    leftovers.append(item)
+                    continue
+                lineage_proposals.append(item)
+                selected_counts[lane] += 1
+        accepted = sum(selected_counts.values())
+        for item in sorted(leftovers, key=_proposal_ranking_key):
+            if accepted >= args.framework_per_seed:
+                break
+            lineage_proposals.append(item)
+            accepted += 1
+
+    baseline_proposals = balanced_proposal_order(
         _round_robin_by_parent(core_proposals),
         _round_robin_by_parent(framework_proposals),
         limit=args.proposal_limit,
         framework_fraction=args.framework_fraction,
+    )
+    proposals = interleave_novel_lane(
+        baseline_proposals,
+        _round_robin_by_parent(_deduplicate_proposals(lineage_proposals)),
+        limit=args.proposal_limit,
+        novel_fraction=args.lineage_fraction,
     )
     output = pd.DataFrame(proposals)
     args.output.parent.mkdir(parents=True, exist_ok=True)

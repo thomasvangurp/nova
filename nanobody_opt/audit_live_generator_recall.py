@@ -254,7 +254,7 @@ def main() -> None:
     parser.add_argument("--holdout-epochs", type=int, default=20)
     parser.add_argument("--budget", type=int, default=320)
     parser.add_argument("--proposal-pool-limit", type=int, default=384)
-    parser.add_argument("--minimum-residue-support", type=int, default=2)
+    parser.add_argument("--minimum-residue-support", type=int, default=1)
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
     if min(
