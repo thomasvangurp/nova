@@ -1,6 +1,8 @@
 import json
+from collections import Counter
 
 from nanobody_opt import sequential_exact_race as race
+from nanobody_opt.mutation_network import load_lineage_edges
 
 
 def test_candidate_major_repeats_use_one_isolated_gpu_process_each(
@@ -69,6 +71,53 @@ def test_screen_budget_is_split_into_publishable_twenty_candidate_tranches():
     assert [item for batch in batches for item in batch] == sequences
 
 
+def test_next_screen_tranche_balances_actual_parent_counts():
+    pending = ["AAAA", "AAAC", "CCCC", "CCCA"]
+    metadata = {
+        "AAAA": {"parent_sequence": "AAAT"},
+        "AAAC": {"parent_sequence": "AAAT"},
+        "CCCC": {"parent_sequence": "CCCT"},
+        "CCCA": {"parent_sequence": "CCCT"},
+    }
+
+    selected = race._balanced_screen_tranche(
+        pending,
+        metadata,
+        Counter({"AAAT": 2, "CCCT": 0}),
+        3,
+    )
+
+    assert selected == ["CCCC", "CCCA", "AAAA"]
+
+
+def test_balanced_screen_preserves_priority_without_parent_metadata():
+    assert race._balanced_screen_tranche(
+        ["AAAA", "CCCC", "DDDD"], {}, Counter(), 2
+    ) == ["AAAA", "CCCC"]
+
+
+def test_completed_screen_tranche_resumes_its_original_candidates(tmp_path):
+    source = tmp_path / "candidates.json"
+    source.write_text(json.dumps({"sequences": ["AAAA", "AAAC"]}))
+    completed = tmp_path / "exact_all.json"
+    completed.write_text("{}")
+
+    selected = race._resumable_screen_tranche(
+        ["AAAA", "AAAC", "CCCC"],
+        {
+            "AAAA": {"parent_sequence": "AAAT"},
+            "AAAC": {"parent_sequence": "AAAT"},
+            "CCCC": {"parent_sequence": "CCCT"},
+        },
+        Counter(),
+        2,
+        source=source,
+        completed=completed,
+    )
+
+    assert selected == ["AAAA", "AAAC"]
+
+
 def test_screen_tranche_loads_each_gpu_pipeline_only_once():
     assert race._screen_execution_shape(20, 10) == (20, 2)
     assert race._screen_execution_shape(7, 10) == (7, 1)
@@ -93,6 +142,35 @@ def test_adaptive_challenger_only_spends_repeat_wave_inside_margin():
     assert not race._challenger_can_overtake(
         screen_p90=105.1, incumbent_p90=85.0, margin=20.0
     )
+
+
+def test_initial_repeat_requires_strict_candidate_or_one_explicit_fallback():
+    candidates = {
+        "WEAK": {"score_p90": 121.0},
+        "STRONG": {"score_p90": 84.0},
+    }
+
+    assert race._initial_repeat_candidate(
+        ["WEAK", "STRONG"],
+        candidates,
+        repeated=set(),
+        maximum_screen_p90=90.0,
+        allow_weak_fallback=False,
+    ) == ("STRONG", False)
+    assert race._initial_repeat_candidate(
+        ["WEAK"],
+        candidates,
+        repeated=set(),
+        maximum_screen_p90=90.0,
+        allow_weak_fallback=False,
+    ) is None
+    assert race._initial_repeat_candidate(
+        ["WEAK"],
+        candidates,
+        repeated=set(),
+        maximum_screen_p90=90.0,
+        allow_weak_fallback=True,
+    ) == ("WEAK", True)
 
 
 def test_best_confirmed_p90_uses_best_candidate_not_file_order(tmp_path):
@@ -120,3 +198,46 @@ def test_provisional_tranche_ranking_skips_slow_pose_and_api_replay(tmp_path):
     assert "--pose-config" not in command
     assert "--api-field-count" not in command
     assert command[command.index("--selection-order") + 1] == "p90"
+
+
+def test_screen_ranking_persists_true_proposal_lineage(tmp_path):
+    ranking = tmp_path / "ranking.json"
+    ranking.write_text(json.dumps({"candidates": [{
+        "sequence": "AAAC",
+        "selection_score": 54.0,
+        "observation_count": 1,
+        "score_median": 50.0,
+        "score_p90": 54.0,
+        "metrics": {},
+    }]}))
+    database = tmp_path / "mutation.sqlite"
+
+    race._store_ranking(
+        database,
+        ranking,
+        epoch=25045,
+        target="P20809",
+        source="live_exact_screen",
+        candidate_metadata={"AAAC": {
+            "parent_sequence": "AAAA",
+            "proposal_type": "lineage_terminal_single_substitution",
+            "mutations": "A4C",
+            "proposal_lane": "lineage",
+            "screen_priority": 17,
+        }},
+    )
+
+    assert load_lineage_edges(database, target="P20809") == [{
+        "parent_sequence": "AAAA",
+        "sequence": "AAAC",
+        "epoch": 25045,
+        "source": "live_exact_screen",
+        "proposal_type": "lineage_terminal_single_substitution",
+        "mutations": ["A4C"],
+        "metadata": {
+            "proposal_lane": "lineage",
+            "score_median": 50.0,
+            "score_p90": 54.0,
+            "screen_priority": 17,
+        },
+    }]

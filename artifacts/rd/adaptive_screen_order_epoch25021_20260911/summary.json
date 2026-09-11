@@ -1,0 +1,95 @@
+{
+  "candidate_count": 320,
+  "parent_count": 9,
+  "protocol": {
+    "tranche_size": 20,
+    "high_scorer_definition": "best 10% by bootstrap validator rank",
+    "baseline": "fixed proposal order",
+    "adaptive": "rebuild pending queue after every tranche and select the least-screened parent, preserving proposal order for ties",
+    "graph_score_policy": "no total-score neighbour pruning: saved exact graph evidence is too weak for safe elimination"
+  },
+  "inputs": {
+    "proposals": {
+      "path": "/Users/tvgdeena/nova-submit/P20809_nanobody_live_epoch25021/local_neighborhood_round2.csv",
+      "sha256": "d00bf91a2ab78be38d7dd5429de92c7e64333a848d145ceaca4075c2674bc561"
+    },
+    "outcomes": {
+      "path": "artifacts/rd/adaptive_graph_replay_epoch25021_20260911/scored_candidates.csv",
+      "sha256": "71c9f5b40ba9dd672edc347a3f28b07bedabf359a731d27e26d10c225fa03847"
+    }
+  },
+  "fixed_order": {
+    "20": {
+      "best_bootstrap_rank": 12,
+      "top_10_count": 0,
+      "top_10pct_count": 1,
+      "top_10pct_recall": 0.03125,
+      "distinct_parents": 2
+    },
+    "40": {
+      "best_bootstrap_rank": 3,
+      "top_10_count": 1,
+      "top_10pct_count": 2,
+      "top_10pct_recall": 0.0625,
+      "distinct_parents": 3
+    },
+    "80": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 2,
+      "top_10pct_count": 4,
+      "top_10pct_recall": 0.125,
+      "distinct_parents": 4
+    },
+    "160": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 4,
+      "top_10pct_count": 15,
+      "top_10pct_recall": 0.46875,
+      "distinct_parents": 6
+    },
+    "320": {
+      "best_bootstrap_rank": 1,
+      "top_10_count": 11,
+      "top_10pct_count": 32,
+      "top_10pct_recall": 1.0,
+      "distinct_parents": 9
+    }
+  },
+  "parent_balanced": {
+    "20": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 1,
+      "top_10pct_count": 2,
+      "top_10pct_recall": 0.0625,
+      "distinct_parents": 9
+    },
+    "40": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 3,
+      "top_10pct_count": 5,
+      "top_10pct_recall": 0.15625,
+      "distinct_parents": 9
+    },
+    "80": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 4,
+      "top_10pct_count": 9,
+      "top_10pct_recall": 0.28125,
+      "distinct_parents": 9
+    },
+    "160": {
+      "best_bootstrap_rank": 2,
+      "top_10_count": 8,
+      "top_10pct_count": 18,
+      "top_10pct_recall": 0.5625,
+      "distinct_parents": 9
+    },
+    "320": {
+      "best_bootstrap_rank": 1,
+      "top_10_count": 11,
+      "top_10pct_count": 32,
+      "top_10pct_recall": 1.0,
+      "distinct_parents": 9
+    }
+  }
+}

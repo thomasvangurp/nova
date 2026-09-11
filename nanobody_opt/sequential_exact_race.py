@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ def _atomic_json(path: Path, payload: Any) -> None:
         raise
 
 
-def _candidate_sequences(path: Path, limit: int) -> list[str]:
+def _candidate_records(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text())
     items = payload if isinstance(payload, list) else (
         payload.get("candidates") or payload.get("sequences") or []
@@ -73,20 +74,131 @@ def _candidate_sequences(path: Path, limit: int) -> list[str]:
             if item.get("proposal_type") == "exhaustive_single_substitution"
             else 1
         ))
-    sequences = []
+    records = []
+    seen: set[str] = set()
     for item in items:
         if isinstance(item, dict) and item.get("layer2_passed") is False:
             continue
         sequence = item.get("sequence") if isinstance(item, dict) else item
         if isinstance(sequence, str) and sequence.strip():
-            sequences.append(sequence.strip().upper())
-    return list(dict.fromkeys(sequences))[:limit]
+            normalized = sequence.strip().upper()
+            if normalized in seen:
+                continue
+            record = dict(item) if isinstance(item, dict) else {}
+            record["sequence"] = normalized
+            records.append(record)
+            seen.add(normalized)
+    return records
+
+
+def _candidate_sequences(path: Path, limit: int) -> list[str]:
+    return [
+        str(record["sequence"])
+        for record in _candidate_records(path)[:limit]
+    ]
 
 
 def _batches(items: list[str], size: int) -> list[list[str]]:
     if size < 1:
         raise ValueError("batch size must be positive")
     return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def _balanced_screen_tranche(
+    pending: list[str],
+    metadata: dict[str, dict[str, Any]],
+    screened_parent_counts: Counter[str],
+    size: int,
+) -> list[str]:
+    """Select the next tranche without oversampling one parent family.
+
+    The proposal generator normally interleaves parents already.  This second
+    guard rebuilds the queue after every completed tranche, so a Layer-2 pass
+    imbalance or an older grouped proposal file cannot spend most of the exact
+    budget on one family.  It deliberately does not use neighbour total scores:
+    the exact replay shows that binding/interaction outcomes are not smooth
+    enough for graph-based arm elimination.
+    """
+    if size < 1:
+        raise ValueError("tranche size must be positive")
+    if not pending:
+        return []
+    if not any(
+        str(metadata.get(sequence, {}).get("parent_sequence") or "").strip()
+        for sequence in pending
+    ):
+        return pending[:size]
+
+    available = list(enumerate(pending))
+    counts = Counter(screened_parent_counts)
+    selected: list[str] = []
+    while available and len(selected) < size:
+        choice = min(
+            range(len(available)),
+            key=lambda index: (
+                counts[
+                    str(
+                        metadata.get(available[index][1], {}).get("parent_sequence")
+                        or "__unattributed__"
+                    )
+                ],
+                available[index][0],
+            ),
+        )
+        _, sequence = available.pop(choice)
+        parent = str(
+            metadata.get(sequence, {}).get("parent_sequence") or "__unattributed__"
+        )
+        selected.append(sequence)
+        counts[parent] += 1
+    return selected
+
+
+def _resumable_screen_tranche(
+    pending: list[str],
+    metadata: dict[str, dict[str, Any]],
+    screened_parent_counts: Counter[str],
+    size: int,
+    *,
+    source: Path,
+    completed: Path,
+) -> list[str]:
+    """Preserve the actual candidate list of an already completed tranche."""
+    if not completed.is_file():
+        return _balanced_screen_tranche(
+            pending, metadata, screened_parent_counts, size
+        )
+    if not source.is_file():
+        raise ValueError(f"completed tranche lacks its candidate source: {source}")
+    sequences = _candidate_sequences(source, size)
+    if not sequences or any(sequence not in pending for sequence in sequences):
+        raise ValueError(f"completed tranche source is inconsistent: {source}")
+    return sequences
+
+
+def _initial_repeat_candidate(
+    ranked_sequences: list[str],
+    candidates: dict[str, dict[str, Any]],
+    *,
+    repeated: set[str],
+    maximum_screen_p90: float,
+    allow_weak_fallback: bool,
+) -> tuple[str, bool] | None:
+    """Choose a strong one-shot candidate, or one bounded fallback candidate.
+
+    A strict finalist may have at most a 90 p90 rank sum.  Repeating every first
+    tranche leader above that ceiling consumed most of the early epoch without
+    producing a qualified checkpoint.  Strong candidates remain immediately
+    eligible; after enough screening, callers may authorize exactly one weak
+    fallback to preserve a chance of first publication.
+    """
+    unseen = [sequence for sequence in ranked_sequences if sequence not in repeated]
+    for sequence in unseen:
+        if float(candidates[sequence]["score_p90"]) <= maximum_screen_p90:
+            return sequence, False
+    if allow_weak_fallback and unseen:
+        return unseen[0], True
+    return None
 
 
 def _screen_execution_shape(candidate_count: int, gpu_count: int) -> tuple[int, int]:
@@ -315,18 +427,37 @@ def _store_ranking(
     epoch: int,
     target: str,
     source: str,
+    candidate_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     if database is None or not ranking.is_file():
         return
     try:
+        observations = ranking_observations(
+            ranking,
+            epoch=epoch,
+            target=target,
+            source=source,
+        )
+        for observation in observations:
+            metadata = (candidate_metadata or {}).get(str(observation["sequence"]), {})
+            observation.update(
+                {
+                    key: metadata[key]
+                    for key in (
+                        "parent_sequence",
+                        "proposal_type",
+                        "mutations",
+                        "proposal_lane",
+                        "parent_selection_lane",
+                        "parent_selection_score",
+                        "screen_priority",
+                    )
+                    if metadata.get(key) is not None
+                }
+            )
         count = update_observation_store(
             database,
-            ranking_observations(
-                ranking,
-                epoch=epoch,
-                target=target,
-                source=source,
-            ),
+            observations,
         )
     except Exception as error:
         # Historical learning must never suppress a publishable result.
@@ -377,6 +508,24 @@ def main() -> None:
             "screen p90 is within this rank-sum margin of the incumbent"
         ),
     )
+    parser.add_argument(
+        "--maximum-initial-screen-p90",
+        type=float,
+        default=90.0,
+        help=(
+            "immediately repeat an initial candidate only when its one-shot "
+            "p90 is at or below this strict qualification ceiling"
+        ),
+    )
+    parser.add_argument(
+        "--weak-initial-fallback-after",
+        type=int,
+        default=80,
+        help=(
+            "after screening this many candidates, permit one initial repeat "
+            "above the p90 ceiling so first publication remains possible"
+        ),
+    )
     parser.add_argument("--qualification-observations", type=int, default=8)
     args = parser.parse_args()
     if not 1 <= args.finalists <= args.candidate_limit:
@@ -387,10 +536,18 @@ def main() -> None:
         parser.error("qualification requires at least eight observations")
     if args.challenger_p90_margin < 0:
         parser.error("--challenger-p90-margin cannot be negative")
+    if args.maximum_initial_screen_p90 < 0:
+        parser.error("--maximum-initial-screen-p90 cannot be negative")
+    if args.weak_initial_fallback_after < 1:
+        parser.error("--weak-initial-fallback-after must be positive")
     gpus = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
     if not gpus:
         parser.error("at least one GPU is required")
-    sequences = _candidate_sequences(args.layer2, args.candidate_limit)
+    candidate_records = _candidate_records(args.layer2)[: args.candidate_limit]
+    sequences = [str(record["sequence"]) for record in candidate_records]
+    candidate_metadata = {
+        str(record["sequence"]): record for record in candidate_records
+    }
     if not sequences:
         raise SystemExit("Layer-2 input has no passing candidates")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -406,17 +563,38 @@ def main() -> None:
     qualified_outputs: list[Path] = []
     repeated_finalists: list[str] = []
     skipped_finalists: list[str] = []
+    deferred_weak_leaders: list[str] = []
     incumbent_p90: float | None = None
+    weak_initial_fallback_spent = False
+    screened_parent_counts: Counter[str] = Counter()
     screened = 0
-    for tranche_index, tranche in enumerate(
-        _batches(sequences, args.screen_tranche_size), start=1
-    ):
+    pending = list(sequences)
+    tranche_index = 0
+    while pending:
         if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
             print("EXACT_RACE_RESERVE_REACHED before next screen tranche", flush=True)
             break
+        tranche_index += 1
         tranche_root = args.output_dir / "screen" / f"tranche_{tranche_index:02d}"
         source = tranche_root / "candidates.json"
-        _atomic_json(source, {"target": args.target, "sequences": tranche})
+        completed = tranche_root / "exact_all.json"
+        tranche = _resumable_screen_tranche(
+            pending,
+            candidate_metadata,
+            screened_parent_counts,
+            args.screen_tranche_size,
+            source=source,
+            completed=completed,
+        )
+        if not completed.is_file():
+            _atomic_json(source, {"target": args.target, "sequences": tranche})
+        for sequence in tranche:
+            pending.remove(sequence)
+            parent = str(
+                candidate_metadata.get(sequence, {}).get("parent_sequence")
+                or "__unattributed__"
+            )
+            screened_parent_counts[parent] += 1
         screen_exact_paths.append(_run_screen(
             source=source,
             config=args.config,
@@ -445,6 +623,7 @@ def main() -> None:
             epoch=args.epoch,
             target=args.target,
             source="live_exact_screen",
+            candidate_metadata=candidate_metadata,
         )
         screen_candidates = _ranking_by_sequence(screen_ranking)
         ranked_sequences = json.loads(screen_ranking.read_text())["sequences"]
@@ -455,12 +634,37 @@ def main() -> None:
         )
         if len(repeated_finalists) >= args.finalists:
             continue
-        sequence = next(
-            (item for item in ranked_sequences if item not in repeated_finalists),
-            None,
+        weak_fallback_boundary = min(args.weak_initial_fallback_after, len(sequences))
+        selection = _initial_repeat_candidate(
+            ranked_sequences,
+            screen_candidates,
+            repeated=set(repeated_finalists),
+            maximum_screen_p90=args.maximum_initial_screen_p90,
+            allow_weak_fallback=(
+                incumbent_p90 is None
+                and not weak_initial_fallback_spent
+                and screened >= weak_fallback_boundary
+            ),
         )
-        if sequence is None:
+        if selection is None:
+            leader = next(
+                (item for item in ranked_sequences if item not in repeated_finalists),
+                None,
+            )
+            if leader is not None:
+                if leader not in deferred_weak_leaders:
+                    deferred_weak_leaders.append(leader)
+                print(
+                    f"EXACT_INITIAL_REPEAT_DEFERRED screen_p90="
+                    f"{float(screen_candidates[leader]['score_p90']):.1f} "
+                    f"ceiling={args.maximum_initial_screen_p90:.1f} "
+                    f"screened={screened}/{weak_fallback_boundary}",
+                    flush=True,
+                )
             continue
+        sequence, weak_fallback = selection
+        if weak_fallback:
+            weak_initial_fallback_spent = True
         finalist_index = len(repeated_finalists) + 1
         screen_p90 = float(screen_candidates[sequence]["score_p90"])
         if incumbent_p90 is not None and not _challenger_can_overtake(
@@ -513,6 +717,7 @@ def main() -> None:
                 epoch=args.epoch,
                 target=args.target,
                 source="live_exact_repeat",
+                candidate_metadata=candidate_metadata,
             )
             qualified_outputs.append(output)
             incumbent_p90 = _best_confirmed_p90(output)
@@ -535,7 +740,11 @@ def main() -> None:
             "maximum_finalists": args.finalists,
             "repeated_finalists": repeated_finalists,
             "skipped_finalists": skipped_finalists,
+            "deferred_weak_leaders": deferred_weak_leaders,
             "challenger_p90_margin": args.challenger_p90_margin,
+            "maximum_initial_screen_p90": args.maximum_initial_screen_p90,
+            "weak_initial_fallback_after": args.weak_initial_fallback_after,
+            "weak_initial_fallback_spent": weak_initial_fallback_spent,
             "incumbent_p90": incumbent_p90,
             "qualified_rankings": [str(path) for path in qualified_outputs],
             "exact_files": [str(path) for path in _exact_paths(args.output_dir)],
