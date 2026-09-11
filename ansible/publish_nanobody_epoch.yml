@@ -161,12 +161,14 @@
           --output {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/qualified_rankings.json') | quote }}
           --exclude-file {{ published_ledger | quote }}
           --minimum-observations 8
-          --minimum-competitive-rate 0.75
-          --minimum-observation-competitive-rate 0.75
-          --maximum-p90-rank-sum 90
-          --maximum-p90-confidence-rank-sum 70
-          --maximum-p90-physical-interaction-rank-sum 40
-          --maximum-p90-developability-rank-sum 15
+          --competitive-score-threshold 60
+          --selection-order competitive-rate
+          --minimum-competitive-rate 0.0
+          --minimum-observation-competitive-rate 0.0
+          --maximum-p90-rank-sum 400
+          --maximum-p90-confidence-rank-sum 300
+          --maximum-p90-physical-interaction-rank-sum 100
+          --maximum-p90-developability-rank-sum 30
           --pose-config {{ (live_root ~ '/epoch' ~ nanobody_epoch ~ '/config.yaml') | quote }}
           --minimum-structure-observations 8
           --minimum-median-contact-jaccard 0.35

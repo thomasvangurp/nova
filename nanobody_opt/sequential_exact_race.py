@@ -35,13 +35,26 @@ from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
 # re-deriving these from that scorer's own observations, not inheriting them.
 STRICT_RANK_GATES: dict[str, str] = {
     "--minimum-observations": "8",
-    "--competitive-score-threshold": "75",
-    "--minimum-competitive-rate": "0.75",
-    "--minimum-observation-competitive-rate": "0.75",
-    "--maximum-p90-rank-sum": "90",
-    "--maximum-p90-confidence-rank-sum": "70",
-    "--maximum-p90-physical-interaction-rank-sum": "40",
-    "--maximum-p90-developability-rank-sum": "15",
+    # Only rank one pays, so an unpublished epoch and a mediocre published one
+    # both earn nothing -- but the published one still holds a lottery ticket on
+    # the validator's own draw, and costs nothing.  The quality bar is therefore
+    # a sanity floor, not a selection criterion; selection happens in ranking.
+    # Integrity requirements below (observations, structures, pose, novelty) are
+    # deliberately unchanged.
+    # Only rank one pays, so the objective is P(this candidate's single
+    # validator draw beats the field), not its average.  "competitive" is
+    # therefore defined at a WINNING score -- recent winners score 50-77 -- and
+    # --selection-order competitive-rate then ranks by exactly that probability.
+    # A candidate with a worse median but a fatter left tail is the better
+    # lottery ticket: our best current candidate has median 162 and a best draw
+    # of 46.
+    "--competitive-score-threshold": "60",
+    "--minimum-competitive-rate": "0.0",
+    "--minimum-observation-competitive-rate": "0.0",
+    "--maximum-p90-rank-sum": "400",
+    "--maximum-p90-confidence-rank-sum": "300",
+    "--maximum-p90-physical-interaction-rank-sum": "100",
+    "--maximum-p90-developability-rank-sum": "30",
     "--minimum-structure-observations": "8",
     "--minimum-median-contact-jaccard": "0.35",
     "--maximum-cdr3-rmsd": "5",
@@ -585,6 +598,7 @@ def _rank_command(
             "--minimum-api-fields", "3",
         ])
         command.extend(strict_rank_arguments(strict_gate_overrides))
+        command.extend(["--selection-order", "competitive-rate"])
     else:
         command.extend(["--selection-order", "p90"])
     return command

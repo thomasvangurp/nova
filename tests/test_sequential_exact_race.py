@@ -448,7 +448,9 @@ def test_replication_rounds_stop_at_the_commitment_reserve(tmp_path, monkeypatch
 
 def test_strict_gates_are_overridable_per_scorer(tmp_path):
     baseline = race.strict_rank_arguments()
-    assert baseline[baseline.index("--maximum-p90-rank-sum") + 1] == "90"
+    # the quality bar is a sanity floor, not a selection criterion: only rank
+    # one pays, so refusing to publish earns exactly what a weak entry earns
+    assert baseline[baseline.index("--maximum-p90-rank-sum") + 1] == "400"
 
     overridden = race.strict_rank_arguments({"maximum_p90_rank_sum": 104})
     assert overridden[overridden.index("--maximum-p90-rank-sum") + 1] == "104"
