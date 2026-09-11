@@ -22,11 +22,16 @@ import json
 import multiprocessing as mp
 import os
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
 
 import numpy as np
+
+# This file is also invoked directly by score_boltzgen_waves.  Ensure the
+# repository root, rather than /root/nanobody_opt, owns package resolution.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nanobody_opt.diffusion_sample_selection import (
     ANALYZE_CONFIDENCE_METRICS,
