@@ -464,10 +464,22 @@ def _connect(path: Path) -> sqlite3.Connection:
             features_json TEXT NOT NULL,
             PRIMARY KEY(epoch, node_id, graph_version)
         );
+        CREATE TABLE IF NOT EXISTS lineage_edges (
+            parent_node_id INTEGER NOT NULL REFERENCES nodes(id),
+            child_node_id INTEGER NOT NULL REFERENCES nodes(id),
+            epoch INTEGER NOT NULL DEFAULT -1,
+            source TEXT NOT NULL,
+            proposal_type TEXT NOT NULL DEFAULT 'unknown',
+            mutations_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(parent_node_id, child_node_id, epoch, source)
+        );
+        CREATE INDEX IF NOT EXISTS lineage_edges_child
+            ON lineage_edges(child_node_id, epoch);
         """
     )
     connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '1')"
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '2')"
     )
     return connection
 
@@ -548,6 +560,74 @@ def update_observation_store(
                     json.dumps(provenance, sort_keys=True),
                 ),
             )
+            parent_sequence = str(
+                observation.get("parent_sequence", "")
+            ).strip().upper()
+            if (
+                parent_sequence
+                and len(parent_sequence) == len(sequence)
+                and parent_sequence != sequence
+                and all(residue in AA_INDEX for residue in parent_sequence)
+            ):
+                parent_vector = bytes(AA_INDEX[residue] for residue in parent_sequence)
+                connection.execute(
+                    """
+                    INSERT INTO nodes(target, sequence, length, residue_vector)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(target, sequence) DO UPDATE SET
+                        length=excluded.length,
+                        residue_vector=excluded.residue_vector
+                    """,
+                    (target, parent_sequence, len(parent_sequence), parent_vector),
+                )
+                parent_node_id = int(connection.execute(
+                    "SELECT id FROM nodes WHERE target=? AND sequence=?",
+                    (target, parent_sequence),
+                ).fetchone()[0])
+                lineage_excluded = {
+                    "observation_id", "sequence", "parent_sequence", "target",
+                    "epoch", "source", "proposal_type", "mutations",
+                    "score_kind", "score", "observation_count", "metrics",
+                    "pose_stability",
+                }
+                lineage_metadata = {
+                    key: value
+                    for key, value in observation.items()
+                    if key not in lineage_excluded
+                }
+                supplied_mutations = observation.get("mutations")
+                if isinstance(supplied_mutations, str):
+                    supplied_mutations = [
+                        item for item in supplied_mutations.split(";") if item
+                    ]
+                connection.execute(
+                    """
+                    INSERT INTO lineage_edges(
+                        parent_node_id, child_node_id, epoch, source,
+                        proposal_type, mutations_json, metadata_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(parent_node_id, child_node_id, epoch, source)
+                    DO UPDATE SET
+                        proposal_type=excluded.proposal_type,
+                        mutations_json=excluded.mutations_json,
+                        metadata_json=excluded.metadata_json
+                    """,
+                    (
+                        parent_node_id,
+                        node_id,
+                        (
+                            int(observation["epoch"])
+                            if observation.get("epoch") is not None
+                            else -1
+                        ),
+                        str(observation.get("source", "unknown")),
+                        str(observation.get("proposal_type", "unknown")),
+                        json.dumps(
+                            supplied_mutations or mutations(parent_sequence, sequence)
+                        ),
+                        json.dumps(lineage_metadata, sort_keys=True),
+                    ),
+                )
             written += 1
     return written
 
@@ -559,7 +639,8 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT n.sequence, o.score, o.epoch, o.source, o.score_kind,
-                   o.observation_count, o.metrics_json, o.pose_json
+                   o.observation_count, o.metrics_json, o.pose_json,
+                   o.provenance_json
             FROM observations o
             JOIN nodes n ON n.id=o.node_id
             WHERE n.target=?
@@ -571,12 +652,44 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
         {
             "sequence": row[0],
             "score": row[1],
-            "epoch": row[2],
+            "epoch": row[2] if row[2] >= 0 else None,
             "source": row[3],
             "score_kind": row[4],
             "observation_count": row[5],
             "metrics": json.loads(row[6]),
             "pose_stability": json.loads(row[7]) if row[7] else None,
+            "provenance": json.loads(row[8]),
+        }
+        for row in rows
+    ]
+
+
+def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
+    """Load observed proposal parent-child relationships without inference."""
+    if not path.is_file():
+        return []
+    with _connect(path) as connection:
+        rows = connection.execute(
+            """
+            SELECT parent.sequence, child.sequence, edge.epoch, edge.source,
+                   edge.proposal_type, edge.mutations_json, edge.metadata_json
+            FROM lineage_edges edge
+            JOIN nodes parent ON parent.id=edge.parent_node_id
+            JOIN nodes child ON child.id=edge.child_node_id
+            WHERE child.target=?
+            ORDER BY edge.epoch, parent.sequence, child.sequence
+            """,
+            (target,),
+        ).fetchall()
+    return [
+        {
+            "parent_sequence": row[0],
+            "sequence": row[1],
+            "epoch": row[2],
+            "source": row[3],
+            "proposal_type": row[4],
+            "mutations": json.loads(row[5]),
+            "metadata": json.loads(row[6]),
         }
         for row in rows
     ]

@@ -3,6 +3,7 @@ import sqlite3
 
 from nanobody_opt.mutation_network import (
     MutationNetwork,
+    load_lineage_edges,
     load_mutation_effects,
     load_observations,
     rebuild_nearest_edges,
@@ -47,6 +48,30 @@ def test_observation_store_updates_existing_identity_atomically(tmp_path):
     observations = load_observations(path, target="P20809")
     assert len(observations) == 1
     assert observations[0]["score"] == 70
+
+
+def test_observation_store_preserves_observed_parent_child_lineage(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "epoch1:AAAC",
+        "sequence": "AAAC",
+        "parent_sequence": "AAAA",
+        "proposal_type": "supported_single",
+        "mutations": "A4C",
+        "score": 50,
+        "epoch": 1,
+        "target": "P20809",
+    }])
+
+    assert load_lineage_edges(path, target="P20809") == [{
+        "parent_sequence": "AAAA",
+        "sequence": "AAAC",
+        "epoch": 1,
+        "source": "unknown",
+        "proposal_type": "supported_single",
+        "mutations": ["A4C"],
+        "metadata": {},
+    }]
 
 
 def test_public_validator_score_has_priority_over_local_proxy():

@@ -21,6 +21,7 @@
     nanobody_producer_activate: false
     nanobody_producer_session: nova-nanobody-producer
     nanobody_mutation_database: /root/artifacts/nanobody_mutations.sqlite
+    nanobody_backfill_exact_screens: false
     nanobody_parent_epochs: 0
     nanobody_parent_limit: 64
     nanobody_neighbor_parent_limit: 32
@@ -459,6 +460,7 @@
           - /root/nanobody_opt/select_elite_parents.py
           - /root/nanobody_opt/mutation_network.py
           - /root/nanobody_opt/seed_mutation_database.py
+          - /root/nanobody_opt/import_exact_screens.py
           - /root/nanobody_opt/rank_exact.py
       changed_when: false
 
@@ -477,6 +479,69 @@
       environment:
         PIXI_COLOR: never
       changed_when: false
+
+    - name: Verify exact-screen importer uses the locked Pixi runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+          - import-exact-screens
+          - --
+          - --help
+      environment:
+        PIXI_COLOR: never
+      changed_when: false
+
+    - name: Backfill every preserved exact screen through locked Pixi
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+          - import-exact-screens
+          - --
+          - --database
+          - "{{ nanobody_mutation_database }}"
+          - --target
+          - "{{ nanobody_target }}"
+          - --archive
+          - "/root/{{ nanobody_target }}_nanobodies.csv"
+          - --exact-root
+          - /root/live
+          - --exact-root
+          - /root/design
+          - --exact-root
+          - /root/artifacts/rd/validator_parity
+          - --exact-root
+          - /root/local_neighborhood_round1_exact.json
+          - --exact-root
+          - /root/recombinants_cdr_probe2_exact.json
+          - --metadata-root
+          - /root/live
+          - --metadata-root
+          - /root/design
+          - --rebuild-edges
+          - --edge-workers
+          - "{{ [cpus.stdout | int, 40] | min }}"
+      environment:
+        PIXI_COLOR: never
+      register: exact_screen_backfill
+      changed_when: true
+      when: nanobody_backfill_exact_screens | bool
+
+    - name: Report exact-screen backfill
+      ansible.builtin.debug:
+        var: exact_screen_backfill.stdout
+      when: nanobody_backfill_exact_screens | bool
 
     - name: Assert every external Layer-2 executable and database exists
       ansible.builtin.shell: |
