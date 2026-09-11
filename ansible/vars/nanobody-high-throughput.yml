@@ -44,14 +44,19 @@ nanobody_maximum_exhaustive_singles: 32768
 # remaining non-GPU cost is one model load per invocation, so large waves are
 # what converts the speedup into throughput; multi-worker packing and predict
 # batching were both measured as dead ends.
-# Per generation, not per epoch.  Four generations of 600 screen the same 2,400
-# candidates as one flat pass, but generations two through four are proposed
-# from what the earlier ones actually scored, so the pool itself improves
-# instead of only the selection within a fixed pool.  600 candidates is 60 per
-# worker, which is past the scorer's amortisation floor.
-nanobody_candidate_limit: 600
-nanobody_screen_tranche_size: 600
-nanobody_weak_initial_fallback_after: 600
+# Per generation, not per epoch.  At the measured rate a generation of 800 is
+# about nine minutes including proposal generation and IgBLAST, so roughly four
+# fit alongside the closing replication: about 3,200 screens and 720 replication
+# observations, against 137 observations per epoch before any of this.
+#
+# Generations two through four are proposed from what the earlier ones actually
+# scored, so the pool improves rather than only the selection within a fixed
+# pool -- which is what binds, since a two-stage policy already captures about
+# 97% of the best candidate the pool contains.  800 is 80 per worker, well past
+# the scorer's amortisation floor.
+nanobody_candidate_limit: 800
+nanobody_screen_tranche_size: 800
+nanobody_weak_initial_fallback_after: 800
 nanobody_finalists: 60
 nanobody_qualification_observations: 13
 
