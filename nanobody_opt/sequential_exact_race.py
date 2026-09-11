@@ -256,6 +256,86 @@ def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bo
     return current_epoch == epoch and block % epoch_length < epoch_length - reserve_blocks
 
 
+def _replication_shortlist(
+    ranking: Path, *, exclude: set[str], limit: int
+) -> list[str]:
+    """Best screened candidates to re-observe, screen order preserved."""
+    if limit < 1 or not ranking.is_file():
+        return []
+    payload = json.loads(ranking.read_text())
+    sequences = [
+        str(sequence)
+        for sequence in payload.get("sequences", [])
+        if str(sequence) not in exclude
+    ]
+    return sequences[:limit]
+
+
+def _run_replication_rounds(
+    *,
+    shortlist: list[str],
+    rounds: int,
+    root: Path,
+    config: Path,
+    target: str,
+    gpus: list[str],
+    scorer: Path,
+    chain_state: Path | None,
+    epoch: int,
+    reserve_blocks: int,
+    predict_batch_size: int | None,
+    timings: Path,
+) -> int:
+    """Re-observe one shortlist as whole rounds of independent observations.
+
+    A single observation of a fixed sequence is a wide draw, so a shortlist
+    chosen on one observation each is largely chosen by luck.  Giving every
+    shortlist member the same number of independent observations lets selection
+    compare pooled means instead.  One round is one scorer invocation over the
+    whole shortlist, which is also what amortises the scorer's model load.
+    """
+    if not shortlist or rounds < 1:
+        return 0
+    source = root / "rounds" / "shortlist.json"
+    _atomic_json(source, {"target": target, "sequences": shortlist})
+    completed = 0
+    for index in range(1, rounds + 1):
+        if not _chain_allows_work(chain_state, epoch, reserve_blocks):
+            print(
+                f"EXACT_REPLICATION_RESERVE_REACHED rounds={completed}/{rounds}",
+                flush=True,
+            )
+            break
+        started = time.monotonic()
+        _run_screen(
+            source=source,
+            config=config,
+            target=target,
+            output_dir=root / "rounds" / f"round_{index:02d}",
+            gpus=gpus,
+            candidate_limit=len(shortlist),
+            scorer=scorer,
+            predict_batch_size=predict_batch_size,
+        )
+        completed += 1
+        seconds = time.monotonic() - started
+        _append_timing(
+            timings,
+            {
+                "phase": "replication_round",
+                "round": index,
+                "shortlist": len(shortlist),
+                "seconds": round(seconds, 1),
+            },
+        )
+        print(
+            f"EXACT_REPLICATION_ROUND_COMPLETE round={index}/{rounds} "
+            f"shortlist={len(shortlist)} seconds={seconds:.0f}",
+            flush=True,
+        )
+    return completed
+
+
 def _append_timing(path: Path, record: dict[str, Any]) -> None:
     """Append one phase-timing record so the epoch budget comes from measurement.
 
@@ -785,6 +865,16 @@ def main() -> None:
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
     parser.add_argument(
+        "--replication-rounds",
+        type=int,
+        default=0,
+        help=(
+            "after screening, re-observe the best --finalists candidates this "
+            "many times, each round one scorer invocation over the whole "
+            "shortlist; 0 keeps the incumbent/challenger repeat loop"
+        ),
+    )
+    parser.add_argument(
         "--pipeline-depth",
         type=int,
         default=1,
@@ -826,6 +916,8 @@ def main() -> None:
         parser.error("--minimum-basin-samples must be positive")
     if args.pipeline_depth not in (0, 1):
         parser.error("--pipeline-depth must be 0 or 1")
+    if args.replication_rounds < 0:
+        parser.error("--replication-rounds cannot be negative")
     if args.screen_predict_batch_size < 0:
         parser.error("--screen-predict-batch-size cannot be negative")
     args.screen_predict_batch_size = args.screen_predict_batch_size or None
@@ -977,6 +1069,10 @@ def main() -> None:
             f"candidates={len(job.tranche)}",
             flush=True,
         )
+        if args.replication_rounds:
+            # Two-stage mode: the whole shortlist is replicated after screening,
+            # so no repeat budget is spent on a per-tranche leader.
+            continue
         if len(repeated_finalists) >= args.finalists:
             continue
         weak_fallback_boundary = min(args.weak_initial_fallback_after, len(sequences))
@@ -1093,10 +1189,62 @@ def main() -> None:
         else:
             print(f"EXACT_CANDIDATE_REJECTED index={finalist_index}", flush=True)
 
+    replication_rounds_completed = 0
+    replication_shortlist: list[str] = []
+    if args.replication_rounds:
+        replication_shortlist = _replication_shortlist(
+            screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
+        )
+        replication_rounds_completed = _run_replication_rounds(
+            shortlist=replication_shortlist,
+            rounds=args.replication_rounds,
+            root=args.output_dir,
+            config=args.config,
+            target=args.target,
+            gpus=gpus,
+            scorer=args.scorer,
+            chain_state=args.chain_state,
+            epoch=args.epoch,
+            reserve_blocks=args.reserve_blocks,
+            predict_batch_size=args.screen_predict_batch_size,
+            timings=timings_path,
+        )
+        if replication_rounds_completed:
+            output = args.output_dir / "qualified_after_rounds.json"
+            if _try_strict_rank(
+                root=args.output_dir,
+                archive=args.archive,
+                config=args.config,
+                target=args.target,
+                epoch=args.epoch,
+                output=output,
+                ledger=args.ledger,
+            ):
+                _store_ranking(
+                    args.mutation_database,
+                    output,
+                    epoch=args.epoch,
+                    target=args.target,
+                    source="live_exact_repeat",
+                    candidate_metadata=candidate_metadata,
+                )
+                qualified_outputs.append(output)
+                incumbent_p90 = _best_confirmed_p90(output)
+                print(
+                    "EXACT_REPLICATION_QUALIFIED "
+                    f"incumbent_p90={incumbent_p90:.1f} output={output}",
+                    flush=True,
+                )
+            else:
+                print("EXACT_REPLICATION_REJECTED", flush=True)
+
     _atomic_json(
         args.output_dir / "complete.json",
         {
             "epoch": args.epoch,
+            "replication_rounds": args.replication_rounds,
+            "replication_rounds_completed": replication_rounds_completed,
+            "replication_shortlist": len(replication_shortlist),
             "target": args.target,
             "screened": screened,
             "candidate_limit": len(sequences),

@@ -368,3 +368,79 @@ def test_prefetched_tranche_matches_the_serial_selection():
     prefetched = race._balanced_screen_tranche(remaining, enriched, counts, 2)
 
     assert prefetched == serial_next
+
+
+def test_replication_rounds_reobserve_the_whole_shortlist(tmp_path, monkeypatch):
+    ranking = tmp_path / "screen_ranking.json"
+    ranking.write_text(json.dumps({"sequences": ["AAA", "BBB", "CCC", "DDD"]}))
+
+    shortlist = race._replication_shortlist(
+        ranking, exclude={"BBB"}, limit=2
+    )
+    assert shortlist == ["AAA", "CCC"]
+
+    calls = []
+
+    def _fake_screen(**kwargs):
+        calls.append(kwargs)
+        return kwargs["output_dir"] / "exact_all.json"
+
+    monkeypatch.setattr(race, "_run_screen", _fake_screen)
+
+    completed = race._run_replication_rounds(
+        shortlist=shortlist,
+        rounds=3,
+        root=tmp_path,
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        gpus=["0", "1"],
+        scorer=tmp_path / "scorer.py",
+        chain_state=None,
+        epoch=25056,
+        reserve_blocks=55,
+        predict_batch_size=2,
+        timings=tmp_path / "timings.jsonl",
+    )
+
+    assert completed == 3
+    # every round observes the entire shortlist, so each candidate gains the
+    # same number of independent observations
+    assert [call["candidate_limit"] for call in calls] == [2, 2, 2]
+    assert [call["output_dir"].name for call in calls] == [
+        "round_01", "round_02", "round_03"
+    ]
+    assert {call["predict_batch_size"] for call in calls} == {2}
+    source = json.loads((tmp_path / "rounds" / "shortlist.json").read_text())
+    assert source["sequences"] == ["AAA", "CCC"]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "timings.jsonl").read_text().splitlines()
+    ]
+    assert [record["phase"] for record in records] == ["replication_round"] * 3
+
+
+def test_replication_rounds_stop_at_the_commitment_reserve(tmp_path, monkeypatch):
+    state = tmp_path / "chain.json"
+    state.write_text(json.dumps({
+        "epoch": 25056,
+        "block": 25056 * 361 + 310,
+        "epoch_length": 361,
+    }))
+    monkeypatch.setattr(race, "_run_screen", lambda **kwargs: tmp_path)
+
+    completed = race._run_replication_rounds(
+        shortlist=["AAA"],
+        rounds=5,
+        root=tmp_path,
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        gpus=["0"],
+        scorer=tmp_path / "scorer.py",
+        chain_state=state,
+        epoch=25056,
+        reserve_blocks=55,
+        predict_batch_size=None,
+        timings=tmp_path / "timings.jsonl",
+    )
+
+    assert completed == 0

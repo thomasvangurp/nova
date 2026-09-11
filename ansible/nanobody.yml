@@ -50,6 +50,7 @@
     nanobody_minimum_basin_samples: 3
     nanobody_qualification_observations: 8
     nanobody_pipeline_depth: 1
+    nanobody_replication_rounds: 0
     nanobody_screen_predict_batch_size: 0
     ckpts:
       - name: boltzgen1_diverse.ckpt
@@ -816,6 +817,8 @@
           - "{{ nanobody_qualification_observations }}"
           - --pipeline-depth
           - "{{ nanobody_pipeline_depth }}"
+          - --replication-rounds
+          - "{{ nanobody_replication_rounds }}"
           - --screen-predict-batch-size
           - "{{ nanobody_screen_predict_batch_size }}"
       changed_when: true

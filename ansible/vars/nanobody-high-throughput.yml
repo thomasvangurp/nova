@@ -40,6 +40,12 @@ nanobody_weak_initial_fallback_after: 400
 nanobody_finalists: 60
 nanobody_qualification_observations: 10
 
+# The screen loop admits at most one finalist per tranche, so the shortlist is
+# replicated explicitly after screening: nine rounds, each one scorer
+# invocation over all sixty candidates, giving every one of them ten
+# independent observations.
+nanobody_replication_rounds: 9
+
 # One observation of a fixed sequence lands within about 34 leaderboard rank
 # points of its own mean, so a shortlist of five chosen on single observations
 # is mostly choosing noise.  Overlapping the per-tranche ranking and database

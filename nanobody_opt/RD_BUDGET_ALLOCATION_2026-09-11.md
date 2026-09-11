@@ -81,21 +81,39 @@ available discrimination; five observations recover 56-70%.
 
 ### The pipeline, not the scorer, is what limits an epoch today
 
-Measured across 108 live screen tranches: 351 seconds of scoring per
-20-candidate tranche, of which roughly 114 seconds is scorer startup and model
-load before the first fold, plus 84 seconds (p90 284) of ranking, basin
-shrinkage and mutation-database work between tranches.  Only 190 seconds is
+Now measured directly by the instrumentation this change adds, on the live box:
+330 seconds of scoring per 20-candidate tranche against 1.3 seconds of ranking,
+basin shrinkage and mutation-database work.  Roughly 140 of those 330 seconds is
+scorer startup and model load before the first fold; only about 190 seconds is
 folding.
+
+An earlier estimate in this document attributed 84 seconds to inter-tranche
+work, read from artifact timestamps.  That gap was the next scorer process
+starting up before it first touched its work directory -- it is inside the
+scoring step, not beside it.  The correction matters: overlapping the
+bookkeeping is worth about a second per tranche today, not 84, and the entire
+fixed cost lives inside the scorer invocation where only a larger tranche can
+amortise it.  The overlap still earns its place at the target scale, where
+ranking grows with the accumulated observation count (1.0s at 80 screened,
+1.3s at 140).
+
+The consequence for the 12.2x scorer is sharp.  At the current 20-candidate
+tranche it folds 20 candidates in about 29 seconds but still pays the model
+load, so the loop returns roughly 2x end to end.  At a 200-candidate tranche the
+same load is amortised over ten times as many candidates and the realised gain
+is about 8x, or close to 10x if the replacement scorer's lighter 33-second
+startup holds.
 
 The live producer is configured for 320 candidates per epoch and actually
 completes 122, with 2.4 replicated finalists rather than five.  It has never
 reached its own configured budget.
 
 Dropping a 12.2x scorer into that loop without changing anything else gives
-about 2x end to end, because the fixed costs do not shrink.  Two changes remove
-them: tranches large enough to amortise the model load (the scorer needs at
-least 15 sequences per shard, so at least 150 per invocation on ten GPUs), and
-overlapping the per-tranche CPU bookkeeping with the next tranche's folding.
+about 2x end to end, because the fixed costs do not shrink.  The change that removes
+them is tranches large enough to amortise the model load: the scorer needs at
+least 15 sequences per shard, so at least 150 candidates per invocation on ten
+GPUs.  Overlapping the CPU bookkeeping is a second-order saving that keeps
+ranking off the critical path as it grows.
 
 ## Decision
 
@@ -172,6 +190,12 @@ prevents mixing selection rules.
   (`--expected-diffusion-samples`, default 5).  The confidence metrics are a
   maximum over samples, so a scorer that quietly draws fewer is biased, not
   merely noisier, and would otherwise pass every existing check.
+- `sequential_exact_race.py`: `--replication-rounds` re-observes the best
+  `--finalists` screened candidates as whole rounds after screening, one scorer
+  invocation per round.  The existing loop admits at most one finalist per
+  tranche, so a shortlist of 60 was previously unreachable in an eight-tranche
+  epoch regardless of configuration.  Default 0 keeps the incumbent/challenger
+  behaviour.
 - `ansible/vars/nanobody-high-throughput.yml`: rewritten to the operating point
   above.  Still dormant.
 

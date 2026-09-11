@@ -255,6 +255,7 @@ def _run_iteration(
         "--qualification-observations", str(args.qualification_observations),
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
+        "--replication-rounds", str(args.replication_rounds),
     ]
     _run(race_command)
 
@@ -359,6 +360,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "independent observations per finalist; one observation of a fixed "
             "sequence is a wide draw, so this is the main accuracy control"
+        ),
+    )
+    parser.add_argument(
+        "--replication-rounds",
+        type=int,
+        default=0,
+        help=(
+            "re-observe the best --finalists screened candidates this many "
+            "times after screening instead of repeating one tranche leader"
         ),
     )
     parser.add_argument(
