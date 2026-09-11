@@ -34,6 +34,8 @@
     nanobody_maximum_exhaustive_singles: 8192
     nanobody_candidate_limit: 320
     nanobody_screen_tranche_size: 20
+    nanobody_maximum_initial_screen_p90: 90
+    nanobody_weak_initial_fallback_after: 80
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -699,6 +701,10 @@
           - "{{ nanobody_candidate_limit }}"
           - --screen-tranche-size
           - "{{ nanobody_screen_tranche_size }}"
+          - --maximum-initial-screen-p90
+          - "{{ nanobody_maximum_initial_screen_p90 }}"
+          - --weak-initial-fallback-after
+          - "{{ nanobody_weak_initial_fallback_after }}"
       changed_when: true
       when: nanobody_producer_activate | bool
 
