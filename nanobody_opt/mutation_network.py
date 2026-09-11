@@ -652,7 +652,7 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
         {
             "sequence": row[0],
             "score": row[1],
-            "epoch": row[2] if row[2] >= 0 else None,
+            "epoch": row[2],
             "source": row[3],
             "score_kind": row[4],
             "observation_count": row[5],
@@ -685,7 +685,7 @@ def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
         {
             "parent_sequence": row[0],
             "sequence": row[1],
-            "epoch": row[2],
+            "epoch": row[2] if row[2] >= 0 else None,
             "source": row[3],
             "proposal_type": row[4],
             "mutations": json.loads(row[5]),

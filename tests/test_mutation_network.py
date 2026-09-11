@@ -50,6 +50,19 @@ def test_observation_store_updates_existing_identity_atomically(tmp_path):
     assert observations[0]["score"] == 70
 
 
+def test_observation_store_loads_an_unknown_observation_epoch(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "pilot:AAA",
+        "sequence": "AAA",
+        "score": 80,
+        "epoch": None,
+        "target": "P20809",
+    }])
+
+    assert load_observations(path, target="P20809")[0]["epoch"] is None
+
+
 def test_observation_store_preserves_observed_parent_child_lineage(tmp_path):
     path = tmp_path / "observations.sqlite"
     update_observation_store(path, [{
