@@ -1473,6 +1473,18 @@ def main() -> None:
                 ),
                 check=True,
             )
+            # Order the pooled ranking the same way a screened tranche is
+            # ordered.  Without this the closing shortlist is chosen on raw
+            # one-shot p90, which is exactly the statistic that carries the
+            # winner's curse: selecting the best of thousands of single draws
+            # overstates quality by roughly the noise spread times the
+            # selection depth, and the candidate regresses when confirmed.
+            _apply_basin_shrinkage(
+                screen_ranking,
+                candidate_metadata,
+                prior_strength=args.basin_shrinkage_strength,
+                minimum_samples=args.minimum_basin_samples,
+            )
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
         )

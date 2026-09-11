@@ -641,3 +641,41 @@ def test_remaining_blocks_reads_the_chain(tmp_path):
     # a stale epoch means no time left, never "infinite"
     assert race._remaining_blocks(state, 25062) == 0.0
     assert race._remaining_blocks(None, 25061) == float("inf")
+
+
+def test_shrinkage_reorders_the_sequences_the_shortlist_reads(tmp_path):
+    # The shortlist reads payload["sequences"], so shrinkage must rewrite that
+    # list and not only the candidate records.
+    ranking = tmp_path / "screen_ranking.json"
+    ranking.write_text(json.dumps({
+        "sequences": ["LUCKY", "STEADY"],
+        "candidates": [
+            {"sequence": "LUCKY", "score_p90": 40.0},
+            {"sequence": "STEADY", "score_p90": 60.0},
+        ],
+    }))
+    metadata = {
+        sequence: {
+            "parent_basin_core_id": "core_1",
+            "proposal_lane": "basin_terminal",
+        }
+        for sequence in ("LUCKY", "STEADY", "THIRD")
+    }
+    # a third basin member makes the basin eligible for shrinkage
+    payload = json.loads(ranking.read_text())
+    payload["candidates"].append({"sequence": "THIRD", "score_p90": 62.0})
+    payload["sequences"].append("THIRD")
+    ranking.write_text(json.dumps(payload))
+
+    race._apply_basin_shrinkage(
+        ranking, metadata, prior_strength=2.0, minimum_samples=3
+    )
+    shrunk = json.loads(ranking.read_text())
+
+    assert shrunk["sequences"] == [
+        item["sequence"] for item in shrunk["candidates"]
+    ]
+    assert all("basin_adjusted_score" in item for item in shrunk["candidates"])
+    # the lucky single draw is pulled toward its basin rather than trusted whole
+    lucky = next(i for i in shrunk["candidates"] if i["sequence"] == "LUCKY")
+    assert lucky["basin_adjusted_score"] > lucky["score_p90"]
