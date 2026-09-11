@@ -53,6 +53,8 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.maximum_exhaustive_singles == 8192
     assert args.candidate_limit == 320
     assert args.screen_tranche_size == 20
+    assert args.maximum_initial_screen_p90 == 90.0
+    assert args.weak_initial_fallback_after == 80
     assert args.finalists == 3
     assert args.challenger_p90_margin == 20.0
     assert args.single_mutation_fraction == 0.75

@@ -233,6 +233,8 @@ def _run_iteration(
         "--gpus", args.gpus,
         "--candidate-limit", str(args.candidate_limit),
         "--screen-tranche-size", str(args.screen_tranche_size),
+        "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
+        "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
         "--finalists", str(args.finalists),
         "--challenger-p90-margin", str(args.challenger_p90_margin),
     ])
@@ -304,6 +306,8 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum exact screens per iteration, published in small tranches",
     )
     parser.add_argument("--screen-tranche-size", type=int, default=20)
+    parser.add_argument("--maximum-initial-screen-p90", type=float, default=90.0)
+    parser.add_argument("--weak-initial-fallback-after", type=int, default=80)
     parser.add_argument("--finalists", type=int, default=3)
     parser.add_argument("--challenger-p90-margin", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
