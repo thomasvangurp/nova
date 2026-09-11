@@ -1,12 +1,16 @@
----
-# Dormant profile for the incoming validator-compatible ~10x exact scorer.
-# Keep activation false until the scorer passes the dual-sample parity canary
-# described in docs/CLAUDE_FAST_SCORER_HANDOFF.md.
+# Dormant profile for the validated 12.2x exact scorer.
+#
+# Keep activation false until the gates in
+# nanobody_opt/RD_BUDGET_ALLOCATION_2026-09-11.md pass on the box.  The shape
+# below is not "ten times the old profile": the measured limit on published
+# score is selection accuracy, not candidate count, so most of the added
+# throughput buys independent observations of a shortlist rather than more
+# one-shot candidates.
 nanobody_producer_activate: false
-nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_batch_fast.py
+nanobody_exact_scorer: /root/fastscore/release/fast_score_batch.py
 
-# Spend the added throughput primarily on breadth. Small exact tranches retain
-# frequent provisional publication and allow adaptive allocation between basins.
+# Proposal generation still explores breadth-first; the exact screen consumes
+# only the strongest Layer-2 survivors.
 nanobody_parent_limit: 256
 nanobody_neighbor_parent_limit: 128
 nanobody_recent_anchor_parent_limit: 32
@@ -24,10 +28,26 @@ nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 6
 nanobody_maximum_exhaustive_singles: 32768
 
-# Initial budget envelope: 2,400 unique one-shot observations plus repeat
-# evidence for up to eight finalists. Recalibrate from measured wall time before
-# increasing this; do not simply consume a nominal 10x multiplier on repeats.
-nanobody_candidate_limit: 2400
-nanobody_screen_tranche_size: 20
-nanobody_weak_initial_fallback_after: 160
-nanobody_finalists: 8
+# Measured operating point: 1,600 one-shot screens in tranches of 200, then a
+# 60-candidate shortlist re-observed ten times, is about 2,140 observations and
+# fits the 3,672-second scoring window with the commitment reserve intact.
+# Tranches of 200 give each of ten shards twenty sequences, which is what
+# amortises the scorer's model load; smaller tranches spend the speedup on
+# process startup.
+nanobody_candidate_limit: 1600
+nanobody_screen_tranche_size: 200
+nanobody_weak_initial_fallback_after: 400
+nanobody_finalists: 60
+nanobody_qualification_observations: 10
+
+# One observation of a fixed sequence lands within about 34 leaderboard rank
+# points of its own mean, so a shortlist of five chosen on single observations
+# is mostly choosing noise.  Overlapping the per-tranche ranking and database
+# update with the next tranche's folding pays for several extra replication
+# rounds.
+nanobody_pipeline_depth: 1
+
+# Scores depend on which candidates share one BoltzGen predict call.  The live
+# 20-candidate tranche implies two per call; keep that grouping when the tranche
+# grows to 200 rather than letting it become twenty.
+nanobody_screen_predict_batch_size: 2

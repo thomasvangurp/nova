@@ -18,7 +18,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
+from nanobody_opt.diffusion_sample_selection import (
+    EXPECTED_DIFFUSION_SAMPLES,
+    SCORER_PROTOCOL,
+    require_expected_sample_count,
+)
 
 
 def _sequences(path: Path) -> list[str]:
@@ -68,6 +72,7 @@ def _validated_wave(
     expected: list[str],
     target: str,
     require_structures: bool = False,
+    expected_diffusion_samples: int = EXPECTED_DIFFUSION_SAMPLES,
 ) -> dict:
     payload = json.loads(path.read_text())
     found = _components(payload, target)
@@ -90,6 +95,11 @@ def _validated_wave(
                 raise ValueError(
                     f"wave result lacks dual-sample structures for {sequence}"
                 )
+            require_expected_sample_count(
+                record["sample_selection"],
+                expected=expected_diffusion_samples,
+                context=f"wave result for {sequence}",
+            )
     return payload
 
 
@@ -143,8 +153,20 @@ def main() -> None:
         type=int,
         help="score only the first N ranked sequences for a short update sweep",
     )
+    parser.add_argument(
+        "--expected-diffusion-samples",
+        type=int,
+        default=EXPECTED_DIFFUSION_SAMPLES,
+        help=(
+            "reject a wave folded with a different diffusion-sample count; the "
+            "reported metrics are a maximum over samples, so fewer samples "
+            "biases the observation instead of only adding noise"
+        ),
+    )
     args = parser.parse_args()
 
+    if args.expected_diffusion_samples < 1:
+        raise SystemExit("expected diffusion-sample count must be positive")
     if (
         args.wave_size < 1
         or args.predict_batch_size < 1
@@ -177,7 +199,11 @@ def main() -> None:
         if wave_output.exists():
             try:
                 payload = _validated_wave(
-                    wave_output, wave, args.target, args.capture_structures
+                    wave_output,
+                    wave,
+                    args.target,
+                    args.capture_structures,
+                    args.expected_diffusion_samples,
                 )
             except ValueError as error:
                 archived = _archive_legacy_wave(wave_output)
@@ -222,7 +248,11 @@ def main() -> None:
                 ])
             subprocess.run(command, check=True)
             payload = _validated_wave(
-                temporary_output, wave, args.target, args.capture_structures
+                temporary_output,
+                wave,
+                args.target,
+                args.capture_structures,
+                args.expected_diffusion_samples,
             )
             os.replace(temporary_output, wave_output)
             action = "READY"

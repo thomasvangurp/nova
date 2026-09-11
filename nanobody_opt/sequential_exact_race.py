@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -212,7 +213,11 @@ def _initial_repeat_candidate(
     return None
 
 
-def _screen_execution_shape(candidate_count: int, gpu_count: int) -> tuple[int, int]:
+def _screen_execution_shape(
+    candidate_count: int,
+    gpu_count: int,
+    predict_batch_size: int | None = None,
+) -> tuple[int, int]:
     """Keep one publishable tranche in one model-loading wave.
 
     The sharded scorer assigns candidates round-robin to GPUs.  Giving the
@@ -220,9 +225,21 @@ def _screen_execution_shape(candidate_count: int, gpu_count: int) -> tuple[int, 
     once for all candidates on that GPU.  The old ``wave_size=gpu_count`` and
     ``predict_batch_size=1`` combination reloaded the complete pipeline once
     per candidate even though publication only happened after the full tranche.
+
+    Predict batch composition is load-bearing: ``score_boltzgen_batch`` scores a
+    whole chunk in one ``predict`` call, and the wrapper's own measurements show
+    the same molecule moving by more than a factor of two depending on what else
+    shared that call.  The derived ``ceil(candidates / gpus)`` shape therefore
+    silently changes scores when the tranche grows, which is exactly what a
+    faster scorer invites.  Pin ``predict_batch_size`` whenever the tranche size
+    changes so a throughput change cannot alter the measured metric.
     """
     if candidate_count < 1 or gpu_count < 1:
         raise ValueError("candidate and GPU counts must be positive")
+    if predict_batch_size is not None:
+        if predict_batch_size < 1:
+            raise ValueError("predict batch size must be positive")
+        return candidate_count, predict_batch_size
     return candidate_count, math.ceil(candidate_count / gpu_count)
 
 
@@ -237,6 +254,18 @@ def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bo
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
     return current_epoch == epoch and block % epoch_length < epoch_length - reserve_blocks
+
+
+def _append_timing(path: Path, record: dict[str, Any]) -> None:
+    """Append one phase-timing record so the epoch budget comes from measurement.
+
+    A faster scorer only moves the bottleneck; without per-phase wall time there
+    is no way to tell whether an epoch is limited by folding, by ranking, or by
+    replication.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _exact_paths(root: Path) -> list[Path]:
@@ -282,7 +311,7 @@ def _rank_command(
     return command
 
 
-def _run_screen(
+def _screen_command(
     *,
     source: Path,
     config: Path,
@@ -290,8 +319,15 @@ def _run_screen(
     output_dir: Path,
     gpus: list[str],
     candidate_limit: int,
-    scorer: Path = DEFAULT_SCORER,
-) -> Path:
+    scorer: Path,
+    predict_batch_size: int | None,
+) -> list[str] | None:
+    """Return the scorer command, or ``None`` when the tranche is already scored.
+
+    An artifact from the previous scoring protocol is preserved beside the
+    tranche and never resumed, so a protocol change re-scores rather than mixing
+    observations from two different selection rules.
+    """
     completed = output_dir / "exact_all.json"
     if completed.is_file():
         try:
@@ -299,7 +335,7 @@ def _run_screen(
         except (OSError, json.JSONDecodeError):
             protocol = None
         if protocol == SCORER_PROTOCOL:
-            return completed
+            return None
         archived = completed.with_name(
             "exact_all.legacy-pre-dual-sample.json"
         )
@@ -314,10 +350,10 @@ def _run_screen(
             f"EXACT_SCREEN_PROTOCOL_REFRESH preserved={archived}",
             flush=True,
         )
-    wave_size, predict_batch_size = _screen_execution_shape(
-        candidate_limit, len(gpus)
+    wave_size, batch_size = _screen_execution_shape(
+        candidate_limit, len(gpus), predict_batch_size
     )
-    command = [
+    return [
         sys.executable,
         "-m",
         "nanobody_opt.score_boltzgen_waves",
@@ -327,13 +363,110 @@ def _run_screen(
         "--output-dir", str(output_dir),
         "--gpus", ",".join(gpus),
         "--wave-size", str(wave_size),
-        "--predict-batch-size", str(predict_batch_size),
+        "--predict-batch-size", str(batch_size),
         "--limit", str(candidate_limit),
         "--scorer", str(scorer),
         "--capture-structures",
     ]
-    subprocess.run(command, check=True)
-    return completed
+
+
+class ScreenJob:
+    """One screen tranche whose scorer may still be folding on the GPUs.
+
+    The scorer owns every GPU while it runs, so nothing else may be scheduled
+    until ``wait`` returns.  Ranking, basin shrinkage and the mutation-database
+    update are pure CPU work and are the only things overlapped with it.
+    """
+
+    def __init__(
+        self,
+        *,
+        index: int,
+        tranche: list[str],
+        root: Path,
+        process: subprocess.Popen | None,
+        command: list[str] | None,
+        started: float,
+    ) -> None:
+        self.index = index
+        self.tranche = tranche
+        self.root = root
+        self.completed = root / "exact_all.json"
+        self._process = process
+        self._command = command
+        self.started = started
+        self.scoring_seconds = 0.0
+
+    def wait(self) -> Path:
+        if self._process is None:
+            return self.completed
+        return_code = self._process.wait()
+        self.scoring_seconds = time.monotonic() - self.started
+        self._process = None
+        if return_code:
+            raise subprocess.CalledProcessError(return_code, self._command or [])
+        return self.completed
+
+
+def _start_screen(
+    *,
+    index: int,
+    tranche: list[str],
+    source: Path,
+    config: Path,
+    target: str,
+    output_dir: Path,
+    gpus: list[str],
+    scorer: Path = DEFAULT_SCORER,
+    predict_batch_size: int | None = None,
+) -> ScreenJob:
+    """Dispatch one tranche without waiting for its GPU work to finish."""
+    command = _screen_command(
+        source=source,
+        config=config,
+        target=target,
+        output_dir=output_dir,
+        gpus=gpus,
+        candidate_limit=len(tranche),
+        scorer=scorer,
+        predict_batch_size=predict_batch_size,
+    )
+    started = time.monotonic()
+    process = None if command is None else subprocess.Popen(command)
+    return ScreenJob(
+        index=index,
+        tranche=tranche,
+        root=output_dir,
+        process=process,
+        command=command,
+        started=started,
+    )
+
+
+def _run_screen(
+    *,
+    source: Path,
+    config: Path,
+    target: str,
+    output_dir: Path,
+    gpus: list[str],
+    candidate_limit: int,
+    scorer: Path = DEFAULT_SCORER,
+    predict_batch_size: int | None = None,
+) -> Path:
+    command = _screen_command(
+        source=source,
+        config=config,
+        target=target,
+        output_dir=output_dir,
+        gpus=gpus,
+        candidate_limit=candidate_limit,
+        scorer=scorer,
+        predict_batch_size=predict_batch_size,
+    )
+    if command is not None:
+        subprocess.run(command, check=True)
+    return output_dir / "exact_all.json"
 
 
 def _repeat_command(
@@ -651,6 +784,27 @@ def main() -> None:
         ),
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
+    parser.add_argument(
+        "--pipeline-depth",
+        type=int,
+        default=1,
+        help=(
+            "dispatch this many screen tranches ahead so ranking, basin "
+            "shrinkage and the mutation-database update run while the GPUs "
+            "fold the next tranche; 0 restores fully serial behaviour"
+        ),
+    )
+    parser.add_argument(
+        "--screen-predict-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "pin how many candidates share one BoltzGen predict call; scores "
+            "depend on that grouping, so a larger tranche must not be allowed "
+            "to change it implicitly.  0 derives the historical "
+            "ceil(candidates / GPUs) shape"
+        ),
+    )
     parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
     parser.add_argument("--minimum-basin-samples", type=int, default=3)
     args = parser.parse_args()
@@ -670,6 +824,11 @@ def main() -> None:
         parser.error("--basin-shrinkage-strength cannot be negative")
     if args.minimum_basin_samples < 1:
         parser.error("--minimum-basin-samples must be positive")
+    if args.pipeline_depth not in (0, 1):
+        parser.error("--pipeline-depth must be 0 or 1")
+    if args.screen_predict_batch_size < 0:
+        parser.error("--screen-predict-batch-size cannot be negative")
+    args.screen_predict_batch_size = args.screen_predict_batch_size or None
     gpus = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
     if not gpus:
         parser.error("at least one GPU is required")
@@ -700,10 +859,22 @@ def main() -> None:
     screened = 0
     pending = list(sequences)
     tranche_index = 0
-    while pending:
+    timings_path = args.output_dir / "timings.jsonl"
+
+    def _dispatch_next_tranche() -> ScreenJob | None:
+        """Start the next tranche's GPU work, or return None when none may run.
+
+        Tranche composition depends only on the pending queue and how often each
+        structural basin has already been screened, never on the ranking of an
+        earlier tranche, so dispatching one tranche ahead selects exactly the
+        candidates a fully serial run would have selected.
+        """
+        nonlocal tranche_index
+        if not pending:
+            return None
         if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
             print("EXACT_RACE_RESERVE_REACHED before next screen tranche", flush=True)
-            break
+            return None
         tranche_index += 1
         tranche_root = args.output_dir / "screen" / f"tranche_{tranche_index:02d}"
         source = tranche_root / "candidates.json"
@@ -728,16 +899,30 @@ def main() -> None:
                 or "__unattributed__"
             )
             screened_parent_counts[parent] += 1
-        screen_exact_paths.append(_run_screen(
+        return _start_screen(
+            index=tranche_index,
+            tranche=tranche,
             source=source,
             config=args.config,
             target=args.target,
             output_dir=tranche_root,
             gpus=gpus,
-            candidate_limit=len(tranche),
             scorer=args.scorer,
-        ))
-        screened += len(tranche)
+            predict_batch_size=args.screen_predict_batch_size,
+        )
+
+    in_flight = _dispatch_next_tranche()
+    while in_flight is not None:
+        job = in_flight
+        in_flight = None
+        job.wait()
+        # The scorer owns every GPU, so the next tranche is dispatched first and
+        # the CPU-only bookkeeping below runs while it folds.
+        if args.pipeline_depth:
+            in_flight = _dispatch_next_tranche()
+        bookkeeping_started = time.monotonic()
+        screen_exact_paths.append(job.completed)
+        screened += len(job.tranche)
         subprocess.run(
             _rank_command(
                 exact=screen_exact_paths,
@@ -768,8 +953,28 @@ def main() -> None:
         screen_candidates = _ranking_by_sequence(screen_ranking)
         ranked_sequences = json.loads(screen_ranking.read_text())["sequences"]
         print(
-            f"EXACT_SCREEN_TRANCHE_COMPLETE tranche={tranche_index} "
+            f"EXACT_SCREEN_TRANCHE_COMPLETE tranche={job.index} "
             f"screened={screened}/{len(sequences)} leader={ranked_sequences[0]}",
+            flush=True,
+        )
+        bookkeeping_seconds = time.monotonic() - bookkeeping_started
+        _append_timing(
+            timings_path,
+            {
+                "phase": "screen_tranche",
+                "tranche": job.index,
+                "candidates": len(job.tranche),
+                "scoring_seconds": round(job.scoring_seconds, 1),
+                "bookkeeping_seconds": round(bookkeeping_seconds, 1),
+                "overlapped": bool(args.pipeline_depth),
+                "screened": screened,
+            },
+        )
+        print(
+            f"EXACT_TRANCHE_TIMING tranche={job.index} "
+            f"scoring={job.scoring_seconds:.0f}s "
+            f"bookkeeping={bookkeeping_seconds:.0f}s "
+            f"candidates={len(job.tranche)}",
             flush=True,
         )
         if len(repeated_finalists) >= args.finalists:
@@ -828,7 +1033,12 @@ def main() -> None:
         if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
             print("EXACT_RACE_RESERVE_REACHED before next finalist", flush=True)
             break
+        if in_flight is not None:
+            # Replication needs every GPU; finish the prefetched tranche first
+            # and let the next loop iteration do its bookkeeping.
+            in_flight.wait()
         repeated_finalists.append(sequence)
+        repeats_started = time.monotonic()
         try:
             _score_repeats(
                 sequence=sequence,
@@ -846,6 +1056,15 @@ def main() -> None:
                 flush=True,
             )
             continue
+        _append_timing(
+            timings_path,
+            {
+                "phase": "finalist_repeats",
+                "finalist": finalist_index,
+                "observations": args.qualification_observations - 1,
+                "seconds": round(time.monotonic() - repeats_started, 1),
+            },
+        )
         output = args.output_dir / f"qualified_after_{finalist_index:02d}.json"
         if _try_strict_rank(
             root=args.output_dir,

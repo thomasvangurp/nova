@@ -23,6 +23,7 @@ def _payload(sequence="AAAA"):
                     "path": "/confidence.cif",
                     "writer_path": "/writer.cif",
                     "sample_selection": {
+                        "sample_count": 5,
                         "writer_sample_index": 0,
                         "analyze_sample_index": 1,
                     },
@@ -60,3 +61,22 @@ def test_legacy_wave_is_preserved_before_refresh(tmp_path):
 
     assert not path.exists()
     assert archived.read_text() == "legacy"
+
+
+def test_wave_with_fewer_diffusion_samples_is_refused(tmp_path):
+    path = tmp_path / "wave.json"
+    payload = _payload()
+    payload["structures"]["AAAA"]["P20809"]["sample_selection"]["sample_count"] = 2
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="maximum over samples"):
+        _validated_wave(path, ["AAAA"], "P20809", require_structures=True)
+
+
+def test_wave_with_the_upstream_diffusion_sample_count_is_accepted(tmp_path):
+    path = tmp_path / "wave.json"
+    payload = _payload()
+    payload["structures"]["AAAA"]["P20809"]["sample_selection"]["sample_count"] = 5
+    path.write_text(json.dumps(payload))
+
+    assert _validated_wave(path, ["AAAA"], "P20809", require_structures=True)

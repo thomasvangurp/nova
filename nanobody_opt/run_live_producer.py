@@ -229,7 +229,7 @@ def _run_iteration(
             "--igblast-batch-size", "1",
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ])
-    _run([
+    race_command = [
         sys.executable,
         "-m", "nanobody_opt.sequential_exact_race",
         "--layer2", str(layer2),
@@ -252,7 +252,11 @@ def _run_iteration(
         "--challenger-p90-margin", str(args.challenger_p90_margin),
         "--basin-shrinkage-strength", str(args.basin_shrinkage_strength),
         "--minimum-basin-samples", str(args.minimum_basin_samples),
-    ])
+        "--qualification-observations", str(args.qualification_observations),
+        "--pipeline-depth", str(args.pipeline_depth),
+        "--screen-predict-batch-size", str(args.screen_predict_batch_size),
+    ]
+    _run(race_command)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -348,6 +352,30 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--challenger-p90-margin", type=float, default=20.0)
     parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
     parser.add_argument("--minimum-basin-samples", type=int, default=3)
+    parser.add_argument(
+        "--qualification-observations",
+        type=int,
+        default=8,
+        help=(
+            "independent observations per finalist; one observation of a fixed "
+            "sequence is a wide draw, so this is the main accuracy control"
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-depth",
+        type=int,
+        default=1,
+        help="overlap tranche bookkeeping with the next tranche's GPU work",
+    )
+    parser.add_argument(
+        "--screen-predict-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "pin candidates per BoltzGen predict call so a larger tranche "
+            "cannot change the grouping that scores depend on"
+        ),
+    )
     parser.add_argument("--once", action="store_true")
     return parser
 

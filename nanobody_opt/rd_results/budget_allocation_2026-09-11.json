@@ -1,0 +1,416 @@
+{
+  "allocation_grid": {
+    "170": [
+      {
+        "breadth": 118,
+        "expected_published_minus_pool_mean": -76.02478933394487,
+        "observations": 166,
+        "replicates": 7,
+        "shortlist": 8
+      },
+      {
+        "breadth": 118,
+        "expected_published_minus_pool_mean": -75.86874257560441,
+        "observations": 168,
+        "replicates": 11,
+        "shortlist": 5
+      },
+      {
+        "breadth": 102,
+        "expected_published_minus_pool_mean": -75.60370875655397,
+        "observations": 166,
+        "replicates": 9,
+        "shortlist": 8
+      },
+      {
+        "breadth": 136,
+        "expected_published_minus_pool_mean": -75.5627716744804,
+        "observations": 168,
+        "replicates": 5,
+        "shortlist": 8
+      },
+      {
+        "breadth": 118,
+        "expected_published_minus_pool_mean": -75.41490318251992,
+        "observations": 166,
+        "replicates": 5,
+        "shortlist": 12
+      }
+    ],
+    "2000": [
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.74502157468473,
+        "observations": 1984,
+        "replicates": 13,
+        "shortlist": 32
+      },
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -104.73396827557599,
+        "observations": 2000,
+        "replicates": 16,
+        "shortlist": 40
+      },
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.65542696080992,
+        "observations": 2000,
+        "replicates": 11,
+        "shortlist": 40
+      },
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -104.65183077545849,
+        "observations": 1976,
+        "replicates": 19,
+        "shortlist": 32
+      },
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.5981533517513,
+        "observations": 1984,
+        "replicates": 17,
+        "shortlist": 24
+      }
+    ],
+    "600": [
+      {
+        "breadth": 420,
+        "expected_published_minus_pool_mean": -91.60777271821046,
+        "observations": 596,
+        "replicates": 12,
+        "shortlist": 16
+      },
+      {
+        "breadth": 420,
+        "expected_published_minus_pool_mean": -91.45621402362914,
+        "observations": 588,
+        "replicates": 8,
+        "shortlist": 24
+      },
+      {
+        "breadth": 480,
+        "expected_published_minus_pool_mean": -91.41861119711042,
+        "observations": 592,
+        "replicates": 8,
+        "shortlist": 16
+      },
+      {
+        "breadth": 480,
+        "expected_published_minus_pool_mean": -91.41167821692457,
+        "observations": 600,
+        "replicates": 11,
+        "shortlist": 12
+      },
+      {
+        "breadth": 420,
+        "expected_published_minus_pool_mean": -91.1402314947935,
+        "observations": 600,
+        "replicates": 16,
+        "shortlist": 12
+      }
+    ]
+  },
+  "epochs_with_fields": [
+    25035,
+    25036,
+    25037,
+    25038,
+    25039,
+    25040,
+    25041,
+    25042,
+    25043,
+    25044,
+    25045,
+    25046,
+    25047,
+    25048,
+    25049,
+    25050,
+    25051,
+    25052,
+    25053,
+    25054
+  ],
+  "measured_policy": {
+    "breadth": 122.22222222222223,
+    "epochs": 18,
+    "expected_published_minus_pool_mean": -67.376161248031,
+    "observations": 136.88888888888889,
+    "published_ranks": [
+      23,
+      38,
+      30,
+      11,
+      30,
+      16,
+      14,
+      17,
+      29,
+      8,
+      8,
+      12,
+      13,
+      3,
+      4,
+      13
+    ],
+    "rank_outcome": {
+      "expected_score": 117.38895250858275,
+      "mean_rank": 15.643475,
+      "median_rank": 15.0,
+      "probability_rank_1": 0.03005,
+      "probability_top_3": 0.093,
+      "probability_top_5": 0.160525
+    },
+    "replicates": 7.0,
+    "shortlist": 2.4444444444444446
+  },
+  "observation_counts": {
+    "repeat": 308,
+    "screen": 2200,
+    "sequences": 931
+  },
+  "observation_noise": {
+    "groups": 42,
+    "sigma_observation": 33.79021519445867,
+    "sigma_observation_mean": 36.703517014854825
+  },
+  "pool_spread": {
+    "epochs": 15,
+    "one_observation_correlation": 0.6992765813489463,
+    "per_epoch": {
+      "25037": {
+        "candidates": 140,
+        "mean_rank_sum": 142.55,
+        "sd_rank_sum": 38.21113721409303
+      },
+      "25038": {
+        "candidates": 140,
+        "mean_rank_sum": 153.57857142857142,
+        "sd_rank_sum": 36.81453963965533
+      },
+      "25039": {
+        "candidates": 180,
+        "mean_rank_sum": 156.37777777777777,
+        "sd_rank_sum": 36.26056471834599
+      },
+      "25040": {
+        "candidates": 140,
+        "mean_rank_sum": 130.8357142857143,
+        "sd_rank_sum": 29.013420539959977
+      },
+      "25041": {
+        "candidates": 120,
+        "mean_rank_sum": 197.38333333333333,
+        "sd_rank_sum": 26.66101655829291
+      },
+      "25045": {
+        "candidates": 120,
+        "mean_rank_sum": 174.41666666666666,
+        "sd_rank_sum": 45.57154930921898
+      },
+      "25046": {
+        "candidates": 100,
+        "mean_rank_sum": 166.09,
+        "sd_rank_sum": 42.672607304234575
+      },
+      "25047": {
+        "candidates": 140,
+        "mean_rank_sum": 197.8,
+        "sd_rank_sum": 62.085251205630044
+      },
+      "25048": {
+        "candidates": 160,
+        "mean_rank_sum": 204.20625,
+        "sd_rank_sum": 50.957263741172575
+      },
+      "25049": {
+        "candidates": 140,
+        "mean_rank_sum": 210.56428571428572,
+        "sd_rank_sum": 60.6842530763012
+      },
+      "25050": {
+        "candidates": 160,
+        "mean_rank_sum": 199.30625,
+        "sd_rank_sum": 56.22058944615359
+      },
+      "25051": {
+        "candidates": 160,
+        "mean_rank_sum": 208.925,
+        "sd_rank_sum": 64.60801496319382
+      },
+      "25052": {
+        "candidates": 160,
+        "mean_rank_sum": 220.4125,
+        "sd_rank_sum": 55.979150150500914
+      },
+      "25053": {
+        "candidates": 140,
+        "mean_rank_sum": 213.84285714285716,
+        "sd_rank_sum": 55.956595644254065
+      },
+      "25054": {
+        "candidates": 80,
+        "mean_rank_sum": 195.1875,
+        "sd_rank_sum": 47.337221084470094
+      }
+    },
+    "pool_mean_rank_sum": 184.76511375661374,
+    "sd_observed": 47.26887830636515,
+    "sigma_quality": 33.054019626274396
+  },
+  "rank_outcome": {
+    "170": {
+      "expected_score": 108.74032442266888,
+      "mean_rank": 13.4083,
+      "median_rank": 11.0,
+      "probability_rank_1": 0.05,
+      "probability_top_3": 0.138475,
+      "probability_top_5": 0.227575
+    },
+    "2000": {
+      "expected_score": 80.02009218192902,
+      "mean_rank": 7.259475,
+      "median_rank": 5.0,
+      "probability_rank_1": 0.19685,
+      "probability_top_3": 0.387725,
+      "probability_top_5": 0.52945
+    },
+    "600": {
+      "expected_score": 93.15734103840329,
+      "mean_rank": 9.80285,
+      "median_rank": 7.0,
+      "probability_rank_1": 0.11205,
+      "probability_top_3": 0.257725,
+      "probability_top_5": 0.38135
+    }
+  },
+  "result_sha256": "bef26b08c70c4baffb09364132f27f8b54f9b43f2a8c7745d1e6554f4636a02f",
+  "target": "P20809",
+  "wall_clock_model": {
+    "bookkeeping_seconds": 84.0,
+    "gpu_count": 10,
+    "scorer_load_seconds": 33.0,
+    "scorer_seconds_per_sequence": 14.5,
+    "window_seconds": 3672.0
+  },
+  "wall_clock_plans": {
+    "overlapped": [
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -105.08570133409071,
+        "observations": 2140,
+        "replicates": 10,
+        "replication_rounds": 9,
+        "sequences_per_shard": 6.0,
+        "shortlist": 60,
+        "tranche": 200,
+        "wall_seconds": 3664.0
+      },
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.9008377091263,
+        "observations": 2040,
+        "replicates": 12,
+        "replication_rounds": 11,
+        "sequences_per_shard": 4.0,
+        "shortlist": 40,
+        "tranche": 200,
+        "wall_seconds": 3585.0
+      },
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.83457396256206,
+        "observations": 2016,
+        "replicates": 14,
+        "replication_rounds": 13,
+        "sequences_per_shard": 3.2,
+        "shortlist": 32,
+        "tranche": 200,
+        "wall_seconds": 3616.2
+      },
+      {
+        "breadth": 1600,
+        "expected_published_minus_pool_mean": -104.74502157468473,
+        "observations": 1984,
+        "replicates": 13,
+        "replication_rounds": 12,
+        "sequences_per_shard": 3.2,
+        "shortlist": 32,
+        "tranche": 150,
+        "wall_seconds": 3635.8
+      },
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -104.73396827557599,
+        "observations": 2000,
+        "replicates": 16,
+        "replication_rounds": 15,
+        "sequences_per_shard": 4.0,
+        "shortlist": 40,
+        "tranche": 200,
+        "wall_seconds": 3626.0
+      }
+    ],
+    "serial": [
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -103.31256864219135,
+        "observations": 1720,
+        "replicates": 11,
+        "replication_rounds": 10,
+        "sequences_per_shard": 3.2,
+        "shortlist": 32,
+        "tranche": 200,
+        "wall_seconds": 3643.0
+      },
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -103.27448442371245,
+        "observations": 1760,
+        "replicates": 10,
+        "replication_rounds": 9,
+        "sequences_per_shard": 4.0,
+        "shortlist": 40,
+        "tranche": 200,
+        "wall_seconds": 3668.0
+      },
+      {
+        "breadth": 1400,
+        "expected_published_minus_pool_mean": -103.090043599783,
+        "observations": 1688,
+        "replicates": 13,
+        "replication_rounds": 12,
+        "sequences_per_shard": 2.4,
+        "shortlist": 24,
+        "tranche": 200,
+        "wall_seconds": 3662.6
+      },
+      {
+        "breadth": 1200,
+        "expected_published_minus_pool_mean": -103.06547974723517,
+        "observations": 1720,
+        "replicates": 14,
+        "replication_rounds": 13,
+        "sequences_per_shard": 4.0,
+        "shortlist": 40,
+        "tranche": 200,
+        "wall_seconds": 3625.0
+      },
+      {
+        "breadth": 1200,
+        "expected_published_minus_pool_mean": -102.7755430883568,
+        "observations": 1800,
+        "replicates": 11,
+        "replication_rounds": 10,
+        "sequences_per_shard": 6.0,
+        "shortlist": 60,
+        "tranche": 200,
+        "wall_seconds": 3642.0
+      }
+    ]
+  }
+}

@@ -28,3 +28,21 @@ def test_validator_rule_rejects_inconsistent_sample_arrays():
             "design_to_target_iptm": [0.8, 0.7],
             "design_ptm": [0.8, 0.7],
         })
+
+
+def test_reduced_diffusion_sample_count_is_refused():
+    import pytest
+
+    from nanobody_opt.diffusion_sample_selection import (
+        EXPECTED_DIFFUSION_SAMPLES,
+        require_expected_sample_count,
+    )
+
+    assert require_expected_sample_count(
+        {"sample_count": EXPECTED_DIFFUSION_SAMPLES}
+    ) == EXPECTED_DIFFUSION_SAMPLES
+
+    with pytest.raises(ValueError, match="maximum over samples"):
+        require_expected_sample_count({"sample_count": 2})
+    with pytest.raises(ValueError, match="diffusion sample count"):
+        require_expected_sample_count({})

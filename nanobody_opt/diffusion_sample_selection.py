@@ -15,6 +15,7 @@ import numpy as np
 
 
 SCORER_PROTOCOL = "validator-dual-sample-v1"
+EXPECTED_DIFFUSION_SAMPLES = 5
 WRITER_SELECTION_RULE = "argmax(0.8*iptm+0.2*ptm)"
 ANALYZE_SELECTION_RULE = (
     "argmax(0.8*design_to_target_iptm+0.2*design_ptm)"
@@ -41,6 +42,36 @@ class DiffusionSampleSelection:
 
     def as_record(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def require_expected_sample_count(
+    record: Mapping[str, Any],
+    *,
+    expected: int = EXPECTED_DIFFUSION_SAMPLES,
+    context: str = "observation",
+) -> int:
+    """Refuse an observation folded with fewer diffusion samples than upstream.
+
+    The reported confidence metrics are a maximum over the diffusion samples, so
+    a scorer that draws fewer samples does not merely add noise: it biases every
+    confidence metric downward and every PAE upward.  A faster scorer can make
+    that trade invisibly, so the sample count is validated rather than trusted.
+    """
+    if expected < 1:
+        raise ValueError("expected diffusion-sample count must be positive")
+    try:
+        count = int(record["sample_count"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"{context} lacks a diffusion sample count"
+        ) from error
+    if count != expected:
+        raise ValueError(
+            f"{context} used {count} diffusion samples, expected {expected}; "
+            "the reported metrics are a maximum over samples, so this biases "
+            "the observation rather than only adding noise"
+        )
+    return count
 
 
 def _samples(values: Any, name: str) -> np.ndarray:

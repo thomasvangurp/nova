@@ -48,6 +48,9 @@
     nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_batch.py
     nanobody_basin_shrinkage_strength: 2.0
     nanobody_minimum_basin_samples: 3
+    nanobody_qualification_observations: 8
+    nanobody_pipeline_depth: 1
+    nanobody_screen_predict_batch_size: 0
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -809,6 +812,12 @@
           - "{{ nanobody_basin_shrinkage_strength }}"
           - --minimum-basin-samples
           - "{{ nanobody_minimum_basin_samples }}"
+          - --qualification-observations
+          - "{{ nanobody_qualification_observations }}"
+          - --pipeline-depth
+          - "{{ nanobody_pipeline_depth }}"
+          - --screen-predict-batch-size
+          - "{{ nanobody_screen_predict_batch_size }}"
       changed_when: true
       when: nanobody_producer_activate | bool
 

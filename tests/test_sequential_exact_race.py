@@ -303,3 +303,68 @@ def test_screen_ranking_persists_true_proposal_lineage(tmp_path):
             "screen_priority": 17,
         },
     }]
+
+
+def test_predict_batch_is_pinned_so_a_bigger_tranche_cannot_change_scores():
+    # Scores depend on which candidates share one predict call, so growing the
+    # tranche for throughput must not silently regroup the predict batch.
+    assert race._screen_execution_shape(200, 10) == (200, 20)
+    assert race._screen_execution_shape(200, 10, 2) == (200, 2)
+    assert race._screen_execution_shape(20, 10, 2) == (20, 2)
+
+
+def test_already_scored_tranche_starts_no_process_and_resumes(tmp_path):
+    from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
+
+    root = tmp_path / "tranche_01"
+    root.mkdir()
+    (root / "exact_all.json").write_text(
+        json.dumps({"scorer_protocol": SCORER_PROTOCOL})
+    )
+
+    job = race._start_screen(
+        index=1,
+        tranche=["AAA"],
+        source=root / "candidates.json",
+        config=tmp_path / "config.yaml",
+        target="P20809",
+        output_dir=root,
+        gpus=["0"],
+    )
+
+    assert job.wait() == root / "exact_all.json"
+    assert job.scoring_seconds == 0.0
+
+
+def test_prefetched_tranche_matches_the_serial_selection():
+    # Dispatching one tranche ahead is only safe because tranche composition
+    # never reads the ranking that the overlapped bookkeeping produces.
+    metadata = {
+        sequence: {"parent_basin_core_id": core, "parent_basin_rank": rank}
+        for sequence, core, rank in (
+            ("AAA", "core_1", 1),
+            ("BBB", "core_2", 2),
+            ("CCC", "core_1", 1),
+            ("DDD", "core_3", 3),
+        )
+    }
+    pending = ["AAA", "BBB", "CCC", "DDD"]
+    counts: Counter[str] = Counter()
+
+    serial = race._balanced_screen_tranche(pending, metadata, counts, 2)
+    for sequence in serial:
+        counts[str(metadata[sequence]["parent_basin_core_id"])] += 1
+    remaining = [item for item in pending if item not in serial]
+    serial_next = race._balanced_screen_tranche(remaining, metadata, counts, 2)
+
+    enriched = {
+        sequence: {
+            **record,
+            "basin_adjusted_score": 42.0,
+            "basin_screen_median": 42.0,
+        }
+        for sequence, record in metadata.items()
+    }
+    prefetched = race._balanced_screen_tranche(remaining, enriched, counts, 2)
+
+    assert prefetched == serial_next
