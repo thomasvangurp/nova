@@ -58,6 +58,14 @@ nanobody_replication_rounds: 9
 # single observation -- the exact failure the shortlist exists to prevent.
 nanobody_replication_reserve_blocks: 68
 
+# Full TNP costs about two seconds per uncached sequence and is GPU-resident:
+# 3,200 novel candidates would be roughly 107 minutes, which does not fit an
+# epoch at all.  Screen the pool on IgBLAST (42 ms/seq at batch one, 21 ms at
+# batch eight) and spend full TNP only on the replication shortlist, which the
+# race gates before anything can be published.
+nanobody_layer2_igblast_only: true
+nanobody_igblast_batch_size: 8
+
 # One observation of a fixed sequence lands within about 34 leaderboard rank
 # points of its own mean, so a shortlist of five chosen on single observations
 # is mostly choosing noise.  Overlapping the per-tranche ranking and database

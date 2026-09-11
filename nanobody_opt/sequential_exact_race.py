@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -281,6 +282,58 @@ def _chain_allows_work(path: Path | None, epoch: int, reserve_blocks: int) -> bo
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
     return current_epoch == epoch and block % epoch_length < epoch_length - reserve_blocks
+
+
+def _layer2_gate(
+    shortlist: list[str],
+    *,
+    command: list[str],
+    root: Path,
+    target: str,
+) -> list[str]:
+    """Run full Layer-2 on the shortlist and keep only what actually passes.
+
+    Full TNP costs about two seconds per uncached sequence and is GPU-resident,
+    so running it over a breadth-first proposal pool would cost more than an
+    epoch: 3,200 novel candidates is roughly 107 minutes.  The pool is therefore
+    screened on IgBLAST alone, and full TNP is spent only on the candidates that
+    could actually be published.  A sequence that fails here is removed from
+    contention rather than published on IgBLAST evidence.
+
+    ``command`` is a template containing ``{input}`` and ``{output}``; the caller
+    owns how Layer 2 is invoked, so this stays free of environment specifics.
+    """
+    if not shortlist or not command:
+        return shortlist
+    gate_root = root / "layer2_gate"
+    source = gate_root / "shortlist.json"
+    output = gate_root / "layer2.json"
+    _atomic_json(source, {"target": target, "sequences": shortlist})
+    resolved = [
+        item.format(input=str(source), output=str(output)) for item in command
+    ]
+    try:
+        subprocess.run(resolved, check=True)
+        payload = json.loads(output.read_text())
+    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
+        # Failing open would publish on IgBLAST evidence alone, which the
+        # publisher is right to refuse; failing closed costs this epoch's
+        # replication instead.
+        print(f"EXACT_LAYER2_GATE_FAILED error={type(error).__name__}", flush=True)
+        return []
+    passed = {
+        str(record["sequence"])
+        for record in payload.get("candidates", [])
+        if isinstance(record, dict)
+        and record.get("sequence")
+        and record.get("layer2_passed") is True
+    }
+    kept = [sequence for sequence in shortlist if sequence in passed]
+    print(
+        f"EXACT_LAYER2_GATE kept={len(kept)}/{len(shortlist)}",
+        flush=True,
+    )
+    return kept
 
 
 def _replication_shortlist(
@@ -895,6 +948,15 @@ def main() -> None:
     )
     parser.add_argument("--qualification-observations", type=int, default=8)
     parser.add_argument(
+        "--layer2-gate-command",
+        help=(
+            "command template run over the replication shortlist to obtain full "
+            "Layer-2 evidence, with {input} and {output} placeholders; the pool "
+            "itself is screened on IgBLAST alone because full TNP over a "
+            "breadth-first pool costs more than an epoch"
+        ),
+    )
+    parser.add_argument(
         "--replication-reserve-blocks",
         type=int,
         default=0,
@@ -1267,6 +1329,13 @@ def main() -> None:
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
         )
+        if args.layer2_gate_command:
+            replication_shortlist = _layer2_gate(
+                replication_shortlist,
+                command=shlex.split(args.layer2_gate_command),
+                root=args.output_dir,
+                target=args.target,
+            )
         replication_rounds_completed = _run_replication_rounds(
             shortlist=replication_shortlist,
             rounds=args.replication_rounds,

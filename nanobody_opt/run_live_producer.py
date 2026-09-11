@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -166,7 +167,7 @@ def _run_iteration(
             "--output", str(seed),
             "--concurrency", str(args.layer2_concurrency),
             "--igblast-concurrency", str(args.layer2_concurrency),
-            "--igblast-batch-size", "1",
+            "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ])
     candidates = iteration_root / "candidates.csv"
@@ -226,9 +227,9 @@ def _run_iteration(
             "--output", str(layer2),
             "--concurrency", str(args.layer2_concurrency),
             "--igblast-concurrency", str(args.layer2_concurrency),
-            "--igblast-batch-size", "1",
+            "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
-        ])
+        ] + (["--igblast-only"] if args.layer2_igblast_only else []))
     race_command = [
         sys.executable,
         "-m", "nanobody_opt.sequential_exact_race",
@@ -259,6 +260,24 @@ def _run_iteration(
         "--replication-reserve-blocks", str(args.replication_reserve_blocks),
         "--strict-gates", str(args.strict_gates or ""),
     ]
+    if args.layer2_igblast_only:
+        # The pool was screened on IgBLAST alone, so the shortlist must earn
+        # full Layer-2 evidence before anything can be published.
+        gate = [
+            "/usr/local/bin/pixi", "run",
+            "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked", "--environment", "metanano", "filter-layer2", "--",
+            "--input", "{input}",
+            "--config", str(config),
+            "--output", "{output}",
+            "--concurrency", str(args.layer2_concurrency),
+            "--igblast-concurrency", str(args.layer2_concurrency),
+            "--igblast-batch-size", str(args.igblast_batch_size),
+            "--cache-dir", str(args.runtime_root / "layer2_cache"),
+        ]
+        race_command.extend(
+            ["--layer2-gate-command", " ".join(shlex.quote(item) for item in gate)]
+        )
     _run(race_command)
 
 
@@ -337,6 +356,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-motif-mutations", type=int, default=6)
     parser.add_argument("--maximum-exhaustive-singles", type=int, default=8192)
     parser.add_argument("--layer2-concurrency", type=int, default=40)
+    parser.add_argument(
+        "--igblast-batch-size",
+        type=int,
+        default=8,
+        help=(
+            "sequences per IgBLAST call; measured 42 ms/seq at one and 21 ms/seq "
+            "at eight, because each call reloads the germline databases"
+        ),
+    )
+    parser.add_argument(
+        "--layer2-igblast-only",
+        type=int,
+        default=0,
+        help=(
+            "screen the pool on IgBLAST alone and spend full TNP only on the "
+            "replication shortlist; uncached TNP is about two seconds per "
+            "sequence, so a breadth-first pool would cost more than an epoch"
+        ),
+    )
     parser.add_argument(
         "--candidate-limit",
         type=int,

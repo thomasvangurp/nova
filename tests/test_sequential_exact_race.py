@@ -493,3 +493,53 @@ def test_screening_stops_early_enough_to_leave_room_for_replication(tmp_path):
     assert race._chain_allows_work(state, 25060, reserve_blocks=55) is True
     # but not once the replication rounds are reserved as well
     assert race._chain_allows_work(state, 25060, reserve_blocks=55 + 68) is False
+
+
+def test_layer2_gate_keeps_only_candidates_with_full_evidence(tmp_path, monkeypatch):
+    def _fake_run(command, check=False):
+        output = command[command.index("--output") + 1]
+        __import__("pathlib").Path(output).write_text(json.dumps({
+            "candidates": [
+                {"sequence": "AAA", "layer2_passed": True},
+                {"sequence": "BBB", "layer2_passed": False},
+                {"sequence": "CCC", "igblast_passed": True},
+            ]
+        }))
+        return __import__("subprocess").CompletedProcess(command, 0)
+
+    monkeypatch.setattr(race.subprocess, "run", _fake_run)
+
+    kept = race._layer2_gate(
+        ["AAA", "BBB", "CCC"],
+        command=["tnp", "--input", "{input}", "--output", "{output}"],
+        root=tmp_path,
+        target="P20809",
+    )
+
+    # BBB failed TNP; CCC only has IgBLAST evidence, which cannot be published
+    assert kept == ["AAA"]
+    source = json.loads((tmp_path / "layer2_gate" / "shortlist.json").read_text())
+    assert source["sequences"] == ["AAA", "BBB", "CCC"]
+
+
+def test_layer2_gate_fails_closed(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    def _boom(command, check=False):
+        raise sp.CalledProcessError(1, command)
+
+    monkeypatch.setattr(race.subprocess, "run", _boom)
+
+    # publishing on IgBLAST evidence alone is worse than losing replication
+    assert race._layer2_gate(
+        ["AAA"],
+        command=["tnp", "--input", "{input}", "--output", "{output}"],
+        root=tmp_path,
+        target="P20809",
+    ) == []
+
+
+def test_layer2_gate_is_inert_without_a_command(tmp_path):
+    assert race._layer2_gate(
+        ["AAA", "BBB"], command=[], root=tmp_path, target="P20809"
+    ) == ["AAA", "BBB"]
