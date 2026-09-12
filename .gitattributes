@@ -2,3 +2,12 @@
 
 # Treat all text files as text and ensure LF
 * text eol=lf
+# Binary archives must never be line-ending normalised: git's autocrlf silently
+# rewrote every .gz and .tgz under snapshots/ on first commit, corrupting all of
+# them while reporting only a warning.
+*.gz binary
+*.tgz binary
+*.sqlite binary
+*.npz binary
+*.cif -text
+snapshots/** binary
