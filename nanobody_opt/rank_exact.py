@@ -28,6 +28,7 @@ from nanobody_opt.simulate_round import (
     METRICS,
     METRIC_CATEGORIES,
 )
+from nanobody_opt.win_probability import rank_by_win_probability
 from nanobody_opt.pose_stability import (
     exact_sample_selections,
     exact_structure_paths,
@@ -246,7 +247,7 @@ def main() -> None:
     parser.add_argument("--leaderboard-api-root", default=LEADERBOARD_API_ROOT)
     parser.add_argument(
         "--selection-order",
-        choices=("competitive-rate", "p90"),
+        choices=("competitive-rate", "p90", "win-probability"),
         default="competitive-rate",
         help="ordering after all fail-closed qualification gates pass",
     )
@@ -547,7 +548,13 @@ def main() -> None:
             "diffusion_sample_selection": selection_summary,
         })
 
-    if args.selection_order == "p90":
+    if args.selection_order == "win-probability":
+        # Only rank one pays and the validator draws once, so the target is the
+        # chance of a winning draw, not the best average.  Spread is an asset:
+        # epoch 25062 was won by a molecule that drew 85 rank points better than
+        # its own average and ranked 13th of 46 on averaged quality.
+        ranked = rank_by_win_probability(ranked, args.competitive_score_threshold)
+    elif args.selection_order == "p90":
         ranked.sort(key=lambda item: (
             item["score_p90"],
             item["score_median"],
