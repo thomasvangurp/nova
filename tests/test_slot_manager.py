@@ -314,7 +314,18 @@ def test_registration_is_never_reachable_without_the_explicit_flag():
 def _unlock_code() -> str:
     """The unlock function with comments and docstrings stripped."""
     source = (REPO / "nanobody_opt" / "slot_manager.py").read_text()
-    body = source.split("def _unlock_coldkey")[1].split("\ndef ")[0]
+    # Every function the password passes through, not just the unlock: the
+    # backends are where it is actually fetched, and a guard that stops at
+    # _unlock_coldkey would pass while a backend leaked.
+    body = "".join(
+        source.split(f"def {name}")[1].split("\ndef ")[0]
+        for name in (
+            "_password_from_keychain",
+            "_password_from_systemd_credential",
+            "_coldkey_password",
+            "_unlock_coldkey",
+        )
+    )
     lines = [
         line for line in body.splitlines()
         if line.strip() and not line.strip().startswith("#")
@@ -330,6 +341,8 @@ def test_no_credential_ever_reaches_a_command_line_or_a_message():
     assert "os.environ.get(service_env" in code
     # The password is captured on a pipe: never echoed, traced or written down.
     assert "capture_output=True" in code
+    # read_text is how the systemd credential is fetched; writing one anywhere
+    # is still forbidden, as is any shell that could echo it.
     for forbidden in ("echo", "printf", "shell=True", "-p ", "open(", "write("):
         assert forbidden not in code, forbidden
     # It is interpolated into nothing, and nothing is logged from this path.
@@ -348,8 +361,14 @@ def test_an_unset_keychain_service_fails_cleanly_with_no_fallback():
         assert forbidden not in source, forbidden
     assert source.count("find-generic-password") == 1
     code = _unlock_code()
-    # Missing variable -> explanatory exit naming only the variable.
+    # Missing variable -> explanatory exit naming only the variable, in both stores.
     assert "raise SystemExit(" in code.split("if not service:")[1]
+    assert "raise SystemExit(" in code.split("if not name:")[1]
+    # The systemd credential is never substituted by an environment variable:
+    # LoadCredentialEncrypted exists precisely so the value stays out of
+    # `systemctl show` and /proc/<pid>/environ.
+    assert "CREDENTIALS_DIRECTORY" in code
+    assert "os.environ.get(name_env" in code
 
 
 # ---------------------------------------------------------------------------
@@ -523,3 +542,48 @@ def test_the_report_line_is_printable_for_every_decision(capsys):
     assert all("executed=false" in line for line in lines)
     assert "reason=registrations_this_interval_above_one" in lines[1]
     assert "reason=target_met" in lines[2]
+
+
+def test_the_credential_source_follows_the_platform():
+    """A Raspberry Pi has no Keychain; macOS has no systemd."""
+    import sys as _sys
+
+    from nanobody_opt import slot_manager as sm
+
+    assert sm.SECRET_SOURCES == ("auto", "keychain", "systemd")
+    expected = "keychain" if _sys.platform == "darwin" else "systemd"
+    assert sm._default_secret_source() == expected
+
+
+def test_the_systemd_credential_is_read_from_the_directory_systemd_supplies(tmp_path, monkeypatch):
+    from nanobody_opt import slot_manager as sm
+
+    monkeypatch.setenv("NOVA_TEST_CRED", "coldkey-password")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    (tmp_path / "coldkey-password").write_text("s3cret\n")
+    assert sm._password_from_systemd_credential("NOVA_TEST_CRED") == "s3cret"
+
+
+def test_running_outside_systemd_fails_with_an_explanation_not_a_fallback(tmp_path, monkeypatch):
+    """No prompt, no Keychain, no plaintext file beside the unit."""
+    from nanobody_opt import slot_manager as sm
+
+    monkeypatch.setenv("NOVA_TEST_CRED", "coldkey-password")
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        sm._password_from_systemd_credential("NOVA_TEST_CRED")
+    assert "CREDENTIALS_DIRECTORY" in str(excinfo.value)
+
+
+def test_a_missing_or_empty_credential_is_distinguished(tmp_path, monkeypatch):
+    from nanobody_opt import slot_manager as sm
+
+    monkeypatch.setenv("NOVA_TEST_CRED", "coldkey-password")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    with pytest.raises(SystemExit) as missing:
+        sm._password_from_systemd_credential("NOVA_TEST_CRED")
+    assert "no systemd credential" in str(missing.value)
+    (tmp_path / "coldkey-password").write_text("\n")
+    with pytest.raises(SystemExit) as empty:
+        sm._password_from_systemd_credential("NOVA_TEST_CRED")
+    assert "is empty" in str(empty.value)

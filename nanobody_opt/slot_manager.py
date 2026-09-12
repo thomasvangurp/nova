@@ -68,6 +68,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -545,28 +546,22 @@ def next_hotkey_name(existing: Sequence[str], prefix: str) -> str:
     return f"{prefix}-{index}"
 
 
-def _unlock_coldkey(wallet: Any, service_env: str) -> None:
-    """Decrypt the coldkey with the password held in the macOS Keychain.
+SECRET_SOURCES = ("auto", "keychain", "systemd")
 
-    The password exists in this process as one local ``str`` for the duration
-    of one ``decrypt`` call and nowhere else.  It is never an argument, never
-    an environment variable, never written down, and never formatted into a
-    message -- including an error message, which is why the original exception
-    is dropped rather than chained: a keyfile library is entitled to put the
-    attempted password in its own text, and that text would land in the log.
 
-    The only string here that may ever be printed is ``service_env``, the
-    *name* of the environment variable that names the Keychain service.
-    """
+def _default_secret_source() -> str:
+    """macOS has a Keychain; a headless Raspberry Pi does not."""
+    return "keychain" if sys.platform == "darwin" else "systemd"
+
+
+def _password_from_keychain(service_env: str) -> str:
+    """Read the password from the macOS Keychain, by service name only."""
     service = os.environ.get(service_env, "").strip()
     if not service:
         raise SystemExit(
             f"set {service_env} to the Keychain service name holding the "
             "coldkey password; it is never read from a flag or a file"
         )
-    keyfile = wallet.coldkey_file
-    if not keyfile.is_encrypted():
-        return
     completed = subprocess.run(
         ["security", "find-generic-password", "-s", service, "-w"],
         capture_output=True,
@@ -580,6 +575,77 @@ def _unlock_coldkey(wallet: Any, service_env: str) -> None:
     password = completed.stdout.rstrip("\n")
     if not password:
         raise SystemExit(f"Keychain item named by {service_env} is empty")
+    return password
+
+
+def _password_from_systemd_credential(name_env: str) -> str:
+    """Read the password from a systemd-supplied encrypted credential.
+
+    This is the store for an always-on headless node such as a Raspberry Pi,
+    where there is no Keychain and no unlocked desktop keyring to talk to.  The
+    operator encrypts the password once with ``systemd-creds encrypt``, bound to
+    that host; systemd decrypts it at service start into ``$CREDENTIALS_DIRECTORY``
+    on a tmpfs, mode 0400, owned by the service user.
+
+    It is deliberately NOT passed as an environment variable: the whole point of
+    LoadCredential over Environment= is that the value never appears in the unit
+    file, in ``systemctl show``, in ``/proc/<pid>/environ``, or in a core dump of
+    a child process.  Only the credential's *name* is configuration.
+    """
+    name = os.environ.get(name_env, "").strip()
+    if not name:
+        raise SystemExit(
+            f"set {name_env} to the systemd credential name holding the coldkey "
+            "password (see LoadCredentialEncrypted= in the unit)"
+        )
+    directory = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()
+    if not directory:
+        raise SystemExit(
+            "CREDENTIALS_DIRECTORY is unset: this process was not started by "
+            "systemd with LoadCredentialEncrypted=, so the credential is not "
+            "available. Run it under the unit rather than by hand."
+        )
+    path = Path(directory) / name
+    if not path.is_file():
+        raise SystemExit(f"no systemd credential named by {name_env} in the credentials directory")
+    try:
+        password = path.read_text(encoding="utf-8").rstrip("\n")
+    except OSError as error:
+        raise SystemExit(f"systemd credential unreadable: {type(error).__name__}") from None
+    if not password:
+        raise SystemExit(f"systemd credential named by {name_env} is empty")
+    return password
+
+
+def _coldkey_password(source: str, service_env: str) -> str:
+    """Fetch the password from whichever store this host actually has."""
+    if source == "auto":
+        source = _default_secret_source()
+    if source == "keychain":
+        return _password_from_keychain(service_env)
+    if source == "systemd":
+        return _password_from_systemd_credential(service_env)
+    raise SystemExit(f"unknown credential source: {source}")
+
+
+def _unlock_coldkey(wallet: Any, service_env: str, source: str = "auto") -> None:
+    """Decrypt the coldkey with the password held in the host's secret store.
+
+    The password exists in this process as one local ``str`` for the duration
+    of one ``decrypt`` call and nowhere else.  It is never an argument, never
+    an environment variable, never written down, and never formatted into a
+    message -- including an error message, which is why the original exception
+    is dropped rather than chained: a keyfile library is entitled to put the
+    attempted password in its own text, and that text would land in the log.
+
+    The only string here that may ever be printed is ``service_env``, the
+    *name* of the environment variable that names the item in the store --
+    a Keychain service on macOS, a systemd credential on a headless node.
+    """
+    keyfile = wallet.coldkey_file
+    if not keyfile.is_encrypted():
+        return
+    password = _coldkey_password(source, service_env)
     try:
         keyfile.decrypt(password)
     except Exception as error:  # noqa: BLE001 -- the class is the whole point
@@ -597,6 +663,7 @@ def _register(
     netuid: int,
     network: str,
     keychain_service_env: str,
+    credential_source: str = "auto",
 ) -> bool:
     """Create the hotkey if needed and burn-register it.
 
@@ -613,7 +680,7 @@ def _register(
     wallet = wallet_factory(name=wallet_name, hotkey=hotkey_name)
     if hotkey_name not in _hotkey_names(wallet_name):
         wallet.create_new_hotkey(n_words=12, use_password=False, overwrite=False)
-    _unlock_coldkey(wallet, keychain_service_env)
+    _unlock_coldkey(wallet, keychain_service_env, credential_source)
     subtensor_factory = getattr(bittensor, "Subtensor", None) or bittensor.subtensor
     subtensor = subtensor_factory(network=network)
     return bool(
@@ -664,10 +731,21 @@ def _preflight(args: argparse.Namespace) -> None:
     """
     if not args.execute:
         return
+    source = args.credential_source
+    if source == "auto":
+        source = _default_secret_source()
+    store = "Keychain service" if source == "keychain" else "systemd credential"
     if not os.environ.get(args.keychain_service_env, "").strip():
         raise SystemExit(
             f"--execute-registrations needs {args.keychain_service_env} set to the "
-            "Keychain service name holding the coldkey password"
+            f"{store} name holding the coldkey password"
+        )
+    if source == "systemd" and not os.environ.get("CREDENTIALS_DIRECTORY", "").strip():
+        # Fail here rather than after a chain round trip: without systemd having
+        # decrypted the credential there is nothing to unlock the coldkey with.
+        raise SystemExit(
+            "--execute-registrations with the systemd credential source must run "
+            "under the unit (CREDENTIALS_DIRECTORY is unset)"
         )
 
 
@@ -725,6 +803,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--lookback-blocks", type=int, default=180)
     parser.add_argument("--floor-tolerance", type=float, default=0.05)
     parser.add_argument(
+        "--credential-source",
+        choices=SECRET_SOURCES,
+        default="auto",
+        help="where the coldkey password lives: keychain (macOS), systemd "
+        "(LoadCredentialEncrypted on a headless node), or auto by platform",
+    )
+    parser.add_argument(
         "--keychain-service-env",
         default="NOVA_COLDKEY_KEYCHAIN_SERVICE",
         help="name of the environment variable holding the Keychain service name",
@@ -780,6 +865,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     netuid=args.netuid,
                     network=args.network,
                     keychain_service_env=args.keychain_service_env,
+                    credential_source=args.credential_source,
                 )
         append_record(
             args.decision_log,
