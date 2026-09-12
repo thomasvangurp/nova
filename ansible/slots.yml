@@ -63,6 +63,11 @@
     # lookback window to tell a decay floor from a post-spike price.
     slot_manager_check_seconds: 300
     slot_manager_lookback_blocks: 180
+    # Live purchasing. Default off, and it must be passed explicitly on the
+    # command line -- never set in a vars file, because a vars file gets copied
+    # between hosts and a copied file is how an unattended machine starts
+    # spending. The rails below stay on in both modes.
+    slot_manager_execute: false
     # Where the repository lives on a remote purchase host.
     slot_manager_remote_repo: /opt/nova-nanobody
 
@@ -115,6 +120,9 @@
           # decision log carries the price history between runs. macOS keeps the
           # resident tmux loop.
           - "{{ 0 if ansible_system == 'Linux' else slot_manager_interval }}"
+        # Kept separate from the base list so the deploy can report which mode it
+        # ran in, and so the spending flag can never arrive by accident.
+        slot_manager_spend_arguments: "{{ ['--execute-registrations'] if slot_manager_execute | bool else [] }}"
 
     # ---- Safety gate -------------------------------------------------------
     # Same gate as the GPU services, and it works here for the same reason the
@@ -129,15 +137,28 @@
         entrypoint_flags: "{{ slot_manager_arguments | select('match', '^--') | list }}"
         entrypoint_chdir: "{{ repo }}"
 
-    - name: Refuse to deploy an argument list that can spend
+    # The base argument list must never contain the spending flag. Enabling live
+    # purchase adds it separately and visibly, so a reader can always tell which
+    # mode a run deployed from the recap.
+    - name: Refuse a base argument list that can spend
       ansible.builtin.assert:
         that:
           - "'--execute-registrations' not in slot_manager_arguments"
           - "'--execute' not in slot_manager_arguments"
         fail_msg: >-
-          The deployed slot agent must be a dry run. Live purchasing is a manual
-          act in the tmux session, never something a playbook run turns on.
-        success_msg: "Deployed slot agent is a logged dry run."
+          --execute-registrations must come from slot_manager_execute, not from
+          the base arguments, or the deploy cannot report which mode it ran in.
+
+    - name: State plainly which mode is being deployed
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'LIVE: this agent will SPEND up to ' ~ slot_manager_max_spend_tao_per_day
+             ~ ' TAO/day, refusing any recycle above ' ~ slot_manager_max_recycle_tao
+             ~ ' TAO, at most one registration per 360-block interval, until it holds '
+             ~ slot_manager_minimum_hotkeys ~ ' hotkeys.'
+             if slot_manager_execute | bool
+             else 'DRY RUN: decisions are logged, nothing is bought. Pass
+                   -e slot_manager_execute=true to spend.' }}
 
     - name: Require the chain stack the agent needs for its reads
       ansible.builtin.command:
@@ -191,7 +212,8 @@
       ansible.builtin.command:
         argv: >-
           {{ ['tmux', 'new-session', '-d', '-s', slot_manager_session]
-             + slot_manager_launcher + slot_manager_arguments }}
+             + slot_manager_launcher + slot_manager_arguments
+             + slot_manager_spend_arguments }}
       args:
         chdir: "{{ repo }}"
       changed_when: true
@@ -261,7 +283,8 @@
       vars:
         slot_manager_repo: "{{ slot_manager_remote_repo }}"
         slot_manager_exec: >-
-          {{ (slot_manager_launcher + slot_manager_arguments) | join(' ') }}
+          {{ (slot_manager_launcher + slot_manager_arguments
+              + slot_manager_spend_arguments) | join(' ') }}
       register: slot_manager_unit
 
     - name: Install the slot purchase timer (Linux)
