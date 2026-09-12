@@ -148,11 +148,33 @@ def test_endpointless_instance_is_dropped_with_a_message(tmp_path, monkeypatch, 
 
 def test_slot_manager_exists_without_any_gpu_box(tmp_path, monkeypatch):
     """Registrations must keep being bought while no box is rented."""
+    monkeypatch.delenv("NOVA_SLOT_HOST", raising=False)
+    inventory = _inventory(tmp_path, monkeypatch, [])
+    # The default purchase host is the always-on node, not this machine: the
+    # recycle price halves every 360 blocks, so a host that sleeps buys at the
+    # top of the decay curve.
+    assert inventory["slot_manager"]["hosts"] == ["raspberrypi"]
+    assert "ansible_connection" not in inventory["_meta"]["hostvars"]["raspberrypi"]
+
+
+def test_the_purchase_host_can_be_moved_back_to_this_machine(tmp_path, monkeypatch):
+    """While the always-on node is down, local is better than not buying."""
+    monkeypatch.setenv("NOVA_SLOT_HOST", "operator")
     inventory = _inventory(tmp_path, monkeypatch, [])
     assert inventory["slot_manager"]["hosts"] == ["operator"]
-    assert (
-        inventory["_meta"]["hostvars"]["operator"]["ansible_connection"] == "local"
-    )
+    assert inventory["_meta"]["hostvars"]["operator"]["ansible_connection"] == "local"
+
+
+def test_the_purchase_host_address_and_user_are_overridable(tmp_path, monkeypatch):
+    """A different always-on node should need no code change."""
+    monkeypatch.setenv("NOVA_SLOT_HOST", "buyer")
+    monkeypatch.setenv("NOVA_SLOT_ADDRESS", "100.64.0.9")
+    monkeypatch.setenv("NOVA_SLOT_USER", "nova")
+    inventory = _inventory(tmp_path, monkeypatch, [])
+    host = inventory["_meta"]["hostvars"]["buyer"]
+    assert inventory["slot_manager"]["hosts"] == ["buyer"]
+    assert host["ansible_host"] == "100.64.0.9"
+    assert host["ansible_user"] == "nova"
 
 
 def test_many_hosts_are_all_returned(tmp_path, monkeypatch):

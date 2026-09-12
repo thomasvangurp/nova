@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+#
+# The subnet-68 slot purchase agent. It lives on an always-on node rather than a
+# laptop because the recycle price halves every 360 blocks (72 minutes), so
+# buying cheaply means being awake for the quiet intervals. A host that sleeps
+# misses them.
+#
+# The coldkey password arrives through LoadCredentialEncrypted, not Environment=.
+# That is deliberate: a credential is decrypted into a tmpfs directory readable
+# only by this unit, so the value never appears in this file, in
+# `systemctl show`, in /proc/<pid>/environ, or in a core dump of a child.
+#
+# Encrypt it once on THIS host (the encryption is host-bound), as root:
+#   systemd-ask-password -n | systemd-creds encrypt --name={{ slot_manager_credential_name }} - {{ slot_manager_credential_path }}
+#   chmod 0600 {{ slot_manager_credential_path }}
+#
+# The unit is a DRY RUN. --execute-registrations is what spends tau and is not
+# present below; enabling live purchase is an edit an operator makes knowingly.
+[Unit]
+Description=Nova subnet-68 slot purchase agent (dry run)
+Documentation=file://{{ slot_manager_repo }}/nanobody_opt/slot_manager.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{ slot_manager_repo }}
+Environment=PYTHONUNBUFFERED=1
+# The NAME of the credential, never its value.
+Environment={{ slot_manager_keychain_service_env }}={{ slot_manager_credential_name }}
+LoadCredentialEncrypted={{ slot_manager_credential_name }}:{{ slot_manager_credential_path }}
+ExecStart={{ slot_manager_exec }}
+Restart=always
+RestartSec=60
+# A registration is a chain write; never run two of these at once.
+StandardOutput=journal
+StandardError=journal
+# The coldkey is the only thing on this host worth stealing.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ slot_manager_decision_log | dirname }}
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

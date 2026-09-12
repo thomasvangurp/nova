@@ -50,6 +50,15 @@
     slot_manager_max_recycle_tao: 0.20
     slot_manager_max_spend_tao_per_day: 1.0
     slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
+    # auto resolves to keychain on macOS and systemd on Linux, matching what the
+    # host actually has; the agent makes the same choice by platform.
+    slot_manager_credential_source: auto
+    # systemd path only. The NAME is configuration; the encrypted blob is data.
+    slot_manager_credential_name: nova-coldkey-password
+    slot_manager_credential_path: /etc/nova/coldkey-password.cred
+    slot_manager_service: nova-slot-manager
+    # Where the repository lives on a remote purchase host.
+    slot_manager_remote_repo: /opt/nova-nanobody
 
   tasks:
     - name: Require committed source for the deployed agent
@@ -91,6 +100,8 @@
           - "{{ slot_manager_max_spend_tao_per_day }}"
           - --keychain-service-env
           - "{{ slot_manager_keychain_service_env }}"
+          - --credential-source
+          - "{{ slot_manager_credential_source }}"
           - --interval
           - "{{ slot_manager_interval }}"
 
@@ -128,7 +139,7 @@
       changed_when: false
       failed_when: false
       register: slot_manager_bittensor
-      when: slot_manager_activate | bool
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
     - name: Report whether chain reads will work
       ansible.builtin.assert:
@@ -138,12 +149,13 @@
           runs without it, but chain reads and registration cannot, so the agent
           would exit on its first poll. Point slot_manager_python at an
           interpreter that has it.
-      when: slot_manager_activate | bool
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
     # The session inherits the environment it is created in, which is how the
     # Keychain service NAME reaches the agent without ever being written down
     # here. Fail before the restart rather than after it.
     - name: Require the Keychain service name to be exported for the session
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
       ansible.builtin.assert:
         that:
           - (ansible_env[slot_manager_keychain_service_env] | default('')) | length > 0
@@ -155,17 +167,16 @@
         success_msg: >-
           {{ slot_manager_keychain_service_env }} is exported; its value was not
           read.
-      when: slot_manager_activate | bool
 
-    - name: Restart the slot purchase agent on committed source
+    - name: Restart the slot purchase agent on committed source (macOS, tmux)
       ansible.builtin.command:
         argv: [tmux, kill-session, -t, "{{ slot_manager_session }}"]
       register: slot_manager_stop
       changed_when: slot_manager_stop.rc == 0
       failed_when: false
-      when: slot_manager_activate | bool
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
-    - name: Start the slot purchase agent as a logged dry run
+    - name: Start the slot purchase agent as a logged dry run (macOS, tmux)
       ansible.builtin.command:
         argv: >-
           {{ ['tmux', 'new-session', '-d', '-s', slot_manager_session]
@@ -173,13 +184,90 @@
       args:
         chdir: "{{ repo }}"
       changed_when: true
-      when: slot_manager_activate | bool
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
-    - name: Confirm the slot purchase agent remains alive
+    - name: Confirm the slot purchase agent remains alive (macOS, tmux)
       ansible.builtin.command:
         argv: [tmux, has-session, -t, "{{ slot_manager_session }}"]
       changed_when: false
-      when: slot_manager_activate | bool
+      when: slot_manager_activate | bool and ansible_system == 'Darwin'
+
+    # ---- Linux: a real service, because a Pi reboots and tmux does not survive
+    # one. The purchaser has to be awake for the quiet registration intervals or
+    # it buys at the top of the decay curve, so "starts itself again" is a
+    # correctness property here, not tidiness.
+    - name: Sync the committed source to the purchase host (Linux)
+      when: ansible_system == 'Linux'
+      ansible.posix.synchronize:
+        src: "{{ repo }}/"
+        dest: "{{ slot_manager_remote_repo }}/"
+        delete: true
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+          - "--exclude=.pixi"
+          - "--exclude=snapshots"
+          - "--exclude=external_tools"
+
+    - name: Create the credential and decision-log directories (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ slot_manager_credential_path | dirname }}"
+        - "{{ slot_manager_decision_log | dirname }}"
+
+    # Refuse to install a unit whose credential does not exist yet: systemd would
+    # start, fail to decrypt, and Restart=always would retry forever while the
+    # journal filled with the same line. Better to say so here.
+    - name: Require the encrypted coldkey credential to exist (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.stat:
+        path: "{{ slot_manager_credential_path }}"
+      register: slot_manager_credential
+
+    - name: Explain how to create the credential if it is absent (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that: slot_manager_credential.stat.exists
+        fail_msg: >-
+          {{ slot_manager_credential_path }} does not exist. systemd-creds
+          encryption is host-bound, so it must be created ON this host and cannot
+          be shipped from the controller. As root there:
+          systemd-ask-password -n |
+          systemd-creds encrypt --name={{ slot_manager_credential_name }} -
+          {{ slot_manager_credential_path }}
+        success_msg: "Encrypted coldkey credential present; its value was not read."
+
+    - name: Install the slot purchase unit (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-slot-manager.service.j2
+        dest: "/etc/systemd/system/{{ slot_manager_service }}.service"
+        mode: "0644"
+      vars:
+        slot_manager_repo: "{{ slot_manager_remote_repo }}"
+        slot_manager_exec: >-
+          {{ (slot_manager_launcher + slot_manager_arguments) | join(' ') }}
+      register: slot_manager_unit
+
+    - name: Restart the slot purchase agent on committed source (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.systemd_service:
+        name: "{{ slot_manager_service }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Confirm the slot purchase agent is running (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ slot_manager_service }}"]
+      register: slot_manager_active
+      changed_when: false
+      failed_when: slot_manager_active.stdout | trim != 'active'
 
     - name: Report the slot agent
       ansible.builtin.debug:

@@ -228,13 +228,34 @@ def build_inventory() -> dict[str, Any]:
         "ansible_python_interpreter": sys.executable,
     }
 
+    # The purchase host. It is an always-on node rather than the operator's
+    # laptop because the recycle price halves every 360 blocks, so buying cheaply
+    # means being awake for the quiet intervals -- a machine that sleeps buys at
+    # the top of the decay curve. NOVA_SLOT_HOST selects it; setting it to
+    # "operator" moves the agent back onto this machine, which is the right
+    # answer only while the always-on node is unavailable.
+    slot_host = os.environ.get("NOVA_SLOT_HOST", DEFAULT_SLOT_HOST).strip()
+    if slot_host != "operator":
+        hostvars[slot_host] = {
+            "ansible_host": os.environ.get("NOVA_SLOT_ADDRESS", slot_host).strip(),
+            "ansible_user": os.environ.get("NOVA_SLOT_USER", "root").strip(),
+            "ansible_python_interpreter": os.environ.get(
+                "NOVA_SLOT_PYTHON", "/usr/bin/python3"
+            ).strip(),
+        }
+
     return {
         "_meta": {"hostvars": hostvars},
         "all": {"children": ["nanobody_producer", "nanobody_publisher", "slot_manager"]},
         "nanobody_producer": {"hosts": producers},
         "nanobody_publisher": {"hosts": list(producers)},
-        "slot_manager": {"hosts": ["operator"]},
+        "slot_manager": {"hosts": [slot_host]},
     }
+
+
+# The Raspberry Pi on the tailnet. Reachable by tailscale name, so it follows the
+# device rather than an address, and overridable for a different purchase host.
+DEFAULT_SLOT_HOST = "raspberrypi"
 
 
 def main() -> None:
