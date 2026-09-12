@@ -54,6 +54,10 @@ requests = "*"
 pyyaml = "*"
 
 [feature.bgen.pypi-dependencies]
+# utils/files.py and utils/molecules.py import dotenv, and the scorer imports
+# them -- so every shard died with ModuleNotFoundError before writing output,
+# which surfaced only as "shard 0 exited 1 without writing out0.json".
+python-dotenv = "*"
 hydride = "==1.2.3"
 pydssp = "==0.9.1"
 logomaker = "==0.8.7"
