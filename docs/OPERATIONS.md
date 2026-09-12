@@ -140,6 +140,20 @@ Do **not** pass `--raw` to `create instance`: it prints an instance API key.
 `ansible-playbook -i $INV ansible/lock.yml` (≈90 s). Lock the purchase host's
 manifest *on the Pi* instead, natively.
 
+### Collecting what the purchaser bought
+Hotkeys are created where the coldkey is -- on the purchase host -- and needed
+where the miner is. Nothing connected the two at first, and the failure is
+invisible: the agent buys slots the publisher never learns to submit from, which
+from the leaderboard looks exactly like buying nothing. Run this between a
+purchase and a GPU deploy:
+
+```bash
+ansible-playbook -i $INV ansible/collect_hotkeys.yml     # Pi -> controller, 0600
+ansible-playbook -i $INV ansible/nanobody_services.yml \
+  -e "nanobody_hotkey_sources=$(...fileglob ~/.nova-hotkeys/*)"
+```
+Only hotkeys move. The coldkey stays put and both GPU plays assert its absence.
+
 ### Purchase host
 Environment variables select it: `NOVA_SLOT_HOST`, `NOVA_SLOT_ADDRESS`,
 `NOVA_SLOT_USER`. Setting `NOVA_SLOT_HOST=operator` moves the purchaser back to
@@ -162,6 +176,23 @@ The deployed unit is a **dry run**; the playbook asserts `--execute-registration
 is absent. Turning on spending is a deliberate manual act. Rails that stay on:
 `--max-recycle-tao`, `--max-spend-tao-per-day`, one registration per adjustment
 interval, and a stagger of `immunity ÷ target` between purchases.
+
+### What the purchaser will and will not buy
+Gates, in order: at target; already registered this adjustment interval; inside
+the stagger window; price above the recycle ceiling; daily budget; then -- only
+once `urgent_below` hotkeys are held -- price above its projected decay floor.
+
+There is deliberately **no gate on `RegistrationsThisInterval`**. It was the
+first thing tried and it never buys: the counter does not clear until the
+interval turns over and this field routinely registers three times an interval,
+so the rule spent whole 72-minute stretches refusing -- observed declining
+tau0.092 against a tau0.20 ceiling. It is a proxy for "the price is elevated"
+while the price sits in the same snapshot, and unlike the price it does not come
+back down.
+
+Below a working fleet the floor test is skipped too: waiting for a floor saves
+about tau0.03, while each missing ticket forfeits ~tau0.032 of expected value per
+epoch, twenty times a day.
 
 ### Buying strategy
 Ramp at roughly one registration per quiet interval until nine are held, then
@@ -204,6 +235,11 @@ quiet box before believing it.
 `PYTHONPATH` at a directory that existed only on a destroyed box; without a
 symlink at the pinned digest it silently imports the *live* BoltzGen instead of
 the fast one.
+
+**A mnemonic in the journal.** The first live registration printed the new
+hotkey's twelve-word mnemonic to stdout, which under a systemd unit is the
+journal -- a file that survives reboots. Hotkey creation now runs with stdout
+discarded. Anything that creates keys must be assumed to print them.
 
 **Losing the box's only copy.** The fast scorer, the publisher and the mutation
 database all lived only on rented hardware. Snapshots now live in
