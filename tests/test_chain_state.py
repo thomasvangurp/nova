@@ -185,3 +185,15 @@ def test_the_payload_never_carries_a_bracketed_target():
     )
     assert payload["nanobody_target"] == "P20809"
     assert "[" not in payload["nanobody_target"]
+
+
+def test_the_miner_does_not_stringify_before_normalising():
+    """str() on the raw value defeats normalise_target entirely.
+
+    ['P20809'] becomes the string "['P20809']", which normalise_target then
+    correctly leaves alone because it is already a string. The first fix for the
+    retry-loop did nothing for exactly this reason.
+    """
+    source = (Path(__file__).resolve().parents[1] / "neurons" / "miner" / "miner.py").read_text()
+    assert 'nanobody_target=state["config"].nanobody_target,' in source
+    assert 'nanobody_target=str(state["config"].nanobody_target)' not in source

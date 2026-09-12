@@ -60,7 +60,7 @@ def _publish_chain_state(state: Dict[str, Any], block: int) -> None:
             netuid=int(state["config"].netuid),
             block=int(block),
             epoch_length=int(state["epoch_length"]),
-            nanobody_target=str(state["config"].nanobody_target),
+            nanobody_target=state["config"].nanobody_target,
             miner_uid=int(state["miner_uid"]),
             neurons=chain_state.neuron_rows(
                 getattr(metagraph, "hotkeys", None),
