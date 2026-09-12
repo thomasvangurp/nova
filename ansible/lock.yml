@@ -1,8 +1,12 @@
 ---
 # Resolve the Linux-only lock on an x86 worker and fetch it back. Git-backed
 # TNP/ImmuneBuilder builds cannot be cross-resolved on an ARM macOS controller.
+- ansible.builtin.import_playbook: require_producer.yml
+
 - name: Resolve the nanobody Pixi lock on x86 Linux
-  hosts: all
+  # Not `all`: the inventory's slot_manager group is the operator's own
+  # machine, and the lock is resolved on x86 Linux, which is the whole point.
+  hosts: nanobody_producer
   remote_user: root
   gather_facts: false
   vars:

@@ -1,0 +1,31 @@
+---
+# One entry point for the whole deployment, in dependency order.
+#
+# The reason this file exists is the reason the rest of this directory was
+# reworked: the deployment used to be split across two branches. /root was
+# provisioned from one and /root/nova-standalone from another, and because the
+# program that published read the second copy, relaxing a publication gate in
+# the first changed nothing for hours. One branch, one inventory, one command.
+#
+#   ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
+#     -i ansible/inventory/vast_nanobody.py ansible/site.yml \
+#     -e @ansible/vars/nanobody-high-throughput.yml \
+#     -e @ansible/vars/nanobody-identity.yml
+#
+# Order matters in one direction only: the chain publisher reads the exact-score
+# bank and the deployed producer source, so the GPU side is provisioned first.
+# The slot purchase agent is last and is independent of both -- it runs on the
+# operator's machine and must keep buying registrations even when no box is
+# rented, which was the situation on the day this was written.
+#
+# Each imported playbook is also runnable on its own, and each re-asserts what
+# it needs rather than trusting the one before it.
+
+- name: Provision the GPU box and the design/scoring producer
+  ansible.builtin.import_playbook: nanobody.yml
+
+- name: Deploy the chain publisher and commitment writer
+  ansible.builtin.import_playbook: nanobody_services.yml
+
+- name: Deploy the slot purchase agent on the operator's machine
+  ansible.builtin.import_playbook: slots.yml

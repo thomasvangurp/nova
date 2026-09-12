@@ -1,0 +1,94 @@
+---
+# The single definition of what lands on the GPU box and where.
+#
+# There is exactly ONE runtime root, ``/root``, and it is a checkout-shaped
+# layout: ``/root/nanobody_opt``, ``/root/tools``, ``/root/config``,
+# ``/root/compound_miner``, ``/root/utils``, ``/root/neurons``,
+# ``/root/pixi.toml``. Everything that runs on the box runs from it.
+#
+# That is not cosmetic. Until 2026-09-12 the producer ran from ``/root`` while
+# the chain publisher ran from a SECOND full copy at ``/root/nova-standalone``,
+# deployed from a different branch and carrying its own Pixi workspace.
+# Publication gates were relaxed in ``/root/nanobody_opt`` and nothing changed
+# for hours, because the program that publishes was reading the other copy. Two
+# roots cost real epochs; this file exists so there can only be one.
+#
+# ``config/`` is synced with the two live validator YAML documents excluded.
+# ``config/config_loader.py`` loads ``config/config.yaml`` **relative to the
+# process working directory**, so on the box that path is the file Ansible
+# downloads from metanova-labs/nova, and the committed copy in this repository
+# must never overwrite it. Excluding them here makes sync order irrelevant
+# rather than load-bearing.
+#
+# Requires: repo
+
+- name: Sync nanobody optimization, chain and support packages
+  ansible.posix.synchronize:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    checksum: true
+    owner: false
+    group: false
+    perms: false
+    rsync_opts: "{{ ['--omit-dir-times', '--exclude=__pycache__', '--exclude=*.pyc', '--no-perms'] + (item.excludes | default([])) }}"
+    use_ssh_args: true
+  loop:
+    # The design/scoring producer.
+    - src: "{{ repo }}/nanobody_opt/"
+      dest: /root/nanobody_opt/
+    # The chain-side publisher and its helpers.
+    - src: "{{ repo }}/tools/"
+      dest: /root/tools/
+    - src: "{{ repo }}/neurons/"
+      dest: /root/neurons/
+    - src: "{{ repo }}/compound_miner/"
+      dest: /root/compound_miner/
+    # miner.py extends sys.path with BASE_DIR/utils, so these are imported as
+    # top-level modules (``from files import ...``, ``from btdr import ...``).
+    - src: "{{ repo }}/utils/"
+      dest: /root/utils/
+    # config_loader.py only; the live validator YAML is downloaded, never copied.
+    - src: "{{ repo }}/config/"
+      dest: /root/config/
+      excludes:
+        - "--exclude=config.yaml"
+        - "--exclude=boltzgen_config.yaml"
+    # The focused publisher/consumer tests run on the box against the deployed
+    # tree, so a deploy proves the code it just installed rather than the code
+    # the controller happens to hold.
+    - src: "{{ repo }}/tests/"
+      dest: /root/tests/
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Make combinatorial_db importable without shipping the molecule database
+  ansible.builtin.file:
+    path: /root/combinatorial_db
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# miner.py imports combinatorial_db.reactions unconditionally, including on the
+# nanobody-only path. The .sqlite it would query is a compound-miner artifact
+# and is deliberately absent; the module is what makes the import succeed.
+- name: Ship only the importable half of combinatorial_db
+  ansible.builtin.copy:
+    src: "{{ repo }}/combinatorial_db/reactions.py"
+    dest: /root/combinatorial_db/reactions.py
+    owner: root
+    group: root
+    mode: "0644"
+
+# The repository has no committed __init__.py here, so the package marker is
+# created on the box. modification_time: preserve keeps a second run from
+# reporting changed forever, which would make real drift unreadable.
+- name: Mark combinatorial_db as a package
+  ansible.builtin.file:
+    path: /root/combinatorial_db/__init__.py
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve

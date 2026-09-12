@@ -1,0 +1,609 @@
+---
+# The chain side of the nanobody miner: the epoch publisher, and optionally the
+# on-chain commitment writer.
+#
+# This is the merge of ansible/nanobody_standalone.yml from
+# deploy/nanobody-standalone into this branch, and four things about that
+# playbook were deliberately NOT carried over.
+#
+# 1. Its own runtime root. It rsynced the whole repository into
+#    /root/nova-standalone and built a SECOND Pixi workspace there. That is the
+#    split that cost epochs: publication gates were relaxed under
+#    /root/nanobody_opt and nothing changed, because the publisher was reading
+#    the other copy. Everything now runs from /root; the old root is deleted,
+#    not ignored.
+# 2. A hand-passed SSH endpoint. Its first play existed only to turn
+#    -e nanobody_host/-e nanobody_port into an inventory entry. vast.ai rotates
+#    the port on every restart, so that play encoded a value that goes stale on
+#    its own. The endpoint now comes from the label.
+# 3. One configured hotkey. It hardcoded standalone_hotkey_name and asserted a
+#    single expected ss58. We hold many uids and a configured hotkey list goes
+#    stale exactly the way the remembered uid did -- we published into a slot
+#    somebody else owned for twenty-one days because code trusted configuration
+#    over the chain. The publisher discovers the fleet from the metagraph by
+#    coldkey; this playbook deploys N hotkey keyfiles and asserts nothing about
+#    which uids they hold.
+# 4. The Compound credential source and cutover. The compound master is gone and
+#    the shared-hotkey dual-writer interlock it enforced no longer has two
+#    writers to interlock. What IS kept from it is the coldkey refusal, which
+#    applies to every rental in every mode.
+#
+# Kept from it verbatim in intent: deploy only committed source, compile before
+# starting, run the focused tests on the box against the deployed tree, remove
+# the unusable systemd units the Vast container leaves behind, and keep the
+# chain writer stopped by default.
+- ansible.builtin.import_playbook: require_producer.yml
+
+- name: Deploy the nanobody chain publisher and commitment writer
+  hosts: nanobody_publisher
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    runtime_root: /root
+    publisher_session: nova-nanobody-publisher
+    chain_writer_session: nova-nanobody-miner
+
+    # The publisher is the service this deployment exists to run, so it is on
+    # by default. The chain writer is off by default: it signs extrinsics, and
+    # starting one as a side effect of a code deploy is not a thing a deploy
+    # should be able to do.
+    #
+    # They are not independent. The publisher reads the chain view -- block,
+    # epoch and the neuron rows it discovers the fleet from -- out of
+    # /root/artifacts/chain_state.json, which only the connected miner process
+    # writes. A publisher running without it logs "chain-state file is missing"
+    # forever and looks alive, so the gates below refuse to start one against a
+    # miner that cannot export that view.
+    nanobody_publisher_activate: true
+    nanobody_chain_writer_activate: false
+    # The hotkey the chain writer constructs its wallet with. Which uids we
+    # publish from is discovered from the chain and is NOT this value; this is
+    # only the identity the writer process itself signs with.
+    nanobody_chain_writer_hotkey: ""
+
+    # Controller-side paths to the hotkey keyfiles to install, as a LIST.
+    # These are locators, never values: Ansible reads the files locally and the
+    # copy tasks are no_log. The coldkey is not in this list and must never be.
+    nanobody_hotkey_sources: []
+    nanobody_wallet_name: mining_ops
+    nanobody_wallet_path: /root/.bittensor/wallets
+
+    # Our coldkey's public ss58. The publisher discovers every uid this coldkey
+    # holds from the metagraph each epoch. It is passed as a plain string
+    # precisely so that nothing coldkey-shaped -- not even the public half --
+    # has to be copied onto rented hardware.
+    nanobody_coldkey_ss58: ""
+
+    # Controller-side path to the repository-scoped submission deploy key.
+    nanobody_deploy_key_source: ""
+    nanobody_deploy_key: /root/secrets/nova_deploy
+    nanobody_submission_repo_owner: thomasvangurp
+    nanobody_submission_repo_name: nova-sn68-submissions
+    nanobody_submission_repo_branch: main
+    nanobody_submission_repo_path: data/results
+
+    nanobody_watch_interval: 45
+    nanobody_layer2_concurrency: 40
+    nanobody_reserve_blocks: 55
+    nanobody_netuid: 68
+    nanobody_network: finney
+
+  tasks:
+    - name: Require committed deployment source
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: controller_status
+      changed_when: false
+      failed_when: controller_status.stdout | length > 0
+
+    - name: Resolve committed deployment revision
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", rev-parse, HEAD]
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: controller_revision
+      changed_when: false
+
+    - name: Require the coldkey address the fleet is discovered by
+      ansible.builtin.assert:
+        that:
+          - nanobody_coldkey_ss58 | length > 0
+        fail_msg: >-
+          Set nanobody_coldkey_ss58 to our coldkey's public ss58. The publisher
+          discovers which uids we hold from the chain by this address; without it
+          there is nothing to discover from, and a configured hotkey list is not
+          an acceptable substitute (that is the failure that published into
+          someone else's uid for twenty-one days).
+      when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
+    # No fallback. The publisher treats the GPU count as a hard gate, so a
+    # default here would substitute a guess for the one fact the rental knows.
+    - name: Require the GPU count the inventory read off the rental
+      ansible.builtin.assert:
+        that:
+          - gpu_count is defined
+          - gpu_count | int > 0
+        fail_msg: >-
+          The inventory did not report num_gpus for {{ inventory_hostname }}.
+          Pass -e gpu_count=N for this run and check why vastai omitted it.
+
+    - name: Create the chain-side directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: /root/artifacts, mode: "0700"}
+        - {path: /root/artifacts/nanobody_history, mode: "0700"}
+        - {path: /root/artifacts/validator_audits, mode: "0700"}
+        - {path: /root/secrets, mode: "0700"}
+        - {path: /root/submissions, mode: "0700"}
+        - {path: "{{ nanobody_wallet_path }}/{{ nanobody_wallet_name }}/hotkeys", mode: "0700"}
+
+    - name: Remove the second runtime root that deployed from another branch
+      ansible.builtin.file:
+        path: /root/nova-standalone
+        state: absent
+
+    # The Vast container has no running init, so these units were inert but
+    # readable, and a readable service file describing a service nothing starts
+    # is worse than none: it is documentation that lies.
+    - name: Remove unusable systemd artifacts from the Vast container
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/nova-nanobody-miner.service
+        - /etc/systemd/system/nova-nanobody-publisher.service
+        - /etc/systemd/system/nova-nanobody-publisher.timer
+        - /root/nova-standalone.env
+
+    - name: Sync the committed runtime into the single root
+      ansible.builtin.include_tasks: tasks/sync_repo.yml
+
+    - name: Ship the locked Pixi workspace metadata
+      ansible.builtin.copy:
+        src: "{{ repo }}/{{ item }}"
+        dest: "/root/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - pixi.toml
+        - pixi.lock
+
+    # A --locked install of an environment the lock does not describe fails with
+    # a resolver message that reads like a network problem. Say what it actually
+    # is, and how to fix it, because the fix needs an x86 Linux host: the
+    # timelock and bittensor wheels cannot be cross-resolved on an ARM macOS
+    # controller, which is what ansible/lock.yml exists for.
+    - name: Check the lockfile describes the chain environment
+      ansible.builtin.command:
+        argv: [grep, -qE, '^  chain310:', /root/pixi.lock]
+      changed_when: false
+      failed_when: false
+      register: chain_locked
+
+    - name: Require a lockfile that includes the chain environment
+      ansible.builtin.assert:
+        that: chain_locked.rc == 0
+        fail_msg: >-
+          pixi.lock does not contain a chain310 environment. It was added to
+          pixi.toml when the chain side moved onto this branch, but the lock has
+          to be resolved on x86 Linux -- run
+          `ansible-playbook -i ansible/inventory/vast_nanobody.py ansible/lock.yml`
+          against this box first, commit the resulting pixi.lock, then re-run
+          this playbook.
+        success_msg: "pixi.lock describes the chain310 environment."
+
+    - name: Install the locked chain environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - chain310
+      environment:
+        PIXI_COLOR: never
+      register: chain_install
+      changed_when: "'Nothing to do' not in (chain_install.stdout ~ chain_install.stderr)"
+
+    - name: Verify the chain stack is the cp310 timelock runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - chain310
+          - python
+          - -c
+          - >-
+            import sys,bittensor,timelock;
+            from async_substrate_interface.sync_substrate import SubstrateInterface;
+            assert sys.version_info[:2]==(3,10),sys.version;
+            print('CHAIN310_OK',bittensor.__version__)
+      environment:
+        PIXI_COLOR: never
+      changed_when: false
+      register: chain_check
+
+    # ---- Credentials -------------------------------------------------------
+    # Hotkeys only, as many as exist. Each entry is a controller-side path; the
+    # file content never appears in a playbook, a variable file, a command line
+    # or task output.
+    - name: Install every hotkey keyfile this fleet uses
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ nanobody_wallet_path }}/{{ nanobody_wallet_name }}/hotkeys/{{ item | basename }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ nanobody_hotkey_sources }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      no_log: true
+
+    - name: Count the hotkeys present on the box
+      ansible.builtin.find:
+        paths: "{{ nanobody_wallet_path }}/{{ nanobody_wallet_name }}/hotkeys"
+        file_type: file
+      register: installed_hotkeys
+
+    # Deliberately a count and not a set of expected addresses. Which uids these
+    # keys hold is a fact about the chain, is answered by the publisher from the
+    # metagraph every epoch, and must not be restated here where it can go stale.
+    - name: Require at least one hotkey to publish from
+      ansible.builtin.assert:
+        that: installed_hotkeys.matched | int > 0
+        fail_msg: >-
+          No hotkey keyfile is present under
+          {{ nanobody_wallet_path }}/{{ nanobody_wallet_name }}/hotkeys. Pass the
+          controller-side paths as nanobody_hotkey_sources.
+        success_msg: >-
+          {{ installed_hotkeys.matched }} hotkey(s) available; the publisher
+          resolves which of them hold uids from the chain.
+      when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
+    - name: Install the repository-scoped submission deploy key
+      ansible.builtin.copy:
+        src: "{{ nanobody_deploy_key_source }}"
+        dest: "{{ nanobody_deploy_key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: nanobody_deploy_key_source | length > 0
+
+    - name: Refuse coldkey material on the rental
+      ansible.builtin.find:
+        paths: "{{ nanobody_wallet_path }}"
+        patterns: [coldkey]
+        recurse: true
+        file_type: file
+      register: rental_coldkeys
+
+    - name: Assert the rental contains no coldkey
+      ansible.builtin.assert:
+        that: rental_coldkeys.matched | int == 0
+        fail_msg: >-
+          Coldkey material found under {{ nanobody_wallet_path }} on rented
+          hardware. Remove it and treat it as compromised. Registrations are
+          bought from the operator's machine (ansible/slots.yml) precisely so
+          this never has to happen here.
+        success_msg: "No coldkey on the rental."
+
+    # ---- Runtime configuration --------------------------------------------
+    # Written with no NOVA_WALLET_HOTKEY. A single configured hotkey is the
+    # assumption this deployment removes; the wallet name and the coldkey
+    # address are enough, and the fleet comes from the chain.
+    - name: Install the nanobody-only runtime configuration
+      ansible.builtin.copy:
+        dest: /root/nanobody.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          SUBTENSOR_NETWORK={{ nanobody_network }}
+          BT_NO_PARSE_CLI_ARGS=false
+          AUTO_UPDATE=0
+          NOVA_LIVE_SEARCH=0
+          NOVA_NANOBODY_ONLY=1
+          NOVA_NANOBODY_RESULT=/root/artifacts/nanobody_result.json
+          NOVA_CHAIN_STATE=/root/artifacts/chain_state.json
+          NOVA_LIVE_CONFIG=/root/config/config.yaml
+          NOVA_WALLET_NAME={{ nanobody_wallet_name }}
+          NOVA_WALLET_PATH={{ nanobody_wallet_path }}
+          NOVA_COLDKEY_SS58={{ nanobody_coldkey_ss58 }}
+          NOVA_GIT_PUSH=1
+          NOVA_DEPLOY_KEY={{ nanobody_deploy_key }}
+          NOVA_GIT_WORKDIR=/root/submissions
+          GITHUB_REPO_OWNER={{ nanobody_submission_repo_owner }}
+          GITHUB_REPO_NAME={{ nanobody_submission_repo_name }}
+          GITHUB_REPO_BRANCH={{ nanobody_submission_repo_branch }}
+          GITHUB_REPO_PATH={{ nanobody_submission_repo_path }}
+
+    - name: Remove the stale implicit dotenv file
+      ansible.builtin.file:
+        path: /root/.env
+        state: absent
+
+    # ---- Safety gate -------------------------------------------------------
+    # Everything from here to the first kill-session runs while the existing
+    # publisher is still publishing.
+    - name: Name the publisher's launcher and arguments once
+      ansible.builtin.set_fact:
+        nanobody_publisher_launcher:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - chain310
+          - publish-current-nanobody
+          - --
+        nanobody_publisher_arguments:
+          - --watch-interval
+          - "{{ nanobody_watch_interval }}"
+          - --network
+          - "{{ nanobody_network }}"
+          - --netuid
+          - "{{ nanobody_netuid }}"
+          # From the rental, not from a vars file. The publisher fails closed on
+          # an unexpected count, and a written-down 10 is wrong the first time a
+          # differently shaped box is rented.
+          - --expected-gpus
+          - "{{ gpu_count }}"
+          - --runtime-root
+          - /root
+          - --score-bank-root
+          - /root
+          - --nanobody-opt-root
+          - /root/nanobody_opt
+          - --pixi
+          - /usr/local/bin/pixi
+          - --layer2-concurrency
+          - "{{ nanobody_layer2_concurrency }}"
+          - --layer2-cache-dir
+          - /root/layer2_cache
+          - --chain-state
+          - /root/artifacts/chain_state.json
+          - --artifact
+          - /root/artifacts/nanobody_result.json
+          - --history-dir
+          - /root/artifacts/nanobody_history
+          - --audit-dir
+          - /root/artifacts/validator_audits
+          - --ledger
+          - /root/artifacts/nanobody_published_sequences.txt
+          - --state
+          - /root/artifacts/nanobody_publisher_state.json
+          - --coldkey
+          - "{{ nanobody_coldkey_ss58 }}"
+          - --wallet-name
+          - "{{ nanobody_wallet_name }}"
+          - --wallet-path
+          - "{{ nanobody_wallet_path }}"
+          - --reserve-blocks
+          - "{{ nanobody_reserve_blocks }}"
+
+    - name: Compile the deployed publisher and chain writer
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/chain310/bin/python
+          - -m
+          - py_compile
+          - /root/tools/publish_current_nanobody.py
+          - /root/compound_miner/nanobody_provider.py
+          - /root/nanobody_opt/fleet.py
+          - /root/neurons/miner/miner.py
+      changed_when: false
+
+    - name: Run the focused publisher tests against the deployed tree
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/chain310/bin/python
+          - -m
+          - pytest
+          - -q
+          - tests/test_publish_current_nanobody.py
+      args:
+        chdir: /root
+      changed_when: false
+      register: publisher_tests
+
+    - name: Verify the publisher accepts every argument it is deployed with
+      ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
+      vars:
+        entrypoint_name: publish-current-nanobody
+        entrypoint_argv: "{{ nanobody_publisher_launcher }}"
+        entrypoint_flags: "{{ nanobody_publisher_arguments | select('match', '^--') | list }}"
+        entrypoint_environment:
+          PIXI_COLOR: never
+
+    # The cross-program contract the publisher cannot check for itself until it
+    # is already running. It needs the miner to export a chain view carrying the
+    # neuron rows the fleet is discovered from; the upstream miner exports no
+    # chain state at all. Check the deployed source, because the alternative is
+    # a publisher that starts, logs one line an interval, and publishes nothing.
+    - name: Verify the deployed miner exports the chain view the publisher reads
+      ansible.builtin.shell: |
+        set -eu
+        grep -q 'NOVA_CHAIN_STATE' /root/neurons/miner/miner.py
+        grep -q 'neurons' /root/neurons/miner/miner.py
+        echo CHAIN_STATE_EXPORT_PRESENT
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      register: chain_state_export
+
+    - name: Require a miner that exports block, epoch and neuron rows
+      ansible.builtin.assert:
+        that: "'CHAIN_STATE_EXPORT_PRESENT' in chain_state_export.stdout"
+        fail_msg: >-
+          /root/neurons/miner/miner.py does not export a chain view
+          (NOVA_CHAIN_STATE with neuron rows). The publisher discovers the fleet
+          from those rows and cannot fall back to a remembered uid, so it would
+          run and publish nothing. The nanobody-only miner with that export
+          exists on deploy/nanobody-standalone and has not been merged onto this
+          branch yet; merge it before activating either service.
+        success_msg: "Miner exports the chain view the publisher reads."
+      when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
+    - name: Require a signing identity for the chain writer
+      ansible.builtin.assert:
+        that: nanobody_chain_writer_hotkey | length > 0
+        fail_msg: >-
+          Set nanobody_chain_writer_hotkey to the hotkey name the writer process
+          signs with. It is not the fleet -- the fleet comes from the chain.
+      when: nanobody_chain_writer_activate | bool
+
+    - name: Verify the submission deploy key reaches only its repository
+      ansible.builtin.command:
+        argv:
+          - git
+          - ls-remote
+          - >-
+            git@github.com:{{ nanobody_submission_repo_owner }}/{{ nanobody_submission_repo_name }}.git
+          - "refs/heads/{{ nanobody_submission_repo_branch }}"
+      environment:
+        GIT_SSH_COMMAND: >-
+          ssh -i {{ nanobody_deploy_key }} -o IdentitiesOnly=yes -o BatchMode=yes
+          -o StrictHostKeyChecking=accept-new
+      changed_when: false
+      register: submission_remote
+      when: nanobody_publisher_activate | bool
+
+    - name: Require the submission branch to exist
+      ansible.builtin.assert:
+        that: submission_remote.stdout | length > 0
+        fail_msg: >-
+          The deploy key reached GitHub but
+          refs/heads/{{ nanobody_submission_repo_branch }} is absent.
+      when: nanobody_publisher_activate | bool
+
+    # ---- Services ----------------------------------------------------------
+    - name: Restart the checkpoint publisher on committed source
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ publisher_session }}"]
+      register: publisher_stop
+      changed_when: publisher_stop.rc == 0
+      failed_when: false
+      when: nanobody_publisher_activate | bool
+
+    - name: Start autonomous current-epoch checkpoint publication
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tmux', 'new-session', '-d', '-s', publisher_session]
+             + nanobody_publisher_launcher + nanobody_publisher_arguments }}
+      args:
+        chdir: /root
+      changed_when: true
+      when: nanobody_publisher_activate | bool
+
+    - name: Confirm the checkpoint publisher remains alive
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, "{{ publisher_session }}"]
+      changed_when: false
+      when: nanobody_publisher_activate | bool
+
+    - name: Keep the chain writer stopped unless it was explicitly activated
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ chain_writer_session }}"]
+      register: chain_writer_stop
+      changed_when: chain_writer_stop.rc == 0
+      failed_when: false
+      when: not (nanobody_chain_writer_activate | bool)
+
+    - name: Check whether the chain writer is already running
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, "{{ chain_writer_session }}"]
+      register: chain_writer_status
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse an unmanaged duplicate chain writer
+      ansible.builtin.command:
+        argv: [pgrep, -f, "[n]eurons/miner/miner.py"]
+      register: chain_writer_processes
+      changed_when: false
+      failed_when: false
+
+    # Two writers on one hotkey overwrite each other's commitment and the epoch
+    # is scored on whichever landed last. If one is running outside the managed
+    # session, stop it by hand rather than adding a second.
+    - name: Assert no chain writer runs outside the managed session
+      ansible.builtin.assert:
+        that: chain_writer_status.rc == 0 or chain_writer_processes.rc != 0
+        fail_msg: >-
+          neurons/miner/miner.py is running (pid
+          {{ chain_writer_processes.stdout }}) but not in the managed tmux
+          session {{ chain_writer_session }}. Stop it before activating.
+      when: nanobody_chain_writer_activate | bool
+
+    - name: Start the on-chain commitment writer
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - "{{ chain_writer_session }}"
+          - /root/.pixi/envs/chain310/bin/python
+          - -m
+          - dotenv
+          - -f
+          - /root/nanobody.env
+          - run
+          - --
+          - /root/.pixi/envs/chain310/bin/python
+          - neurons/miner/miner.py
+          - --network
+          - "{{ nanobody_network }}"
+          - --netuid
+          - "{{ nanobody_netuid }}"
+          - --wallet.path
+          - "{{ nanobody_wallet_path }}"
+          - --wallet.name
+          - "{{ nanobody_wallet_name }}"
+          - --wallet.hotkey
+          - "{{ nanobody_chain_writer_hotkey }}"
+          - --logging.debug
+      args:
+        chdir: /root
+      changed_when: true
+      when:
+        - nanobody_chain_writer_activate | bool
+        - chain_writer_status.rc != 0
+
+    - name: Record the successfully validated chain-side revision
+      ansible.builtin.copy:
+        content: "{{ controller_revision.stdout }}\n"
+        dest: /root/artifacts/nanobody_chain_deployed_commit.txt
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Report the chain side
+      ansible.builtin.debug:
+        msg: >-
+          {{ chain_check.stdout }}; {{ publisher_tests.stdout_lines[-1] | default('tests ok') }};
+          {{ installed_hotkeys.matched }} hotkey(s) deployed;
+          publisher active={{ nanobody_publisher_activate | bool }};
+          chain writer active={{ nanobody_chain_writer_activate | bool }}

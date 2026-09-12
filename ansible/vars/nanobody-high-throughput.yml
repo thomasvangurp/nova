@@ -9,6 +9,11 @@
 nanobody_producer_activate: false
 # The fast scorer spells two contract flags differently, so it is driven
 # through the adapter rather than invoked directly.  Rollback is this one path.
+#
+# The scorer the adapter drives is no longer something built on the box: it is
+# deployed from external_tools/fast_nanobody_scorer/ with its sha256 pin
+# re-verified on arrival, and /root/artifacts/nanobody_fast_scorer.json is
+# rendered by ansible/nanobody.yml.  Nothing below changed for that.
 nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_fast_adapter.py
 
 # Proposal generation is deliberately UNCHANGED from the configuration that

@@ -1,0 +1,40 @@
+# Chain identity and credential LOCATORS for the nanobody deployment.
+#
+# Nothing in this file is a secret and nothing in it resolves one. The coldkey
+# ss58 is a public address. The two key paths are paths on the controller: Ansible
+# reads those files itself, the copy tasks that use them are no_log, and no key
+# material passes through a command line, a variable or task output.
+#
+# The coldkey itself is never deployed. Registrations are bought from the
+# operator's machine (ansible/slots.yml), where the coldkey password comes from
+# the macOS Keychain via an exported variable NAME. Both GPU playbooks assert
+# that no coldkey exists on the rental.
+#
+# Fill these in locally. Do not commit real values here if this repository is
+# ever shared more widely than it is today -- pass the file with
+# `-e @/path/outside/the/repo.yml` instead.
+
+# Our coldkey's public ss58. The publisher discovers every uid this coldkey holds
+# from the metagraph each epoch; there is deliberately no configured hotkey or
+# uid list, because a configured list goes stale exactly the way the remembered
+# uid did -- we published into a slot someone else owned for twenty-one days.
+nanobody_coldkey_ss58: ""
+
+# Controller-side paths to the hotkey keyfiles to install on the GPU box, as a
+# list. Add one entry per registered hotkey; the deployment passes through
+# however many there are and asserts nothing about which uids they hold.
+#
+# nanobody_hotkey_sources:
+#   - ~/.bittensor/wallets/mining_ops/hotkeys/nova68-slot1
+#   - ~/.bittensor/wallets/mining_ops/hotkeys/nova68-slot2
+nanobody_hotkey_sources: []
+
+nanobody_wallet_name: mining_ops
+nanobody_wallet_path: /root/.bittensor/wallets
+
+# Controller-side path to the repository-scoped submission deploy key. Scoped to
+# one repository, not an account-wide token.
+nanobody_deploy_key_source: ""
+
+# The hotkey name the chain writer process signs with. Not the fleet.
+nanobody_chain_writer_hotkey: ""

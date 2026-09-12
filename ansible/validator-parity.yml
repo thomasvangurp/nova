@@ -2,8 +2,12 @@
 # Install the validator's documented Python/PyTorch scoring environment without
 # activating, restarting, or stopping the live producer. The full nanobody play
 # installs this same locked feature as the live ``bgen`` environment.
+- ansible.builtin.import_playbook: require_producer.yml
+
 - name: Install locked validator parity environment
-  hosts: all
+  # Not `all`: the inventory's slot_manager group is the operator's own
+  # machine, and the parity environment is a linux-64 CUDA solve.
+  hosts: nanobody_producer
   remote_user: root
   gather_facts: false
   any_errors_fatal: true

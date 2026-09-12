@@ -2,8 +2,12 @@
 # Fast path for an immutable OCI runtime plus a Vast persistent cache volume.
 # After proving both are the expected artifacts, import the canonical playbook:
 # its locked Pixi installs and checkpoint downloads become local verification.
+- ansible.builtin.import_playbook: require_producer.yml
+
 - name: Validate prebuilt nanobody runtime and persistent cache
-  hosts: all
+  # Not `all`: the inventory's slot_manager group is the operator's own
+  # machine and has no immutable runtime to validate.
+  hosts: nanobody_producer
   remote_user: root
   gather_facts: false
   any_errors_fatal: true

@@ -2,8 +2,16 @@
 # Dedicated NOVA nanobody design/scoring host. BoltzGen and MetaNano require
 # different Python/PyTorch stacks, so both are declared as isolated Pixi
 # environments and installed strictly from the committed lockfile.
+#
+# The host is discovered from `vastai show instances --raw` by label, never
+# written down: see ansible/inventory/vast_nanobody.py. `hosts:` is the
+# discovered group and not `all`, because `all` now also contains the
+# operator's own machine (the slot_manager group), which must never be
+# provisioned as a GPU box.
+- ansible.builtin.import_playbook: require_producer.yml
+
 - name: Provision the nanobody design and scoring box
-  hosts: all
+  hosts: nanobody_producer
   remote_user: root
   gather_facts: false
   any_errors_fatal: true
@@ -62,6 +70,20 @@
     nanobody_igblast_batch_size: 8
     nanobody_strict_gates: ""
     nanobody_screen_predict_batch_size: 0
+    # The vendored ~28x exact scorer, deployed from external_tools/ rather than
+    # built on the box. It lived only on rented hardware for four days and
+    # survived its instance being destroyed by minutes; see
+    # external_tools/fast_nanobody_scorer/PROVENANCE.md.
+    #
+    # The directory is named after the pinned digest, so an unpinned or
+    # differently pinned build cannot quietly occupy the same path, and the
+    # adapter's own sha256 check refuses anything but these bytes.
+    nanobody_fast_scorer_sha256: >-
+      530f5dcbc54d4a012571f4f9a7ddb6c016552291606652766d02c91643a7d531
+    nanobody_fast_scorer_root: /root/fastscore
+    nanobody_fast_scorer_reference: >-
+      0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif
+    nanobody_fast_scorer_tuning: {}
     ckpts:
       - name: boltzgen1_diverse.ckpt
         sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c
@@ -219,15 +241,112 @@
         rsync_opts: ["--exclude=.git", "--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
         use_ssh_args: true
 
-    - name: Sync nanobody optimization code
+    # One runtime root. See ansible/tasks/sync_repo.yml for why there is exactly
+    # one, and what a second one cost.
+    - name: Sync the committed runtime into the single root
+      ansible.builtin.include_tasks: tasks/sync_repo.yml
+
+    - name: Remove the second runtime root that deployed from another branch
+      ansible.builtin.file:
+        path: /root/nova-standalone
+        state: absent
+
+    - name: Create the pinned fast-scorer destination
+      ansible.builtin.file:
+        path: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy the vendored fast exact scorer from version control
       ansible.posix.synchronize:
-        src: "{{ repo }}/nanobody_opt/"
-        dest: /root/nanobody_opt/
+        src: "{{ repo }}/external_tools/fast_nanobody_scorer/"
+        dest: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}/"
         checksum: true
         owner: false
         group: false
-        rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        perms: false
+        rsync_opts:
+          - "--omit-dir-times"
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--no-perms"
         use_ssh_args: true
+
+    - name: Restore the executable bit on the scorer launcher
+      ansible.builtin.file:
+        path: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}/release_python.sh"
+        mode: "0755"
+
+    # release_python.sh sets PYTHONPATH to /root/fastscore/release/boltzgen_src.
+    # That path was a working directory on the destroyed box and is not in
+    # version control, so the committed launcher would import the live vendored
+    # BoltzGen instead of its own pinned copy -- silently, and only under load.
+    # The link makes the committed launcher correct as committed, and keeps
+    # "release" pointing at whichever digest is deployed.
+    - name: Point the launcher's PYTHONPATH at the deployed pinned tree
+      ansible.builtin.file:
+        src: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}"
+        dest: "{{ nanobody_fast_scorer_root }}/release"
+        state: link
+        force: true
+
+    - name: Verify the deployed scorer is byte-identical to the validated one
+      ansible.builtin.stat:
+        path: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}/fast_score_batch.py"
+        checksum_algorithm: sha256
+      register: deployed_fast_scorer
+
+    - name: Assert the fast scorer pin survived the transfer
+      ansible.builtin.assert:
+        that:
+          - deployed_fast_scorer.stat.exists
+          - deployed_fast_scorer.stat.checksum == nanobody_fast_scorer_sha256
+        fail_msg: >-
+          The deployed fast scorer hashes
+          {{ deployed_fast_scorer.stat.checksum | default('(absent)') }}, not the
+          pinned {{ nanobody_fast_scorer_sha256 }}. score_boltzgen_fast_adapter
+          would refuse it mid-epoch; fix the transfer or update the pin
+          deliberately.
+        success_msg: "Fast scorer pinned at {{ nanobody_fast_scorer_sha256[:12] }}."
+
+    - name: Verify the reference design the adapter grafts against
+      ansible.builtin.stat:
+        path: "{{ nanobody_fast_scorer_root }}/pinned-{{ nanobody_fast_scorer_sha256[:12] }}/refdesign/{{ nanobody_fast_scorer_reference }}"
+      register: deployed_synth_reference
+
+    - name: Require the reference design before naming it in the settings
+      ansible.builtin.assert:
+        that:
+          - deployed_synth_reference.stat.exists
+          - deployed_synth_reference.stat.size > 1000
+        fail_msg: >-
+          synth_reference {{ nanobody_fast_scorer_reference }} is missing from the
+          deployed package. Without it the adapter silently falls back to the
+          slow diffusion design stage, which is correct but is not the 28x path.
+
+    # Box-specific tuning stays out of the repository, but the file itself is
+    # rendered here so the pin, the launcher and the reference design cannot
+    # drift apart between the deployment and the adapter that reads them.
+    # nanobody_fast_scorer_tuning carries any per-host knobs the adapter
+    # forwards (fold_sampling_steps, fold_diffusion_samples, ...); it is empty by
+    # default so the scorer runs with the settings it was validated under.
+    - name: Render the adapter's scorer settings with the pin intact
+      ansible.builtin.copy:
+        dest: /root/artifacts/nanobody_fast_scorer.json
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {{
+            {
+              'python': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/release_python.sh',
+              'scorer': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/fast_score_batch.py',
+              'scorer_sha256': nanobody_fast_scorer_sha256,
+              'synth_reference': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/refdesign/' ~ nanobody_fast_scorer_reference,
+            } | combine(nanobody_fast_scorer_tuning) | to_nice_json
+          }}
 
     - name: Install interpreter wrappers and scorer shims
       ansible.posix.synchronize:
@@ -535,6 +654,16 @@
           - /root/nanobody_opt/rank_exact.py
           - /root/nanobody_opt/score_boltzgen_batch.py
           - /root/nanobody_opt/score_boltzgen_waves.py
+          # The publication path. score_boltzgen_fast_adapter is here because a
+          # refactor left it raising ModuleNotFoundError and only the deploy
+          # gates caught it; publication_gates and publish_checkpoint are here
+          # because a relaxed gate that does not import is a gate that never
+          # relaxed.
+          - /root/nanobody_opt/score_boltzgen_fast_adapter.py
+          - /root/nanobody_opt/publication_gates.py
+          - /root/nanobody_opt/publish_checkpoint.py
+          - /root/nanobody_opt/win_probability.py
+          - /root/nanobody_opt/qualify_screen_leader.py
       changed_when: false
 
     - name: Verify autonomous producer entry points use the locked Pixi runtime
@@ -718,46 +847,40 @@
       changed_when: "'REPAIRED' in ownership.stdout"
       register: ownership
 
-    - name: Check the configured live exact scorer before activation
-      ansible.builtin.stat:
-        path: "{{ nanobody_exact_scorer }}"
-      register: configured_exact_scorer
-      when: nanobody_producer_activate | bool
+    # A coldkey on a rented box is an unrecoverable loss, and "it is only the
+    # scoring box" is exactly the assumption under which one gets copied there
+    # by accident. This runs on every host in every mode, not only where a
+    # wallet is expected, and it is the reason the slot purchase agent runs on
+    # the operator's own machine instead of here.
+    - name: Refuse coldkey material on the rental
+      ansible.builtin.find:
+        paths: /root/.bittensor/wallets
+        patterns: [coldkey]
+        recurse: true
+        file_type: file
+      register: rental_coldkeys
 
-    - name: Require the configured live exact scorer before stopping the producer
+    - name: Assert the rental contains no coldkey
       ansible.builtin.assert:
-        that:
-          - configured_exact_scorer.stat.isreg | default(false)
+        that: rental_coldkeys.matched | int == 0
         fail_msg: >-
-          Exact scorer {{ nanobody_exact_scorer }} is absent; the existing live
-          producer was not stopped.
-      when: nanobody_producer_activate | bool
+          Coldkey material found under /root/.bittensor/wallets on rented
+          hardware. Remove it and treat it as compromised.
+        success_msg: "No coldkey on the rental."
 
-    - name: Verify the configured exact scorer CLI before stopping the producer
-      ansible.builtin.command:
-        argv:
-          - /root/bgen_python.sh
-          - "{{ nanobody_exact_scorer }}"
-          - --help
-      changed_when: false
-      when: nanobody_producer_activate | bool
+    # ---- Safety gate ------------------------------------------------------
+    # Every check between here and "Stop prior autonomous nanobody producer"
+    # runs while the existing producer is still mining. A deploy that cannot
+    # start the replacement therefore leaves the old one running instead of
+    # taking the miner down: that is how an adapter ModuleNotFoundError was
+    # caught without costing an epoch, and it is why nothing below reorders.
 
-    - name: Stop prior autonomous nanobody producer before activation
-      ansible.builtin.command:
-        argv: [tmux, kill-session, -t, "{{ nanobody_producer_session }}"]
-      register: producer_stop
-      changed_when: producer_stop.rc == 0
-      failed_when: false
-      when: nanobody_producer_activate | bool
-
-    - name: Start autonomous Pixi nanobody producer
-      ansible.builtin.command:
-        argv:
-          - tmux
-          - new-session
-          - -d
-          - -s
-          - "{{ nanobody_producer_session }}"
+    - name: Name the producer's launcher and arguments once
+      ansible.builtin.set_fact:
+        # Declared as data so the same list is both what the gate verifies and
+        # what tmux starts. Typing them twice is how a verified flag and a
+        # passed flag drift apart.
+        nanobody_producer_launcher:
           - /usr/local/bin/pixi
           - run
           - --manifest-path
@@ -767,6 +890,7 @@
           - bgen
           - live-producer
           - --
+        nanobody_producer_arguments:
           - --poll-interval
           - "30"
           - --mutation-database
@@ -853,6 +977,67 @@
           - "{{ nanobody_exploit_basin_core_limit }}"
           - --screen-predict-batch-size
           - "{{ nanobody_screen_predict_batch_size }}"
+
+    - name: Check the configured live exact scorer before activation
+      ansible.builtin.stat:
+        path: "{{ nanobody_exact_scorer }}"
+      register: configured_exact_scorer
+      when: nanobody_producer_activate | bool
+
+    - name: Require the configured live exact scorer before stopping the producer
+      ansible.builtin.assert:
+        that:
+          - configured_exact_scorer.stat.isreg | default(false)
+        fail_msg: >-
+          Exact scorer {{ nanobody_exact_scorer }} is absent; the existing live
+          producer was not stopped.
+      when: nanobody_producer_activate | bool
+
+    # The scorer contract is a fixed argument list that score_boltzgen_waves
+    # passes positionally by name. The fast adapter exists because the vendored
+    # scorer spells two of them differently, so a scorer that no longer accepts
+    # one of these is a scorer every wave will fail on.
+    - name: Verify the configured exact scorer starts and keeps its contract
+      ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
+      vars:
+        entrypoint_name: "exact scorer {{ nanobody_exact_scorer | basename }}"
+        entrypoint_argv:
+          - /root/bgen_python.sh
+          - "{{ nanobody_exact_scorer }}"
+        entrypoint_flags:
+          - --sequences
+          - --config
+          - --target
+          - --gpus
+          - --shards-per-gpu
+          - --batch-size
+          - --work-root
+          - --out
+      when: nanobody_producer_activate | bool
+
+    - name: Verify the producer accepts every argument it is deployed with
+      ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
+      vars:
+        entrypoint_name: live-producer
+        entrypoint_argv: "{{ nanobody_producer_launcher }}"
+        entrypoint_flags: "{{ nanobody_producer_arguments | select('match', '^--') | list }}"
+        entrypoint_environment:
+          PIXI_COLOR: never
+      when: nanobody_producer_activate | bool
+
+    - name: Stop prior autonomous nanobody producer before activation
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ nanobody_producer_session }}"]
+      register: producer_stop
+      changed_when: producer_stop.rc == 0
+      failed_when: false
+      when: nanobody_producer_activate | bool
+
+    - name: Start autonomous Pixi nanobody producer
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tmux', 'new-session', '-d', '-s', nanobody_producer_session]
+             + nanobody_producer_launcher + nanobody_producer_arguments }}
       changed_when: true
       when: nanobody_producer_activate | bool
 
@@ -875,4 +1060,5 @@
         msg: >-
           {{ bgen_check.stdout }}; {{ layer2_artifacts.stdout }};
           {{ layer2_canary.stdout_lines[-1] }}; archive and checkpoints ready;
+          fast scorer pinned {{ nanobody_fast_scorer_sha256[:12] }};
           autonomous producer active={{ nanobody_producer_activate | bool }}

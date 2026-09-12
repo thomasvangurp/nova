@@ -1,0 +1,47 @@
+---
+# Prove an entry point can start, BEFORE anything that is running is stopped.
+#
+# This gate has already earned its place: an adapter refactor left
+# ``score_boltzgen_fast_adapter`` raising ModuleNotFoundError, and because the
+# ``--help`` probe runs before ``tmux kill-session`` the deploy failed with the
+# live producer still mining instead of taking the miner down and leaving the
+# epoch unscored.
+#
+# It checks two things, because "the module imports" is not the same as "the
+# arguments we are about to pass exist":
+#
+#   1. ``--help`` exits zero. That exercises every import on the entry point's
+#      path, which is where a missing module, a renamed package or a syntax
+#      error actually shows up.
+#   2. Every flag this deployment passes appears in the help text. A flag that
+#      was renamed upstream otherwise starts the service, fails argparse, and
+#      the tmux session exits seconds after the deploy reported success.
+#
+# Callers set:
+#   entrypoint_name         a human label used in messages
+#   entrypoint_argv         argv list WITHOUT --help
+#   entrypoint_flags        flags the deployment will pass (optional)
+#   entrypoint_environment  environment for the probe (optional)
+#   entrypoint_chdir        working directory for the probe (optional)
+
+- name: "Probe {{ entrypoint_name }} for a startable entry point"
+  ansible.builtin.command:
+    argv: "{{ entrypoint_argv + ['--help'] }}"
+    chdir: "{{ entrypoint_chdir | default(omit) }}"
+  environment: "{{ entrypoint_environment | default({}) }}"
+  changed_when: false
+  register: entrypoint_help
+
+- name: "Require every flag {{ entrypoint_name }} is deployed with"
+  ansible.builtin.assert:
+    that:
+      - item in (entrypoint_help.stdout ~ entrypoint_help.stderr)
+    fail_msg: >-
+      {{ entrypoint_name }} does not accept {{ item }}. The deployment would
+      start it with that flag and argparse would kill it seconds later, so
+      nothing was stopped. Reconcile the playbook's argument list with the
+      entry point.
+    success_msg: "{{ entrypoint_name }} accepts {{ item }}"
+  loop: "{{ entrypoint_flags | default([]) }}"
+  loop_control:
+    label: "{{ item }}"

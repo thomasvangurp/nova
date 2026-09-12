@@ -22,6 +22,14 @@ bgen = { features = ["validator-bgen"], no-default-feature = true }
 bgen-conda = { features = ["bgen"], no-default-feature = true }
 metanano = { features = ["metanano"], no-default-feature = true }
 validator-bgen = { features = ["validator-bgen"], no-default-feature = true }
+# The chain side: the epoch publisher and the on-chain commitment writer. It is
+# declared HERE, in the same workspace as the scorer, on purpose. Until
+# 2026-09-12 it lived in a second Pixi workspace under /root/nova-standalone
+# deployed from a different branch, and the resulting split meant relaxing a
+# publication gate in /root/nanobody_opt changed nothing for hours: the program
+# that publishes was reading the other copy. One workspace, one root, one
+# branch.
+chain310 = { features = ["chain310"], no-default-feature = true }
 
 # BoltzGen exact-scoring environment. Versions mirror the vendored BoltzGen
 # pyproject; CUDA-linked packages belong to this single conda-forge solve.
@@ -239,6 +247,37 @@ audit-pairwise-shortlist = "cd /root && python -m nanobody_opt.audit_pairwise_sh
 seed-mutation-database = "cd /root && python -m nanobody_opt.seed_mutation_database"
 import-exact-screens = "cd /root && python -m nanobody_opt.import_exact_screens"
 audit-live-generator-recall = "cd /root && python -m nanobody_opt.audit_live_generator_recall"
+
+# Chain/miner environment, carried over unchanged from the branch that actually
+# wrote commitments (deploy/nanobody-standalone). Python 3.10 is not a
+# preference: the timelock wheels are cp310-only. Keep the async substrate stack
+# coherent -- substrate-interface and py-scale-codec own the same scalecodec
+# namespace and must not be added beside async-substrate-interface.
+[feature.chain310.dependencies]
+python = "3.10.*"
+pip = "*"
+numpy = ">=2,<2.3"
+pandas = "2.2.*"
+rdkit = "2024.09.*"
+cryptography = ">=46"
+python-dotenv = "*"
+requests = "*"
+pyyaml = "*"
+pytest = "*"
+
+[feature.chain310.pypi-dependencies]
+bittensor = "==10.4.1"
+timelock = "==0.0.1.dev0"
+async-substrate-interface = "==2.0.4"
+cyscale = "==0.4.0"
+
+[feature.chain310.tasks]
+check = "python -c \"import bittensor,timelock; from async_substrate_interface.sync_substrate import SubstrateInterface; print(bittensor.__version__)\""
+publish-current-nanobody = "cd /root && python tools/publish_current_nanobody.py"
+test-nanobody-publisher = "cd /root && python -m pytest -q tests/test_publish_current_nanobody.py"
+# There is deliberately no slot-manager task here. This workspace is linux-64
+# only and the slot purchase agent needs the coldkey and the macOS Keychain, so
+# it runs on the operator's machine (ansible/slots.yml) and never on a rental.
 
 [feature.metanano.tasks]
 check = "python -c \"import Bio, anarci, metanano; print(Bio.__version__)\""

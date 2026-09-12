@@ -2,6 +2,8 @@
 # Publish the best unused, repeat-scored nanobody for a current live epoch.
 # The exact-score bank is target-bound and may be reused while the target stays
 # unchanged; published and historical sequences are always excluded.
+- ansible.builtin.import_playbook: require_producer.yml
+
 - name: Publish a qualified nanobody checkpoint for the live epoch
   hosts: nanobody_producer
   remote_user: root
@@ -11,7 +13,10 @@
   vars:
     repo: "{{ playbook_dir }}/.."
     nanobody_epoch: 0
-    gpu_count: 10
+    # From the rental, via the dynamic inventory. A written-down count is wrong
+    # the first time a differently shaped box is rented, and this one is a hard
+    # gate below, so there is deliberately no fallback value.
+    gpu_count: "{{ hostvars[inventory_hostname].vast_num_gpus }}"
     layer2_concurrency: 40
     live_root: /root/live
     source_epoch_root: /root/live/epoch25021
