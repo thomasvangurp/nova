@@ -1,0 +1,191 @@
+---
+# The subnet-68 slot purchase agent, deployed on the OPERATOR'S OWN MACHINE.
+#
+# It runs here and nowhere else for one reason: burn-registering needs the
+# coldkey, and the coldkey password comes out of the macOS Keychain. A coldkey on
+# a rented box is an unrecoverable loss, so the box gets hotkeys only and this
+# service never goes near it. ansible/nanobody.yml and ansible/nanobody_services.yml
+# both assert that no coldkey is present on the rental; this playbook is the
+# other half of that boundary.
+#
+# Nothing here reads, resolves, prints or stores the coldkey password. The only
+# credential-adjacent string that appears is
+# NOVA_COLDKEY_KEYCHAIN_SERVICE -- the NAME of an environment variable that in
+# turn names a Keychain service. That name is passed to the agent, which shells
+# out to security(1) itself and holds the value in one local variable for the
+# duration of one decrypt call. There is deliberately no lookup of any kind in
+# this playbook or in any vars file, and the operator's shell must export
+# NOVA_COLDKEY_KEYCHAIN_SERVICE before the tmux session is created, since the
+# session inherits the environment it is created in.
+#
+# The deployed unit is a DRY RUN. --execute-registrations is the flag that
+# spends tau, and it is not passed here under any variable. Turning on live
+# purchasing is a deliberate manual act by the operator in the tmux session, not
+# a deployment side effect. There is intentionally no ansible variable that can
+# flip it, because a variable that can flip it is a variable that will be flipped
+# by a copied command line.
+- name: Deploy the subnet-68 slot purchase agent on the operator's machine
+  hosts: slot_manager
+  # Facts are gathered here, unlike the GPU plays, because this play needs
+  # ansible_env: the operator's HOME for the decision log, and the presence --
+  # never the value -- of the exported Keychain service-name variable.
+  gather_facts: true
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    slot_manager_session: nova-nanobody-slots
+    slot_manager_activate: true
+    # Interpreter with bittensor available. This workspace's Pixi manifest is
+    # linux-64 only, so the GPU box's locked environment is not an option here;
+    # name whatever interpreter the operator keeps bittensor in.
+    slot_manager_python: python3
+    slot_manager_minimum_hotkeys: 9
+    slot_manager_interval: 900
+    slot_manager_wallet: mining_ops
+    slot_manager_hotkey_prefix: nova68-slot
+    slot_manager_netuid: 68
+    slot_manager_network: finney
+    slot_manager_decision_log: "{{ ansible_env.HOME }}/.nova/subnet68_slots.jsonl"
+    slot_manager_max_recycle_tao: 0.20
+    slot_manager_max_spend_tao_per_day: 1.0
+    slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
+
+  tasks:
+    - name: Require committed source for the deployed agent
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]
+      register: controller_status
+      changed_when: false
+      failed_when: controller_status.stdout | length > 0
+
+    - name: Create the decision log directory
+      ansible.builtin.file:
+        path: "{{ slot_manager_decision_log | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Name the agent's launcher and arguments once
+      ansible.builtin.set_fact:
+        # --execute-registrations is absent by design; see the header.
+        slot_manager_launcher:
+          - "{{ slot_manager_python }}"
+          - -m
+          - nanobody_opt.slot_manager
+        slot_manager_arguments:
+          - --netuid
+          - "{{ slot_manager_netuid }}"
+          - --network
+          - "{{ slot_manager_network }}"
+          - --wallet
+          - "{{ slot_manager_wallet }}"
+          - --hotkey-prefix
+          - "{{ slot_manager_hotkey_prefix }}"
+          - --minimum-hotkeys
+          - "{{ slot_manager_minimum_hotkeys }}"
+          - --decision-log
+          - "{{ slot_manager_decision_log }}"
+          - --max-recycle-tao
+          - "{{ slot_manager_max_recycle_tao }}"
+          - --max-spend-tao-per-day
+          - "{{ slot_manager_max_spend_tao_per_day }}"
+          - --keychain-service-env
+          - "{{ slot_manager_keychain_service_env }}"
+          - --interval
+          - "{{ slot_manager_interval }}"
+
+    # ---- Safety gate -------------------------------------------------------
+    # Same gate as the GPU services, and it works here for the same reason the
+    # agent is testable without an account: everything above its argparse call
+    # is standard library, so --help runs with bittensor absent, no wallet
+    # loaded, no Keychain read and no chain connection.
+    - name: Verify the agent accepts every argument it is deployed with
+      ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
+      vars:
+        entrypoint_name: slot_manager
+        entrypoint_argv: "{{ slot_manager_launcher }}"
+        entrypoint_flags: "{{ slot_manager_arguments | select('match', '^--') | list }}"
+        entrypoint_chdir: "{{ repo }}"
+
+    - name: Refuse to deploy an argument list that can spend
+      ansible.builtin.assert:
+        that:
+          - "'--execute-registrations' not in slot_manager_arguments"
+          - "'--execute' not in slot_manager_arguments"
+        fail_msg: >-
+          The deployed slot agent must be a dry run. Live purchasing is a manual
+          act in the tmux session, never something a playbook run turns on.
+        success_msg: "Deployed slot agent is a logged dry run."
+
+    - name: Require the chain stack the agent needs for its reads
+      ansible.builtin.command:
+        argv:
+          - "{{ slot_manager_python }}"
+          - -c
+          - >-
+            import bittensor;
+            print('SLOT_MANAGER_BITTENSOR_OK', bittensor.__version__)
+      changed_when: false
+      failed_when: false
+      register: slot_manager_bittensor
+      when: slot_manager_activate | bool
+
+    - name: Report whether chain reads will work
+      ansible.builtin.assert:
+        that: "'SLOT_MANAGER_BITTENSOR_OK' in slot_manager_bittensor.stdout"
+        fail_msg: >-
+          {{ slot_manager_python }} cannot import bittensor. The decision core
+          runs without it, but chain reads and registration cannot, so the agent
+          would exit on its first poll. Point slot_manager_python at an
+          interpreter that has it.
+      when: slot_manager_activate | bool
+
+    # The session inherits the environment it is created in, which is how the
+    # Keychain service NAME reaches the agent without ever being written down
+    # here. Fail before the restart rather than after it.
+    - name: Require the Keychain service name to be exported for the session
+      ansible.builtin.assert:
+        that:
+          - (ansible_env[slot_manager_keychain_service_env] | default('')) | length > 0
+        fail_msg: >-
+          {{ slot_manager_keychain_service_env }} is not exported in this shell.
+          Export it (its VALUE is the Keychain service name, which this playbook
+          never sees) and re-run, or the agent will exit the first time it needs
+          to unlock the coldkey.
+        success_msg: >-
+          {{ slot_manager_keychain_service_env }} is exported; its value was not
+          read.
+      when: slot_manager_activate | bool
+
+    - name: Restart the slot purchase agent on committed source
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ slot_manager_session }}"]
+      register: slot_manager_stop
+      changed_when: slot_manager_stop.rc == 0
+      failed_when: false
+      when: slot_manager_activate | bool
+
+    - name: Start the slot purchase agent as a logged dry run
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tmux', 'new-session', '-d', '-s', slot_manager_session]
+             + slot_manager_launcher + slot_manager_arguments }}
+      args:
+        chdir: "{{ repo }}"
+      changed_when: true
+      when: slot_manager_activate | bool
+
+    - name: Confirm the slot purchase agent remains alive
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, "{{ slot_manager_session }}"]
+      changed_when: false
+      when: slot_manager_activate | bool
+
+    - name: Report the slot agent
+      ansible.builtin.debug:
+        msg: >-
+          {{ slot_manager_session }} holding >=
+          {{ slot_manager_minimum_hotkeys }} registrations, polling every
+          {{ slot_manager_interval }}s, DRY RUN
+          (pass --execute-registrations by hand to spend);
+          decisions appended to {{ slot_manager_decision_log }}
