@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+#
+# How often to look, not how often to buy. Buying is rate-limited inside the
+# agent -- at most one registration per 360-block adjustment interval, and a
+# stagger of immunity/target between purchases -- so frequent checks cost only a
+# chain read and buy nothing extra.
+#
+# Looking often is what makes purchases cheap. The recycle price decays -0.19%
+# per block and halves every 360 blocks, and the agent buys when the live price
+# sits near the floor of its {{ slot_manager_lookback_blocks }}-block lookback
+# window. That window is about {{ (slot_manager_lookback_blocks * 12 / 60) | round | int }}
+# minutes wide, so a check every {{ (slot_manager_check_seconds / 60) | round | int }}
+# minutes keeps several samples inside it; poll much slower and the agent cannot
+# tell a floor from a spike and declines to buy at all.
+[Unit]
+Description=Check subnet-68 registration slots on a schedule
+Requires=nova-slot-manager.service
+
+[Timer]
+OnBootSec={{ slot_manager_check_seconds }}
+OnUnitActiveSec={{ slot_manager_check_seconds }}
+# Never land on the same block as every other scheduled buyer.
+RandomizedDelaySec={{ (slot_manager_check_seconds / 4) | round | int }}
+# A missed window while the Pi was off should be checked at once, not skipped
+# until the next tick.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

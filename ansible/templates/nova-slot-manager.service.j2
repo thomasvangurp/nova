@@ -17,22 +17,27 @@
 # The unit is a DRY RUN. --execute-registrations is what spends tau and is not
 # present below; enabling live purchase is an edit an operator makes knowingly.
 [Unit]
-Description=Nova subnet-68 slot purchase agent (dry run)
+Description=Nova subnet-68 slot purchase check (dry run)
 Documentation=file://{{ slot_manager_repo }}/nanobody_opt/slot_manager.py
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# oneshot driven by nova-slot-manager.timer, not a resident loop. The agent
+# keeps its price history in the decision log precisely so single-shot runs
+# accumulate state, and a process that exits between checks is one that cannot
+# wedge holding a decrypted coldkey. A timer also survives reboots, which a Pi
+# does regularly.
+Type=oneshot
 WorkingDirectory={{ slot_manager_repo }}
 Environment=PYTHONUNBUFFERED=1
 # The NAME of the credential, never its value.
 Environment={{ slot_manager_keychain_service_env }}={{ slot_manager_credential_name }}
 LoadCredentialEncrypted={{ slot_manager_credential_name }}:{{ slot_manager_credential_path }}
 ExecStart={{ slot_manager_exec }}
-Restart=always
-RestartSec=60
-# A registration is a chain write; never run two of these at once.
+# A registration is a chain write; never run two of these at once. The timer
+# does not stack runs, and oneshot means systemd will not start a second while
+# the first is still going.
 StandardOutput=journal
 StandardError=journal
 # The coldkey is the only thing on this host worth stealing.
@@ -46,5 +51,5 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-[Install]
-WantedBy=multi-user.target
+# No [Install]: the timer is what gets enabled, not the service. Enabling this
+# unit directly would run one check at boot and never again.

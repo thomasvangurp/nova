@@ -57,6 +57,12 @@
     slot_manager_credential_name: nova-coldkey-password
     slot_manager_credential_path: /etc/nova/coldkey-password.cred
     slot_manager_service: nova-slot-manager
+    # How often to LOOK. Buying is rate-limited inside the agent, so a frequent
+    # check costs one chain read and buys nothing extra -- but it is what makes a
+    # purchase cheap, because the floor test needs several samples inside its
+    # lookback window to tell a decay floor from a post-spike price.
+    slot_manager_check_seconds: 300
+    slot_manager_lookback_blocks: 180
     # Where the repository lives on a remote purchase host.
     slot_manager_remote_repo: /opt/nova-nanobody
 
@@ -102,8 +108,13 @@
           - "{{ slot_manager_keychain_service_env }}"
           - --credential-source
           - "{{ slot_manager_credential_source }}"
+          - --lookback-blocks
+          - "{{ slot_manager_lookback_blocks }}"
           - --interval
-          - "{{ slot_manager_interval }}"
+          # Linux is timer-driven, so each run evaluates once and exits; the
+          # decision log carries the price history between runs. macOS keeps the
+          # resident tmux loop.
+          - "{{ 0 if ansible_system == 'Linux' else slot_manager_interval }}"
 
     # ---- Safety gate -------------------------------------------------------
     # Same gate as the GPU services, and it works here for the same reason the
@@ -253,21 +264,46 @@
           {{ (slot_manager_launcher + slot_manager_arguments) | join(' ') }}
       register: slot_manager_unit
 
-    - name: Restart the slot purchase agent on committed source (Linux)
+    - name: Install the slot purchase timer (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-slot-manager.timer.j2
+        dest: "/etc/systemd/system/{{ slot_manager_service }}.timer"
+        mode: "0644"
+      register: slot_manager_timer
+
+    # The TIMER is enabled, never the service: enabling a oneshot service would
+    # run one check at boot and then nothing.
+    - name: Schedule the slot purchase checks (Linux)
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.systemd_service:
-        name: "{{ slot_manager_service }}"
+        name: "{{ slot_manager_service }}.timer"
         state: restarted
         enabled: true
         daemon_reload: true
 
-    - name: Confirm the slot purchase agent is running (Linux)
+    - name: Confirm the schedule is armed and has a next run (Linux)
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.command:
-        argv: [systemctl, is-active, "{{ slot_manager_service }}"]
-      register: slot_manager_active
+        argv:
+          - systemctl
+          - show
+          - "{{ slot_manager_service }}.timer"
+          - --property=ActiveState
+          - --property=NextElapseUSecRealtime
+      register: slot_manager_schedule
       changed_when: false
-      failed_when: slot_manager_active.stdout | trim != 'active'
+      failed_when: >-
+        'ActiveState=active' not in slot_manager_schedule.stdout
+        or 'NextElapseUSecRealtime=' not in slot_manager_schedule.stdout
+
+    # Prove the check itself runs to completion under the unit, rather than
+    # trusting that a timer which is armed will fire something that works.
+    - name: Run one scheduled check now (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv: [systemctl, start, "--wait", "{{ slot_manager_service }}.service"]
+      changed_when: true
 
     - name: Report the slot agent
       ansible.builtin.debug:
