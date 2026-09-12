@@ -102,9 +102,9 @@ WAIT = "wait"
 
 # Reason codes.  Every skip records one, so the log says why we did not buy.
 REASON_BUY = "below_target_at_decay_floor"
+REASON_BUY_URGENT = "below_target_and_short_of_a_fleet"
 REASON_TARGET_MET = "target_met"
 REASON_OWN_INTERVAL = "already_registered_this_interval"
-REASON_FIELD_BUSY = "registrations_this_interval_above_one"
 REASON_STAGGER = "inside_stagger_window"
 REASON_NO_HISTORY = "insufficient_price_history"
 REASON_ABOVE_FLOOR = "price_above_decay_floor"
@@ -175,6 +175,11 @@ class SlotPolicy:
 
     target: int = 9
     max_recycle_tao: float = 0.20
+    #: Below this many held hotkeys, take any affordable price rather than wait
+    #: for a decay floor.  A forfeited epoch costs more than a dear registration:
+    #: the floor saves ~tau0.03, a missing ticket forfeits ~tau0.032 of expected
+    #: value every epoch, and there are ~20 epochs a day.
+    urgent_below: int = 3
     max_spend_tao_per_day: float = 1.0
     #: ``None`` means :func:`default_stagger_blocks` of the target.
     stagger_blocks: int | None = None
@@ -309,19 +314,29 @@ def decide(
     1. we are at or above target -- nothing to do;
     2. we already registered inside this adjustment interval -- never more than
        one of our registrations per interval, whatever the price does;
-    3. ``RegistrationsThisInterval`` is above one -- the field is bidding and
-       our buy would land on top of someone else's jump;
-    4. we are inside the stagger window -- buying now would bunch an immunity
+    3. we are inside the stagger window -- buying now would bunch an immunity
        expiry against one we already hold;
-    5. the price history is too thin to locate the floor;
-    6. the price sits above the projected decay floor -- a jump has not
-       amortised yet;
-    7. the price is above the hard recycle ceiling;
-    8. the purchase would breach the rolling daily budget.
+    4. the price is above the hard recycle ceiling;
+    5. the purchase would breach the rolling daily budget;
+    6. the price history is too thin to locate the floor;
+    7. the price sits above the projected decay floor.
 
-    The two hard rails (7, 8) are evaluated last only so that the log shows the
-    cheapest true explanation first; both refuse absolutely and neither can be
-    traded against anything else.
+    Gates 6 and 7 are a REFINEMENT and are skipped while we hold fewer than
+    ``policy.urgent_below`` hotkeys.  Waiting for a decay floor saves at most
+    about a third of a roughly tau0.10 registration -- call it tau0.03 -- while
+    every epoch spent below a full fleet forfeits ~tau0.032 of expected value
+    per missing ticket, and there are about twenty epochs a day.  Haggling is
+    only rational once most of the fleet is already held.
+
+    There is deliberately no gate on ``RegistrationsThisInterval``.  It was one
+    of the first things tried and it is a proxy for "the price is elevated",
+    which is worth nothing when the price itself is right there in the same
+    snapshot.  Worse, it does not clear: the counter sits at its value for the
+    whole 360-block interval, and this field routinely registers three times an
+    interval, so a "buy only when the field is quiet" rule spends most of its
+    life refusing -- observed refusing tau0.092 against a tau0.20 ceiling.  A
+    purchaser that never purchases is the expensive failure here, not a slightly
+    dear registration.
     """
     now = time.time() if now is None else now
     shortfall = policy.target - state.registered
@@ -366,18 +381,20 @@ def decide(
         and state.last_registration_block // ADJUSTMENT_INTERVAL == state.interval
     ):
         return verdict(WAIT, REASON_OWN_INTERVAL)
-    if state.registrations_this_interval > 1:
-        return verdict(WAIT, REASON_FIELD_BUSY)
     if blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
-    if floor is None:
-        return verdict(WAIT, REASON_NO_HISTORY)
-    if state.recycle_tao > floor * (1.0 + policy.floor_tolerance):
-        return verdict(WAIT, REASON_ABOVE_FLOOR)
+    # Hard rails first: both refuse absolutely and cannot be traded away.
     if state.recycle_tao > policy.max_recycle_tao:
         return verdict(WAIT, REASON_CEILING)
     if spent + state.recycle_tao > policy.max_spend_tao_per_day:
         return verdict(WAIT, REASON_BUDGET)
+    # Below a working fleet, an affordable price beats a perfect one.
+    if state.registered < policy.urgent_below:
+        return verdict(BUY, REASON_BUY_URGENT)
+    if floor is None:
+        return verdict(WAIT, REASON_NO_HISTORY)
+    if state.recycle_tao > floor * (1.0 + policy.floor_tolerance):
+        return verdict(WAIT, REASON_ABOVE_FLOOR)
     return verdict(BUY, REASON_BUY)
 
 
@@ -696,6 +713,7 @@ def _register(
 def _policy_from_args(args: argparse.Namespace) -> SlotPolicy:
     return SlotPolicy(
         target=args.target,
+        urgent_below=args.urgent_below,
         max_recycle_tao=args.max_recycle_tao,
         max_spend_tao_per_day=args.max_spend_tao_per_day,
         stagger_blocks=args.stagger_blocks,
@@ -799,6 +817,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=int,
         default=None,
         help="default: immunity_period // target, which spreads expiries evenly",
+    )
+    parser.add_argument(
+        "--urgent-below",
+        type=int,
+        default=3,
+        help="below this many held hotkeys, buy at any affordable price rather "
+        "than waiting for a decay floor",
     )
     parser.add_argument("--lookback-blocks", type=int, default=180)
     parser.add_argument("--floor-tolerance", type=float, default=0.05)

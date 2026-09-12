@@ -33,7 +33,12 @@ def decaying(start_block: int, blocks: int, price: float, decay: float | None = 
     ]
 
 
-def state_at(history, *, regs=0, registered=(), last=None):
+#: Enough held hotkeys that the urgency path is not in play, so a test about the
+#: decay floor is actually testing the decay floor.
+HOLDING_A_FLEET = tuple(range(5))
+
+
+def state_at(history, *, regs=0, registered=HOLDING_A_FLEET, last=None):
     latest = history[-1]
     return sm.ChainState(
         block=latest.block,
@@ -74,11 +79,14 @@ def test_waiting_pays_at_current_prices_and_stops_paying_near_tau0_046():
 def test_pure_decay_below_target_buys():
     history = decaying(1_000_000, 61, 0.135167)
     decision = sm.decide(
-        state_at(history, regs=0, registered=(7, 12)), history, [], sm.SlotPolicy()
+        state_at(history, regs=0, registered=(7, 12, 19, 24, 31)),
+        history,
+        [],
+        sm.SlotPolicy(),
     )
     assert decision.action == sm.BUY
     assert decision.reason == sm.REASON_BUY
-    assert decision.detail["shortfall"] == 7
+    assert decision.detail["shortfall"] == 4
     # Under pure decay every sample projects to the same price, so the live
     # price sits exactly on its own floor.
     assert decision.detail["floor_ratio"] == pytest.approx(1.0, abs=1e-9)
@@ -90,11 +98,47 @@ def test_one_competitor_registration_in_the_interval_is_still_a_buy():
     assert sm.decide(state_at(history, regs=1), history, [], sm.SlotPolicy()).action == sm.BUY
 
 
-def test_a_busy_interval_waits():
+def test_a_busy_interval_does_not_block_a_cheap_buy():
+    """The competitor counter is not a price, and gating on it never buys.
+
+    RegistrationsThisInterval does not clear until the interval turns over, and
+    this field routinely registers three times an interval -- so "wait until the
+    field is quiet" spent its life refusing prices less than half the ceiling.
+    What matters is the price in the same snapshot.
+    """
     history = decaying(1_000_000, 61, 0.12)
-    decision = sm.decide(state_at(history, regs=2), history, [], sm.SlotPolicy())
+    decision = sm.decide(state_at(history, regs=5), history, [], sm.SlotPolicy())
+    assert decision.action == sm.BUY
+    assert decision.detail["registrations_this_interval"] == 5
+
+
+def test_an_expensive_interval_still_refuses():
+    """Removing the proxy must not remove the protection it stood in for."""
+    history = decaying(1_000_000, 61, 0.42)
+    decision = sm.decide(state_at(history, regs=5), history, [], sm.SlotPolicy())
     assert decision.action == sm.WAIT
-    assert decision.reason == sm.REASON_FIELD_BUSY
+    assert decision.reason == sm.REASON_CEILING
+
+
+def test_below_a_working_fleet_an_affordable_price_beats_a_perfect_one():
+    """Holding nothing, a spike we would normally sit out is still worth buying.
+
+    The floor saves about tau0.03; each missing ticket forfeits ~tau0.032 of
+    expected value every epoch, roughly twenty times a day.
+    """
+    history = decaying(1_000_000, 61, 0.10)
+    spiked = list(history) + [sm.PriceSample(history[-1].block + 1, 0.15)]
+    decision = sm.decide(
+        state_at(spiked, registered=()), spiked, [], sm.SlotPolicy()
+    )
+    assert decision.action == sm.BUY
+    assert decision.reason == sm.REASON_BUY_URGENT
+    # ...and the same spike is declined once the fleet is nearly complete.
+    patient = sm.decide(
+        state_at(spiked, registered=tuple(range(8))), spiked, [], sm.SlotPolicy()
+    )
+    assert patient.action == sm.WAIT
+    assert patient.reason == sm.REASON_ABOVE_FLOOR
 
 
 # ---------------------------------------------------------------------------
@@ -531,17 +575,19 @@ def test_the_report_line_is_printable_for_every_decision(capsys):
     history = decaying(1_000_000, 61, 0.13)
     for state in (
         state_at(history),
-        state_at(history, regs=3),
+        state_at(history, registered=()),
         state_at(history, registered=tuple(range(9))),
+        state_at(history, last=history[-1].block - 1),
     ):
         decision = sm.decide(state, history, [], sm.SlotPolicy())
         sm._report(decision, executed=False, hotkey="nova68-slot-1")
     lines = capsys.readouterr().out.strip().splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 4
     assert lines[0].startswith("SLOT_BUY reason=")
     assert all("executed=false" in line for line in lines)
-    assert "reason=registrations_this_interval_above_one" in lines[1]
-    assert "reason=target_met" in lines[2]
+    assert f"reason={sm.REASON_BUY_URGENT}" in lines[1]
+    assert f"reason={sm.REASON_TARGET_MET}" in lines[2]
+    assert f"reason={sm.REASON_OWN_INTERVAL}" in lines[3]
 
 
 def test_the_credential_source_follows_the_platform():
