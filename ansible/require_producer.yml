@@ -1,0 +1,37 @@
+---
+# Fail loudly when the dynamic inventory found no GPU box, and print the
+# endpoint it did find.
+#
+# Without this, ``hosts: nanobody_producer`` with an empty group prints
+# "skipping: no hosts matched" and exits 0. A green deploy that touched nothing
+# is the worst possible report: it is what "the port silently changed and every
+# box looked down" feels like from the controller side. Say what was
+# discovered, every run, so a rotated endpoint is visible rather than inferred.
+- name: Require a discovered nanobody GPU host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Assert the vast.ai inventory resolved at least one labelled instance
+      ansible.builtin.assert:
+        that:
+          - (groups['nanobody_producer'] | default([]) | length) > 0
+        fail_msg: >-
+          No running vast.ai instance carries the nanobody label. Rent one and
+          label it (`vastai label instance <id> nova-nanobody-pixi`), or point
+          the inventory at a different label with NOVA_VAST_LABEL. The
+          inventory script prints what it did see on stderr.
+        success_msg: >-
+          {{ groups['nanobody_producer'] | length }} labelled instance(s)
+          discovered.
+
+    - name: Report the endpoint discovered for this run
+      ansible.builtin.debug:
+        msg: >-
+          {{ item }} = {{ hostvars[item].ansible_host }}:{{ hostvars[item].ansible_port }}
+          ({{ hostvars[item].vast_num_gpus | default('?') }}x
+          {{ hostvars[item].vast_gpu_name | default('GPU') }},
+          instance {{ hostvars[item].vast_instance_id | default('?') }})
+      loop: "{{ groups['nanobody_producer'] }}"
+      loop_control:
+        label: "{{ item }}"
