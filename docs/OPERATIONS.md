@@ -129,11 +129,29 @@ uncommitted tree.
 
 ### Rent a box
 ```bash
-vastai search offers 'num_gpus=4 gpu_name=RTX_4090 cpu_arch=amd64 disk_space>=200 reliability>0.98' -o dph
+vastai search offers 'num_gpus>=2 num_gpus<=4 gpu_ram>=23 cpu_arch=amd64 disk_space>=200 reliability>0.97' -o dph
 vastai create instance <id> --image nvidia/cuda:12.6.0-devel-ubuntu22.04 \
-  --disk 300 --label nova-nanobody-pixi --ssh --direct
+  --disk 220 --label nova-nanobody-pixi --ssh --direct
 ```
 Do **not** pass `--raw` to `create instance`: it prints an instance API key.
+
+**Check `cur_state`, not `actual_status`.** An instance vast never starts sits at
+`actual_status: loading` indefinitely while `cur_state` and `intended_status`
+read `stopped`; `vastai logs` on it says only "No such container". That is not a
+slow image pull and no amount of waiting fixes it. `vastai start instance <id>`
+then returns "Required resources are currently unavailable, state change
+queued".
+
+Six machines across three GPU types behaved this way in one sitting, on-demand
+and interruptible alike, while `vastai search offers` still advertised them. The
+account reads `billing_creditonly: 1` with `balance: 0` and credit intact, which
+is the likeliest cause: promotional credit without a verified payment method is
+restricted on much of the fleet. Before blaming hosts, check that field. Nothing
+is charged for an instance that never starts, but destroy them anyway.
+
+A 2xRTX 3090 at ~\$0.31/hr is a sixth the price of 4090s for the same 24 GB
+class, and the lean profile needs about 1.5 GPU-equivalents, so it is worth
+searching on `gpu_ram>=23` rather than a model name.
 
 ### Re-lock after changing pixi.toml
 `pixi.lock` cannot be cross-resolved on ARM macOS. Rent an x86 box, then
