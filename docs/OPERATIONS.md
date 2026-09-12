@@ -143,11 +143,13 @@ then returns "Required resources are currently unavailable, state change
 queued".
 
 Six machines across three GPU types behaved this way in one sitting, on-demand
-and interruptible alike, while `vastai search offers` still advertised them. The
-account reads `billing_creditonly: 1` with `balance: 0` and credit intact, which
-is the likeliest cause: promotional credit without a verified payment method is
-restricted on much of the fleet. Before blaming hosts, check that field. Nothing
-is charged for an instance that never starts, but destroy them anyway.
+and interruptible alike, while `vastai search offers` still advertised them --
+and then an A100 offer started on the first check, minutes later. So the cause is
+stale listings for machines already taken, not the account: `billing_creditonly:
+1` with `balance: 0` looked like a smoking gun and was not. The remedy is to try
+the next offer quickly rather than to diagnose, which is what a create-and-check
+loop over the offer list does. Nothing is charged for an instance that never
+starts, but destroy them anyway.
 
 A 2xRTX 3090 at ~\$0.31/hr is a sixth the price of 4090s for the same 24 GB
 class, and the lean profile needs about 1.5 GPU-equivalents, so it is worth
