@@ -56,6 +56,24 @@ def neuron_rows(
     ]
 
 
+def normalise_target(value: Any) -> str:
+    """One target as a scalar string, however the config spells it.
+
+    ``config.nanobody_target`` is a LIST even when it holds a single target, so
+    ``str()`` on it yields ``"['P20809']"`` -- which then fails an equality check
+    against the live config's ``'P20809'`` and leaves the producer retrying
+    forever on a string mismatch. Unwrap here so no caller has to remember.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError("nanobody_target is empty")
+        value = value[0]
+    text = str(value).strip()
+    if not text:
+        raise ValueError("nanobody_target is blank")
+    return text
+
+
 def build_payload(
     *,
     netuid: int,
@@ -78,7 +96,7 @@ def build_payload(
         "block": int(block),
         "epoch_length": int(epoch_length),
         "epoch": int(block) // int(epoch_length),
-        "nanobody_target": str(nanobody_target),
+        "nanobody_target": normalise_target(nanobody_target),
         "miner_uid": int(miner_uid),
         "neurons": rows,
         "updated_at_unix": float(now),

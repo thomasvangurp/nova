@@ -156,3 +156,32 @@ def test_miner_still_calls_the_exporter():
     assert "from nanobody_opt import chain_state" in source
     assert source.count("_publish_chain_state(state, current_block)") >= 2
     assert "await metagraph.sync()" in source
+
+
+def test_a_list_target_is_unwrapped_to_a_scalar():
+    """config.nanobody_target is a list even for one target.
+
+    str() on it yields "['P20809']", which fails an equality check against the
+    live config's 'P20809' and leaves the producer retry-looping on a string
+    mismatch rather than doing any work. Observed in production.
+    """
+    assert chain_state.normalise_target(["P20809"]) == "P20809"
+    assert chain_state.normalise_target(("P20809", "other")) == "P20809"
+    assert chain_state.normalise_target("P20809") == "P20809"
+    assert chain_state.normalise_target(" P20809 ") == "P20809"
+
+
+def test_an_empty_or_blank_target_is_rejected_not_stringified():
+    for bad in ([], (), "", "   "):
+        with pytest.raises(ValueError):
+            chain_state.normalise_target(bad)
+
+
+def test_the_payload_never_carries_a_bracketed_target():
+    payload = chain_state.build_payload(
+        netuid=68, block=9054662, epoch_length=361,
+        nanobody_target=["P20809"], miner_uid=40,
+        neurons=[{"uid": 0, "hotkey": "hk", "coldkey": "ck"}], now=1.0,
+    )
+    assert payload["nanobody_target"] == "P20809"
+    assert "[" not in payload["nanobody_target"]
