@@ -246,6 +246,7 @@
     # it buys at the top of the decay curve, so "starts itself again" is a
     # correctness property here, not tidiness.
     - name: Create the credential and decision-log directories (Linux)
+      become: true
       when: ansible_system == 'Linux'
       ansible.builtin.file:
         path: "{{ item }}"
@@ -259,6 +260,7 @@
     # start, fail to decrypt, and Restart=always would retry forever while the
     # journal filled with the same line. Better to say so here.
     - name: Require the encrypted coldkey credential to exist (Linux)
+      become: true
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.stat:
         path: "{{ slot_manager_credential_path }}"
@@ -278,6 +280,7 @@
         success_msg: "Encrypted coldkey credential present; its value was not read."
 
     - name: Install the slot purchase unit (Linux)
+      become: true
       when: ansible_system == 'Linux'
       ansible.builtin.template:
         src: templates/nova-slot-manager.service.j2
@@ -291,6 +294,7 @@
       register: slot_manager_unit
 
     - name: Install the slot purchase timer (Linux)
+      become: true
       when: ansible_system == 'Linux'
       ansible.builtin.template:
         src: templates/nova-slot-manager.timer.j2
@@ -301,6 +305,7 @@
     # The TIMER is enabled, never the service: enabling a oneshot service would
     # run one check at boot and then nothing.
     - name: Schedule the slot purchase checks (Linux)
+      become: true
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.systemd_service:
         name: "{{ slot_manager_service }}.timer"
@@ -309,6 +314,7 @@
         daemon_reload: true
 
     - name: Confirm the schedule is armed and has a next run (Linux)
+      become: true
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.command:
         argv:
@@ -326,6 +332,7 @@
     # Prove the check itself runs to completion under the unit, rather than
     # trusting that a timer which is armed will fire something that works.
     - name: Run one scheduled check now (Linux)
+      become: true
       when: slot_manager_activate | bool and ansible_system == 'Linux'
       ansible.builtin.command:
         argv: [systemctl, start, "--wait", "{{ slot_manager_service }}.service"]
