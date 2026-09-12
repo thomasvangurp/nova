@@ -15,27 +15,45 @@ import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nanobody_opt import diversity, gates
+from nanobody_opt import diversity, gates, publication_gates
 from nanobody_opt.simulate_round import METRICS
 
 SCHEMA_VERSION = 3
 EXACT_SCORER = "nova-boltzgen-validator-wrapper"
-MINIMUM_EXACT_OBSERVATIONS = 8
-MINIMUM_COMPETITIVE_RATE = 0.75
-MINIMUM_OBSERVATION_COMPETITIVE_RATE = 0.75
-MAXIMUM_P90_RANK_SUM = 90.0
+
+# Every threshold below is READ from publication_gates, never restated here.
+# Ranking already qualifies candidates against those gates; a second, stricter
+# copy in the program that writes the checkpoint does not add safety, it makes
+# publication impossible for exactly the candidates ranking just approved -- and
+# a hardcoded ceiling of 90 on a drifting rank-sum scale is how re-scoring the
+# sequence the validator paid 79 for came back at median 180 and blocked itself.
+_PUBLICATION_GATES = publication_gates.gate_defaults()
+MINIMUM_EXACT_OBSERVATIONS = int(_PUBLICATION_GATES["--minimum-observations"])
+MINIMUM_COMPETITIVE_RATE = float(_PUBLICATION_GATES["--minimum-competitive-rate"])
+MINIMUM_OBSERVATION_COMPETITIVE_RATE = float(
+    _PUBLICATION_GATES["--minimum-observation-competitive-rate"]
+)
+MAXIMUM_P90_RANK_SUM = float(_PUBLICATION_GATES["--maximum-p90-rank-sum"])
 MAXIMUM_P90_CATEGORY_RANK_SUMS = {
-    "confidence": 70.0,
-    "physical_interaction": 40.0,
-    "developability": 15.0,
+    "confidence": float(_PUBLICATION_GATES["--maximum-p90-confidence-rank-sum"]),
+    "physical_interaction": float(
+        _PUBLICATION_GATES["--maximum-p90-physical-interaction-rank-sum"]
+    ),
+    "developability": float(
+        _PUBLICATION_GATES["--maximum-p90-developability-rank-sum"]
+    ),
 }
-MINIMUM_STRUCTURE_OBSERVATIONS = 8
-MINIMUM_MEDIAN_CONTACT_JACCARD = 0.35
-MAXIMUM_CDR3_RMSD_ANGSTROM = 5.0
+MINIMUM_STRUCTURE_OBSERVATIONS = int(
+    _PUBLICATION_GATES["--minimum-structure-observations"]
+)
+MINIMUM_MEDIAN_CONTACT_JACCARD = float(
+    _PUBLICATION_GATES["--minimum-median-contact-jaccard"]
+)
+MAXIMUM_CDR3_RMSD_ANGSTROM = float(_PUBLICATION_GATES["--maximum-cdr3-rmsd"])
 # The validator-configured generation hotspot is not the contact patch used by
 # the strongest public P20809 poses. Retain occupancy as a diagnostic, but do
 # not gate publication on that mismatched site.
-MINIMUM_EPITOPE_OCCUPANCY = 0.0
+MINIMUM_EPITOPE_OCCUPANCY = float(_PUBLICATION_GATES["--minimum-epitope-occupancy"])
 
 
 def _sha256(path: Path) -> str:
@@ -166,12 +184,28 @@ def validate_provisional_exact_evidence(winner: dict) -> tuple[int, float, float
     return observation_count, competitive_rate, observation_rate
 
 
-def checkpoint_is_better(previous: object, candidate: dict) -> bool:
-    """Only replace a same-epoch checkpoint with better exact evidence."""
+def checkpoint_is_better(
+    previous: object, candidate: dict, assigned_sequence: str | None = None
+) -> bool:
+    """Only replace a same-epoch checkpoint with better exact evidence.
+
+    When a sequence is assigned -- one uid of the fleet carries exactly this
+    molecule -- the assignment wins over the score comparison: a file left behind
+    by a different sequence is stale for this uid, not better than it.
+    """
     if not isinstance(previous, dict):
         return True
     if previous.get("epoch") != candidate.get("epoch"):
         return True
+    if assigned_sequence:
+        previous_sequences = previous.get("sequences")
+        held = (
+            str(previous_sequences[0]).strip().upper()
+            if isinstance(previous_sequences, list) and previous_sequences
+            else ""
+        )
+        if held != assigned_sequence.strip().upper():
+            return True
     try:
         previous_score = float(previous["selection"]["score"])
         candidate_score = float(candidate["selection"]["score"])
@@ -216,6 +250,13 @@ def main() -> None:
         action="store_true",
         help="publish after one complete exact observation while repeats continue",
     )
+    parser.add_argument(
+        "--sequence",
+        help=(
+            "publish this ranked sequence instead of rank one; the fleet "
+            "publisher binds one distinct sequence to each uid it holds"
+        ),
+    )
     args = parser.parse_args()
 
     config = yaml.safe_load(args.config.read_text())
@@ -236,6 +277,18 @@ def main() -> None:
     if not candidates:
         raise SystemExit("ranking contains no candidate")
     winner = candidates[0]
+    if args.sequence:
+        requested = args.sequence.strip().upper()
+        matches = [
+            item for item in candidates
+            if str(item.get("sequence", "")).strip().upper() == requested
+        ]
+        if not matches:
+            raise SystemExit(
+                f"requested sequence is not in {args.rankings}; a uid may only "
+                "publish a candidate that passed this epoch's qualification"
+            )
+        winner = matches[0]
     sequence = str(winner["sequence"]).strip().upper()
     try:
         validator = (
@@ -328,6 +381,10 @@ def main() -> None:
             "score_p90": float(winner["score_p90"]),
             "score_worst": float(winner["score_worst"]),
             "p90_category_rank_sums": winner.get("p90_category_rank_sums", {}),
+            # Carried through for the fleet artifact: the reason this sequence was
+            # chosen for a uid is its chance of a winning draw, not its average.
+            "win_probability": winner.get("win_probability"),
+            "selection_order": ranking.get("selection_order"),
             "score_semantics": (
                 "published raw metrics are the arithmetic mean of independent "
                 "local observations, matching validator score sharing; the current "
@@ -360,7 +417,7 @@ def main() -> None:
         previous = json.loads(args.output.read_text())
     except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
         previous = None
-    if not checkpoint_is_better(previous, payload):
+    if not checkpoint_is_better(previous, payload, args.sequence):
         print(
             f"retained better epoch {args.epoch} checkpoint at {args.output}; "
             f"candidate_score={selection_score:.1f} sequence={sequence}"

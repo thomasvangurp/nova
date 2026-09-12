@@ -1,5 +1,6 @@
 import pytest
 
+from nanobody_opt import publication_gates
 from nanobody_opt.publish_checkpoint import (
     checkpoint_is_better,
     validate_exact_robustness,
@@ -7,74 +8,94 @@ from nanobody_opt.publish_checkpoint import (
 )
 
 
-def test_robustness_gate_requires_eight_independent_observations():
-    with pytest.raises(ValueError, match="fewer than 8"):
-        validate_exact_robustness({"observation_count": 7, "competitive_rate": 1})
+GATES = publication_gates.gate_defaults()
+MINIMUM_OBSERVATIONS = int(GATES["--minimum-observations"])
+MINIMUM_STRUCTURES = int(GATES["--minimum-structure-observations"])
+MINIMUM_COMPETITIVE_RATE = float(GATES["--minimum-competitive-rate"])
+MAXIMUM_P90 = float(GATES["--maximum-p90-rank-sum"])
+MAXIMUM_CONFIDENCE_P90 = float(GATES["--maximum-p90-confidence-rank-sum"])
+MINIMUM_JACCARD = float(GATES["--minimum-median-contact-jaccard"])
 
 
 def _robust_candidate(**overrides):
+    """A candidate that sits exactly on every gate, whatever the gates now are."""
     candidate = {
-        "observation_count": 8,
-        "competitive_rate": 0.75,
-        "observation_competitive_rate": 0.75,
-        "score_p90": 90,
+        "observation_count": MINIMUM_OBSERVATIONS,
+        "competitive_rate": MINIMUM_COMPETITIVE_RATE,
+        "observation_competitive_rate": MINIMUM_COMPETITIVE_RATE,
+        "score_p90": MAXIMUM_P90,
         "p90_category_rank_sums": {
-            "confidence": 60,
-            "physical_interaction": 40,
-            "developability": 15,
+            "confidence": MAXIMUM_CONFIDENCE_P90,
+            "physical_interaction": float(
+                GATES["--maximum-p90-physical-interaction-rank-sum"]
+            ),
+            "developability": float(GATES["--maximum-p90-developability-rank-sum"]),
         },
         "pose_stability": {
-            "structure_observation_count": 8,
-            "contact_jaccard_median": 0.35,
-            "cdr3_rmsd_max_angstrom": 5.0,
-            "epitope_occupancy_min": 0.20,
+            "structure_observation_count": MINIMUM_STRUCTURES,
+            "contact_jaccard_median": MINIMUM_JACCARD,
+            "cdr3_rmsd_max_angstrom": float(GATES["--maximum-cdr3-rmsd"]),
+            "epitope_occupancy_min": float(GATES["--minimum-epitope-occupancy"]),
         },
     }
     candidate.update(overrides)
     return candidate
 
 
-def test_robustness_gate_requires_three_quarters_of_replays_to_be_competitive():
-    with pytest.raises(ValueError, match="below 75%"):
-        validate_exact_robustness(_robust_candidate(competitive_rate=0.74))
+def test_every_threshold_comes_from_publication_gates():
+    # These numbers lived here as literals until the day the gates were relaxed
+    # elsewhere: ranking then qualified candidates this writer went on refusing,
+    # so the miner held a checkpoint it would not publish. One source of truth.
+    assert validate_exact_robustness(_robust_candidate()) == (
+        MINIMUM_OBSERVATIONS, MINIMUM_COMPETITIVE_RATE, MINIMUM_COMPETITIVE_RATE
+    )
 
-    with pytest.raises(ValueError, match="independent-observation.*below 75%"):
-        validate_exact_robustness(
-            _robust_candidate(observation_competitive_rate=0.74)
-        )
 
-    assert validate_exact_robustness(
-        _robust_candidate()
-    ) == (8, 0.75, 0.75)
+def test_robustness_gate_requires_the_configured_observation_floor():
+    with pytest.raises(ValueError, match=f"fewer than {MINIMUM_OBSERVATIONS}"):
+        validate_exact_robustness(_robust_candidate(
+            observation_count=MINIMUM_OBSERVATIONS - 1
+        ))
+
+
+def test_robustness_gate_requires_the_configured_competitive_rates():
+    if MINIMUM_COMPETITIVE_RATE > 0:
+        with pytest.raises(ValueError, match="competitive rate"):
+            validate_exact_robustness(_robust_candidate(
+                competitive_rate=MINIMUM_COMPETITIVE_RATE - 0.01
+            ))
+    with pytest.raises(ValueError, match="competitive rate"):
+        validate_exact_robustness(_robust_candidate(competitive_rate=float("nan")))
+    with pytest.raises(ValueError, match="independent-observation"):
+        validate_exact_robustness(_robust_candidate(
+            observation_competitive_rate=float("nan")
+        ))
 
 
 def test_robustness_gate_enforces_total_and_category_tails():
-    with pytest.raises(ValueError, match="p90 rank sum 91.*exceeds 90"):
-        validate_exact_robustness(_robust_candidate(score_p90=91))
-    with pytest.raises(ValueError, match="p90 confidence.*exceeds 70"):
+    with pytest.raises(ValueError, match="p90 rank sum"):
+        validate_exact_robustness(_robust_candidate(score_p90=MAXIMUM_P90 + 1))
+    with pytest.raises(ValueError, match="p90 confidence"):
         validate_exact_robustness(_robust_candidate(
             p90_category_rank_sums={
-                "confidence": 71,
-                "physical_interaction": 30,
-                "developability": 10,
+                "confidence": MAXIMUM_CONFIDENCE_P90 + 1,
+                "physical_interaction": 1,
+                "developability": 1,
             }
         ))
 
 
 def test_robustness_gate_requires_repeat_stable_complexes():
-    with pytest.raises(ValueError, match="fewer than 8 retained"):
-        validate_exact_robustness(_robust_candidate(
-            pose_stability={"structure_observation_count": 7}
-        ))
+    with pytest.raises(ValueError, match=f"fewer than {MINIMUM_STRUCTURES} retained"):
+        candidate = _robust_candidate()
+        candidate["pose_stability"]["structure_observation_count"] = (
+            MINIMUM_STRUCTURES - 1
+        )
+        validate_exact_robustness(candidate)
     with pytest.raises(ValueError, match="contact Jaccard.*below"):
-        validate_exact_robustness(_robust_candidate(
-            pose_stability={
-                "structure_observation_count": 8,
-                "contact_jaccard_median": 0.34,
-                "cdr3_rmsd_max_angstrom": 4,
-                "epitope_occupancy_min": 0.5,
-            }
-        ))
+        candidate = _robust_candidate()
+        candidate["pose_stability"]["contact_jaccard_median"] = MINIMUM_JACCARD - 0.01
+        validate_exact_robustness(candidate)
 
 
 def test_provisional_gate_accepts_first_complete_exact_observation():
