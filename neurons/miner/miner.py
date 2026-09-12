@@ -10,6 +10,7 @@ import traceback
 import base64
 import hashlib
 import subprocess
+import time
 from pathlib import Path
 
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -34,11 +35,46 @@ BTWallet = getattr(bt, "Wallet", getattr(bt, "wallet", None))
 BTConfig = getattr(bt, "Config", getattr(bt, "config", None))
 
 from config.config_loader import load_config
+from nanobody_opt import chain_state
 from constants import ALLOWED_AAS
 from files import upload_file_to_github
 from btdr import QuicknetBittensorDrandTimelock
 from combinatorial_db.reactions import get_random_reaction_product
 from compound_miner.provider import from_challenge
+
+
+def _publish_chain_state(state: Dict[str, Any], block: int) -> None:
+    """Expose the miner's existing chain view without another WebSocket client.
+
+    The payload shape and the atomic write live in ``nanobody_opt.chain_state``,
+    which imports with only the standard library -- the publisher runs in a
+    different Pixi environment and the tests in a third, and a contract only one
+    of them can import is not a contract.
+    """
+    path_value = os.environ.get("NOVA_CHAIN_STATE")
+    if not path_value or state.get("last_chain_state_block") == int(block):
+        return
+    metagraph = state.get("metagraph")
+    try:
+        payload = chain_state.build_payload(
+            netuid=int(state["config"].netuid),
+            block=int(block),
+            epoch_length=int(state["epoch_length"]),
+            nanobody_target=str(state["config"].nanobody_target),
+            miner_uid=int(state["miner_uid"]),
+            neurons=chain_state.neuron_rows(
+                getattr(metagraph, "hotkeys", None),
+                getattr(metagraph, "coldkeys", None),
+            ),
+            now=time.time(),
+        )
+    except chain_state.EmptyRosterError as error:
+        # Leave the last good file in place: an empty roster is indistinguishable
+        # from a real deregistration once the publisher reads it.
+        bt.logging.warning(f"Chain state not published: {error}")
+        return
+    chain_state.write_atomic(Path(path_value), payload)
+    state["last_chain_state_block"] = int(block)
 
 
 def get_challenge_params_from_blockhash(
@@ -567,6 +603,7 @@ async def run_miner(config: argparse.Namespace) -> None:
     )
     challenge_params["epoch"] = block_to_check // epoch_length
     bt.logging.info(f"Challenge params: {challenge_params}")
+    _publish_chain_state(state, current_block)
     # A hot code reload may leave the already-running epoch search in its own
     # process group.  Skip only this initial launch so the replacement miner
     # can adopt that search without starting a duplicate; boundary launches
@@ -590,10 +627,24 @@ async def run_miner(config: argparse.Namespace) -> None:
     while True:
         try:
             current_block = await subtensor.get_current_block()
+            _publish_chain_state(state, current_block)
 
             # If we are at an epoch boundary, fetch new proteins
             if current_block % epoch_length == 0:
                 bt.logging.info(f"Found epoch boundary at block {current_block}.")
+
+                # Re-sync before the boundary's chain-state export.  Without
+                # this the exported neuron rows stay frozen at process start, so
+                # the publisher would keep resolving our fleet from a roster
+                # that predates any (de)registration -- the same staleness the
+                # export exists to eliminate.
+                try:
+                    await metagraph.sync()
+                except Exception as error:  # a failed sync must not end the epoch
+                    bt.logging.warning(f"Metagraph sync failed at boundary: {error}")
+                else:
+                    state["last_chain_state_block"] = None
+                    _publish_chain_state(state, current_block)
                 
                 block_hash = await subtensor.determine_block_hash(current_block)
                 
