@@ -49,13 +49,13 @@ nanobody_candidate_limit: 2800
 nanobody_screen_tranche_size: 700
 nanobody_weak_initial_fallback_after: 1400
 nanobody_finalists: 300
-nanobody_qualification_observations: 9
+nanobody_qualification_observations: 13
 
 # Replication is spent once per epoch, in the generation that opens inside the
 # closing window, over the pooled best of every generation.  The generator does
 # not re-propose what it has already screened, so without pooling a strong hit
 # from generation one could never be confirmed later.
-nanobody_replication_rounds: 24
+nanobody_replication_rounds: 12
 
 # Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54
 # seconds of folding plus one model load each), so screening must stop roughly
@@ -69,9 +69,20 @@ nanobody_replication_rounds: 24
 # nothing at all, which is how epochs 25056-25058 went unscored.
 nanobody_replication_reserve_blocks: 152
 
-# Successive elimination.  The screen is stage zero -- 2,800 candidates with one
-# observation each -- and the tournament then starts from the best 300 rather
-# than 60, pruning to 60% after every four rounds.  Simulated against the same
+# Successive elimination, with depth cut because the returns are concentrated in
+# the first few observations.  Measured on 46 real field molecules with three
+# independent observations each: predicting a held-out observation of the
+# validator's own selection objective (0.8*design_to_target_iptm + 0.2*design_ptm)
+# improves r 0.164 -> 0.298 from ONE extra observation.  Past a handful the curve
+# flattens, so 24 rounds was well past diminishing returns.
+#
+# The freed budget widens the tournament instead, which is what matters: the
+# epoch-25062 winner drew 85 rank points better than its own average and sits
+# 13th of 46 on true quality, so winning is decided by the largest upward
+# fluctuation, and a wider field of contenders holds more tickets.
+#
+# The screen is stage zero -- 2,800 candidates with one observation each -- and
+# the tournament starts from the best 300, pruning to 60% every four rounds.  Simulated against the same
 # time budget, a flat 60-candidate allocation wins 29% of the time and this wins
 # 46%: pruning is cheap, so the budget buys a far wider tournament, and a wider
 # tournament is much more likely to contain a candidate that can actually win.

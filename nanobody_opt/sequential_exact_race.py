@@ -26,6 +26,7 @@ from nanobody_opt.mutation_network import (
     ranking_observations,
     update_observation_store,
 )
+from nanobody_opt import publication_gates
 from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL
 from nanobody_opt.metric_outliers import (
     field_distribution,
@@ -33,60 +34,23 @@ from nanobody_opt.metric_outliers import (
 )
 
 
-# Absolute qualification gates, calibrated against observations from the
-# production scorer.  They are thresholds on field-relative rank sums, so a
-# replacement scorer with even a small systematic offset moves how often they
-# fire.  Keep them overridable rather than compiled in: switching scorers means
-# re-deriving these from that scorer's own observations, not inheriting them.
-STRICT_RANK_GATES: dict[str, str] = {
-    "--minimum-observations": "8",
-    # Only rank one pays, so an unpublished epoch and a mediocre published one
-    # both earn nothing -- but the published one still holds a lottery ticket on
-    # the validator's own draw, and costs nothing.  The quality bar is therefore
-    # a sanity floor, not a selection criterion; selection happens in ranking.
-    # Integrity requirements below (observations, structures, pose, novelty) are
-    # deliberately unchanged.
-    # Only rank one pays, so the objective is P(this candidate's single
-    # validator draw beats the field), not its average.  "competitive" is
-    # therefore defined at a WINNING score -- recent winners score 50-77 -- and
-    # --selection-order competitive-rate then ranks by exactly that probability.
-    # A candidate with a worse median but a fatter left tail is the better
-    # lottery ticket: our best current candidate has median 162 and a best draw
-    # of 46.
-    "--competitive-score-threshold": "60",
-    "--minimum-competitive-rate": "0.0",
-    "--minimum-observation-competitive-rate": "0.0",
-    "--maximum-p90-rank-sum": "400",
-    "--maximum-p90-confidence-rank-sum": "300",
-    "--maximum-p90-physical-interaction-rank-sum": "100",
-    "--maximum-p90-developability-rank-sum": "30",
-    "--minimum-structure-observations": "8",
-    "--minimum-median-contact-jaccard": "0.35",
-    "--maximum-cdr3-rmsd": "5",
-    "--minimum-epitope-occupancy": "0",
-}
+# The gates live in nanobody_opt.publication_gates, which the live publisher
+# imports as well.  Two hardcoded copies in two repositories is what let a
+# relaxation be deployed here while the program that actually publishes kept
+# refusing, so this module keeps no copy of its own.
+STRICT_RANK_GATES = publication_gates.gate_defaults()
 
 
 def strict_rank_arguments(overrides: dict[str, Any] | None = None) -> list[str]:
-    """Flatten the strict gates, applying calibrated overrides by flag name."""
-    gates = dict(STRICT_RANK_GATES)
-    for flag, value in (overrides or {}).items():
-        name = flag if flag.startswith("--") else f"--{flag.replace('_', '-')}"
-        if name not in gates:
-            raise ValueError(f"unknown strict rank gate: {flag}")
-        gates[name] = str(value)
-    return [item for flag, value in gates.items() for item in (flag, value)]
+    """Flatten the publication gates, applying calibrated overrides by name."""
+    return publication_gates.gate_arguments(overrides)
 
 
 def load_strict_gate_overrides(path: Path | None) -> dict[str, Any]:
     """Read re-derived gate thresholds, refusing anything but a flat object."""
-    if path is None:
-        return {}
-    payload = json.loads(path.read_text())
-    gates = payload.get("gates", payload) if isinstance(payload, dict) else None
-    if not isinstance(gates, dict):
-        raise ValueError(f"strict gate overrides must be an object: {path}")
-    return gates
+    return publication_gates.load_overrides(path)
+
+
 DEFAULT_SCORER = Path("/root/nanobody_opt/score_boltzgen_batch.py")
 
 

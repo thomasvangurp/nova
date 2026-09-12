@@ -465,7 +465,7 @@ def test_strict_gates_are_overridable_per_scorer(tmp_path):
 def test_unknown_strict_gate_is_refused():
     import pytest
 
-    with pytest.raises(ValueError, match="unknown strict rank gate"):
+    with pytest.raises(ValueError, match="unknown publication gate"):
         race.strict_rank_arguments({"maximum_p90_invented_gate": 1})
 
 
