@@ -1,0 +1,35 @@
+# The purchase host's environment: an arm64 Raspberry Pi, not the GPU rental.
+#
+# This is a SEPARATE manifest from the workspace root on purpose. The root
+# declares linux-64 only, and adding linux-aarch64 there would force every
+# environment to re-solve for it -- including metanano, whose git-backed TNP and
+# ImmuneBuilder builds cannot be cross-resolved at all. Isolating the purchase
+# host keeps the GPU lock untouchable from here.
+#
+# It is also deliberately smaller than the GPU box's chain310. The purchaser
+# reads the chain and submits burned_register; it never commits a weight or a
+# reveal, so it needs no timelock -- which matters, because the timelock wheels
+# are cp310-only and there is no reason to hunt for an arm64 build of something
+# unused.
+#
+# Lock it ON the Pi (`pixi install` there), never from the macOS controller:
+# arm64 Linux is the target platform, so resolving natively sidesteps
+# cross-resolution entirely.
+[workspace]
+name = "nova-slot-host"
+channels = ["conda-forge"]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+python = "3.11.*"
+pip = "*"
+
+[pypi-dependencies]
+bittensor = "==10.4.1"
+async-substrate-interface = "==2.0.4"
+
+[tasks]
+# The deploy gate runs this: it proves the chain stack imports before the timer
+# is armed, so a broken environment fails here rather than every five minutes
+# in the journal.
+check = "python -c \"import bittensor; from async_substrate_interface.sync_substrate import SubstrateInterface; print('SLOT_HOST_OK', bittensor.__version__)\""
