@@ -39,7 +39,12 @@
     # Interpreter with bittensor available. This workspace's Pixi manifest is
     # linux-64 only, so the GPU box's locked environment is not an option here;
     # name whatever interpreter the operator keeps bittensor in.
-    slot_manager_python: python3
+    # On a remote purchase host the interpreter is the one built from this
+    # repository's own committed arm64 lock, inside the synced tree. It survives
+    # redeploys because .pixi is excluded from the sync; putting it at the tree
+    # ROOT does not survive, because the sync overwrites the manifest there with
+    # the workspace root's, whose pinned pixi version the Pi does not have.
+    slot_manager_python: "{{ (slot_manager_remote_repo ~ '/deploy/slot_host/.pixi/envs/default/bin/python') if ansible_system == 'Linux' else 'python3' }}"
     slot_manager_minimum_hotkeys: 9
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
