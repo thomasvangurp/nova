@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from dotenv import load_dotenv
 import bittensor as bt
 from bittensor.core.errors import MetadataError
-from substrateinterface import SubstrateInterface
+from async_substrate_interface.sync_substrate import SubstrateInterface
 import pandas as pd
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -198,6 +198,20 @@ def setup_logging(config: argparse.Namespace) -> None:
 # 3. BITTENSOR & NETWORK SETUP
 # ----------------------------------------------------------------------------
 
+def _resolved_chain_endpoint(config: argparse.Namespace) -> str:
+    """Return the websocket URI behind a Bittensor network alias.
+
+    async-substrate-interface 2.x wants a real URI, while the Bittensor CLI
+    accepts aliases such as ``finney`` and resolves them under
+    ``config.subtensor.chain_endpoint``.  Passing the alias straight through
+    fails only when the first query runs, long after startup looked healthy.
+    """
+    chain_endpoint = config.subtensor.chain_endpoint
+    if not str(chain_endpoint).startswith(("ws://", "wss://")):
+        raise ValueError(f"Invalid resolved chain endpoint: {chain_endpoint!r}")
+    return str(chain_endpoint)
+
+
 async def setup_bittensor_objects(config: argparse.Namespace) -> Tuple[Any, Any, Any, int, int]:
     """
     Initializes wallet, subtensor, and metagraph. Fetches the epoch length
@@ -237,7 +251,7 @@ async def setup_bittensor_objects(config: argparse.Namespace) -> Tuple[Any, Any,
         bt.logging.info(f"Miner UID: {miner_uid}")
 
         # Query epoch length
-        node = SubstrateInterface(url=config.network)
+        node = SubstrateInterface(url=_resolved_chain_endpoint(config))
         # Set epoch_length to tempo + 1
         epoch_length = node.query("SubtensorModule", "Tempo", [config.netuid]).value + 1
         bt.logging.info(f"Epoch length query successful: {epoch_length} blocks")

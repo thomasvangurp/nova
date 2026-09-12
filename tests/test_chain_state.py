@@ -123,3 +123,36 @@ def test_the_publisher_accepts_exactly_what_the_miner_writes(tmp_path, monkeypat
     # ... and the fleet resolved from it holds only our own two uids.
     crew = publisher.fleet_module.discover_fleet(view.neurons, COLDKEY_OURS, netuid=68)
     assert sorted(member.uid for member in crew) == [0, 1]
+
+
+def _miner_tree():
+    """Parse the miner without importing it — bittensor is not installed here."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "neurons" / "miner" / "miner.py")
+    return ast.parse(source.read_text()), source.read_text()
+
+
+def test_miner_uses_the_async_substrate_stack():
+    """substrate-interface and py-scale-codec own the same `scalecodec` namespace
+    as async-substrate-interface, so the chain env cannot hold both. The synchronous
+    package is the one that must not come back."""
+    _, source = _miner_tree()
+    assert "from async_substrate_interface.sync_substrate import SubstrateInterface" in source
+    assert "from substrateinterface import" not in source
+
+
+def test_miner_resolves_the_endpoint_rather_than_passing_an_alias():
+    """async-substrate-interface 2.x needs a real URI; `finney` only fails at the
+    first query, long after startup has reported success."""
+    _, source = _miner_tree()
+    assert "SubstrateInterface(url=_resolved_chain_endpoint(config))" in source
+    assert "SubstrateInterface(url=config.network)" not in source
+
+
+def test_miner_still_calls_the_exporter():
+    """A passing test of chain_state.py cannot prove the miner invokes it."""
+    _, source = _miner_tree()
+    assert "from nanobody_opt import chain_state" in source
+    assert source.count("_publish_chain_state(state, current_block)") >= 2
+    assert "await metagraph.sync()" in source
