@@ -67,6 +67,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import contextlib
+import io
 import subprocess
 import sys
 import time
@@ -673,6 +675,37 @@ def _unlock_coldkey(wallet: Any, service_env: str, source: str = "auto") -> None
         del password
 
 
+def _create_hotkey_quietly(wallet: Any) -> None:
+    """Create a hotkey without its mnemonic reaching stdout.
+
+    bittensor prints the new key's twelve-word mnemonic on creation.  Under a
+    systemd unit stdout is the journal, so the first live registration wrote a
+    private key in clear text to a file that survives reboots and is readable by
+    anyone who can read the journal.  That is a key-material leak, not noise.
+
+    The output is discarded rather than filtered: a filter has to be right about
+    every future version's wording, while a discarded stream cannot leak
+    whatever the next release decides to print.  ``suppress=True`` is passed as
+    well where the installed version understands it, so the mnemonic is not
+    formatted in the first place.
+    """
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            try:
+                wallet.create_new_hotkey(
+                    n_words=12, use_password=False, overwrite=False, suppress=True
+                )
+            except TypeError:
+                # Older signatures have no `suppress`; the redirect still holds.
+                wallet.create_new_hotkey(
+                    n_words=12, use_password=False, overwrite=False
+                )
+    finally:
+        # Drop the captured text unread. Nothing in it is worth a leak.
+        buffer.close()
+
+
 def _register(
     *,
     wallet_name: str,
@@ -696,7 +729,7 @@ def _register(
     wallet_factory = getattr(bittensor, "Wallet", None) or bittensor.wallet
     wallet = wallet_factory(name=wallet_name, hotkey=hotkey_name)
     if hotkey_name not in _hotkey_names(wallet_name):
-        wallet.create_new_hotkey(n_words=12, use_password=False, overwrite=False)
+        _create_hotkey_quietly(wallet)
     _unlock_coldkey(wallet, keychain_service_env, credential_source)
     subtensor_factory = getattr(bittensor, "Subtensor", None) or bittensor.subtensor
     subtensor = subtensor_factory(network=network)

@@ -633,3 +633,43 @@ def test_a_missing_or_empty_credential_is_distinguished(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as empty:
         sm._password_from_systemd_credential("NOVA_TEST_CRED")
     assert "is empty" in str(empty.value)
+
+
+def test_a_new_hotkey_mnemonic_never_reaches_stdout(capsys):
+    """bittensor prints the mnemonic on creation; under systemd that is the journal.
+
+    The first live registration wrote a twelve-word private key in clear text to
+    a file that survives reboots. Discarding the stream is the fix, rather than
+    filtering it, because a filter must be right about every future version's
+    wording.
+    """
+    from nanobody_opt import slot_manager as sm
+
+    class LoudWallet:
+        def create_new_hotkey(self, **kwargs):
+            print("The mnemonic to the new hotkey is: correct horse battery staple")
+            print("also on stderr", file=sys.stderr)
+
+    sm._create_hotkey_quietly(LoudWallet())
+    captured = capsys.readouterr()
+    assert "mnemonic" not in captured.out
+    assert "correct horse" not in captured.out
+    assert "correct horse" not in captured.err
+    assert captured.out == ""
+
+
+def test_hotkey_creation_survives_a_signature_without_suppress():
+    """Older bittensor has no `suppress`; the redirect must still hold."""
+    from nanobody_opt import slot_manager as sm
+
+    seen = {}
+
+    class OldWallet:
+        def create_new_hotkey(self, **kwargs):
+            if "suppress" in kwargs:
+                raise TypeError("unexpected keyword argument 'suppress'")
+            seen.update(kwargs)
+            print("mnemonic: leaked")
+
+    sm._create_hotkey_quietly(OldWallet())
+    assert seen == {"n_words": 12, "use_password": False, "overwrite": False}
