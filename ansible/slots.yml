@@ -62,6 +62,8 @@
     slot_manager_credential_name: nova-coldkey-password
     slot_manager_credential_path: /etc/nova/coldkey-password.cred
     slot_manager_service: nova-slot-manager
+    slot_manager_user: "{{ ansible_user_id }}"
+    slot_manager_home: "{{ ansible_env.HOME }}"
     # How often to LOOK. Buying is rate-limited inside the agent, so a frequent
     # check costs one chain read and buys nothing extra -- but it is what makes a
     # purchase cheap, because the floor test needs several samples inside its
@@ -346,8 +348,8 @@
     - name: Report the slot agent
       ansible.builtin.debug:
         msg: >-
-          {{ slot_manager_session }} holding >=
-          {{ slot_manager_minimum_hotkeys }} registrations, polling every
-          {{ slot_manager_interval }}s, DRY RUN
-          (pass --execute-registrations by hand to spend);
+          {{ slot_manager_service if ansible_system == 'Linux' else slot_manager_session }}
+          holding >= {{ slot_manager_minimum_hotkeys }} registrations, checking every
+          {{ slot_manager_check_seconds if ansible_system == 'Linux' else slot_manager_interval }}s, {{ 'LIVE' if slot_manager_execute | bool else 'DRY RUN' }}
+          (-e slot_manager_execute=true to spend);
           decisions appended to {{ slot_manager_decision_log }}

@@ -23,6 +23,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Runs as the wallet's owner, not root. The coldkey and the decision log belong
+# to this user, and a process that signs chain writes has no reason to be root.
+User={{ slot_manager_user }}
+Group={{ slot_manager_user }}
+Environment=HOME={{ slot_manager_home }}
 # oneshot driven by nova-slot-manager.timer, not a resident loop. The agent
 # keeps its price history in the decision log precisely so single-shot runs
 # accumulate state, and a process that exits between checks is one that cannot
@@ -44,8 +49,11 @@ StandardError=journal
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths={{ slot_manager_decision_log | dirname }}
+# ProtectHome is off because the wallet and the decision log both live in this
+# user's home; ProtectSystem=strict still makes everything else read-only, and
+# only the two paths below are writable.
+ProtectHome=false
+ReadWritePaths={{ slot_manager_decision_log | dirname }} {{ slot_manager_home }}/.bittensor
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
