@@ -129,13 +129,29 @@
     # agent is testable without an account: everything above its argparse call
     # is standard library, so --help runs with bittensor absent, no wallet
     # loaded, no Keychain read and no chain connection.
+    - name: Sync the committed source to the purchase host (Linux)
+      when: ansible_system == 'Linux'
+      ansible.posix.synchronize:
+        src: "{{ repo }}/"
+        dest: "{{ slot_manager_remote_repo }}/"
+        delete: true
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+          - "--exclude=.pixi"
+          - "--exclude=snapshots"
+          - "--exclude=external_tools"
+
     - name: Verify the agent accepts every argument it is deployed with
       ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
       vars:
         entrypoint_name: slot_manager
         entrypoint_argv: "{{ slot_manager_launcher }}"
         entrypoint_flags: "{{ slot_manager_arguments | select('match', '^--') | list }}"
-        entrypoint_chdir: "{{ repo }}"
+        # The probe runs ON the target, so it must chdir to the repository as it
+        # exists there -- the controller's path does not exist on a remote
+        # purchase host, and pointing at it fails before the check can run.
+        entrypoint_chdir: "{{ slot_manager_remote_repo if ansible_system == 'Linux' else repo }}"
 
     # The base argument list must never contain the spending flag. Enabling live
     # purchase adds it separately and visibly, so a reader can always tell which
@@ -215,7 +231,7 @@
              + slot_manager_launcher + slot_manager_arguments
              + slot_manager_spend_arguments }}
       args:
-        chdir: "{{ repo }}"
+        chdir: "{{ repo }}"   # macOS runs from the controller's own checkout
       changed_when: true
       when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
@@ -229,19 +245,6 @@
     # one. The purchaser has to be awake for the quiet registration intervals or
     # it buys at the top of the decay curve, so "starts itself again" is a
     # correctness property here, not tidiness.
-    - name: Sync the committed source to the purchase host (Linux)
-      when: ansible_system == 'Linux'
-      ansible.posix.synchronize:
-        src: "{{ repo }}/"
-        dest: "{{ slot_manager_remote_repo }}/"
-        delete: true
-        rsync_opts:
-          - "--exclude=.git"
-          - "--exclude=__pycache__"
-          - "--exclude=.pixi"
-          - "--exclude=snapshots"
-          - "--exclude=external_tools"
-
     - name: Create the credential and decision-log directories (Linux)
       when: ansible_system == 'Linux'
       ansible.builtin.file:
