@@ -661,7 +661,9 @@ def _rank_command(
             "--minimum-api-fields", "3",
         ])
         command.extend(strict_rank_arguments(strict_gate_overrides))
-        command.extend(["--selection-order", "competitive-rate"])
+        # Strict qualification decides what actually gets published, so it is the
+        # one ordering that must target a winning draw rather than a good average.
+        command.extend(["--selection-order", "win-probability"])
     else:
         command.extend(["--selection-order", "p90"])
     return command

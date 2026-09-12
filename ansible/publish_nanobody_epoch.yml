@@ -162,7 +162,7 @@
           --exclude-file {{ published_ledger | quote }}
           --minimum-observations 8
           --competitive-score-threshold 60
-          --selection-order competitive-rate
+          --selection-order win-probability
           --minimum-competitive-rate 0.0
           --minimum-observation-competitive-rate 0.0
           --maximum-p90-rank-sum 400
