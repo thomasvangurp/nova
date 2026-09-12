@@ -1,8 +1,8 @@
 # Chain identity and credential LOCATORS for the nanobody deployment.
 #
 # Nothing in this file is a secret and nothing in it resolves one. The coldkey
-# ss58 is a public address. The two key paths are paths on the controller: Ansible
-# reads those files itself, the copy tasks that use them are no_log, and no key
+# ss58 is a public address. The credential entries are PATHS on the controller:
+# Ansible reads those files itself, the tasks that use them are no_log, and no key
 # material passes through a command line, a variable or task output.
 #
 # The coldkey itself is never deployed. Registrations are bought from the
@@ -32,9 +32,14 @@ nanobody_hotkey_sources: []
 nanobody_wallet_name: mining_ops
 nanobody_wallet_path: /root/.bittensor/wallets
 
-# Controller-side path to the repository-scoped submission deploy key. Scoped to
-# one repository, not an account-wide token.
-nanobody_deploy_key_source: ""
+# Controller-side path to a file containing ONLY the GitHub token the submission
+# upload authenticates with. Ansible reads the file itself, the task that writes
+# it is no_log, and the value reaches no command line or output.
+#
+# A token rather than an SSH deploy key because utils/files.py -- the uploader
+# the deployed miner actually calls -- PUTs to api.github.com/.../contents with a
+# bearer GITHUB_TOKEN. Scope it to the submission repository alone.
+nanobody_github_token_file: ""
 
 # The hotkey name the chain writer process signs with. Not the fleet.
 nanobody_chain_writer_hotkey: ""

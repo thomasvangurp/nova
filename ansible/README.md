@@ -120,6 +120,30 @@ flags, 42 producer flags, 20 publisher flags, 10 slot-agent flags.
 A consequence worth knowing: because each gate is `--help`-based, every entry
 point must be `--help`-able with no chain connection, no wallet and no Keychain.
 
+Three gates are not `--help`-shaped, and each exists because a specific thing
+crossed programs and could only fail at runtime:
+
+- **the chain-state seam.** The publisher reads block, epoch and the neuron rows
+  it discovers the fleet from out of `chain_state.json`, which only the connected
+  miner writes, and it has no fallback to a remembered uid. So
+  `tests/test_chain_state.py` and `tests/test_publish_current_nanobody.py` run on
+  the box against the deployed tree, and a source check confirms the deployed
+  miner still *calls* `nanobody_opt.chain_state` — which a passing test of that
+  module cannot prove.
+- **the miner's imports.** `py_compile` proves the miner parses, not that the
+  chain environment can satisfy its imports, so the deployed miner module is
+  imported in `chain310`. It is import-safe by construction: module level is
+  only `sys.path` setup and `getattr` aliases, everything else is behind
+  `__main__`.
+- **dead configuration.** `/root/nanobody.env`'s keys are cross-checked against
+  the deployed source, and any key nothing reads fails the deploy. The first
+  draft of that file carried nine keys inherited from the other branch's miner
+  (`NOVA_NANOBODY_ONLY`, `NOVA_NANOBODY_RESULT`, `NOVA_LIVE_CONFIG`,
+  `NOVA_WALLET_*`, `NOVA_COLDKEY_SS58`, `NOVA_GIT_PUSH`, `NOVA_DEPLOY_KEY`,
+  `NOVA_GIT_WORKDIR`, `AUTO_UPDATE`) that this branch's miner reads none of.
+  Configuration nothing reads is worse than absent: it is a written record of
+  behaviour that is not happening.
+
 ## Credentials
 
 - **No coldkey ever reaches the box.** Both GPU playbooks `find` for coldkey
@@ -139,9 +163,13 @@ point must be `--help`-able with no chain connection, no wallet and no Keychain.
   that it is absent from the argument list. Turning on live purchasing is a
   deliberate manual act in the tmux session; a variable that can flip it is a
   variable that will be flipped by a copied command line.
-- Hotkey keyfiles and the submission deploy key are passed as controller-side
-  **paths**. Ansible reads them locally, the copy tasks are `no_log`, and no key
-  material passes through a command line, a variable or task output.
+- Hotkey keyfiles and the GitHub submission token are passed as controller-side
+  **paths**. Ansible reads them locally, the tasks that write them are `no_log`,
+  and no key material passes through a command line, a variable or task output.
+  It is a token rather than an SSH deploy key because `utils/files.py` — the
+  uploader the deployed miner calls — PUTs to `api.github.com/.../contents` with a
+  bearer `GITHUB_TOKEN`. The deploy-key-and-git-push path belonged to the other
+  branch's `files.py`.
 
 ## The vendored fast scorer
 

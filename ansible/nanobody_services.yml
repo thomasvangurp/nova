@@ -77,9 +77,16 @@
     # has to be copied onto rented hardware.
     nanobody_coldkey_ss58: ""
 
-    # Controller-side path to the repository-scoped submission deploy key.
-    nanobody_deploy_key_source: ""
-    nanobody_deploy_key: /root/secrets/nova_deploy
+    # Controller-side path to a file containing ONLY the GitHub token the
+    # submission upload authenticates with. A locator, never the value: Ansible
+    # reads the file itself and the task that writes it is no_log, so the token
+    # reaches no command line, no variable this playbook prints, and no output.
+    #
+    # It is a token rather than an SSH deploy key because utils/files.py --
+    # which is what the deployed miner calls -- PUTs to
+    # api.github.com/repos/.../contents with a bearer GITHUB_TOKEN. The
+    # deploy-key-and-git-push path belonged to the other branch's files.py.
+    nanobody_github_token_file: ""
     nanobody_submission_repo_owner: thomasvangurp
     nanobody_submission_repo_name: nova-sn68-submissions
     nanobody_submission_repo_branch: main
@@ -279,16 +286,6 @@
           resolves which of them hold uids from the chain.
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
-    - name: Install the repository-scoped submission deploy key
-      ansible.builtin.copy:
-        src: "{{ nanobody_deploy_key_source }}"
-        dest: "{{ nanobody_deploy_key }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-      when: nanobody_deploy_key_source | length > 0
-
     - name: Refuse coldkey material on the rental
       ansible.builtin.find:
         paths: "{{ nanobody_wallet_path }}"
@@ -308,10 +305,27 @@
         success_msg: "No coldkey on the rental."
 
     # ---- Runtime configuration --------------------------------------------
-    # Written with no NOVA_WALLET_HOTKEY. A single configured hotkey is the
-    # assumption this deployment removes; the wallet name and the coldkey
-    # address are enough, and the fleet comes from the chain.
-    - name: Install the nanobody-only runtime configuration
+    # Every key here is read by the code this playbook deploys, and the gate
+    # below proves it against the deployed source.
+    #
+    # The first draft of this file carried nine keys inherited from the other
+    # branch's miner that nothing here reads: NOVA_NANOBODY_ONLY,
+    # NOVA_LIVE_CONFIG, NOVA_WALLET_NAME, NOVA_WALLET_PATH, NOVA_COLDKEY_SS58,
+    # NOVA_GIT_PUSH, NOVA_DEPLOY_KEY, NOVA_GIT_WORKDIR, and AUTO_UPDATE -- which
+    # is read, but only by neurons/validator/validator.py, and we are a miner.
+    # Configuration nothing reads is worse than absent: it is a written record of
+    # behaviour that is not happening.
+    #
+    # NOVA_WALLET_* is gone for a second reason as well. The wallet reaches the
+    # miner as --wallet.name/--wallet.path/--wallet.hotkey, and which uids we
+    # publish from is discovered from the chain, never configured.
+    #
+    # NOVA_NANOBODY_RESULT stays: compound_miner/nanobody_provider.py falls back
+    # to it when no explicit path is passed, so it is set to the same file the
+    # publisher is given as --artifact rather than left to disagree with it.
+    #
+    # mode 0600 and no_log because GITHUB_TOKEN is in it.
+    - name: Install the chain-side runtime configuration
       ansible.builtin.copy:
         dest: /root/nanobody.env
         owner: root
@@ -320,22 +334,75 @@
         content: |
           SUBTENSOR_NETWORK={{ nanobody_network }}
           BT_NO_PARSE_CLI_ARGS=false
-          AUTO_UPDATE=0
           NOVA_LIVE_SEARCH=0
-          NOVA_NANOBODY_ONLY=1
-          NOVA_NANOBODY_RESULT=/root/artifacts/nanobody_result.json
           NOVA_CHAIN_STATE=/root/artifacts/chain_state.json
-          NOVA_LIVE_CONFIG=/root/config/config.yaml
-          NOVA_WALLET_NAME={{ nanobody_wallet_name }}
-          NOVA_WALLET_PATH={{ nanobody_wallet_path }}
-          NOVA_COLDKEY_SS58={{ nanobody_coldkey_ss58 }}
-          NOVA_GIT_PUSH=1
-          NOVA_DEPLOY_KEY={{ nanobody_deploy_key }}
-          NOVA_GIT_WORKDIR=/root/submissions
+          NOVA_NANOBODY_RESULT=/root/artifacts/nanobody_result.json
           GITHUB_REPO_OWNER={{ nanobody_submission_repo_owner }}
           GITHUB_REPO_NAME={{ nanobody_submission_repo_name }}
           GITHUB_REPO_BRANCH={{ nanobody_submission_repo_branch }}
           GITHUB_REPO_PATH={{ nanobody_submission_repo_path }}
+          {% if nanobody_github_token_file | length > 0 %}
+          GITHUB_TOKEN={{ lookup('file', nanobody_github_token_file) | trim }}
+          {% endif %}
+      no_log: true
+
+    # Names only. The values are never read back off the box, and the key names
+    # are not secret -- GITHUB_TOKEN's presence is the fact being asserted.
+    - name: List the configuration keys actually written
+      ansible.builtin.shell: |
+        set -eu
+        cut -d= -f1 /root/nanobody.env | grep -v '^$'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: configured_keys
+
+    # A key nothing reads is drift, and this is how nine of them got here. The
+    # deployed source is the authority, so ask it rather than a reviewer.
+    #
+    # This is a floor, not a proof: it searches the whole deployed tree, so a key
+    # only the validator reads would pass. It catches the failure that actually
+    # happened -- a key from another branch's miner that exists nowhere here.
+    - name: Find configuration keys no deployed code reads
+      ansible.builtin.shell: |
+        set -u
+        dead=""
+        for key in {{ configured_keys.stdout_lines | join(' ') }}; do
+          if ! grep -Rqs --include='*.py' "$key" \
+              /root/neurons /root/utils /root/nanobody_opt /root/compound_miner \
+              /root/tools /root/config; then
+            dead="$dead $key"
+          fi
+        done
+        echo "DEAD:$dead"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: dead_keys
+
+    - name: Require every configured key to be read by something
+      ansible.builtin.assert:
+        that: dead_keys.stdout | trim == 'DEAD:'
+        fail_msg: >-
+          /root/nanobody.env sets keys that no deployed module reads
+          ({{ dead_keys.stdout | trim | replace('DEAD:', '') }}). Either the
+          code that reads them was not merged, or they are left over from
+          another branch's miner. Remove them or merge that code; do not leave a
+          runtime configuration describing behaviour that is not happening.
+        success_msg: >-
+          All {{ configured_keys.stdout_lines | length }} configured keys are
+          read by deployed code.
+
+    - name: Require the submission credential the deployed uploader needs
+      ansible.builtin.assert:
+        that: "'GITHUB_TOKEN' in configured_keys.stdout_lines"
+        fail_msg: >-
+          utils/files.py:upload_file_to_github raises unless GITHUB_TOKEN is
+          set, so the chain writer would submit nothing. Point
+          nanobody_github_token_file at a controller-side file holding the
+          token for
+          {{ nanobody_submission_repo_owner }}/{{ nanobody_submission_repo_name }}.
+      when: nanobody_chain_writer_activate | bool
 
     - name: Remove the stale implicit dotenv file
       ansible.builtin.file:
@@ -411,6 +478,7 @@
           - /root/tools/publish_current_nanobody.py
           - /root/compound_miner/nanobody_provider.py
           - /root/nanobody_opt/fleet.py
+          - /root/nanobody_opt/chain_state.py
           - /root/neurons/miner/miner.py
       changed_when: false
 
@@ -422,6 +490,11 @@
           - pytest
           - -q
           - tests/test_publish_current_nanobody.py
+          # Covers the seam itself: the publisher's _chain_view parsing what the
+          # miner writes, and discover_fleet picking our uids out of a roster.
+          # Run on the box against the deployed tree, so a deploy proves the
+          # code it just installed rather than the code the controller holds.
+          - tests/test_chain_state.py
       args:
         chdir: /root
       changed_when: false
@@ -437,15 +510,21 @@
           PIXI_COLOR: never
 
     # The cross-program contract the publisher cannot check for itself until it
-    # is already running. It needs the miner to export a chain view carrying the
-    # neuron rows the fleet is discovered from; the upstream miner exports no
-    # chain state at all. Check the deployed source, because the alternative is
-    # a publisher that starts, logs one line an interval, and publishes nothing.
+    # is already running: it needs the miner to export a chain view carrying the
+    # neuron rows the fleet is discovered from, and it cannot fall back to a
+    # remembered uid. Without it the publisher starts, logs one line an interval
+    # and publishes nothing.
+    #
+    # tests/test_chain_state.py above proves the payload and the parsing. What a
+    # test cannot prove is that the DEPLOYED miner still calls the exporter, so
+    # that is what is checked here, against the real symbol names.
     - name: Verify the deployed miner exports the chain view the publisher reads
       ansible.builtin.shell: |
         set -eu
+        grep -q 'from nanobody_opt import chain_state' /root/neurons/miner/miner.py
+        grep -q '_publish_chain_state(' /root/neurons/miner/miner.py
         grep -q 'NOVA_CHAIN_STATE' /root/neurons/miner/miner.py
-        grep -q 'neurons' /root/neurons/miner/miner.py
+        grep -q 'def neuron_rows' /root/nanobody_opt/chain_state.py
         echo CHAIN_STATE_EXPORT_PRESENT
       args:
         executable: /bin/bash
@@ -457,14 +536,34 @@
       ansible.builtin.assert:
         that: "'CHAIN_STATE_EXPORT_PRESENT' in chain_state_export.stdout"
         fail_msg: >-
-          /root/neurons/miner/miner.py does not export a chain view
-          (NOVA_CHAIN_STATE with neuron rows). The publisher discovers the fleet
-          from those rows and cannot fall back to a remembered uid, so it would
-          run and publish nothing. The nanobody-only miner with that export
-          exists on deploy/nanobody-standalone and has not been merged onto this
-          branch yet; merge it before activating either service.
+          The deployed miner does not call nanobody_opt.chain_state to export a
+          chain view. The publisher discovers the fleet from those neuron rows
+          and has no fallback, so it would run and publish nothing.
         success_msg: "Miner exports the chain view the publisher reads."
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
+    # py_compile above proves the miner parses; it does not prove the chain
+    # environment can satisfy its imports. The miner is import-safe by
+    # construction -- module level is only sys.path setup and getattr aliases,
+    # everything else is behind __main__ -- so importing it here is the cheapest
+    # honest check that the process will actually start. This is the gate that
+    # catches a third-party dependency the chain310 feature does not declare.
+    - name: Verify the chain environment satisfies the deployed miner's imports
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/chain310/bin/python
+          - -c
+          - >-
+            import importlib.util, sys;
+            spec = importlib.util.spec_from_file_location(
+                'deployed_miner', '/root/neurons/miner/miner.py');
+            module = importlib.util.module_from_spec(spec);
+            spec.loader.exec_module(module);
+            print('MINER_IMPORTS_OK')
+      args:
+        chdir: /root
+      changed_when: false
+      register: miner_imports
 
     - name: Require a signing identity for the chain writer
       ansible.builtin.assert:
@@ -473,30 +572,6 @@
           Set nanobody_chain_writer_hotkey to the hotkey name the writer process
           signs with. It is not the fleet -- the fleet comes from the chain.
       when: nanobody_chain_writer_activate | bool
-
-    - name: Verify the submission deploy key reaches only its repository
-      ansible.builtin.command:
-        argv:
-          - git
-          - ls-remote
-          - >-
-            git@github.com:{{ nanobody_submission_repo_owner }}/{{ nanobody_submission_repo_name }}.git
-          - "refs/heads/{{ nanobody_submission_repo_branch }}"
-      environment:
-        GIT_SSH_COMMAND: >-
-          ssh -i {{ nanobody_deploy_key }} -o IdentitiesOnly=yes -o BatchMode=yes
-          -o StrictHostKeyChecking=accept-new
-      changed_when: false
-      register: submission_remote
-      when: nanobody_publisher_activate | bool
-
-    - name: Require the submission branch to exist
-      ansible.builtin.assert:
-        that: submission_remote.stdout | length > 0
-        fail_msg: >-
-          The deploy key reached GitHub but
-          refs/heads/{{ nanobody_submission_repo_branch }} is absent.
-      when: nanobody_publisher_activate | bool
 
     # ---- Services ----------------------------------------------------------
     - name: Restart the checkpoint publisher on committed source
@@ -603,7 +678,8 @@
     - name: Report the chain side
       ansible.builtin.debug:
         msg: >-
-          {{ chain_check.stdout }}; {{ publisher_tests.stdout_lines[-1] | default('tests ok') }};
+          {{ chain_check.stdout }}; {{ miner_imports.stdout }};
+          {{ publisher_tests.stdout_lines[-1] | default('tests ok') }};
           {{ installed_hotkeys.matched }} hotkey(s) deployed;
           publisher active={{ nanobody_publisher_activate | bool }};
           chain writer active={{ nanobody_chain_writer_activate | bool }}
