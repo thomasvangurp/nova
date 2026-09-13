@@ -22,6 +22,15 @@ TOKEN_FILE=${NOVA_GITHUB_TOKEN_FILE:-$HOME/.nova-github-token}
 PROFILE=${NOVA_PROFILE:-vars/nanobody-high-throughput.yml}
 PLAYBOOK=${1:-nanobody_services.yml}
 
+# The miner is the ONLY writer of /root/artifacts/chain_state.json, which the
+# publisher reads for the block, the epoch and the neuron rows it discovers the
+# fleet from. Deploying without these two arguments stops the miner and leaves
+# the publisher throwing "miner chain-state is stale" every cycle while looking
+# alive -- which is exactly what one deploy without them did. Set
+# NOVA_CHAIN_WRITER=false only when deliberately deploying code with no signer.
+CHAIN_WRITER=${NOVA_CHAIN_WRITER:-true}
+CHAIN_WRITER_HOTKEY=${NOVA_CHAIN_WRITER_HOTKEY:-nova68-slot-1}
+
 [ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
 [ -r "$TOKEN_FILE" ] || { echo "github token file not readable: $TOKEN_FILE" >&2; exit 2; }
 
@@ -29,4 +38,6 @@ exec ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
   -e "@$PROFILE" \
   -e "nanobody_coldkey_ss58=$COLDKEY" \
   -e "nanobody_github_token_file=$TOKEN_FILE" \
+  -e "nanobody_chain_writer_activate=$CHAIN_WRITER" \
+  -e "nanobody_chain_writer_hotkey=$CHAIN_WRITER_HOTKEY" \
   "${@:2}"

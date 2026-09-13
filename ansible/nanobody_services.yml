@@ -138,6 +138,21 @@
           someone else's uid for twenty-one days).
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
+    - name: Refuse a publisher with no miner to read the chain view from
+      ansible.builtin.assert:
+        that:
+          - nanobody_chain_writer_activate | bool
+        fail_msg: >-
+          The publisher reads the block, the epoch and the neuron rows it
+          discovers the fleet from out of /root/artifacts/chain_state.json, and
+          the miner is its only writer. Starting the publisher with the writer
+          off produces a service that logs "miner chain-state is stale" every
+          cycle and commits nothing while looking alive -- one deploy did
+          exactly that. Pass nanobody_chain_writer_activate=true (deploy via
+          deploy/nanobody_deploy.sh, which does), or set
+          nanobody_publisher_activate=false to deploy code without starting it.
+      when: nanobody_publisher_activate | bool
+
     # No fallback. The publisher treats the GPU count as a hard gate, so a
     # default here would substitute a guess for the one fact the rental knows.
     - name: Require the GPU count the inventory read off the rental
