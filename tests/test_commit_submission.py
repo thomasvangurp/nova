@@ -1,0 +1,100 @@
+"""Committing one uid's submission, and refusing to commit someone else's."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nanobody_opt import commit_submission as cs
+
+
+class _Timelock:
+    """Records what it was asked to encrypt; the uid is part of the key."""
+
+    def __init__(self):
+        self.calls = []
+
+    def encrypt(self, uid, message, block):
+        self.calls.append((uid, message, block))
+        return f"cipher(uid={uid},msg={message},blk={block})"
+
+
+ROSTER = [
+    {"uid": 40, "hotkey": "5EsjOURS"},
+    {"uid": 46, "hotkey": "5HEHOURS"},
+    {"uid": 51, "hotkey": "5RIVALxx"},
+]
+
+
+def test_a_hotkey_that_holds_its_uid_is_accepted():
+    assert cs.holds_uid(ROSTER, "5EsjOURS", 40) is True
+
+
+def test_a_recycled_uid_is_refused():
+    """uids are recycled, so yesterday's uid can be another operator's today.
+
+    Committing for it would sign someone else's slot. The uid is therefore checked
+    against the chain roster rather than trusted from the command line.
+    """
+    assert cs.holds_uid(ROSTER, "5EsjOURS", 51) is False
+
+
+def test_a_uid_absent_from_the_roster_is_refused():
+    """A deregistered uid vanishes from the metagraph entirely."""
+    assert cs.holds_uid(ROSTER, "5EsjOURS", 999) is False
+
+
+def test_the_payload_is_keyed_on_the_uid():
+    """Identical sequences must not collide across uids.
+
+    Encryption keyed on the uid is what makes each uid's file distinct, which is
+    why a single repository can hold the whole fleet's submissions: the filename
+    is a content hash, and the content differs per uid.
+    """
+    timelock = _Timelock()
+    first, _ = cs.encoded_payload("SEQ", 40, 100, timelock)
+    second, _ = cs.encoded_payload("SEQ", 46, 100, timelock)
+    assert first != second
+    assert timelock.calls[0][0] == 40 and timelock.calls[1][0] == 46
+
+
+def test_the_payload_is_deterministic_for_one_uid():
+    timelock = _Timelock()
+    first, first_body = cs.encoded_payload("SEQ", 40, 100, timelock)
+    second, second_body = cs.encoded_payload("SEQ", 40, 100, timelock)
+    assert (first, first_body) == (second, second_body)
+
+
+def test_the_content_is_base64_of_the_ciphertext():
+    import base64
+
+    timelock = _Timelock()
+    _, encoded = cs.encoded_payload("SEQ", 40, 100, timelock)
+    assert base64.b64decode(encoded).decode() == "cipher(uid=40,msg=SEQ,blk=100)"
+
+
+def test_skip_results_are_distinguishable_from_a_commit():
+    """A caller iterating the fleet must tell a skip from a submission without
+    parsing prose, and a stale hotkey must not look like success."""
+    assert cs.RESULT_COMMITTED != cs.RESULT_STALE != cs.RESULT_TOO_SOON
+    assert cs.RESULT_COMMITTED == "COMMIT_OK"
+    assert "STALE" in cs.RESULT_STALE
+    assert "RATE_LIMITED" in cs.RESULT_TOO_SOON
+
+
+def test_help_works_without_the_chain_stack():
+    """The deploy gate runs --help where bittensor may be absent, so nothing
+    chain-related may be imported at module or argparse time."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [sys.executable, "-m", "nanobody_opt.commit_submission", "--help"],
+        cwd=repo, capture_output=True, text=True, timeout=60,
+    )
+    assert done.returncode == 0
+    assert "--uid" in done.stdout
+    assert "bittensor" not in done.stderr.lower()
