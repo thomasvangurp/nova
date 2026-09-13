@@ -670,6 +670,14 @@ def _publish_fleet(
         )
     requirements = yaml.safe_load(config.read_text())["nanobody_requirements"]
     checkpoints: dict[str, dict[str, Any]] = {}
+    # Per-uid, isolated, for the same reason the commit loop is: one uid whose
+    # winner "lacks a current Layer-2 pass" used to abort the whole fleet from
+    # inside this loop, so the uids already staged never reached an artifact and
+    # nothing committed. Epochs 25089 and 25091 published two uids of six that
+    # way. A uid that cannot be published is reported as uncovered, which is
+    # exactly what the shortfall path already means.
+    published: list[fleet_module.Assignment] = []
+    rejected: list[tuple[int, str]] = []
     for assignment in assignments:
         destination = staging_root / stage / f"uid{assignment.uid}.json"
         command = [
@@ -688,30 +696,54 @@ def _publish_fleet(
         ])
         if stage == "provisional":
             command.append("--provisional")
-        _run(command)
+        try:
+            _run(command)
+        except subprocess.CalledProcessError as error:
+            rejected.append((assignment.uid, f"publisher exited {error.returncode}"))
+            continue
         checkpoint = _read_json(destination)
         if not _is_current_qualified(
             checkpoint, target=target, epoch=epoch, requirements=requirements
         ):
-            raise SystemExit(
-                f"publisher produced an invalid checkpoint for uid {assignment.uid}"
-            )
+            rejected.append((assignment.uid, "invalid checkpoint"))
+            continue
         if _checkpoint_sequence(checkpoint) != assignment.sequence:
-            raise SystemExit(
-                f"uid {assignment.uid} was published a sequence it was not assigned"
+            # Never publishable: a uid holding a sequence it was not assigned is
+            # how two uids end up committing the same molecule, which the
+            # validator dedupes to one score.
+            rejected.append(
+                (assignment.uid, "published a sequence it was not assigned")
             )
+            continue
         checkpoints[assignment.sequence] = checkpoint
+        published.append(assignment)
+
+    if rejected:
+        print(
+            f"{PUBLISH_FLEET_REJECTED} {len(rejected)} of {len(assignments)} "
+            "uid(s) could not be published this epoch: "
+            + ", ".join(f"uid {uid} ({why})" for uid, why in rejected),
+            file=sys.stderr,
+            flush=True,
+        )
+    if not published:
+        raise SystemExit(
+            f"no uid could be published for epoch {epoch}: "
+            + ", ".join(f"uid {uid} ({why})" for uid, why in rejected)
+        )
+
     artifact = fleet_module.fleet_artifact(
         target=target,
         epoch=epoch,
         stage=stage,
-        assignments=assignments,
+        assignments=published,
         checkpoints=checkpoints,
-        unassigned=short,
+        unassigned=fleet_module.uncovered(crew, published),
     )
-    return artifact, assignments
+    return artifact, published
 
 
+PUBLISH_FLEET_REJECTED = "NANOBODY_FLEET_UID_REJECTED"
 COMMIT_FLEET_FAILED = "COMMIT_FLEET_UID_FAILED"
 COMMIT_FLEET_INCOMPLETE = "COMMIT_FLEET_INCOMPLETE"
 

@@ -23,6 +23,7 @@ from nanobody_opt import fleet, publication_gates
 from tools import publish_current_nanobody
 from tools.publish_current_nanobody import (
     COMMIT_FLEET_FAILED,
+    PUBLISH_FLEET_REJECTED,
     COMMIT_FLEET_INCOMPLETE,
     RANK_QUALIFICATION_ARGUMENTS,
     SELECTION_ORDER,
@@ -475,6 +476,9 @@ class _Host:
         self.root = root
         self.commands: list[list[str]] = []
         self.candidate_sequences = [_sequence(index) for index in range(candidates)]
+        # Sequences publish_checkpoint.py refuses, so a test can reproduce
+        # the live "winner lacks a current Layer-2 pass" exit for one uid.
+        self.unpublishable: set[str] = set()
         runtime = root / "runtime"
         (runtime / ".pixi/envs/bgen/bin").mkdir(parents=True)
         (runtime / ".pixi/envs/bgen/bin/python").write_text("#!/bin/sh\n")
@@ -585,6 +589,8 @@ class _Host:
                 for sequence in self.candidate_sequences
             ]}))
         elif "publish_checkpoint.py" in joined:
+            if value("--sequence") in self.unpublishable:
+                raise subprocess.CalledProcessError(1, command)
             output = Path(value("--output"))
             stage = "provisional" if "--provisional" in command else "qualified"
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -944,3 +950,39 @@ def test_the_default_run_commits_the_provisional_fleet_and_skips_the_strict_rank
     # shares every other rank flag, so it is the only honest marker here.
     assert not [c for c in host.commands if "--pose-config" in c]
     assert "strict qualification is disabled" in capsys.readouterr().out
+
+
+def test_one_unpublishable_uid_does_not_cost_the_rest_of_the_fleet(
+    tmp_path, monkeypatch, capsys
+):
+    """publish_checkpoint.py exiting non-zero used to abort the whole fleet.
+
+    Epochs 25089 and 25091 published two uids of six that way: the failure came
+    from inside the per-uid loop, so the uids already staged never reached an
+    artifact and nothing committed at all.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    host.unpublishable = {_sequence(1)}
+
+    _publish_once(
+        host.args(
+            strict_qualification=False,
+            commit_command="/root/commit.sh {hotkey} {sequence} {block}",
+        )
+    )
+
+    artifact = json.loads(host.artifact.read_text())
+    published = [entry["uid"] for entry in artifact["submissions"]]
+    assert len(published) == 2
+    commits = [c for c in host.commands if c[0].endswith("commit.sh")]
+    assert len(commits) == 2
+    assert PUBLISH_FLEET_REJECTED in capsys.readouterr().err
+
+
+def test_a_fleet_with_no_publishable_uid_stops_rather_than_writing_nothing(
+    tmp_path, monkeypatch
+):
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    host.unpublishable = set(host.candidate_sequences)
+    with pytest.raises(SystemExit, match="no uid could be published"):
+        _publish_once(host.args(strict_qualification=False))
