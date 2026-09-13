@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nanobody_opt import win_probability as wp
 from nanobody_opt.win_probability import (
     MINIMUM_SPREAD,
     observation_spread,
@@ -74,3 +75,66 @@ def test_ranking_is_best_first_and_annotated():
 
 def test_no_observations_cannot_win():
     assert win_probability([], 100.0) == 0.0
+
+
+def test_a_two_observation_spread_leans_on_the_cohort():
+    """One degree of freedom is not evidence of a wide draw distribution.
+
+    Spread is an asset in this estimator, so a candidate whose spread is merely
+    badly measured outranks one whose spread is real. Epoch 25093 ranked a
+    two-observation candidate first on a spread of 91.9 against ~45 for the
+    five-observation candidates.
+    """
+    pooled = 45.0
+    wide_but_unknown = wp.shrunk_spread(91.9, pooled, observations=2)
+    wide_and_known = wp.shrunk_spread(91.9, pooled, observations=9)
+    assert wide_but_unknown < wide_and_known
+    assert pooled < wide_but_unknown < 91.9
+
+
+def test_a_well_observed_spread_is_mostly_its_own():
+    assert wp.shrunk_spread(80.0, 40.0, observations=9) > wp.shrunk_spread(
+        80.0, 40.0, observations=3
+    )
+
+
+def test_a_single_observation_cannot_stand_out_on_a_lucky_draw():
+    """One draw lands about 34 rank points from its own mean, so it is not
+    grounds to spend a ticket on."""
+    cohort = 130.0
+    lucky = wp.shrunk_mean(90.0, cohort, observations=1)
+    earned = wp.shrunk_mean(90.0, cohort, observations=9)
+    assert earned < lucky < cohort
+
+
+def test_shrinkage_never_invents_a_spread_below_the_floor():
+    assert wp.shrunk_spread(0.1, 0.1, observations=9) >= wp.MINIMUM_SPREAD
+    assert wp.shrunk_spread(None, 0.0, observations=1) >= wp.MINIMUM_SPREAD
+
+
+def test_the_ranker_applies_the_shrinkage_not_just_the_raw_sample():
+    """Wiring, not arithmetic: the epoch-25093 ordering came out of the ranker.
+
+    A wider spread still ranks higher after shrinking -- that is the point of
+    variance seeking -- but a two-observation candidate must not collect the
+    full advantage of a spread carrying one degree of freedom.
+    """
+    cohort = [
+        {"per_observation_median_rank_sum": [120.0, 130.0, 125.0, 135.0, 128.0],
+         "sequence": "STEADY"},
+        {"per_observation_median_rank_sum": [118.0, 132.0, 124.0, 136.0, 127.0],
+         "sequence": "STEADY2"},
+        {"per_observation_median_rank_sum": [65.0, 191.0], "sequence": "NOISY"},
+    ]
+    ranked = wp.rank_by_win_probability(cohort, 60.0)
+    noisy = next(item for item in ranked if item["sequence"] == "NOISY")
+
+    sample = wp.observation_spread([65.0, 191.0])
+    assert noisy["observation_spread"] < sample, "the sample spread was used raw"
+    assert noisy["observation_spread_sample"] == sample
+
+    unshrunk = wp.win_probability([65.0, 191.0], 60.0, spread=sample)
+    assert noisy["win_probability"] < unshrunk, (
+        "the two-observation candidate kept the full advantage of a "
+        "one-degree-of-freedom spread"
+    )

@@ -314,13 +314,9 @@ def _pool(entries):
     }
 
 
-def test_half_the_fleet_buys_the_best_expected_score():
-    """Win-probability order is variance seeking, which is wrong for a fleet.
-
-    In epoch 25093 it spent every uid on candidates predicted at p90 170-203
-    while a candidate predicted at 128.5 sat unused further down the pool, and
-    our best actual finish was rank 20 of 40.
-    """
+def test_the_value_share_knob_buys_expected_score_when_asked():
+    """Off by default -- variance seeking is the right objective -- but the
+    knob must work, so an estimator that goes wrong can be sidestepped."""
     pool = _pool([
         ("AAA", 0.30, 200.0),
         ("BBB", 0.20, 190.0),
@@ -331,6 +327,14 @@ def test_half_the_fleet_buys_the_best_expected_score():
     assert set(chosen) == {"AAA", "BBB", "CCC", "DDD"}
     # The two best expected scores are picked first, then the tail seekers.
     assert chosen[:2] == ["CCC", "DDD"]
+
+
+def test_the_fleet_buys_the_tail_by_default():
+    """Only rank one pays and the validator takes a single draw, so buying the
+    mean discards the candidates most likely to win."""
+    assert fleet.DEFAULT_VALUE_SHARE == 0.0
+    pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
+    assert fleet.distinct_sequences(pool, 2) == ["AAA", "BBB"]
 
 
 def test_a_zero_value_share_is_pure_win_probability_order():

@@ -45,6 +45,17 @@ def pooled_spread(spreads: Sequence[float]) -> float:
     return max(median, MINIMUM_SPREAD)
 
 
+# Observations' worth of prior weight given to the cohort's spread when
+# shrinking a candidate's own. Spread is an ASSET in this estimator, so a
+# candidate whose spread is merely badly measured is promoted over one whose
+# spread is genuinely large: with two observations the sample deviation carries
+# one degree of freedom and swings by a factor of two either way. In epoch
+# 25093 the top-ranked candidate had n=2 and a spread of 91.9 against ~45 for
+# the n=5 candidates, and it was ranked first on that alone. Shrinking toward
+# the cohort keeps variance-seeking while refusing to seek estimation error.
+SPREAD_PRIOR_OBSERVATIONS = 4.0
+
+
 def observation_spread(scores: Sequence[float]) -> float | None:
     """Draw-to-draw spread of one candidate, or None when it cannot be estimated."""
     if len(scores) < 2:
@@ -53,11 +64,43 @@ def observation_spread(scores: Sequence[float]) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def shrunk_mean(sample: float, cohort: float, observations: int) -> float:
+    """Blend a candidate's own mean with the cohort's, by how well it is known.
+
+    The same winner's curse applies to the mean as to the spread, and fixing
+    only the spread moves the problem rather than solving it: with the spread
+    shrunk, the epoch-25093 pool promoted four single-observation candidates
+    whose medians were simply the luckiest draws. One observation of a fixed
+    sequence lands about 34 rank points from its own mean, so one draw is not
+    grounds to spend a ticket.
+    """
+    if observations < 1:
+        return cohort
+    weight = observations / (observations + SPREAD_PRIOR_OBSERVATIONS)
+    return weight * sample + (1.0 - weight) * cohort
+
+
+def shrunk_spread(sample: float | None, pooled: float, observations: int) -> float:
+    """Blend a candidate's own spread with the cohort's, by how well it is known.
+
+    Weight is the sample's degrees of freedom against a fixed prior, so two
+    observations lean on the cohort and nine mostly stand on their own.
+    """
+    if sample is None or not math.isfinite(sample) or sample <= 0:
+        return max(pooled, MINIMUM_SPREAD)
+    degrees = max(observations - 1, 0)
+    weight = degrees / (degrees + SPREAD_PRIOR_OBSERVATIONS)
+    blended = math.sqrt(weight * sample**2 + (1.0 - weight) * pooled**2)
+    return max(blended, MINIMUM_SPREAD)
+
+
 def win_probability(
     scores: Sequence[float],
     threshold: float,
     *,
     fallback_spread: float = MINIMUM_SPREAD,
+    spread: float | None = None,
+    cohort_mean: float | None = None,
 ) -> float:
     """Probability that a single fresh draw of this candidate beats ``threshold``.
 
@@ -67,7 +110,10 @@ def win_probability(
     if not scores:
         return 0.0
     mean = fmean(scores)
-    spread = observation_spread(scores)
+    if cohort_mean is not None:
+        mean = shrunk_mean(mean, cohort_mean, len(scores))
+    if spread is None:
+        spread = observation_spread(scores)
     if spread is None or spread <= 0:
         spread = fallback_spread
     spread = max(spread, MINIMUM_SPREAD)
@@ -91,16 +137,28 @@ def rank_by_win_probability(
         observation_spread(item.get(scores_key) or []) for item in candidates
     ]
     fallback = pooled_spread([value for value in spreads if value is not None])
+    means = [
+        fmean(item.get(scores_key) or [0.0]) if (item.get(scores_key) or []) else None
+        for item in candidates
+    ]
+    known = [value for value in means if value is not None]
+    cohort_mean = fmean(known) if known else 0.0
     annotated = []
     for item, spread in zip(candidates, spreads, strict=True):
         scores = item.get(scores_key) or []
+        effective = shrunk_spread(spread, fallback, len(scores))
         probability = win_probability(
-            scores, threshold, fallback_spread=fallback
+            scores,
+            threshold,
+            fallback_spread=effective,
+            spread=effective,
+            cohort_mean=cohort_mean,
         )
         enriched = dict(item)
         enriched["win_probability"] = probability
         enriched["win_threshold"] = threshold
-        enriched["observation_spread"] = spread if spread is not None else fallback
+        enriched["observation_spread"] = effective
+        enriched["observation_spread_sample"] = spread
         enriched["observation_spread_estimated"] = spread is None
         annotated.append(enriched)
     annotated.sort(

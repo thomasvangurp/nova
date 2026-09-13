@@ -288,13 +288,17 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
 
 
 # Share of the fleet spent on the best EXPECTED score rather than on the best
-# chance of a lucky draw. Win-probability order is deliberately variance
-# seeking, which is right when you hold one ticket and wrong when you hold
-# seven: in epoch 25093 it spent every uid on candidates predicted at p90
-# 170-203 while a candidate predicted at 128.5 sat unused at pool position 11,
-# and our best actual finish was rank 20 of 40. Half the fleet now buys the
-# expected score, half still buys the tail.
-DEFAULT_VALUE_SHARE = 0.5
+# chance of a lucky draw. OFF by default, because variance seeking is the right
+# objective here and buying the mean actively discards the candidates most
+# likely to win: only rank one pays and the validator takes a single draw.
+#
+# It was briefly set to 0.5 on the theory that win-probability order was
+# picking poor candidates. It was not: the estimator was, by ranking a
+# two-observation candidate first on a spread carrying one degree of freedom.
+# That is fixed in win_probability.shrunk_spread, where it belongs. The knob
+# stays because a miscalibrated estimator is worth being able to sidestep in a
+# hurry, not because the mean is what we want to buy.
+DEFAULT_VALUE_SHARE = 0.0
 VALUE_KEY = "score_p90"
 
 
