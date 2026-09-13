@@ -681,6 +681,35 @@
         success_msg: "Miner exports the chain view the publisher reads."
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
+    # The same check for the commit driver, and it is not redundant with the
+    # miner's: commit_submission defers its imports into main(), so --help
+    # exits 0 on a box where every one of them is missing. Every uid in the
+    # fleet failed with "No module named 'btdr'" while the miner beside it
+    # committed happily, because the miner appends /root and /root/utils to
+    # sys.path and this program did not. --self-test runs the real import
+    # block, in the real interpreter the --commit-command names.
+    - name: Verify the commit driver's own imports resolve in the chain environment
+      ansible.builtin.command:
+        cmd: >-
+          /root/.pixi/envs/chain310/bin/python -m nanobody_opt.commit_submission
+          --self-test
+        chdir: /root
+      changed_when: false
+      failed_when: false
+      register: commit_self_test
+
+    - name: Require a commit driver that can actually import what it commits with
+      ansible.builtin.assert:
+        that: "'COMMIT_SELF_TEST_OK' in commit_self_test.stdout"
+        fail_msg: >-
+          The commit driver cannot import its dependencies under
+          /root/.pixi/envs/chain310. Every uid would fail at the last step of
+          the epoch, after the fleet had been published, which is the most
+          expensive place to discover it. Output: {{ commit_self_test.stdout }}
+          {{ commit_self_test.stderr }}
+        success_msg: "Commit driver imports resolve; the fleet can commit."
+      when: nanobody_publisher_activate | bool
+
     # py_compile above proves the miner parses; it does not prove the chain
     # environment can satisfy its imports. The miner is import-safe by
     # construction -- module level is only sys.path setup and getattr aliases,

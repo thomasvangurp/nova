@@ -83,14 +83,15 @@ def holds_uid(neurons, hotkey_ss58: str, uid: int) -> bool:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uid", type=int, required=True)
+    # Not argparse-required: --self-test must run with no submission to make.
+    # main() enforces them for every other invocation.
+    parser.add_argument("--uid", type=int)
     parser.add_argument(
         "--hotkey",
-        required=True,
         help="hotkey wallet NAME or ss58 address; an address is resolved to the "
         "local key file that holds it",
     )
-    parser.add_argument("--sequence", required=True)
+    parser.add_argument("--sequence")
     parser.add_argument("--wallet-name", default="mining_ops")
     parser.add_argument("--wallet-path", default="/root/.bittensor/wallets")
     parser.add_argument("--netuid", type=int, default=68)
@@ -105,11 +106,52 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="resolve and validate everything, then stop before the extrinsic",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "import every dependency this program needs, then exit. The "
+            "deploy runs it: --help proves nothing, because the imports are "
+            "deferred into main()"
+        ),
+    )
     return parser
 
 
+SELF_TEST_OK = "COMMIT_SELF_TEST_OK"
+
+
+def _add_repository_to_path() -> None:
+    """Put the deployed root and its utils/ on sys.path, as the miner does.
+
+    btdr and files are not installed packages -- they are modules under
+    /root/utils, and neurons/miner/miner.py appends both paths itself before
+    importing them. This program did not, so every commit died on
+    ``ModuleNotFoundError: No module named 'btdr'`` while the miner beside it
+    worked, and the fleet committed nothing.
+    """
+    root = Path(__file__).resolve().parent.parent
+    for entry in (root, root / "utils"):
+        text = str(entry)
+        if text not in sys.path:
+            sys.path.append(text)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if not args.self_test:
+        missing = [
+            name
+            for name in ("uid", "hotkey", "sequence")
+            if getattr(args, name) in (None, "")
+        ]
+        if missing:
+            parser.error(
+                "the following arguments are required: "
+                + ", ".join(f"--{name}" for name in missing)
+            )
+    _add_repository_to_path()
 
     # Imported here, not at module import time, so --help works in any
     # environment: the deploy gate runs it where bittensor may be absent.
@@ -120,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
     from files import load_github_path, upload_file_to_github
 
     from nanobody_opt import fleet
+
+    if args.self_test:
+        print(SELF_TEST_OK)
+        return 0
 
     # The publisher substitutes {hotkey} from the chain, so it arrives as an
     # ss58 address, while a wallet is constructed from a key FILE NAME. Accept

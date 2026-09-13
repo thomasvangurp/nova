@@ -113,3 +113,35 @@ def test_a_truncated_address_is_not_mistaken_for_either():
     It matches no neuron row, so treating it as a key-file name would look up a
     file that cannot exist."""
     assert not cs._looks_like_address("5EkCwcNTfxeN")
+
+
+def test_the_commit_driver_puts_the_repository_and_utils_on_sys_path():
+    """btdr and files live in utils/, not site-packages.
+
+    neurons/miner/miner.py appends both paths before importing them; this
+    program did not, so every uid in the fleet died on "No module named
+    'btdr'" at the last step of an epoch while the miner beside it committed.
+    """
+    import sys
+
+    root = Path(cs.__file__).resolve().parent.parent
+    before = list(sys.path)
+    try:
+        cs._add_repository_to_path()
+        assert str(root) in sys.path
+        assert str(root / "utils") in sys.path
+    finally:
+        sys.path[:] = before
+
+
+def test_self_test_needs_no_submission_arguments():
+    """The deploy gate runs it with no uid, hotkey or sequence to commit."""
+    parsed = cs._parser().parse_args(["--self-test"])
+    assert parsed.self_test is True
+    assert parsed.uid is None
+
+
+def test_a_real_invocation_still_requires_the_submission_arguments(capsys):
+    with pytest.raises(SystemExit):
+        cs.main(["--uid", "1"])
+    assert "--hotkey" in capsys.readouterr().err
