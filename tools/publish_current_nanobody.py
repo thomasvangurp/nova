@@ -897,8 +897,12 @@ def _commit_fleet(
 ) -> None:
     """Send one commitment per uid, one block apart, inside the reserve.
 
-    ``max_regs_per_block`` is 1, so extrinsics are paced a block apart rather
-    than sent together.  With no command configured the per-uid miner processes
+    Sent as fast as the chain accepts them. ``max_regs_per_block`` is 1, but
+    that caps REGISTRATIONS, not commitments: in epoch 25096 uid 60 and uid 61
+    committed in the same block from different hotkeys. Pacing cost us that
+    epoch -- we tied the winner's score of 43.0 exactly and lost the tiebreak,
+    which is block_submitted, because our fleet landed at elapsed 328-350
+    against their 326.  With no command configured the per-uid miner processes
     commit from the artifact themselves and this is a no-op; the schedule is
     recorded either way.
     """
@@ -1020,8 +1024,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--commit-pause-seconds",
         type=float,
-        default=12.0,
-        help="one block between extrinsics; max_regs_per_block is 1",
+        default=0.0,
+        help=(
+            "delay between one uid's commitment and the next. Zero: ties are "
+            "broken by block_submitted and every block of delay is a tie lost"
+        ),
     )
     parser.add_argument(
         "--ledger",

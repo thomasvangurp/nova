@@ -1173,3 +1173,33 @@ def test_a_rolled_epoch_stops_the_wait_rather_than_committing_late(
         _commit_fleet(assignments, args=args, template="commit --uid {uid}",
                       artifact=tmp_path / "a.json", epoch=COMMIT_EPOCH,
                       pause_seconds=0)
+
+
+def test_the_fleet_does_not_pace_itself_out_of_a_tie_by_default():
+    """Ties are broken by block_submitted, earlier first.
+
+    Epoch 25096: our uid 12 scored 43.0 and so did uid 44, and we lost the
+    epoch because our fleet landed at elapsed 328-350 against their 326. The
+    old 12-second pace cost roughly eight blocks across eight uids. That pace
+    was justified by max_regs_per_block, which caps registrations, not
+    commitments -- in that same epoch uid 60 and uid 61 committed in one block.
+    """
+    assert _parser().parse_args([]).commit_pause_seconds == 0.0
+
+
+def test_the_best_ranked_sequence_gets_the_earliest_commit_block(
+    tmp_path, monkeypatch
+):
+    """Any of our tickets can be the one that ties, but the best-ranked has the
+    best chance of it, so it must not be the one that commits last."""
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    _publish_once(host.args(strict_qualification=False))
+
+    entries = json.loads(host.artifact.read_text())["submissions"]
+    blocks = [entry["commit_block"] for entry in entries]
+    assert blocks == sorted(blocks), "commit blocks are out of schedule order"
+    ranked = [c["sequence"] for c in json.loads(
+        (host.runtime / "live" / f"epoch{EPOCH}" / "provisional_rankings.json"
+         ).read_text())["candidates"]]
+    first = min(entries, key=lambda e: e["commit_block"])["sequence"]
+    assert first == ranked[0], "the earliest block did not go to the best sequence"
