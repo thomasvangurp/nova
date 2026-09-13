@@ -481,6 +481,9 @@ class _Host:
         self.unpublishable: set[str] = set()
         # Ranked candidates this epoch's Layer-2 run does not pass.
         self.layer2_failures: set[str] = set()
+        # Candidates the validator's own duplicate gates reject: >=0.95
+        # whole-sequence identity, or >=0.85 CDR3, to a top sequence.
+        self.non_novel: set[str] = set()
         runtime = root / "runtime"
         (runtime / ".pixi/envs/bgen/bin").mkdir(parents=True)
         (runtime / ".pixi/envs/bgen/bin/python").write_text("#!/bin/sh\n")
@@ -592,6 +595,13 @@ class _Host:
                     "layer2_passed": sequence not in self.layer2_failures,
                 }
                 for sequence in self.candidate_sequences
+            ]}))
+        elif "check-validator-novelty" in joined:
+            output = Path(value("--output"))
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({"sequences": [
+                sequence for sequence in self.candidate_sequences
+                if sequence not in self.non_novel
             ]}))
         elif "publish_checkpoint.py" in joined:
             if value("--sequence") in self.unpublishable:
@@ -1021,3 +1031,49 @@ def test_publication_stops_when_no_ranked_candidate_passed_layer_2(
     host.layer2_failures = set(host.candidate_sequences)
     with pytest.raises(SystemExit, match="no ranked candidate passed Layer-2"):
         _publish_once(host.args(strict_qualification=False))
+
+
+def test_a_uid_is_never_assigned_a_sequence_the_validator_calls_a_duplicate(
+    tmp_path, monkeypatch
+):
+    """Distinctness is not novelty, and this is what zero scores looked like.
+
+    utils/nanobodies.py::is_duplicate drops a UID outright at >=0.95 whole
+    sequence identity or >=0.85 CDR3 to a top sequence. Our epoch-25093 fleet
+    was 0.95-0.98 identical to the epoch-25091 rank-1 sequence, so all six
+    tickets were discarded before scoring and we appeared nowhere on the
+    leaderboard while the plumbing reported six healthy commits.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    host.non_novel = {_sequence(0), _sequence(2)}
+
+    _publish_once(host.args(strict_qualification=False))
+
+    published = {
+        entry["sequence"]
+        for entry in json.loads(host.artifact.read_text())["submissions"]
+    }
+    assert not published & host.non_novel
+    assert len(published) == 3
+
+
+def test_publication_stops_when_every_candidate_is_a_validator_duplicate(
+    tmp_path, monkeypatch
+):
+    """Committing a fleet the validator will discard is worse than not
+    committing: it spends the epoch and returns nothing."""
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1))
+    host.non_novel = set(host.candidate_sequences)
+    with pytest.raises(SystemExit, match="validator-novelty"):
+        _publish_once(host.args(strict_qualification=False))
+
+
+def test_the_novelty_gate_runs_against_the_target_archive(tmp_path, monkeypatch):
+    """It replays the validator's gates, so it needs the same archive."""
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1))
+    _publish_once(host.args(strict_qualification=False))
+
+    checks = [c for c in host.commands if "check-validator-novelty" in " ".join(c)]
+    assert checks, "the novelty gate never ran"
+    assert "--archive" in checks[0]
+    assert "--target" in checks[0]

@@ -627,6 +627,43 @@ def _layer2_command(
     ]
 
 
+def _novelty_command(
+    *,
+    pixi_manifest: Path,
+    rankings: Path,
+    archive: Path,
+    target: str,
+    output: Path,
+    pixi: Path,
+) -> list[str]:
+    """Replay the validator's own duplicate gates before we commit anything.
+
+    utils/nanobodies.py::is_duplicate drops a UID outright when any of its
+    sequences is >=0.95 identical to a top sequence for the target, or shares a
+    CDR3 at >=0.85. Local neighbourhood search produces exactly that: our six
+    epoch-25093 tickets were 0.95-0.98 identical to the epoch-25091 rank-1
+    sequence and 0.94-0.98 identical to each other, so every one of them was
+    discarded before scoring and we appeared nowhere on the leaderboard.
+    """
+    return [
+        str(pixi), "run", "--manifest-path", str(pixi_manifest),
+        "-e", "metanano", "check-validator-novelty", "--",
+        "--input", str(rankings),
+        "--archive", str(archive),
+        "--target", target,
+        "--output", str(output),
+    ]
+
+
+def _validator_novel_sequences(novelty: Path) -> set[str]:
+    """Sequences the validator's own gates would accept as novel."""
+    payload = json.loads(novelty.read_text())
+    sequences = payload.get("sequences")
+    if not isinstance(sequences, list):
+        raise SystemExit(f"{novelty} holds no novelty result list")
+    return {str(item).strip().upper() for item in sequences}
+
+
 def _current_layer2_passes(layer2: Path) -> set[str]:
     """Sequences this epoch's Layer-2 run passed, upper-cased for comparison."""
     payload = json.loads(layer2.read_text())
@@ -640,15 +677,14 @@ def _current_layer2_passes(layer2: Path) -> set[str]:
     }
 
 
-def _restrict_to_current_layer2(
-    payload: dict[str, Any], layer2: Path
+def _restrict_pool(
+    payload: dict[str, Any], allowed: set[str], *, gate: str, source: Path
 ) -> dict[str, Any]:
-    """Drop ranked candidates with no current Layer-2 pass, keeping the order.
+    """Drop ranked candidates the gate rejects, keeping win-probability order.
 
-    Win-probability order is preserved, so the ranking's own monotonicity
-    assertion still holds on the subsequence.
+    Order is preserved, so the ranking's own monotonicity assertion still holds
+    on the subsequence.
     """
-    passes = _current_layer2_passes(layer2)
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         raise SystemExit("ranking contains no candidate list")
@@ -656,17 +692,17 @@ def _restrict_to_current_layer2(
         candidate
         for candidate in candidates
         if isinstance(candidate, Mapping)
-        and str(candidate.get("sequence") or "").strip().upper() in passes
+        and str(candidate.get("sequence") or "").strip().upper() in allowed
     ]
     if not kept:
         raise SystemExit(
-            f"no ranked candidate passed Layer-2 in {layer2}: there is nothing "
+            f"no ranked candidate passed {gate} in {source}: there is nothing "
             "publishable this epoch"
         )
     if len(kept) < len(candidates):
         print(
-            f"Layer-2 pool: {len(kept)} of {len(candidates)} ranked "
-            "candidate(s) hold a current pass and are assignable",
+            f"{gate} pool: {len(kept)} of {len(candidates)} ranked "
+            "candidate(s) are assignable",
             flush=True,
         )
     return {**payload, "candidates": kept}
@@ -688,6 +724,7 @@ def _publish_fleet(
     bgen_python: Path,
     nanobody_opt_root: Path,
     staging_root: Path,
+    novelty: Path,
 ) -> tuple[dict[str, Any], list[fleet_module.Assignment]]:
     """Bind k distinct sequences to k uids and build the single fleet artifact."""
     payload = json.loads(rankings.read_text())
@@ -697,7 +734,22 @@ def _publish_fleet(
     # refused with "winner lacks a current Layer-2 pass": in epoch 25092 only
     # three of the top six passed. layer2[0] is this epoch's file; the rest are
     # historical and are not what "current" means.
-    payload = _restrict_to_current_layer2(payload, layer2[0])
+    payload = _restrict_pool(
+        payload,
+        _current_layer2_passes(layer2[0]),
+        gate="Layer-2",
+        source=layer2[0],
+    )
+    # And the validator's own duplicate gates. Distinctness is not novelty: two
+    # sequences differing by one residue are distinct and are the SAME molecule
+    # to the validator, so a fleet of near-neighbours is a fleet of one ticket
+    # that scores zero times.
+    payload = _restrict_pool(
+        payload,
+        _validator_novel_sequences(novelty),
+        gate="validator-novelty",
+        source=novelty,
+    )
     sequences = fleet_module.distinct_sequences(payload, len(crew))
     try:
         blocks = fleet_module.commitment_blocks(
@@ -1001,6 +1053,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         archive_path = epoch_root / "archive.csv"
         rankings_path = epoch_root / "provisional_rankings.json"
         current_layer2_path = epoch_root / "provisional_layer2.json"
+        novelty_path = epoch_root / "provisional_novelty.json"
         _atomic_download(CONFIG_URL, config_path)
         config = yaml.safe_load(config_path.read_text())
         configured_target = str(config["protein_selection"]["nanobody"]["target"])
@@ -1127,6 +1180,14 @@ def _publish_once(args: argparse.Namespace) -> None:
                 cache_dir=args.layer2_cache_dir,
                 pixi=args.pixi,
             ))
+            _run(_novelty_command(
+                pixi_manifest=pixi_manifest,
+                rankings=rankings_path,
+                archive=archive_path,
+                target=target,
+                output=novelty_path,
+                pixi=args.pixi,
+            ))
 
             _assert_same_epoch(args, epoch, "retrying on timer")
 
@@ -1145,6 +1206,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 bgen_python=bgen_python,
                 nanobody_opt_root=args.nanobody_opt_root,
                 staging_root=epoch_root / "checkpoints",
+                novelty=novelty_path,
             )
             _atomic_json(args.artifact, artifact)
             _report(artifact, "provisional")
@@ -1218,6 +1280,7 @@ def _publish_once(args: argparse.Namespace) -> None:
 
         qualified_rankings = epoch_root / "qualified_rankings.json"
         qualified_layer2 = epoch_root / "qualified_layer2.json"
+        qualified_novelty = epoch_root / "qualified_novelty.json"
         try:
             _run(_rank_command(
                 bgen_python=bgen_python,
@@ -1264,6 +1327,14 @@ def _publish_once(args: argparse.Namespace) -> None:
             cache_dir=args.layer2_cache_dir,
             pixi=args.pixi,
         ))
+        _run(_novelty_command(
+            pixi_manifest=pixi_manifest,
+            rankings=qualified_rankings,
+            archive=archive_path,
+            target=target,
+            output=qualified_novelty,
+            pixi=args.pixi,
+        ))
         _assert_same_epoch(args, epoch, "retaining the provisional fleet")
 
         artifact, assignments = _publish_fleet(
@@ -1281,6 +1352,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             bgen_python=bgen_python,
             nanobody_opt_root=args.nanobody_opt_root,
             staging_root=epoch_root / "checkpoints",
+            novelty=qualified_novelty,
         )
         _atomic_json(args.artifact, artifact)
         _report(artifact, "qualified")

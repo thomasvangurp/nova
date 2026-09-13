@@ -694,6 +694,37 @@
         success_msg: "Miner exports the chain view the publisher reads."
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
+    # The validator's duplicate gates are the difference between six tickets
+    # and none: a UID whose sequence is >=0.95 identical to a top sequence, or
+    # shares a CDR3 at >=0.85, is dropped before scoring. That check existed in
+    # the repository as a manual pixi task while the live publisher never
+    # called it, and every ticket we committed was discarded silently. Assert
+    # the deployed publisher runs it, against the real symbol names.
+    - name: Verify the deployed publisher replays the validator's duplicate gates
+      ansible.builtin.shell: |
+        set -eu
+        grep -q '_novelty_command(' /root/tools/publish_current_nanobody.py
+        grep -q 'check-validator-novelty' /root/tools/publish_current_nanobody.py
+        grep -q '_validator_novel_sequences(' /root/tools/publish_current_nanobody.py
+        grep -q 'def duplicate_reason' /root/nanobody_opt/check_validator_novelty.py
+        echo NOVELTY_GATE_PRESENT
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      register: novelty_gate
+
+    - name: Require a publisher that cannot commit a validator duplicate
+      ansible.builtin.assert:
+        that: "'NOVELTY_GATE_PRESENT' in novelty_gate.stdout"
+        fail_msg: >-
+          The deployed publisher does not run check-validator-novelty. Every
+          uid would commit a sequence the validator discards before scoring,
+          which looks exactly like a healthy fleet from this side: six
+          COMMIT_OK lines and no leaderboard row.
+        success_msg: "Publisher replays the validator's duplicate gates."
+      when: nanobody_publisher_activate | bool
+
     # The same check for the commit driver, and it is not redundant with the
     # miner's: commit_submission defers its imports into main(), so --help
     # exits 0 on a box where every one of them is missing. Every uid in the
