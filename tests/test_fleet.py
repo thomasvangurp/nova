@@ -354,3 +354,53 @@ def test_value_share_must_be_a_fraction():
     pool = _pool([("AAA", 0.3, 200.0)])
     with pytest.raises(ValueError, match="fraction"):
         fleet.distinct_sequences(pool, 1, value_share=1.5)
+
+
+REAL = "KWALVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDSVKGRFTSSRDNAKNSLYGQMNSLRAEDTAVYYCGVFLGAHPCPLEGEMDAFGAGTTVVVGQ"
+
+
+def _variant(base, swaps):
+    """A near-neighbour: the kind of candidate local search actually produces."""
+    out = list(base)
+    for position, residue in swaps:
+        out[position] = residue
+    return "".join(out)
+
+
+def test_a_near_duplicate_yields_to_a_separated_candidate():
+    """Two tickets closer than the limit are one ticket to the validator.
+
+    Over epochs 25093-25095 every dropped uid was 0.9685-0.9843 identical to a
+    uid that scored, while every surviving pair sat at 0.9449-0.9606: we
+    committed seven submissions and played three.
+    """
+    twin = _variant(REAL, [(2, "M")])          # one residue apart
+    far = _variant(REAL, [(i, "G") for i in range(30, 50)])
+    # The twin outranks the separated candidate on win probability.
+    pool = _pool([(REAL, 0.30, 100.0), (twin, 0.29, 101.0), (far, 0.10, 150.0)])
+
+    chosen = fleet.distinct_sequences(pool, 2)
+
+    assert REAL in chosen
+    assert far in chosen, "a one-residue neighbour outranked a real second ticket"
+    assert twin not in chosen
+
+
+def test_a_degenerate_pool_still_fills_the_fleet_with_its_most_separated():
+    """A hard floor is the wrong tool: on the epoch-25095 pool it left one
+    assignable candidate out of thirty, because the search produces one
+    molecule thirty times. Fewer tickets is worse than close tickets."""
+    twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
+             for i, aa in enumerate("MVQTA")]
+    chosen = fleet.distinct_sequences(_pool(twins), 5)
+    assert len(chosen) == 5, "the fleet went unspent over similarity"
+    assert len(set(chosen)) == 5
+
+
+def test_sequence_identity_is_conservative_against_the_validators_rule():
+    twin = _variant(REAL, [(2, "M")])
+    assert fleet.sequence_identity(REAL, twin) > 0.99
+    assert fleet.sequence_identity(REAL, REAL) == 1.0
+    assert fleet.MAXIMUM_FLEET_IDENTITY < 0.95, (
+        "the proxy needs margin under the rule it stands in for"
+    )

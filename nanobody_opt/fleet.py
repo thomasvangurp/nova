@@ -299,11 +299,39 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
 # stays because a miscalibrated estimator is worth being able to sidestep in a
 # hurry, not because the mean is what we want to buy.
 DEFAULT_VALUE_SHARE = 0.0
+
+# Two tickets closer than this are one ticket. The validator discards a
+# submission too similar to another, and measured over epochs 25093-25095 that
+# is exactly what happened to us: every dropped uid was 0.9685-0.9843 identical
+# to a uid that scored, while every surviving pair sat at 0.9449-0.9606. We
+# committed seven and played three.
+#
+# 0.93 rather than the 0.95 the rule states, because this is a positional
+# proxy: the validator aligns, and an alignment can only find MORE identity
+# than position-for-position comparison of equal-length sequences. The margin
+# is what keeps a proxy conservative.
+MAXIMUM_FLEET_IDENTITY = 0.93
+
+
+def sequence_identity(left: str, right: str) -> float:
+    """Position-for-position identity, normalised by the longer sequence.
+
+    Deliberately dependency-free: this module is imported in the chain
+    environment, which has no alignment stack.
+    """
+    if not left or not right:
+        return 0.0
+    shared = sum(1 for a, b in zip(left, right) if a == b)
+    return shared / max(len(left), len(right))
+
+
+def _closest(sequence: str, chosen: Sequence[str]) -> float:
+    return max((sequence_identity(sequence, other) for other in chosen), default=0.0)
 VALUE_KEY = "score_p90"
 
 
 def _best_by_expected_score(
-    candidates: Sequence[Any], wanted: int, taken: set[str]
+    candidates: Sequence[Any], wanted: int, taken: set[str], limit: float
 ) -> list[str]:
     """Lowest predicted p90 rank sum first; lower is better, ties keep order."""
     scored: list[tuple[float, int, str]] = []
@@ -333,6 +361,7 @@ def distinct_sequences(
     *,
     required_order: str = REQUIRED_SELECTION_ORDER,
     value_share: float = DEFAULT_VALUE_SHARE,
+    maximum_identity: float = MAXIMUM_FLEET_IDENTITY,
 ) -> list[str]:
     """Take the best ``count`` pairwise-distinct sequences from a ranking.
 
@@ -359,19 +388,41 @@ def distinct_sequences(
     seen: set[str] = set()
     # The value half first, so the fleet always holds the best expected score
     # it can see even when the pool is smaller than the fleet.
+    eligible: list[str] = []
     value_wanted = int(count * value_share)
     if value_wanted:
-        chosen.extend(_best_by_expected_score(candidates, value_wanted, seen))
+        chosen.extend(
+            _best_by_expected_score(
+                candidates, value_wanted, seen, maximum_identity
+            )
+        )
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("ranking candidates must be mappings")
         sequence = str(candidate.get("sequence") or "").strip().upper()
         if not sequence or sequence in seen:
             continue
+        eligible.append(sequence)
         seen.add(sequence)
-        chosen.append(sequence)
+    # Spread the remaining tickets. A hard similarity floor is the wrong tool
+    # here: on the epoch-25095 pool it left ONE assignable candidate out of
+    # thirty, because local neighbourhood search produces one molecule thirty
+    # times. So take the count we need and make it as separated as this pool
+    # allows -- the validator discards a submission too close to another, and
+    # over 25093-25095 that cost us four uids of seven every epoch.
+    for sequence in eligible:
         if len(chosen) == count:
             break
+        if _closest(sequence, chosen) < maximum_identity:
+            chosen.append(sequence)
+    if len(chosen) < count:
+        # Nothing far enough left: fill by farthest-first, best rank breaking
+        # ties, so the tickets we do spend are the most separated available.
+        remaining = [item for item in eligible if item not in chosen]
+        while remaining and len(chosen) < count:
+            pick = min(remaining, key=lambda item: _closest(item, chosen))
+            chosen.append(pick)
+            remaining.remove(pick)
     if not chosen:
         raise ValueError("ranking yielded no usable sequence")
     return chosen
