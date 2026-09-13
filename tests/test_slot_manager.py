@@ -673,3 +673,76 @@ def test_hotkey_creation_survives_a_signature_without_suppress():
 
     sm._create_hotkey_quietly(OldWallet())
     assert seen == {"n_words": 12, "use_password": False, "overwrite": False}
+
+
+class _Metagraph:
+    def __init__(self, coldkeys, hotkeys, stakes):
+        self.coldkeys = coldkeys
+        self.hotkeys = hotkeys
+        self.alpha_stake = stakes
+
+
+class _Subtensor:
+    def __init__(self, metagraph):
+        self._metagraph = metagraph
+
+    def metagraph(self, netuid):
+        return self._metagraph
+
+
+OURS = "5EkCwcNT"
+THEIRS = "5OtherCK"
+
+
+def test_only_our_coldkeys_holdings_are_reported():
+    subtensor = _Subtensor(_Metagraph(
+        coldkeys=[OURS, THEIRS, OURS],
+        hotkeys=["hkA", "hkB", "hkC"],
+        stakes=[2.5, 99.0, 1.5],
+    ))
+    holdings = sm.alpha_holdings(subtensor, 68, OURS)
+    assert [h["uid"] for h in holdings["holdings"]] == [0, 2]
+    assert holdings["alpha_total"] == pytest.approx(4.0)
+
+
+def test_the_report_values_the_position_and_writes_the_command():
+    holdings = {"alpha_total": 10.0,
+                "holdings": [{"uid": 1, "hotkey": "hkA", "alpha": 10.0}]}
+    report = sm.treasury_report(
+        holdings=holdings, price_tao=0.02151, netuid=68,
+        wallet_name="mining_ops", slippage=0.02, floor_alpha=1.0,
+    )
+    assert report["value_tao"] == pytest.approx(0.2151)
+    assert report["actionable"] is True
+    assert len(report["commands"]) == 1
+    assert "--amount 10.000000" in report["commands"][0]
+
+
+def test_a_conversion_command_always_carries_a_price_limit():
+    """A bare market order can fill the whole position into a thin book."""
+    command = sm.conversion_command(
+        netuid=68, hotkey="hkA", alpha=10.0, price_tao=0.02,
+        wallet_name="mining_ops", slippage=0.02,
+    )
+    assert "--price-limit 0.01960000" in command
+    assert "--tolerance 0.020" in command
+
+
+def test_a_position_below_the_floor_is_reported_but_not_actionable():
+    holdings = {"alpha_total": 0.4,
+                "holdings": [{"uid": 1, "hotkey": "hkA", "alpha": 0.4}]}
+    report = sm.treasury_report(
+        holdings=holdings, price_tao=0.02, netuid=68,
+        wallet_name="mining_ops", slippage=0.02, floor_alpha=1.0,
+    )
+    assert report["actionable"] is False
+    assert report["commands"] == []
+
+
+def test_the_agent_never_executes_the_conversion_itself():
+    """The agent reports and computes; the signature stays with the operator."""
+    import inspect
+
+    source = inspect.getsource(sm)
+    for forbidden in ("unstake(", "remove_stake(", "swap_stake(", "sell("):
+        assert forbidden not in source, f"slot_manager can execute {forbidden}"

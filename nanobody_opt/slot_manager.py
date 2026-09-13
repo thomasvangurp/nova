@@ -515,6 +515,81 @@ def _recycle_tao(subtensor: Any, netuid: int) -> float:
     return float(raw) / 1e9
 
 
+#: Alpha holdings below this are not worth a manual conversion.
+DEFAULT_ALPHA_REPORT_FLOOR = 1.0
+
+
+def alpha_holdings(subtensor: Any, netuid: int, coldkey: str) -> dict[str, Any]:
+    """Alpha accrued to our hotkeys, and what it is currently worth in tau.
+
+    Read-only. The agent reports the position and the command that would
+    convert it; the conversion itself is executed by the operator, because an
+    unattended process holding the coldkey should not be able to move the
+    treasury on its own.
+    """
+    metagraph = subtensor.metagraph(netuid)
+    coldkeys = list(metagraph.coldkeys)
+    stakes = getattr(metagraph, "alpha_stake", None)
+    if stakes is None:
+        stakes = metagraph.stake
+    holdings = []
+    total = 0.0
+    for uid, owner in enumerate(coldkeys):
+        if str(owner) != coldkey:
+            continue
+        amount = float(_scalar(stakes[uid]))
+        total += amount
+        holdings.append({
+            "uid": uid,
+            "hotkey": str(metagraph.hotkeys[uid]),
+            "alpha": amount,
+        })
+    return {"holdings": holdings, "alpha_total": total}
+
+
+def conversion_command(
+    *, netuid: int, hotkey: str, alpha: float, price_tao: float,
+    wallet_name: str, slippage: float,
+) -> str:
+    """The exact command the operator runs to convert alpha to tau.
+
+    Rendered with a limit price rather than a bare market order, so a thin
+    book cannot fill the whole position at a price nobody intended.
+    """
+    floor = price_tao * (1.0 - slippage)
+    return (
+        f"btcli stake remove --netuid {netuid} --wallet.name {wallet_name} "
+        f"--wallet.hotkey {hotkey} --amount {alpha:.6f} "
+        f"--tolerance {slippage:.3f} --price-limit {floor:.8f}"
+    )
+
+
+def treasury_report(
+    *, holdings: dict[str, Any], price_tao: float, netuid: int,
+    wallet_name: str, slippage: float, floor_alpha: float,
+) -> dict[str, Any]:
+    """What we hold, what it is worth, and the command to convert it."""
+    total = float(holdings["alpha_total"])
+    report = {
+        "kind": "treasury",
+        "alpha_total": total,
+        "alpha_price_tao": price_tao,
+        "value_tao": total * price_tao,
+        "holdings": holdings["holdings"],
+        "actionable": total >= floor_alpha,
+        "commands": [],
+    }
+    if report["actionable"]:
+        report["commands"] = [
+            conversion_command(
+                netuid=netuid, hotkey=item["hotkey"], alpha=item["alpha"],
+                price_tao=price_tao, wallet_name=wallet_name, slippage=slippage,
+            )
+            for item in holdings["holdings"] if item["alpha"] > 0
+        ]
+    return report
+
+
 def _registrations_this_interval(subtensor: Any, netuid: int) -> int:
     raw = _scalar(subtensor.query_subtensor("RegistrationsThisInterval", params=[netuid]))
     return int(raw)
