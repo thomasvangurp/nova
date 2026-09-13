@@ -88,7 +88,17 @@ RANK_QUALIFICATION_ARGUMENTS = tuple(publication_gates.gate_arguments())
 # Only rank one pays and the validator draws once, so the shortlist that decides
 # what is published must be ordered by the chance of a winning draw.
 SELECTION_ORDER = fleet_module.REQUIRED_SELECTION_ORDER
-SHORTLIST_LIMIT = 30
+# How many ranked candidates the fleet gets to choose from. Thirty was enough
+# when a fleet was one uid; with eight it is the binding constraint on distinct
+# tickets. The top thirty by win probability concentrate in one family -- 27 of
+# 30 in epoch 25099 -- so the fleet found three separated molecules and
+# committed five duplicates the validator discarded. The score bank holds
+# thousands of scored sequences; the separated families are in there, below the
+# cut. Ranking more of them is CPU work, not GPU.
+SHORTLIST_LIMIT = 300
+#: Ranked candidates per uid, so a growing fleet keeps room to find distinct
+#: molecules rather than competing for the same thirty.
+SHORTLIST_PER_UID = 50
 
 CANONICAL_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 SUPPORTED_CHAIN_STATE_SCHEMAS = frozenset({1, 2})
@@ -1195,7 +1205,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 "exact_all.json yet, so there is nothing qualified to publish"
             )
 
-        shortlist = max(SHORTLIST_LIMIT, len(crew))
+        shortlist = max(SHORTLIST_LIMIT, len(crew) * SHORTLIST_PER_UID)
         if current_qualified:
             # The provisional pass is the net that keeps an epoch from submitting
             # nothing. A qualified fleet is already live for this epoch, so the

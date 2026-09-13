@@ -24,6 +24,7 @@ from nanobody_opt import fleet, publication_gates
 from tools import publish_current_nanobody
 from tools.publish_current_nanobody import (
     COMMIT_FLEET_FAILED,
+    SHORTLIST_LIMIT,
     PUBLISH_FLEET_REJECTED,
     COMMIT_FLEET_INCOMPLETE,
     RANK_QUALIFICATION_ARGUMENTS,
@@ -679,7 +680,9 @@ def test_the_strict_pass_uses_the_shared_gates_and_win_probability(tmp_path, mon
     ):
         assert command[command.index(flag) + 1] == expected
     assert command[command.index("--selection-order") + 1] == SELECTION_ORDER
-    assert command[command.index("--limit") + 1] == "30"
+    assert command[command.index("--limit") + 1] == str(
+        max(SHORTLIST_LIMIT, len(HOTKEYS[:3]) * publish_current_nanobody.SHORTLIST_PER_UID)
+    )
     # The provisional net applies the evidence floor only, never the quality gates.
     provisional = host.ranked(strict=False)[0]
     assert "--maximum-p90-rank-sum" not in provisional
@@ -1211,3 +1214,14 @@ def test_the_reserve_opening_is_noticed_within_a_block():
     Epoch 25098 committed first at elapsed 313 against a schedule of 306, and
     epoch 25097's winner committed at 306."""
     assert publish_current_nanobody.COMMIT_WAIT_POLL_SECONDS <= 6.0
+
+
+def test_the_shortlist_scales_with_the_fleet():
+    """Thirty candidates is what a one-uid fleet needed.
+
+    With eight uids the top thirty by win probability concentrated in one
+    family -- 27 of 30 in epoch 25099 -- so the fleet found three separated
+    molecules and committed five the validator discarded.
+    """
+    assert publish_current_nanobody.SHORTLIST_LIMIT >= 300
+    assert publish_current_nanobody.SHORTLIST_PER_UID >= 20
