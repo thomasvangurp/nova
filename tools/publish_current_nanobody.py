@@ -836,6 +836,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--strict-qualification",
+        action="store_true",
+        help=(
+            "run the strict rank_exact upgrade after the provisional fleet "
+            "has committed. Off by default: it has produced no upgrade in "
+            "live operation and costs about a third of an epoch"
+        ),
+    )
+    parser.add_argument(
         "--commit-pause-seconds",
         type=float,
         default=12.0,
@@ -1068,6 +1077,29 @@ def _publish_once(args: argparse.Namespace) -> None:
                 epoch=epoch,
                 pause_seconds=args.commit_pause_seconds,
             )
+
+        if not args.strict_qualification:
+            # Cut from the live path. Six consecutive epochs produced zero
+            # qualified upgrades while the strict rank consumed roughly twenty
+            # minutes of a seventy-two minute epoch, and until the provisional
+            # commit moved ahead of it, it was the reason a published fleet
+            # reached the chain late or not at all. Run it offline against the
+            # score bank, or pass --strict-qualification to restore it.
+            print(
+                "strict qualification is disabled; the committed provisional "
+                "fleet stands for this epoch",
+                flush=True,
+            )
+            _write_publisher_state(
+                args.state,
+                epoch=epoch,
+                target=target,
+                exact_fingerprint=exact_fingerprint,
+                strict_fingerprint=strict_fingerprint,
+                ledger_fingerprint=ledger_fingerprint,
+                fleet_fingerprint=fleet_fingerprint,
+            )
+            return
 
         if _strict_state_matches(
             publisher_state,

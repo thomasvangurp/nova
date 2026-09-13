@@ -506,7 +506,7 @@ class _Host:
             "tools.publish_current_nanobody._gpu_count", lambda: 0
         )
 
-    def args(self, extra_exact=(), **overrides):
+    def args(self, extra_exact=(), strict_qualification=True, **overrides):
         arguments = [
             "--expected-gpus", "0",
             "--netuid", "68",
@@ -529,6 +529,10 @@ class _Host:
             "--layer2-cache-dir", str(self.root / "layer2_cache"),
             "--commit-pause-seconds", "0",
         ]
+        # The strict upgrade is off in production; these tests cover it, so the
+        # harness turns it on unless a test is specifically about the default.
+        if strict_qualification:
+            arguments.append("--strict-qualification")
         for path in extra_exact:
             arguments.extend(["--exact", str(path)])
         for flag, value in overrides.items():
@@ -911,3 +915,32 @@ def test_the_provisional_fleet_commits_before_the_strict_rank_runs():
     strict_rank = source.index("strict=True")
     commit = source.index("_commit_fleet(", provisional)
     assert provisional < commit < strict_rank
+
+
+def test_strict_qualification_is_off_unless_asked_for():
+    assert _parser().parse_args([]).strict_qualification is False
+
+
+def test_the_default_run_commits_the_provisional_fleet_and_skips_the_strict_rank(
+    tmp_path, monkeypatch, capsys
+):
+    """Six live epochs produced no qualified upgrade for ~20 minutes each.
+
+    With the upgrade cut, an epoch must still reach the chain once per uid --
+    and must not shell out to the strict rank at all.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    _publish_once(
+        host.args(
+            strict_qualification=False,
+            commit_command="/root/commit.sh {hotkey} {sequence} {block}",
+        )
+    )
+
+    commits = [c for c in host.commands if c[0].endswith("commit.sh")]
+    assert [c[1] for c in commits] == HOTKEYS[:3]
+    assert len({c[2] for c in commits}) == 3
+    # --pose-config is passed by the strict pass alone; the provisional pass
+    # shares every other rank flag, so it is the only honest marker here.
+    assert not [c for c in host.commands if "--pose-config" in c]
+    assert "strict qualification is disabled" in capsys.readouterr().out
