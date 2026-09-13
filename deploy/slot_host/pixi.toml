@@ -27,6 +27,11 @@ pip = "*"
 [pypi-dependencies]
 bittensor = "==10.4.1"
 async-substrate-interface = "==2.0.4"
+# The purchase host is the only machine that is always on, so it is also where
+# renting a GPU box from has to work when nobody is at a laptop. The API key
+# lives at ~/.config/vastai/vast_api_key, mode 0600, and is never read by
+# anything here.
+vastai = "*"
 
 [tasks]
 # The deploy gate runs this: it proves the chain stack imports before the timer
