@@ -12,13 +12,15 @@
 # no_log and the value reaches no command line.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# Run from ansible/: ansible.cfg lives there and every relative path below
+# -- the inventory, the profile -- is written relative to it.
+cd "$(dirname "${BASH_SOURCE[0]}")/../ansible"
 
-INVENTORY=${NOVA_INVENTORY:-ansible/inventory/vast_nanobody.py}
+INVENTORY=${NOVA_INVENTORY:-inventory/vast_nanobody.py}
 COLDKEY=${NOVA_COLDKEY_SS58:-5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ}
 TOKEN_FILE=${NOVA_GITHUB_TOKEN_FILE:-$HOME/.nova-github-token}
 PROFILE=${NOVA_PROFILE:-vars/nanobody-high-throughput.yml}
-PLAYBOOK=${1:-ansible/nanobody_services.yml}
+PLAYBOOK=${1:-nanobody_services.yml}
 
 [ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
 [ -r "$TOKEN_FILE" ] || { echo "github token file not readable: $TOKEN_FILE" >&2; exit 2; }
