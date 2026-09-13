@@ -275,6 +275,28 @@
           or leave it unset and let it glob
           {{ nanobody_hotkey_staging_dir }} after running collect_hotkeys.yml.
 
+    # An empty list is a list, and that is the hole. If collect_hotkeys.yml never
+    # ran, or ran on a controller with a different HOME, the glob returns [] --
+    # the copy loop below then has nothing to do and SKIPS without failing, and
+    # "Require at least one hotkey to publish from" is satisfied by whatever an
+    # earlier deploy left on the box. The deploy then reports "N hotkey(s)
+    # deployed" having deployed none of the ones the purchaser has since bought,
+    # which is indistinguishable from buying nothing -- the failure the whole
+    # collect-then-install sequence exists to prevent.
+    - name: Require the hotkey list to name at least one keyfile
+      ansible.builtin.assert:
+        that: nanobody_hotkey_sources | length > 0
+        fail_msg: >-
+          nanobody_hotkey_sources is empty: nothing is staged in
+          {{ nanobody_hotkey_staging_dir }} on this controller. This run would
+          install no keyfile at all and still pass its hotkey gate on whatever an
+          earlier deploy left on {{ inventory_hostname }}. Run
+          ansible/collect_hotkeys.yml first -- site.yml does it for you, and it
+          fails loudly if the purchase host holds nothing.
+        success_msg: >-
+          {{ nanobody_hotkey_sources | length }} keyfile(s) staged for install.
+      when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
     - name: Install every hotkey keyfile this fleet uses
       ansible.builtin.copy:
         src: "{{ item }}"
@@ -306,6 +328,30 @@
         success_msg: >-
           {{ installed_hotkeys.matched }} hotkey(s) available; the publisher
           resolves which of them hold uids from the chain.
+      when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
+
+    # Names only; the contents are never read back off the box. "At least one"
+    # cannot see a copy loop that partially failed, and that loop is no_log, so
+    # its own failure message says nothing useful. Compare the sets instead: a
+    # keyfile the controller staged and the box does not hold is a uid the
+    # publisher will discover from the chain and then be unable to sign for.
+    - name: Require every staged keyfile to have landed on the box
+      ansible.builtin.assert:
+        that:
+          - nanobody_hotkeys_missing | length == 0
+        fail_msg: >-
+          Staged but not present on {{ inventory_hostname }}:
+          {{ nanobody_hotkeys_missing }}. The install loop is no_log, so check
+          {{ nanobody_hotkey_staging_dir }} is readable and re-run; do not
+          activate the publisher against a partial fleet.
+        success_msg: >-
+          All {{ nanobody_hotkey_sources | length }} staged keyfile(s) are on the
+          box.
+      vars:
+        nanobody_hotkeys_missing: >-
+          {{ nanobody_hotkey_sources | map('basename') | list
+             | difference(installed_hotkeys.files
+                          | map(attribute='path') | map('basename') | list) }}
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
     - name: Refuse coldkey material on the rental
@@ -346,6 +392,42 @@
     # to it when no explicit path is passed, so it is set to the same file the
     # publisher is given as --artifact rather than left to disagree with it.
     #
+    # The lookup('file', ...) that reads the token lives inside the no_log task
+    # below, which means a wrong or unreadable path fails with its own reason
+    # suppressed -- the same shape as the copy loop that iterated the characters
+    # of a string and could not say why. Resolve the LOCATOR here, where the
+    # message survives. get_checksum/get_mime/get_attributes are off so this task
+    # does not read the file's bytes at all, and nothing about it is registered
+    # except existence and size.
+    - name: Resolve the GitHub token locator before anything no_log reads it
+      ansible.builtin.stat:
+        path: "{{ nanobody_github_token_file }}"
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: nanobody_github_token_locator
+      changed_when: false
+      when: nanobody_github_token_file | length > 0
+
+    - name: Require the GitHub token locator to point at a non-empty file
+      ansible.builtin.assert:
+        that:
+          - nanobody_github_token_locator.stat.exists
+          - nanobody_github_token_locator.stat.isreg
+          - nanobody_github_token_locator.stat.size > 0
+        fail_msg: >-
+          nanobody_github_token_file is {{ nanobody_github_token_file }}, which
+          is not a non-empty regular file on this controller. The task that reads
+          it is no_log, so lookup('file') would fail there with the reason
+          hidden. Point it at a file holding only the token for
+          {{ nanobody_submission_repo_owner }}/{{ nanobody_submission_repo_name }},
+          or leave it empty to deploy without a submission credential.
+        success_msg: "GitHub token locator resolves; its value was not read."
+      when: nanobody_github_token_file | length > 0
+
     # mode 0600 and no_log because GITHUB_TOKEN is in it.
     - name: Install the chain-side runtime configuration
       ansible.builtin.copy:
