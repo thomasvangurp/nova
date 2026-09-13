@@ -848,7 +848,12 @@ def _publish_fleet(
 
 
 BLOCK_SECONDS = 12.0
-COMMIT_WAIT_POLL_SECONDS = 20.0
+# Poll faster than the miner rewrites the chain view (~11s), so the reserve
+# opening is noticed within a block rather than two or three. Epoch 25098's
+# first commit landed at elapsed 313 against a schedule of 306, and epoch
+# 25097's winner committed at 306: the gap is polling lag, and ties go to the
+# earlier block.
+COMMIT_WAIT_POLL_SECONDS = 4.0
 PUBLISH_FLEET_REJECTED = "NANOBODY_FLEET_UID_REJECTED"
 COMMIT_FLEET_FAILED = "COMMIT_FLEET_UID_FAILED"
 COMMIT_FLEET_INCOMPLETE = "COMMIT_FLEET_INCOMPLETE"

@@ -1203,3 +1203,11 @@ def test_the_best_ranked_sequence_gets_the_earliest_commit_block(
          ).read_text())["candidates"]]
     first = min(entries, key=lambda e: e["commit_block"])["sequence"]
     assert first == ranked[0], "the earliest block did not go to the best sequence"
+
+
+def test_the_reserve_opening_is_noticed_within_a_block():
+    """The miner rewrites the chain view about every 11 seconds; polling more
+    slowly than that spends blocks discovering a reserve that already opened.
+    Epoch 25098 committed first at elapsed 313 against a schedule of 306, and
+    epoch 25097's winner committed at 306."""
+    assert publish_current_nanobody.COMMIT_WAIT_POLL_SECONDS <= 6.0
