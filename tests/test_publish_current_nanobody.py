@@ -1225,3 +1225,16 @@ def test_the_shortlist_scales_with_the_fleet():
     """
     assert publish_current_nanobody.SHORTLIST_LIMIT >= 300
     assert publish_current_nanobody.SHORTLIST_PER_UID >= 20
+
+
+def test_fleet_selection_does_not_trade_quality_for_crowd_distance():
+    """Measured on epoch 25100: 349 of 350 candidates sit within 0.95 of the
+    archive's recent tail, and the one clear candidate is the worst in the pool
+    (p90 230.0, winP 0.0043 against 108.2 and 0.0431). Avoiding the crowd would
+    lead with the worst molecule to save one ticket."""
+    import inspect
+
+    source = inspect.getsource(publish_current_nanobody._publish_fleet)
+    call = source[source.index("fleet_module.distinct_sequences("):]
+    call = call[: call.index(")") + 1]
+    assert "crowd=" not in call, "fleet selection is spending quality on crowd distance"

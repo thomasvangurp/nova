@@ -788,12 +788,18 @@ def _publish_fleet(
         gate="validator-novelty",
         source=novelty,
     )
-    # In epoch 25099 our uid 12 was 0.9528 identical to another miner's
-    # submission in the same epoch: the validator scored theirs and dropped
-    # ours. Separation among our own tickets does not see that.
-    sequences = fleet_module.distinct_sequences(
-        payload, len(crew), crowd=_recent_field_sequences(archive)
-    )
+    # Deliberately NOT crowd-aware. In epoch 25099 our uid 12 lost a duplicate
+    # collision to another miner at 0.9528, which argued for avoiding molecules
+    # the field is sitting on -- but measured against epoch 25100's pool, 349
+    # of 350 candidates are within 0.95 of the archive's recent tail and the
+    # single clear one is the WORST in the pool: p90 230.0 and win probability
+    # 0.0043, against 108.2 and 0.0431 for the best contested candidate.
+    #
+    # The whole field has converged on one family, so "uncrowded" selects for
+    # distance from what works. A collision costs one ticket; leading with the
+    # worst molecule costs the epoch. _recent_field_sequences and
+    # fleet.uncrowded are kept for when the pool is no longer degenerate.
+    sequences = fleet_module.distinct_sequences(payload, len(crew))
     try:
         blocks = fleet_module.commitment_blocks(
             epoch=epoch,
