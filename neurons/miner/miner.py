@@ -150,32 +150,9 @@ def parse_arguments() -> argparse.Namespace:
     return config
 
 
-def load_github_path() -> str:
-    """
-    Constructs the path for GitHub operations from environment variables.
-    
-    Returns:
-        str: The fully qualified GitHub path (owner/repo/branch/path).
-    Raises:
-        ValueError: If the final path exceeds 100 characters.
-    """
-    github_repo_name = os.environ.get('GITHUB_REPO_NAME')  # e.g., "nova"
-    github_repo_branch = os.environ.get('GITHUB_REPO_BRANCH')  # e.g., "main"
-    github_repo_owner = os.environ.get('GITHUB_REPO_OWNER')  # e.g., "metanova-labs"
-    github_repo_path = os.environ.get('GITHUB_REPO_PATH')  # e.g., "data/results" or ""
-
-    if github_repo_name is None or github_repo_branch is None or github_repo_owner is None:
-        raise ValueError("Missing one or more GitHub environment variables (GITHUB_REPO_*)")
-
-    if github_repo_path == "":
-        github_path = f"{github_repo_owner}/{github_repo_name}/{github_repo_branch}"
-    else:
-        github_path = f"{github_repo_owner}/{github_repo_name}/{github_repo_branch}/{github_repo_path}"
-
-    if len(github_path) > 100:
-        raise ValueError("GitHub path is too long. Please shorten it to 100 characters or less.")
-
-    return github_path
+# Moved to utils/files.py, which the commit driver already imports; a second
+# copy here would drift from the one that writes the on-chain content.
+from files import load_github_path  # noqa: E402  (re-exported for callers)
 
 
 # ----------------------------------------------------------------------------

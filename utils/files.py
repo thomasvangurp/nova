@@ -9,6 +9,38 @@ import csv
 
 load_dotenv(override=True)
 
+# Defined here rather than in the miner because the commit driver needs it
+# too, and it imports `files`, not the miner. Two copies of this would drift
+# apart silently: the value goes on-chain, and a validator that cannot fetch
+# the payload it points at scores nothing.
+def load_github_path() -> str:
+    """
+    Constructs the path for GitHub operations from environment variables.
+    
+    Returns:
+        str: The fully qualified GitHub path (owner/repo/branch/path).
+    Raises:
+        ValueError: If the final path exceeds 100 characters.
+    """
+    github_repo_name = os.environ.get('GITHUB_REPO_NAME')  # e.g., "nova"
+    github_repo_branch = os.environ.get('GITHUB_REPO_BRANCH')  # e.g., "main"
+    github_repo_owner = os.environ.get('GITHUB_REPO_OWNER')  # e.g., "metanova-labs"
+    github_repo_path = os.environ.get('GITHUB_REPO_PATH')  # e.g., "data/results" or ""
+
+    if github_repo_name is None or github_repo_branch is None or github_repo_owner is None:
+        raise ValueError("Missing one or more GitHub environment variables (GITHUB_REPO_*)")
+
+    if github_repo_path == "":
+        github_path = f"{github_repo_owner}/{github_repo_name}/{github_repo_branch}"
+    else:
+        github_path = f"{github_repo_owner}/{github_repo_name}/{github_repo_branch}/{github_repo_path}"
+
+    if len(github_path) > 100:
+        raise ValueError("GitHub path is too long. Please shorten it to 100 characters or less.")
+
+    return github_path
+
+
 def upload_file_to_github(filename: str, encoded_content: str):
     # Github configs
     github_repo_name = os.environ.get('GITHUB_REPO_NAME')   # example: nova

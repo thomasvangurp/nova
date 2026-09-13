@@ -145,3 +145,16 @@ def test_a_real_invocation_still_requires_the_submission_arguments(capsys):
     with pytest.raises(SystemExit):
         cs.main(["--uid", "1"])
     assert "--hotkey" in capsys.readouterr().err
+
+
+def test_load_github_path_has_exactly_one_definition():
+    """The value it returns is what goes on-chain.
+
+    It lived in neurons/miner/miner.py while the commit driver imported it
+    from `files`, where it did not exist -- every uid failed on ImportError
+    after the fleet was published. One definition, in the module both import.
+    """
+    root = Path(cs.__file__).resolve().parent.parent
+    marker = "def load_github_path"
+    assert marker in (root / "utils" / "files.py").read_text()
+    assert marker not in (root / "neurons" / "miner" / "miner.py").read_text()
