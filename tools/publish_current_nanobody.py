@@ -847,14 +847,49 @@ def _publish_fleet(
     return artifact, published
 
 
+BLOCK_SECONDS = 12.0
+COMMIT_WAIT_POLL_SECONDS = 20.0
 PUBLISH_FLEET_REJECTED = "NANOBODY_FLEET_UID_REJECTED"
 COMMIT_FLEET_FAILED = "COMMIT_FLEET_UID_FAILED"
 COMMIT_FLEET_INCOMPLETE = "COMMIT_FLEET_INCOMPLETE"
 
 
+def _sleep(seconds: float) -> None:
+    """Indirection so a test can advance the chain instead of real time."""
+    time.sleep(seconds)
+
+
+def _await_commit_block(
+    args: argparse.Namespace, target_block: int, epoch: int
+) -> None:
+    """Hold until the chain reaches this assignment's scheduled block.
+
+    Every scored submission in the field commits inside the end-of-epoch
+    reserve: in epoch 25093 the leaderboard's blocks_elapsed ran 306 to 344 of
+    361, and our two scored uids sat at 336 and 344 while the four we committed
+    early were not scored at all. fleet.commitment_blocks() already computes
+    that schedule; this is what honours it.
+
+    The wait is bounded by the epoch: a commitment that would land after the
+    rollover is worthless, so we stop rather than spend the next epoch's time.
+    """
+    while True:
+        chain = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
+        if chain.epoch != epoch:
+            raise SystemExit(
+                f"epoch rolled to {chain.epoch} while waiting for the "
+                f"commitment reserve of epoch {epoch}"
+            )
+        if chain.block >= target_block:
+            return
+        remaining = target_block - chain.block
+        _sleep(min(BLOCK_SECONDS * remaining, COMMIT_WAIT_POLL_SECONDS))
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
+    args: argparse.Namespace,
     template: str | None,
     artifact: Path,
     epoch: int,
@@ -882,6 +917,8 @@ def _commit_fleet(
             )
             for part in shlex.split(template)
         ]
+        # The schedule, not a fixed delay: one block apart INSIDE the reserve.
+        _await_commit_block(args, assignment.commit_block, epoch)
         if index and pause_seconds > 0:
             time.sleep(pause_seconds)
         try:
@@ -1218,6 +1255,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             # rate limit allows, and is a harmless no-op when it does not.
             _commit_fleet(
                 assignments,
+                args=args,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1271,6 +1309,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             )
             _commit_fleet(
                 assignments,
+                args=args,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1312,6 +1351,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             )
             _commit_fleet(
                 assignments,
+                args=args,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1368,6 +1408,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         )
         _commit_fleet(
             assignments,
+            args=args,
             template=args.commit_command,
             artifact=args.artifact,
             epoch=epoch,

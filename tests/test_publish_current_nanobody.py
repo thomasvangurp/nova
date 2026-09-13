@@ -5,6 +5,7 @@ the file the real program would have written, so the whole publication path --
 discovery, ordering, distinctness, the single artifact, the ledger -- is
 exercised without a host.
 """
+import argparse
 import inspect
 import json
 import subprocess
@@ -484,6 +485,18 @@ class _Host:
         # Candidates the validator's own duplicate gates reject: >=0.95
         # whole-sequence identity, or >=0.85 CDR3, to a top sequence.
         self.non_novel: set[str] = set()
+        # The publisher now waits for each uid's scheduled block inside the
+        # end-of-epoch reserve, so the fake clock advances the chain instead of
+        # sleeping: the waiting logic runs for real, the test does not.
+        self.blocks_waited = 0
+
+        def advance(seconds):
+            self.blocks_waited += 1
+            state = json.loads(self.chain_state.read_text())
+            state["block"] += max(1, int(seconds // 12) or 1)
+            self.chain_state.write_text(json.dumps(state))
+
+        monkeypatch.setattr(publish_current_nanobody, "_sleep", advance)
         runtime = root / "runtime"
         (runtime / ".pixi/envs/bgen/bin").mkdir(parents=True)
         (runtime / ".pixi/envs/bgen/bin/python").write_text("#!/bin/sh\n")
@@ -868,6 +881,23 @@ def test_publication_still_refuses_when_there_is_no_evidence_at_all(tmp_path):
     assert "no exact score-bank inputs found under" in source
 
 
+
+COMMIT_EPOCH = 25_087
+RESERVE_START = EPOCH_LENGTH * COMMIT_EPOCH + EPOCH_LENGTH - 55
+
+
+def _commit_args(tmp_path, block):
+    """Minimal namespace for a direct _commit_fleet call: it reads the chain
+    view to know when each uid's reserve block has arrived."""
+    state = _chain_state(
+        tmp_path / "chain_state.json", epoch=COMMIT_EPOCH, block=block,
+        neurons=_neurons(),
+    )
+    return argparse.Namespace(
+        chain_state=state, netuid=68, maximum_chain_state_age=600.0
+    )
+
+
 def test_one_uid_s_commit_failure_does_not_cost_the_rest_of_the_fleet(
     monkeypatch, capsys, tmp_path
 ):
@@ -878,8 +908,8 @@ def test_one_uid_s_commit_failure_does_not_cost_the_rest_of_the_fleet(
     """
     assignments = [
         fleet.Assignment(uid=uid, hotkey=f"5Hotkey{uid}", sequence="Q" * 120,
-                         commit_block=9_000_000 + uid)
-        for uid in (1, 40, 46, 51)
+                         commit_block=RESERVE_START + index)
+        for index, uid in enumerate((1, 40, 46, 51))
     ]
     attempted: list[str] = []
 
@@ -891,9 +921,10 @@ def test_one_uid_s_commit_failure_does_not_cost_the_rest_of_the_fleet(
     monkeypatch.setattr("tools.publish_current_nanobody._run", fake_run)
     _commit_fleet(
         assignments,
+        args=_commit_args(tmp_path, RESERVE_START + 10),
         template="commit --uid {uid} --hotkey {hotkey} --sequence {sequence}",
         artifact=tmp_path / "artifact.json",
-        epoch=25_087,
+        epoch=COMMIT_EPOCH,
         pause_seconds=0,
     )
 
@@ -908,17 +939,18 @@ def test_a_fully_successful_fleet_commit_reports_no_failure(
 ):
     assignments = [
         fleet.Assignment(uid=uid, hotkey=f"5Hotkey{uid}", sequence="Q" * 120,
-                         commit_block=9_000_000 + uid)
-        for uid in (1, 40)
+                         commit_block=RESERVE_START + index)
+        for index, uid in enumerate((1, 40))
     ]
     monkeypatch.setattr(
         "tools.publish_current_nanobody._run", lambda command: None
     )
     _commit_fleet(
         assignments,
+        args=_commit_args(tmp_path, RESERVE_START + 10),
         template="commit --uid {uid}",
         artifact=tmp_path / "artifact.json",
-        epoch=25_087,
+        epoch=COMMIT_EPOCH,
         pause_seconds=0,
     )
     assert COMMIT_FLEET_INCOMPLETE not in capsys.readouterr().err
@@ -1077,3 +1109,67 @@ def test_the_novelty_gate_runs_against_the_target_archive(tmp_path, monkeypatch)
     assert checks, "the novelty gate never ran"
     assert "--archive" in checks[0]
     assert "--target" in checks[0]
+
+
+def test_no_uid_commits_before_its_scheduled_reserve_block(tmp_path, monkeypatch):
+    """Every scored submission in the field commits inside the reserve.
+
+    Epoch 25093's leaderboard ran blocks_elapsed 306-344 of 361 across the
+    whole field; our two scored uids sat at 336 and 344 and the four we
+    committed early were not scored at all. fleet.commitment_blocks() already
+    computed that schedule -- _commit_fleet fired immediately and ignored it.
+    """
+    assignments = [
+        fleet.Assignment(uid=uid, hotkey=f"5Hotkey{uid}", sequence="Q" * 120,
+                         commit_block=RESERVE_START + index)
+        for index, uid in enumerate((1, 40, 46))
+    ]
+    # Chain sits well before the reserve, as it does when the cycle finishes early.
+    args = _commit_args(tmp_path, EPOCH_LENGTH * COMMIT_EPOCH + 17)
+    seen = []
+
+    def advance(seconds):
+        state = json.loads(args.chain_state.read_text())
+        state["block"] += max(1, int(seconds // 12))
+        args.chain_state.write_text(json.dumps(state))
+
+    def record(command):
+        seen.append(json.loads(args.chain_state.read_text())["block"])
+
+    monkeypatch.setattr(publish_current_nanobody, "_sleep", advance)
+    monkeypatch.setattr(publish_current_nanobody, "_run", record)
+
+    _commit_fleet(assignments, args=args, template="commit --uid {uid}",
+                  artifact=tmp_path / "a.json", epoch=COMMIT_EPOCH,
+                  pause_seconds=0)
+
+    assert len(seen) == 3
+    for block, assignment in zip(seen, assignments):
+        assert block >= assignment.commit_block, "committed before the reserve"
+        assert block < EPOCH_LENGTH * (COMMIT_EPOCH + 1), "committed after rollover"
+
+
+def test_a_rolled_epoch_stops_the_wait_rather_than_committing_late(
+    tmp_path, monkeypatch
+):
+    """A commitment landing after the rollover is worthless, not merely late."""
+    assignments = [
+        fleet.Assignment(uid=1, hotkey="5Hotkey1", sequence="Q" * 120,
+                         commit_block=RESERVE_START)
+    ]
+    args = _commit_args(tmp_path, EPOCH_LENGTH * COMMIT_EPOCH + 17)
+
+    def jump(seconds):
+        state = json.loads(args.chain_state.read_text())
+        state["block"] = EPOCH_LENGTH * (COMMIT_EPOCH + 1) + 5
+        state["epoch"] = COMMIT_EPOCH + 1
+        args.chain_state.write_text(json.dumps(state))
+
+    monkeypatch.setattr(publish_current_nanobody, "_sleep", jump)
+    monkeypatch.setattr(publish_current_nanobody, "_run",
+                        lambda c: pytest.fail("committed into the wrong epoch"))
+
+    with pytest.raises(SystemExit, match="epoch rolled"):
+        _commit_fleet(assignments, args=args, template="commit --uid {uid}",
+                      artifact=tmp_path / "a.json", epoch=COMMIT_EPOCH,
+                      pause_seconds=0)
