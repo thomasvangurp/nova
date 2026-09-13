@@ -102,6 +102,21 @@ def _prepare_epoch(
     return config, archive, target
 
 
+def _looks_exhausted(iteration_root: Path) -> bool:
+    """Whether this iteration failed because the neighbourhood is used up.
+
+    Saturation and breakage both surface as a non-zero exit, and only one of them
+    is worth retrying. The generator prints a marker for the first; anything else
+    keeps the existing retry behaviour, because a real fault should not silently
+    end an epoch's generation.
+    """
+    from nanobody_opt.local_neighborhood import EXHAUSTED_SUFFIX
+
+    # A sidecar file, because the producer streams child output to its own
+    # terminal instead of capturing it -- there is no log here to grep.
+    return (iteration_root / ("candidates.csv" + EXHAUSTED_SUFFIX)).is_file()
+
+
 def _run_iteration(
     *,
     args: argparse.Namespace,
@@ -572,6 +587,8 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _parser().parse_args()
     completed_iterations: dict[int, int] = {}
+    #: Epochs whose neighbourhood is used up; generation stops, replication continues.
+    exhausted_epochs: set[int] = set()
     while True:
         try:
             state = _chain_state(args.chain_state, args.maximum_chain_state_age)
@@ -583,6 +600,22 @@ def main() -> None:
                     flush=True,
                 )
             else:
+                if epoch in exhausted_epochs:
+                    # The neighbourhood is used up for this epoch. Generating
+                    # again would exclude everything already proposed and come
+                    # back empty, which is how this span was spent at 0% GPU
+                    # before: 43 iterations into a basin with 13,504 candidates
+                    # already excluded. Wait for the reserve and let replication
+                    # have the rest of the epoch -- eight observations take
+                    # reliability from 0.16 to 0.61, and a forty-fourth pass
+                    # takes it nowhere.
+                    print(
+                        f"PRODUCER_EXHAUSTED epoch={epoch} offset={offset}; "
+                        "generation complete, leaving the epoch to replication",
+                        flush=True,
+                    )
+                    time.sleep(args.poll_seconds)
+                    continue
                 iteration = completed_iterations.get(epoch, 0) + 1
                 print(
                     f"PRODUCER_ITERATION epoch={epoch} offset={offset} "
@@ -604,6 +637,8 @@ def main() -> None:
                     })
                     completed_iterations[epoch] = iteration
                     print(f"PRODUCER_ITERATION_FAILED {error}", flush=True)
+                    if _looks_exhausted(failure.parent):
+                        exhausted_epochs.add(epoch)
                 else:
                     completed_iterations[epoch] = iteration
             if args.once:

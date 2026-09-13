@@ -841,6 +841,13 @@ def interleave_novel_lane(
 #: of magnitude larger) without it expiring.
 EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE = 20
 
+#: Printed when a seed's neighbourhood cannot supply the requested novel
+#: candidates. The caller treats it as "stop generating", never as an error.
+EXHAUSTED_MARKER = "NEIGHBOURHOOD_EXHAUSTED"
+
+#: Sidecar written beside --output when the neighbourhood is used up.
+EXHAUSTED_SUFFIX = ".exhausted.json"
+
 
 def exhaustive_singles_ceiling(
     configured: int | None, proposal_limit: int
@@ -1019,6 +1026,10 @@ def main() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
+
+    #: Seeds whose neighbourhood could not supply the requested novel candidates.
+    #: Collected rather than raised on, so one saturated seed does not end the run.
+    exhausted_seeds: list[str] = []
     for name in (
         "recent", "seed_count", "minimum_seeds", "per_seed", "donor_count",
         "min_support", "proposal_limit",
@@ -1442,11 +1453,39 @@ def main() -> None:
                 stochastic_accepted += 1
 
         if stochastic_accepted < args.per_seed:
-            raise SystemExit(
-                f"only generated {stochastic_accepted}/{args.per_seed} "
-                "stochastic candidates for seed "
-                f"with selection score {parent_score:.1f}"
+            # Saturation, not breakage. Every iteration excludes the candidates
+            # of all previous iterations, so a neighbourhood that has been
+            # revisited enough times simply runs out of novel molecules within
+            # one mutation of its seeds -- there is no twelfth sequence left to
+            # propose. Observed live at 43 iterations in one epoch with 13,504
+            # candidates already excluded, which is what a fast scorer plus a
+            # small per-iteration budget produces.
+            #
+            # Failing here made the producer retry, so it spun on a full
+            # neighbourhood at 0% GPU for the rest of the epoch. The remaining
+            # time is worth far more spent replicating what we already have:
+            # reliability goes 0.16 -> 0.61 across eight observations, while a
+            # forty-fourth pass over an exhausted basin adds nothing.
+            exhausted_seeds.append(
+                f"{stochastic_accepted}/{args.per_seed} at score {parent_score:.1f}"
             )
+
+    if exhausted_seeds:
+        # A sidecar FILE, not only a printed marker: the producer streams child
+        # output straight to its terminal rather than capturing it, so a caller
+        # has nothing to grep. A file beside the output is the only signal that
+        # survives.
+        print(
+            f"{EXHAUSTED_MARKER} {len(exhausted_seeds)} seed(s) short: "
+            + "; ".join(exhausted_seeds[:4]),
+            flush=True,
+        )
+        exhausted_path = Path(str(args.output) + EXHAUSTED_SUFFIX)
+        exhausted_path.parent.mkdir(parents=True, exist_ok=True)
+        exhausted_path.write_text(
+            json.dumps({"seeds_short": exhausted_seeds, "per_seed": args.per_seed},
+                       indent=2, sort_keys=True)
+        )
 
     base_scores = {node.sequence: node.score for node in mutation_network.nodes}
     basin_representatives: dict[str, tuple[
