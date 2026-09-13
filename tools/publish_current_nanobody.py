@@ -746,6 +746,37 @@ def _recent_field_sequences(archive: Path, rows: int = FIELD_CROWD_ROWS) -> list
     return list(tail)
 
 
+def _cdr_command(
+    *, pixi_manifest: Path, rankings: Path, output: Path, pixi: Path
+) -> list[str]:
+    """Annotate the ranked pool with CDRs so the fleet can avoid a clonotype.
+
+    Whole-sequence identity is the coarse tier of the validator's duplicate
+    rule and not the one that binds a fleet drawn from one lineage: epoch
+    25100's seven tickets were all below 0.95 to one another and five were
+    discarded anyway, on CDR3s one or two residues apart in seventeen.
+    """
+    return [
+        str(pixi), "run", "--manifest-path", str(pixi_manifest),
+        "-e", "metanano", "annotate-cdrs", "--",
+        "--input", str(rankings),
+        "--output", str(output),
+    ]
+
+
+def _annotated_cdrs(path: Path) -> dict[str, dict[str, str]]:
+    """CDRs by sequence, or nothing if the annotation is unavailable.
+
+    Missing annotation degrades to identity-only separation, which is what we
+    had before; it must never stop an epoch from publishing.
+    """
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        return {}
+    cdrs = payload.get("cdrs")
+    return cdrs if isinstance(cdrs, dict) else {}
+
+
 def _publish_fleet(
     *,
     args: argparse.Namespace,
@@ -763,6 +794,7 @@ def _publish_fleet(
     nanobody_opt_root: Path,
     staging_root: Path,
     novelty: Path,
+    cdr_annotations: Path,
 ) -> tuple[dict[str, Any], list[fleet_module.Assignment]]:
     """Bind k distinct sequences to k uids and build the single fleet artifact."""
     payload = json.loads(rankings.read_text())
@@ -799,7 +831,9 @@ def _publish_fleet(
     # distance from what works. A collision costs one ticket; leading with the
     # worst molecule costs the epoch. _recent_field_sequences and
     # fleet.uncrowded are kept for when the pool is no longer degenerate.
-    sequences = fleet_module.distinct_sequences(payload, len(crew))
+    sequences = fleet_module.distinct_sequences(
+        payload, len(crew), cdrs=_annotated_cdrs(cdr_annotations)
+    )
     try:
         blocks = fleet_module.commitment_blocks(
             epoch=epoch,
@@ -1152,6 +1186,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         rankings_path = epoch_root / "provisional_rankings.json"
         current_layer2_path = epoch_root / "provisional_layer2.json"
         novelty_path = epoch_root / "provisional_novelty.json"
+        cdr_path = epoch_root / "provisional_cdrs.json"
         _atomic_download(CONFIG_URL, config_path)
         config = yaml.safe_load(config_path.read_text())
         configured_target = str(config["protein_selection"]["nanobody"]["target"])
@@ -1286,6 +1321,12 @@ def _publish_once(args: argparse.Namespace) -> None:
                 output=novelty_path,
                 pixi=args.pixi,
             ))
+            _run(_cdr_command(
+                pixi_manifest=pixi_manifest,
+                rankings=rankings_path,
+                output=cdr_path,
+                pixi=args.pixi,
+            ))
 
             _assert_same_epoch(args, epoch, "retrying on timer")
 
@@ -1305,6 +1346,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 nanobody_opt_root=args.nanobody_opt_root,
                 staging_root=epoch_root / "checkpoints",
                 novelty=novelty_path,
+                cdr_annotations=cdr_path,
             )
             _atomic_json(args.artifact, artifact)
             _report(artifact, "provisional")
@@ -1381,6 +1423,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         qualified_rankings = epoch_root / "qualified_rankings.json"
         qualified_layer2 = epoch_root / "qualified_layer2.json"
         qualified_novelty = epoch_root / "qualified_novelty.json"
+        qualified_cdrs = epoch_root / "qualified_cdrs.json"
         try:
             _run(_rank_command(
                 bgen_python=bgen_python,
@@ -1436,6 +1479,12 @@ def _publish_once(args: argparse.Namespace) -> None:
             output=qualified_novelty,
             pixi=args.pixi,
         ))
+        _run(_cdr_command(
+            pixi_manifest=pixi_manifest,
+            rankings=qualified_rankings,
+            output=qualified_cdrs,
+            pixi=args.pixi,
+        ))
         _assert_same_epoch(args, epoch, "retaining the provisional fleet")
 
         artifact, assignments = _publish_fleet(
@@ -1454,6 +1503,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             nanobody_opt_root=args.nanobody_opt_root,
             staging_root=epoch_root / "checkpoints",
             novelty=qualified_novelty,
+            cdr_annotations=qualified_cdrs,
         )
         _atomic_json(args.artifact, artifact)
         _report(artifact, "qualified")

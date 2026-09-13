@@ -335,6 +335,57 @@ def sequence_identity(left: str, right: str) -> float:
     return shared / max(len(left), len(right))
 
 
+#: The validator's clonotype rule, mirrored from utils/nanobodies.py
+#: ``is_duplicate``. Whole-sequence identity is the coarse tier; these are the
+#: ones that actually bound a fleet drawn from one lineage.
+CDR3_DUPLICATE_SIMILARITY = 0.85
+CDR3_WITH_CONSERVED_FRAMEWORK = 0.80
+CONSERVED_CDR_SIMILARITY = 0.90
+
+
+def _region_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    shared = sum(1 for a, b in zip(left, right) if a == b)
+    return shared / max(len(left), len(right))
+
+
+def same_clonotype(
+    left: Mapping[str, str] | None, right: Mapping[str, str] | None
+) -> bool:
+    """Whether the validator would call these two submissions one molecule.
+
+    Epoch 25100 committed seven tickets all below 0.95 whole-sequence identity
+    and lost five of them: their CDR3s were one or two residues apart in
+    seventeen, so every pair sat above 0.85 and the validator kept two.
+    """
+    if not left or not right:
+        return False
+    cdr3 = _region_similarity(left.get("cdr3", ""), right.get("cdr3", ""))
+    if cdr3 >= CDR3_DUPLICATE_SIMILARITY:
+        return True
+    return (
+        cdr3 >= CDR3_WITH_CONSERVED_FRAMEWORK
+        and _region_similarity(left.get("cdr1", ""), right.get("cdr1", ""))
+        >= CONSERVED_CDR_SIMILARITY
+        and _region_similarity(left.get("cdr2", ""), right.get("cdr2", ""))
+        >= CONSERVED_CDR_SIMILARITY
+    )
+
+
+def _clashes(
+    sequence: str,
+    chosen: Sequence[str],
+    cdrs: Mapping[str, Mapping[str, str]],
+    limit: float,
+) -> bool:
+    """True when this sequence is a duplicate of something already chosen."""
+    if _closest(sequence, chosen) >= limit:
+        return True
+    mine = cdrs.get(sequence)
+    return any(same_clonotype(mine, cdrs.get(other)) for other in chosen)
+
+
 def _closest(sequence: str, chosen: Sequence[str]) -> float:
     return max((sequence_identity(sequence, other) for other in chosen), default=0.0)
 
@@ -371,7 +422,11 @@ VALUE_KEY = "score_p90"
 
 
 def _best_by_expected_score(
-    candidates: Sequence[Any], wanted: int, taken: set[str], limit: float
+    candidates: Sequence[Any],
+    wanted: int,
+    taken: set[str],
+    limit: float,
+    cdrs: Mapping[str, Mapping[str, str]],
 ) -> list[str]:
     """Lowest predicted p90 rank sum first; lower is better, ties keep order."""
     scored: list[tuple[float, int, str]] = []
@@ -391,7 +446,7 @@ def _best_by_expected_score(
         # The value half is chosen on expected score alone, but two molecules
         # the validator calls the same are still one ticket: without this the
         # best two by p90 were 0.9921 apart and the second scored nothing.
-        if _closest(sequence, taken) >= limit:
+        if _clashes(sequence, sorted(taken), cdrs, limit):
             continue
         taken.add(sequence)
         chosen.append(sequence)
@@ -408,6 +463,7 @@ def distinct_sequences(
     value_share: float = DEFAULT_VALUE_SHARE,
     maximum_identity: float = MAXIMUM_FLEET_IDENTITY,
     crowd: Sequence[str] = (),
+    cdrs: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[str]:
     """Take the best ``count`` pairwise-distinct sequences from a ranking.
 
@@ -435,12 +491,13 @@ def distinct_sequences(
     # The value half first, so the fleet always holds the best expected score
     # it can see even when the pool is smaller than the fleet.
     eligible: list[str] = []
+    cdrs = dict(cdrs or {})
     crowd = [str(item).strip().upper() for item in crowd if item]
     value_wanted = int(count * value_share)
     if value_wanted:
         chosen.extend(
             _best_by_expected_score(
-                candidates, value_wanted, seen, VALIDATOR_DUPLICATE_IDENTITY
+                candidates, value_wanted, seen, VALIDATOR_DUPLICATE_IDENTITY, cdrs
             )
         )
     for candidate in candidates:
@@ -470,7 +527,7 @@ def distinct_sequences(
                 break
             if sequence in chosen:
                 continue
-            if _closest(sequence, chosen) < maximum_identity:
+            if not _clashes(sequence, chosen, cdrs, maximum_identity):
                 chosen.append(sequence)
     if len(chosen) < count:
         # Fill farthest-first, but never past the line the validator dedupes
@@ -482,7 +539,7 @@ def distinct_sequences(
         remaining = [item for item in eligible if item not in chosen]
         while remaining and len(chosen) < count:
             pick = min(remaining, key=lambda item: _closest(item, chosen))
-            if _closest(pick, chosen) >= VALIDATOR_DUPLICATE_IDENTITY:
+            if _clashes(pick, chosen, cdrs, VALIDATOR_DUPLICATE_IDENTITY):
                 break
             chosen.append(pick)
             remaining.remove(pick)

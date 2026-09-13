@@ -494,6 +494,9 @@ class _Host:
         # Candidates the validator's own duplicate gates reject: >=0.95
         # whole-sequence identity, or >=0.85 CDR3, to a top sequence.
         self.non_novel: set[str] = set()
+        # CDRs the annotator would report. Distinct per candidate by default,
+        # so the harness does not silently make every ticket one clonotype.
+        self.clonotypes: dict[str, str] = {}
         # The publisher now waits for each uid's scheduled block inside the
         # end-of-epoch reserve, so the fake clock advances the chain instead of
         # sleeping: the waiting logic runs for real, the test does not.
@@ -570,6 +573,10 @@ class _Host:
             arguments.extend([f"--{flag.replace('_', '-')}", str(value)])
         return _parser().parse_args(arguments)
 
+    def cdrs_for(self, sequence):
+        cdr3 = self.clonotypes.get(sequence, sequence[20:37])
+        return {"cdr1": sequence[2:12], "cdr2": sequence[12:20], "cdr3": cdr3}
+
     def download(self, url, destination):
         destination.parent.mkdir(parents=True, exist_ok=True)
         if url.endswith("config.yaml"):
@@ -618,6 +625,13 @@ class _Host:
                 }
                 for sequence in self.candidate_sequences
             ]}))
+        elif "annotate-cdrs" in joined:
+            output = Path(value("--output"))
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({"cdrs": {
+                sequence: self.cdrs_for(sequence)
+                for sequence in self.candidate_sequences
+            }}))
         elif "check-validator-novelty" in joined:
             output = Path(value("--output"))
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -1246,3 +1260,26 @@ def test_fleet_selection_does_not_trade_quality_for_crowd_distance():
     call = source[source.index("fleet_module.distinct_sequences("):]
     call = call[: call.index(")") + 1]
     assert "crowd=" not in call, "fleet selection is spending quality on crowd distance"
+
+
+def test_the_fleet_never_commits_two_tickets_of_one_clonotype(tmp_path, monkeypatch):
+    """Epoch 25100 committed seven tickets all below 0.95 whole-sequence
+    identity and lost five: every CDR3 was one or two residues from another."""
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    shared = "AVFLGAHPCPLEGEMDA"
+    for sequence in host.candidate_sequences[:4]:
+        host.clonotypes[sequence] = shared
+
+    _publish_once(host.args(strict_qualification=False))
+
+    entries = json.loads(host.artifact.read_text())["submissions"]
+    used = [host.cdrs_for(e["sequence"])["cdr3"] for e in entries]
+    assert used.count(shared) <= 1, "two uids spent on one clonotype"
+
+
+def test_the_publisher_annotates_cdrs_before_choosing(tmp_path, monkeypatch):
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1))
+    _publish_once(host.args(strict_qualification=False))
+    assert [c for c in host.commands if "annotate-cdrs" in " ".join(c)], (
+        "the fleet chose without knowing any clonotype"
+    )

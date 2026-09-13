@@ -464,3 +464,39 @@ def test_the_fallback_never_commits_a_certain_duplicate():
 def test_the_fleet_threshold_sits_just_under_the_validators_line():
     assert fleet.MAXIMUM_FLEET_IDENTITY < fleet.VALIDATOR_DUPLICATE_IDENTITY
     assert fleet.VALIDATOR_DUPLICATE_IDENTITY == 0.95
+
+
+CDR_A = {"cdr1": "GFTASRGWYG", "cdr2": "ISSSGSTWM", "cdr3": "AVFLGAHPCPLEGEMDA"}
+CDR_B = {"cdr1": "GFTASRGWYG", "cdr2": "ISSSGSTWM", "cdr3": "AVSLGAHPCPLEGEMDA"}
+CDR_FAR = {"cdr1": "GRTFSSYAMG", "cdr2": "AISWSGGSTY", "cdr3": "AADRWGQPRYYDY"}
+
+
+def test_two_tickets_of_one_clonotype_are_one_ticket():
+    """Epoch 25100's seven tickets were all below 0.95 whole-sequence identity
+    and five were still discarded: their CDR3s were one or two residues apart
+    in seventeen, every pair above the 0.85 clonotype line."""
+    assert fleet.same_clonotype(CDR_A, CDR_B)
+    assert not fleet.same_clonotype(CDR_A, CDR_FAR)
+
+
+def test_selection_refuses_a_second_ticket_of_the_same_clonotype():
+    first = _variant(REAL, [(30, "K")])
+    twin = _variant(REAL, [(i, "K") for i in range(30, 38)])   # far by identity
+    far = _variant(REAL, [(i, "G") for i in range(30, 50)])
+    pool = _pool([(first, 0.30, 100.0), (twin, 0.29, 101.0), (far, 0.10, 150.0)])
+    cdrs = {first: CDR_A, twin: CDR_B, far: CDR_FAR}
+
+    chosen = fleet.distinct_sequences(pool, 3, cdrs=cdrs)
+
+    assert first in chosen
+    assert far in chosen
+    assert twin not in chosen, "a second ticket of the same clonotype was spent"
+
+
+def test_an_unannotated_candidate_falls_back_to_identity_alone():
+    """A sequence the annotator could not read must not silently pass every
+    clonotype check, nor block the fleet."""
+    a = _variant(REAL, [(30, "K")])
+    b = _variant(REAL, [(i, "G") for i in range(30, 50)])
+    pool = _pool([(a, 0.3, 100.0), (b, 0.2, 110.0)])
+    assert len(fleet.distinct_sequences(pool, 2, cdrs={})) == 2
