@@ -20,12 +20,60 @@
     slot_manager_hotkey_prefix: nova68-slot
 
   tasks:
+    # nanobody_services.yml globs this directory to build its install list. An
+    # unset HOME would make that glob '/*' and the install loop would iterate
+    # over the root of the controller's filesystem, so the locator is checked
+    # before anything is written into it.
+    - name: Require a resolvable staging location
+      ansible.builtin.assert:
+        that:
+          - (lookup('env', 'HOME') | default('', true)) | length > 0
+          - hotkey_staging_dir is match('^/')
+          - (hotkey_staging_dir | dirname) != '/'
+        fail_msg: >-
+          HOME is not set on the controller, so the hotkey staging directory
+          would resolve to {{ hotkey_staging_dir }}. The GPU plays glob that
+          directory to build their install list; a glob rooted at / would
+          iterate over the filesystem root inside a no_log copy loop.
+      run_once: true
+      delegate_to: localhost
+
+    # BEFORE the fetch, not after. ansible.builtin.fetch creates a missing
+    # destination directory with the controller's umask -- 0755 in a normal
+    # shell -- so a directory made private afterwards is private only from the
+    # moment the whole play succeeds, and not at all if it aborts in between.
+    - name: Create the staging directory private, before anything is written into it
+      ansible.builtin.file:
+        path: "{{ hotkey_staging_dir }}"
+        state: directory
+        mode: "0700"
+      run_once: true
+      delegate_to: localhost
+
     - name: Find the hotkeys the purchaser has created
       ansible.builtin.find:
         paths: "{{ ansible_env.HOME }}/.bittensor/wallets/{{ slot_manager_wallet }}/hotkeys"
         patterns: "{{ slot_manager_hotkey_prefix }}*"
         file_type: file
       register: purchased_hotkeys
+
+    # Zero files is not a quiet success. A wrong wallet name or a renamed prefix
+    # makes this play stage nothing, and the GPU plays then pass their hotkey
+    # gate on whatever a previous deploy left on the box -- green, while the
+    # fleet the purchaser is building never reaches the publisher.
+    - name: Require the purchase host to hold at least one hotkey
+      ansible.builtin.assert:
+        that: purchased_hotkeys.matched | int > 0
+        fail_msg: >-
+          No file matching {{ slot_manager_hotkey_prefix }}* exists under
+          {{ ansible_env.HOME }}/.bittensor/wallets/{{ slot_manager_wallet }}/hotkeys
+          on {{ inventory_hostname }}. Either the purchaser has bought nothing
+          yet, or slot_manager_wallet/slot_manager_hotkey_prefix here disagree
+          with the ones ansible/slots.yml deploys the agent with. Staging
+          nothing silently is the failure this play exists to prevent.
+        success_msg: >-
+          {{ purchased_hotkeys.matched }} hotkey file(s) found on
+          {{ inventory_hostname }}.
 
     - name: Report what the fleet currently holds
       ansible.builtin.debug:
@@ -36,27 +84,60 @@
 
     # fetch, not synchronize: the private halves should be written by a task that
     # can be told to keep quiet about what it moved.
+    #
+    # fetch takes no `mode`. It accepts one without complaint and ignores it --
+    # verified: a fetch with mode 0600 writes 0644 -- so the permission is set
+    # by the task after this one rather than claimed here and not applied.
     - name: Stage them on the controller
       ansible.builtin.fetch:
         src: "{{ item.path }}"
         dest: "{{ hotkey_staging_dir }}/"
         flat: true
-        mode: "0600"
       loop: "{{ purchased_hotkeys.files }}"
       loop_control:
         label: "{{ item.path | basename }}"
       no_log: true
 
-    - name: Keep the staging directory private
+    # Names, not contents: the basenames are already printed above.
+    - name: Make every staged keyfile readable only by its owner
       ansible.builtin.file:
-        path: "{{ hotkey_staging_dir }}"
-        state: directory
-        mode: "0700"
+        path: "{{ hotkey_staging_dir }}/{{ item.path | basename }}"
+        mode: "0600"
+        state: file
+      loop: "{{ purchased_hotkeys.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
       delegate_to: localhost
+
+    - name: Read back the staged permissions
+      ansible.builtin.find:
+        paths: "{{ hotkey_staging_dir }}"
+        file_type: file
+      register: staged_hotkeys
+      delegate_to: localhost
+
+    # Proves the chmod above rather than trusting it: private key material at
+    # 0644 under a directory whose mode depends on the controller's umask is the
+    # state this play used to leave behind.
+    - name: Require no staged key material to be group- or world-readable
+      ansible.builtin.assert:
+        that:
+          - staged_hotkeys.files | rejectattr('mode', 'equalto', '0600') | list | length == 0
+        fail_msg: >-
+          Staged hotkey files are not 0600:
+          {{ staged_hotkeys.files | rejectattr('mode', 'equalto', '0600')
+             | map(attribute='path') | map('basename') | list }}.
+          These are private halves; treat any that were group- or
+          world-readable as exposed.
+        success_msg: >-
+          {{ staged_hotkeys.files | length }} staged keyfile(s), all 0600, in a
+          0700 directory.
 
     - name: Report the staging directory
       ansible.builtin.debug:
         msg: >-
-          Hotkeys staged in {{ hotkey_staging_dir }}. Pass them to the GPU plays
-          with -e 'nanobody_hotkey_sources={{ "{{" }} lookup("fileglob",
-          "{{ hotkey_staging_dir }}/*", wantlist=True) {{ "}}" }}'
+          Hotkeys staged in {{ hotkey_staging_dir }}. The GPU plays glob this
+          directory by default (nanobody_hotkey_staging_dir), so there is no
+          command line to update -- and no list literal to pass through -e,
+          which Ansible would take as a string and iterate character by
+          character inside a no_log loop.
