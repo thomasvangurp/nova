@@ -77,6 +77,8 @@
     # bad patch of submissions ever trips the gate.
     nanobody_layer2_canary_rows: 4
     nanobody_public_neighbourhood_distance: 0
+    nanobody_graft_teacher_rank: 1
+    nanobody_graft_limit: 60
     nanobody_scout_iterations: 1
     nanobody_exploit_basin_fraction: 0.95
     nanobody_exploit_basin_core_limit: 5
@@ -1098,6 +1100,15 @@
           - "{{ nanobody_strict_gates }}"
           - --layer2-igblast-only
           - "{{ 1 if nanobody_layer2_igblast_only | bool else 0 }}"
+          # Scaffold diversity the neighbourhood search cannot reach on its
+          # own. Across epochs 25093-25095 every candidate in the pool sat
+          # within 0.93 identity of every other, we committed seven
+          # submissions and the validator scored three.
+          - --donor-grafts
+          - --graft-teacher-rank
+          - "{{ nanobody_graft_teacher_rank }}"
+          - --graft-limit
+          - "{{ nanobody_graft_limit }}"
           - --public-neighbourhood-distance
           - "{{ nanobody_public_neighbourhood_distance }}"
           - --scout-iterations

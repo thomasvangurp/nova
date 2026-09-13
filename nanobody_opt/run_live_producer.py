@@ -9,6 +9,7 @@ picked up atomically by the independent checkpoint publisher.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shlex
@@ -124,6 +125,61 @@ def _prepare_epoch(
     archive = epoch_root / "archive.csv"
     _download(ARCHIVE_URL.format(target=target), archive)
     return config, archive, target
+
+
+def refresh_donor_grafts(
+    *,
+    epoch_root: Path,
+    archive: Path,
+    config: Path,
+    pixi: Path,
+    manifest: Path,
+    teacher_rank: int,
+    limit: int,
+) -> Path | None:
+    """Rebuild the graft pool from this epoch's archive, or keep the last one.
+
+    Generated per epoch because the teacher is the archive's best measured
+    sequence and the donors are public frameworks that keep arriving: a graft
+    pool pinned at deploy time goes stale exactly the way a remembered uid did.
+
+    A failure here is not fatal. Grafts widen the pool; losing them costs
+    diversity for one epoch, while stopping the producer costs the epoch
+    itself.
+    """
+    teachers = epoch_root / "structural_teachers.json"
+    grafts = epoch_root / "donor_grafts.json"
+    if grafts.is_file():
+        return grafts
+    base = [
+        str(pixi), "run", "--manifest-path", str(manifest), "-e", "metanano",
+        "python", "-m",
+    ]
+    try:
+        _run(base + [
+            "nanobody_opt.select_structural_teachers",
+            "--archive", str(archive),
+            "--config", str(config),
+            "--output", str(teachers),
+        ])
+        _run(base + [
+            "nanobody_opt.generate_donor_grafts",
+            "--teachers", str(teachers),
+            "--archive", str(archive),
+            "--config", str(config),
+            "--teacher-rank", str(teacher_rank),
+            "--limit", str(limit),
+            "--output", str(grafts),
+        ])
+    except (subprocess.CalledProcessError, OSError) as error:
+        print(
+            f"donor grafts unavailable this epoch ({error}); continuing with "
+            "neighbourhood proposals alone",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+    return grafts
 
 
 def _looks_exhausted(iteration_root: Path) -> bool:
@@ -275,6 +331,19 @@ def _run_iteration(
             if previous != candidates:
                 command.extend(["--exclude", str(previous)])
         _run(command)
+        grafts = args.graft_candidates
+        if grafts is None and args.donor_grafts:
+            grafts = refresh_donor_grafts(
+                epoch_root=args.runtime_root / "live" / f"epoch{epoch}",
+                archive=archive,
+                config=config,
+                pixi=Path("/usr/local/bin/pixi"),
+                manifest=args.runtime_root / "pixi.toml",
+                teacher_rank=args.graft_teacher_rank,
+                limit=args.graft_limit,
+            )
+        if grafts is not None:
+            merge_graft_candidates(candidates, grafts)
         if args.public_neighbourhood_distance:
             # Every winner in the leakage-free replay sat one substitution from
             # a sequence another hotkey had already published, and about forty
@@ -401,6 +470,75 @@ def _run_iteration(
     _run(race_command)
 
 
+GRAFT_PROPOSAL_TYPE = "donor_graft"
+
+
+def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
+    """Add donor-graft sequences to an iteration's proposals, in place.
+
+    Neighbourhood search explores one molecule's surroundings, so the pool it
+    produces is one molecule: across epochs 25093-25095 every candidate sat
+    within 0.93 identity of every other, we committed seven submissions and the
+    validator scored three, and a hard separation rule would have left ONE
+    assignable candidate out of thirty.
+
+    Donor grafts are the diversity that pool lacks -- the measured paratope on
+    a different validator-proven VHH framework, 0.85-0.89 from our own lineage
+    rather than 0.98. They enter here, before Layer-2 and screening, so a graft
+    earns its exact score on exactly the same evidence as anything else and
+    nothing downstream needs to know where it came from.
+    """
+    if not grafts.is_file():
+        raise SystemExit(f"graft candidates file is missing: {grafts}")
+    payload = json.loads(grafts.read_text())
+    cases = payload.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise SystemExit(f"{grafts} holds no graft cases")
+
+    with candidates.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if "sequence" not in fieldnames:
+        raise SystemExit(f"{candidates} has no sequence column")
+
+    known = {str(row["sequence"]).strip().upper() for row in rows}
+    teacher = str(payload.get("teacher_sequence") or "").strip().upper()
+    added = 0
+    for case in cases:
+        sequence = str(case.get("sequence") or "").strip().upper()
+        if not sequence or sequence in known:
+            continue
+        known.add(sequence)
+        row = {name: "" for name in fieldnames}
+        row["sequence"] = sequence
+        # Provenance the screen already understands: the teacher is the parent
+        # this hybrid was built from, and the lane says why it exists.
+        if "parent_sequence" in row:
+            row["parent_sequence"] = teacher
+        if "proposal_type" in row:
+            row["proposal_type"] = GRAFT_PROPOSAL_TYPE
+        if "proposal_lane" in row:
+            row["proposal_lane"] = GRAFT_PROPOSAL_TYPE
+        if "edit_distance" in row:
+            row["edit_distance"] = case.get("mutation_count_from_teacher", "")
+        if "parent_max_jaccard_to_top50" in row:
+            row["parent_max_jaccard_to_top50"] = case.get("max_jaccard_to_top50", "")
+        rows.append(row)
+        added += 1
+
+    with candidates.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(
+        f"donor grafts: merged {added} of {len(cases)} case(s) into "
+        f"{candidates.name}; {len(rows)} proposals total",
+        flush=True,
+    )
+    return added
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-root", type=Path, default=Path("/root"))
@@ -471,6 +609,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
+    parser.add_argument(
+        "--donor-grafts",
+        action="store_true",
+        help=(
+            "rebuild a donor-graft pool from each epoch's archive and add it "
+            "to the proposals. Neighbourhood search alone produces one "
+            "molecule many times: across epochs 25093-25095 every candidate "
+            "sat within 0.93 identity of every other and the validator scored "
+            "three of our seven submissions"
+        ),
+    )
+    parser.add_argument("--graft-teacher-rank", type=int, default=1)
+    parser.add_argument("--graft-limit", type=int, default=60)
+    parser.add_argument(
+        "--graft-candidates",
+        type=Path,
+        help=(
+            "generate_donor_grafts output whose sequences join each "
+            "iteration's proposals. Neighbourhood search alone produces one "
+            "molecule many times; this is the scaffold diversity it cannot "
+            "reach on its own"
+        ),
+    )
     parser.add_argument("--terminal-width", type=int, default=17)
     parser.add_argument(
         "--maximum-terminal-haplotype-mutations", type=int, default=6
