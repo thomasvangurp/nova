@@ -329,12 +329,13 @@ def test_the_value_share_knob_buys_expected_score_when_asked():
     assert chosen[:2] == ["CCC", "DDD"]
 
 
-def test_the_fleet_buys_the_tail_by_default():
-    """Only rank one pays and the validator takes a single draw, so buying the
-    mean discards the candidates most likely to win."""
-    assert fleet.DEFAULT_VALUE_SHARE == 0.0
+def test_the_fleet_splits_between_expected_score_and_the_tail():
+    """Predicted p90 correlated +0.807 with the actual score across our five
+    scored tickets in epoch 25099; win probability managed only -0.526. Half
+    the fleet buys expected quality, half still buys the tail."""
+    assert 0.0 < fleet.DEFAULT_VALUE_SHARE < 1.0
     pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
-    assert fleet.distinct_sequences(pool, 2) == ["AAA", "BBB"]
+    assert set(fleet.distinct_sequences(pool, 2)) == {"AAA", "BBB"}
 
 
 def test_a_zero_value_share_is_pure_win_probability_order():

@@ -292,13 +292,19 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
 # objective here and buying the mean actively discards the candidates most
 # likely to win: only rank one pays and the validator takes a single draw.
 #
-# It was briefly set to 0.5 on the theory that win-probability order was
-# picking poor candidates. It was not: the estimator was, by ranking a
-# two-observation candidate first on a spread carrying one degree of freedom.
-# That is fixed in win_probability.shrunk_spread, where it belongs. The knob
-# stays because a miscalibrated estimator is worth being able to sidestep in a
-# hurry, not because the mean is what we want to buy.
-DEFAULT_VALUE_SHARE = 0.0
+# Half, on measured evidence rather than theory. Across our five scored
+# tickets in epoch 25099 the predicted p90 correlated +0.807 with the actual
+# score while the win probability correlated only -0.526, and epoch 25101's
+# pool held a candidate at p90 108.2 with confidence rank 82.2 that
+# win-probability order ranked 27 times lower than its own top pick at p90
+# 217.2 and confidence 175.1.
+#
+# Confidence is the whole of our gap to the winners -- we beat them on
+# developability every epoch and usually on interaction -- and the best
+# expected-score candidates are also the best-confidence ones. Half the fleet
+# buys them; half still buys the tail, because only rank one pays and the
+# validator draws once.
+DEFAULT_VALUE_SHARE = 0.5
 
 # Two tickets closer than this are one ticket. The validator discards a
 # submission too similar to another, and measured over epochs 25093-25095 that
