@@ -62,6 +62,20 @@
     nanobody_replication_rounds_per_stage: 0
     nanobody_replication_keep_fraction: 1.0
     nanobody_layer2_igblast_only: false
+    # How many rows off the tail of the live submission archive the Layer-2 canary
+    # measures. More than one because the tail is whatever another miner submitted
+    # last, and one bad sequence must not read as a broken pipeline.
+    #
+    # Not many more, because this costs real deploy time and the number is
+    # measured, not guessed: on the rented 2x A100 box, --tail 1 against a warm
+    # /root/layer2_cache took 1 second, and --tail 8 with seven uncached rows took
+    # 218 -- about 27 seconds per row that TNP has not seen. The archive grows
+    # between deploys, so the tail is cold nearly every time and that is a
+    # recurring cost, not a one-off. Four rows is therefore about 80 seconds for a
+    # gate that needs only one row to get through end to end; it is partly hidden
+    # behind the async checkpoint download this task runs alongside. Raise it if a
+    # bad patch of submissions ever trips the gate.
+    nanobody_layer2_canary_rows: 4
     nanobody_public_neighbourhood_distance: 0
     nanobody_scout_iterations: 1
     nanobody_exploit_basin_fraction: 0.95
@@ -192,22 +206,50 @@
         success_msg: >-
           Live nanobody challenge is {{ nanobody_target }} / {{ nanobody_structure }}.
 
+    # `set -euo pipefail` is the substance of this task, not housekeeping. Without
+    # it the block's last command was the echo, so a curl that failed for any
+    # reason -- a 404 from a renamed target, DNS, a rate limit -- left the elapsed
+    # time at one second and the task exiting 0, and "reject a host with unusable
+    # real download bandwidth" PASSED on a host that had downloaded nothing at
+    # all. Measured on the live box: a 404 gives `curl: (22)`, elapsed=1, and a
+    # script exit status of 0.
+    #
+    # -o /dev/null also measured nothing, so a 200 carrying an error page or a
+    # truncated body counted as a healthy transfer. curl now reports the size it
+    # actually received and the gate asserts the bytes as well as the seconds.
     - name: Reject a host with unusable real download bandwidth
       ansible.builtin.shell: |
+        set -euo pipefail
         start=$(date +%s)
-        curl -fsSL -o /dev/null --max-time 60 \
-          https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv
-        echo $(( $(date +%s) - start ))
+        bytes=$(curl -fsSL --max-time 60 -w '%{size_download}' -o /dev/null \
+          https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/{{ nanobody_target }}_nanobodies.csv)
+        echo "$(( $(date +%s) - start )) ${bytes}"
       args:
         executable: /bin/bash
       changed_when: false
       register: probe
 
+    # A curl that fails now fails the task above with curl's own exit status and
+    # message, which says more than "replace this host" ever did. What is left for
+    # this gate is the case curl calls success: the archive is 9,512,670 bytes
+    # today and only grows, so the 30-second bound is already a ~317 KB/s floor --
+    # it just needed a clause saying the bytes arrived.
     - name: Report host preflight
       ansible.builtin.assert:
-        that: probe.stdout | int <= 30
-        fail_msg: "Archive download took {{ probe.stdout }} seconds; replace this host"
-        success_msg: "{{ cpus.stdout }} CPUs; archive in {{ probe.stdout }} seconds"
+        that:
+          - probe_seconds | int <= 30
+          - probe_bytes | int > 1000000
+        fail_msg: >-
+          The submission archive transferred {{ probe_bytes }} bytes in
+          {{ probe_seconds }} seconds. It is several megabytes and every stage of
+          this deployment reads it, so either the transfer was truncated or this
+          host's real bandwidth is unusable; replace the host.
+        success_msg: >-
+          {{ cpus.stdout }} CPUs; {{ probe_bytes }} archive bytes in
+          {{ probe_seconds }}s.
+      vars:
+        probe_seconds: "{{ probe.stdout.split()[0] }}"
+        probe_bytes: "{{ probe.stdout.split()[1] }}"
 
     - name: Ship the declarative Pixi manifest and lockfile
       ansible.builtin.copy:
@@ -814,6 +856,21 @@
       changed_when: false
       register: layer2_artifacts
 
+    # The canary input is the TAIL of a live archive that every other miner on the
+    # subnet writes to, so which sequences it contains is not under our control.
+    # With --tail 1 the gate asserted pass_count==1 on one arbitrary submission,
+    # which conflates "Layer-2 works" with "the newest thing somebody else
+    # submitted is good": a junk sequence aborted the deploy with a message that
+    # dumped the result document and blamed the pipeline. (x['candidates'][0] was
+    # not reached on that path -- the pass_count assert fires first -- but
+    # candidates holds only the rows that PASSED, so with more than one row it
+    # would be, and the index now sits behind the pass_count check.)
+    #
+    # A measurement-only canary is not the answer either. A row rejected by
+    # IgBLAST never reaches developability, so the TNP/OpenMM half -- the
+    # expensive half, and the one that has actually broken -- would quietly stop
+    # being proved. Several rows instead, requiring at least one to pass end to
+    # end, keeps that proof while surviving one bad neighbour.
     - name: Prove Layer-2 computes real IgBLAST and TNP results
       ansible.builtin.command:
         argv:
@@ -826,7 +883,7 @@
           - --output
           - /root/layer2_canary.json
           - --tail
-          - "1"
+          - "{{ nanobody_layer2_canary_rows }}"
           - --concurrency
           - "1"
           - --cache-dir
@@ -836,6 +893,9 @@
       changed_when: false
       register: layer2_canary
 
+    # Prints a summary line before deciding, so a failure says what was measured
+    # instead of a traceback, and indexes candidates only behind the pass_count
+    # check that makes it non-empty.
     - name: Verify the Layer-2 canary is a measured pass
       ansible.builtin.command:
         argv:
@@ -843,15 +903,36 @@
           - -c
           - >-
             import json;
+            n={{ nanobody_layer2_canary_rows }};
             x=json.load(open('/root/layer2_canary.json'));
-            assert x['input_count']==1,x;
-            assert x['pass_count']==1,x;
-            c=x['candidates'][0];
-            assert c['nativeness_score'] is not None,c;
-            assert c['human_framework_score'] is not None,c;
-            assert c['developability']['passed'],c;
-            print('LAYER2_CANARY_OK')
+            rows=x['candidates']+x['rejected'];
+            c=(x['candidates'] or [{}])[0];
+            d=c.get('developability') or {};
+            print('LAYER2_CANARY_SUMMARY input=%s measured=%s passed=%s rejections=%s'
+            % (x['input_count'], len(rows), x['pass_count'], x['rejection_counts']));
+            print('LAYER2_CANARY_OK' if (x['input_count']==n and len(rows)==n
+            and x['pass_count']>=1 and c.get('nativeness_score') is not None
+            and c.get('human_framework_score') is not None and d.get('passed'))
+            else 'LAYER2_CANARY_FAILED')
       changed_when: false
+      failed_when: false
+      register: layer2_canary_check
+
+    - name: Require Layer-2 to have measured every row and passed a real one
+      ansible.builtin.assert:
+        that: "'LAYER2_CANARY_OK' in layer2_canary_check.stdout"
+        fail_msg: >-
+          {{ layer2_canary_check.stdout_lines
+             | select('search', 'LAYER2_CANARY_SUMMARY') | list
+             | default(['the canary produced no summary'], true) | first }}.
+          If every row was measured and every one was rejected, Layer-2 is working
+          and the last {{ nanobody_layer2_canary_rows }} archive submissions are
+          simply bad -- raise nanobody_layer2_canary_rows. If fewer rows were
+          measured than were read, IgBLAST or TNP did not run; check
+          {{ layer2_artifacts.stdout | default('LAYER2_ARTIFACTS') }} and the
+          MetaNano activation gate above.
+        success_msg: >-
+          {{ layer2_canary_check.stdout_lines[0] | default('LAYER2_CANARY_OK') }}
 
     - name: Reap the Xet checkpoint download
       ansible.builtin.async_status:
@@ -1109,6 +1190,8 @@
       ansible.builtin.debug:
         msg: >-
           {{ bgen_check.stdout }}; {{ layer2_artifacts.stdout }};
-          {{ layer2_canary.stdout_lines[-1] }}; archive and checkpoints ready;
+          {{ layer2_canary.stdout_lines[-1] | default('layer-2 ok', true) }};
+          {{ layer2_canary_check.stdout_lines[0] | default('', true) }};
+          archive and checkpoints ready;
           fast scorer pinned {{ nanobody_fast_scorer_sha256[:12] }};
           autonomous producer active={{ nanobody_producer_activate | bool }}
