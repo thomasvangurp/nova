@@ -833,3 +833,67 @@ def test_a_flat_allocation_is_still_available(tmp_path, monkeypatch):
     )
 
     assert calls == [3, 3, 3, 3]
+
+
+REP_BASE = "KWALVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDSVKGRFTSSRDNAKNSLYGQMNSLRAEDTAVYYCGVFLGAHPCPLEGEMDAFGAGTTVVVGQ"
+
+
+def _near(base, position, residue):
+    out = list(base)
+    out[position] = residue
+    return "".join(out)
+
+
+def _far(base, span):
+    out = list(base)
+    for i in range(30, 30 + span):
+        out[i] = "G"
+    return "".join(out)
+
+
+def test_replication_covers_every_family_before_deepening_one():
+    """Pruning purely by score spent every observation on one family.
+
+    The leader reached 12-13 observations while the separated molecules the
+    fleet actually commits sat at 2-6, which both under-optimises them and,
+    because a low-observation estimate is shrunk toward the cohort mean, makes
+    them look worse than they are.
+    """
+    ranked = [
+        REP_BASE,                       # family A, best
+        _near(REP_BASE, 2, "M"),        # family A again
+        _near(REP_BASE, 3, "T"),        # family A again
+        _far(REP_BASE, 20),             # family B
+        _far(REP_BASE, 40),             # family C
+    ]
+    slate = race._keep_a_family_slate(ranked, keep=3)
+    assert slate[0] == REP_BASE, "the best candidate must still lead"
+    assert _far(REP_BASE, 20) in slate
+    assert _far(REP_BASE, 40) in slate
+    assert _near(REP_BASE, 2, "M") not in slate, "a near copy took a slot"
+
+
+def test_the_slate_still_fills_by_rank_when_families_run_out():
+    """A degenerate pool must not shrink the surviving set: fewer observed
+    candidates is worse than close ones."""
+    ranked = [REP_BASE] + [_near(REP_BASE, i, "M") for i in range(2, 8)]
+    slate = race._keep_a_family_slate(ranked, keep=4)
+    assert len(slate) == 4
+    assert len(set(slate)) == 4
+
+
+def test_keeping_everything_is_a_no_op():
+    ranked = [REP_BASE, _far(REP_BASE, 20)]
+    assert race._keep_a_family_slate(ranked, keep=5) == ranked
+
+
+def test_the_prune_actually_uses_the_family_slate():
+    """Wiring, not arithmetic: the concentration happened inside _prune."""
+    import inspect
+
+    source = inspect.getsource(race)
+    prune = source.index("def _prune(alive: list[str], keep: int)")
+    body = source[prune:prune + 2000]
+    assert "_keep_a_family_slate(" in body, (
+        "_prune still truncates by rank alone"
+    )

@@ -529,6 +529,48 @@ def _affordable_shortlist(
     return shortlist[:width]
 
 
+#: Two submissions closer than this are one submission: the validator dedupes
+#: them and only one is scored.
+REPLICATION_FAMILY_IDENTITY = 0.95
+
+
+def _sequence_identity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    shared = sum(1 for a, b in zip(left, right) if a == b)
+    return shared / max(len(left), len(right))
+
+
+def _keep_a_family_slate(ranked: list[str], keep: int) -> list[str]:
+    """Keep the best of each family first, then fill by rank.
+
+    Pruning purely by score spends every observation on one family: the leader
+    reached twelve to thirteen observations while the separated molecules the
+    fleet actually commits sat at two to six. That penalises them twice, once
+    because they are less optimised and once because a low-observation estimate
+    is shrunk toward the cohort mean, so they look worse than they are.
+
+    A fleet of eight commits eight distinct molecules. Observations spent
+    beyond what makes an estimate trustworthy are better spent covering the
+    molecules that will actually be submitted.
+    """
+    if keep >= len(ranked):
+        return list(ranked)
+    slate: list[str] = []
+    for sequence in ranked:
+        if len(slate) >= keep:
+            break
+        if all(
+            _sequence_identity(sequence, chosen) < REPLICATION_FAMILY_IDENTITY
+            for chosen in slate
+        ):
+            slate.append(sequence)
+    if len(slate) < keep:
+        taken = set(slate)
+        slate.extend(item for item in ranked if item not in taken)
+    return slate[:keep]
+
+
 def _run_replication_rounds(
     *,
     shortlist: list[str],
@@ -1770,7 +1812,7 @@ def main() -> None:
             alive_set = set(alive)
             ranked = [str(item) for item in order if str(item) in alive_set]
             missing = [item for item in alive if item not in set(ranked)]
-            return (ranked + missing)[:keep]
+            return _keep_a_family_slate(ranked + missing, keep)
 
         replication_rounds_completed = _run_replication_rounds(
             shortlist=replication_shortlist,
