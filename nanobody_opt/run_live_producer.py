@@ -136,6 +136,7 @@ def refresh_donor_grafts(
     manifest: Path,
     teacher_rank: int,
     limit: int,
+    donors: int,
 ) -> Path | None:
     """Rebuild the graft pool from this epoch's archive, or keep the last one.
 
@@ -169,6 +170,7 @@ def refresh_donor_grafts(
             "--config", str(config),
             "--teacher-rank", str(teacher_rank),
             "--limit", str(limit),
+            "--donors", str(donors),
             "--output", str(grafts),
         ])
     except (subprocess.CalledProcessError, OSError) as error:
@@ -366,6 +368,7 @@ def _run_iteration(
                 manifest=args.runtime_root / "pixi.toml",
                 teacher_rank=args.graft_teacher_rank,
                 limit=args.graft_limit,
+                donors=args.graft_donors,
             )
         if grafts is not None:
             merge_graft_candidates(candidates, grafts)
@@ -629,7 +632,13 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--graft-teacher-rank", type=int, default=1)
-    parser.add_argument("--graft-limit", type=int, default=60)
+    # Measured on epoch 25098's archive: the default 200-donor, 60-case pool
+    # yields 3 mutually separated molecules -- no better than the neighbourhood
+    # pool it is meant to widen -- while 534 donors and 300 cases yield 27.
+    # Framework diversity comes from the donors, not from the teachers: all ten
+    # structural teachers sit in one family and only two of them are separated.
+    parser.add_argument("--graft-limit", type=int, default=300)
+    parser.add_argument("--graft-donors", type=int, default=600)
     parser.add_argument(
         "--graft-candidates",
         type=Path,

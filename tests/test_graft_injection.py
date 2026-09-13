@@ -111,7 +111,7 @@ def test_a_graft_pool_already_built_for_this_epoch_is_reused(tmp_path, monkeypat
     result = producer.refresh_donor_grafts(
         epoch_root=epoch_root, archive=tmp_path / "a.csv",
         config=tmp_path / "c.yaml", pixi=Path("/usr/local/bin/pixi"),
-        manifest=tmp_path / "pixi.toml", teacher_rank=1, limit=60,
+        manifest=tmp_path / "pixi.toml", teacher_rank=1, limit=60, donors=600,
     )
     assert result == existing
     assert calls == [], "rebuilt a graft pool that already existed"
@@ -134,7 +134,7 @@ def test_a_graft_build_failure_costs_diversity_not_the_epoch(tmp_path, monkeypat
     result = producer.refresh_donor_grafts(
         epoch_root=epoch_root, archive=tmp_path / "a.csv",
         config=tmp_path / "c.yaml", pixi=Path("/usr/local/bin/pixi"),
-        manifest=tmp_path / "pixi.toml", teacher_rank=1, limit=60,
+        manifest=tmp_path / "pixi.toml", teacher_rank=1, limit=60, donors=600,
     )
     assert result is None
     assert "continuing with neighbourhood proposals alone" in capsys.readouterr().err

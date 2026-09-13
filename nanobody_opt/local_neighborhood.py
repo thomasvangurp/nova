@@ -876,6 +876,21 @@ def main() -> None:
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--layer2-seeds", required=True, type=Path)
+    parser.add_argument(
+        "--parents-may-match-top-sequences",
+        action="store_true",
+        default=True,
+        help=(
+            "use public parents even when they crowd the target's top "
+            "sequences. On by default: they are proposal centres, never "
+            "submissions, and excluding them dropped 7 separated families to 4"
+        ),
+    )
+    parser.add_argument(
+        "--no-parents-matching-top-sequences",
+        dest="parents_may_match_top_sequences",
+        action="store_false",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
         "--exclude",
@@ -1078,10 +1093,18 @@ def main() -> None:
             parent_source = "recent_archive"
         else:
             continue
-        diverse, max_jaccard = diversity.passes_diversity(
+        crowds_top, max_jaccard = diversity.passes_diversity(
             sequence, top_kmers, threshold=0.9, k=5
         )
-        if diverse:
+        # A parent is a proposal CENTRE, never a submission -- select_elite_parents
+        # says so outright: "Parent sequences are public and are therefore never
+        # submitted." Gating parents on the submission novelty rule excluded the
+        # field's best molecules from our search precisely because they rank
+        # highly: of 7 mutually separated public parent families available on
+        # epoch 25098, only 4 survived to propose from. The proposals themselves
+        # are still novelty-checked, by the exclusion file here and by
+        # check_validator_novelty before anything is committed.
+        if crowds_top or args.parents_may_match_top_sequences:
             pose = candidate.get("pose_stability") or {}
             protected = {
                 int(position) - 1
