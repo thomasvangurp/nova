@@ -32,5 +32,8 @@ def test_the_replay_disables_the_coarse_prefilter_like_the_validator_does():
     source = inspect.getsource(check_validator_novelty.main)
     call = source[source.index("engine.search("):]
     call = call[: call.index(")")]
-    assert "coarse_min_shared=None" in call
-    assert "coarse_jaccard=None" in call
+    assert "coarse_min_shared=0" in call
+    assert "coarse_jaccard=0.0" in call
+    assert "coarse_min_shared=None" not in call, (
+        "None selects the configured coarse filter rather than skipping it"
+    )

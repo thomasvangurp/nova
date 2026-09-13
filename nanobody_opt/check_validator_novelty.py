@@ -124,12 +124,17 @@ def main() -> None:
         # and "30/30 novel" for a fleet that was 0.95-0.98 identical to the
         # live rank-1 sequence. The validator disables that prefilter, so a
         # replay that leaves it on proves nothing.
+        # Explicit zeros, not None. None means "use the configured coarse
+        # filter", not "skip it", so every top-50 sequence was discarded before
+        # alignment and this replay reported coarse_candidates=0,
+        # maximum_identity=0.000 and 350/350 novel -- a gate that compared
+        # nothing and had never rejected a candidate.
         search = engine.search(
             sequence,
             include_alignment=True,
             exclude_ids=None,
-            coarse_min_shared=None,
-            coarse_jaccard=None,
+            coarse_min_shared=0,
+            coarse_jaccard=0.0,
         )
         matches = []
         for match in search.matches:

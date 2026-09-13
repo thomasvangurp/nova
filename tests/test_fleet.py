@@ -404,3 +404,35 @@ def test_sequence_identity_is_conservative_against_the_validators_rule():
     assert fleet.MAXIMUM_FLEET_IDENTITY < 0.95, (
         "the proxy needs margin under the rule it stands in for"
     )
+
+
+def test_a_candidate_the_field_is_sitting_on_is_avoided():
+    """Separation among our own tickets does not see the competition.
+
+    In epoch 25099 our uid 12 was 0.9528 identical to another miner's
+    submission in the same epoch: the validator scored theirs, dropped ours,
+    and we paid for a registration that produced nothing.
+    """
+    contested = _variant(REAL, [(2, "M")])
+    clear = _variant(REAL, [(i, "G") for i in range(30, 50)])
+    pool = _pool([(contested, 0.30, 100.0), (clear, 0.10, 150.0)])
+
+    chosen = fleet.distinct_sequences(pool, 1, crowd=[REAL])
+
+    assert chosen == [clear], "took a molecule the field already occupies"
+
+
+def test_crowding_never_leaves_a_uid_unspent():
+    """A registration held is paid for; a contested ticket still beats none."""
+    contested = [_variant(REAL, [(2, aa)]) for aa in "MVQ"]
+    pool = _pool([(s, 0.3 - i * 0.01, 100.0 + i) for i, s in enumerate(contested)])
+    chosen = fleet.distinct_sequences(pool, 2, crowd=[REAL])
+    assert len(chosen) == 2
+
+
+def test_no_crowd_is_the_previous_behaviour():
+    far = _variant(REAL, [(i, "G") for i in range(30, 50)])
+    pool = _pool([(REAL, 0.3, 100.0), (far, 0.2, 110.0)])
+    assert fleet.distinct_sequences(pool, 2) == fleet.distinct_sequences(
+        pool, 2, crowd=[]
+    )

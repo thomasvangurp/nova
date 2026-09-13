@@ -327,6 +327,36 @@ def sequence_identity(left: str, right: str) -> float:
 
 def _closest(sequence: str, chosen: Sequence[str]) -> float:
     return max((sequence_identity(sequence, other) for other in chosen), default=0.0)
+
+
+#: Identity to a sequence the FIELD has recently submitted at which the
+#: validator is likely to treat ours as the duplicate and score theirs instead.
+FIELD_COLLISION_IDENTITY = 0.95
+
+
+def uncrowded(
+    candidates: Sequence[str],
+    crowd: Sequence[str],
+    limit: float = FIELD_COLLISION_IDENTITY,
+) -> list[str]:
+    """Candidates that no recent field submission sits on top of.
+
+    Separation among our own tickets is not enough. In epoch 25099 our uid 12
+    was 0.9528 identical to another miner's submission in the same epoch: the
+    validator scored theirs and dropped ours, and we paid for a registration
+    that produced nothing. Everyone is mutating the same winner, so the crowded
+    region is precisely where our neighbourhood search wants to go.
+
+    We cannot see the field's current epoch -- it is timelocked -- but what
+    they submitted recently is public, and it is where they are still standing.
+    """
+    if not crowd:
+        return list(candidates)
+    return [
+        sequence
+        for sequence in candidates
+        if _closest(sequence, crowd) < limit
+    ]
 VALUE_KEY = "score_p90"
 
 
@@ -362,6 +392,7 @@ def distinct_sequences(
     required_order: str = REQUIRED_SELECTION_ORDER,
     value_share: float = DEFAULT_VALUE_SHARE,
     maximum_identity: float = MAXIMUM_FLEET_IDENTITY,
+    crowd: Sequence[str] = (),
 ) -> list[str]:
     """Take the best ``count`` pairwise-distinct sequences from a ranking.
 
@@ -389,6 +420,7 @@ def distinct_sequences(
     # The value half first, so the fleet always holds the best expected score
     # it can see even when the pool is smaller than the fleet.
     eligible: list[str] = []
+    crowd = [str(item).strip().upper() for item in crowd if item]
     value_wanted = int(count * value_share)
     if value_wanted:
         chosen.extend(
@@ -410,11 +442,21 @@ def distinct_sequences(
     # times. So take the count we need and make it as separated as this pool
     # allows -- the validator discards a submission too close to another, and
     # over 25093-25095 that cost us four uids of seven every epoch.
-    for sequence in eligible:
-        if len(chosen) == count:
-            break
-        if _closest(sequence, chosen) < maximum_identity:
-            chosen.append(sequence)
+    roomy = uncrowded(eligible, crowd)
+    if crowd and len(roomy) < len(eligible):
+        print(
+            f"field crowding: {len(roomy)} of {len(eligible)} candidate(s) are "
+            "clear of what the field submitted recently",
+            flush=True,
+        )
+    for pool in (roomy, eligible):
+        for sequence in pool:
+            if len(chosen) == count:
+                break
+            if sequence in chosen:
+                continue
+            if _closest(sequence, chosen) < maximum_identity:
+                chosen.append(sequence)
     if len(chosen) < count:
         # Nothing far enough left: fill by farthest-first, best rank breaking
         # ties, so the tickets we do spend are the most separated available.

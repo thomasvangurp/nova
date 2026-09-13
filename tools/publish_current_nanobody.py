@@ -33,6 +33,7 @@ at import time or during argument parsing.
 from __future__ import annotations
 
 import argparse
+import csv
 import fcntl
 import hashlib
 import json
@@ -44,7 +45,7 @@ import sys
 import tempfile
 import time
 import traceback
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping, NamedTuple, Sequence
@@ -718,6 +719,33 @@ def _restrict_pool(
     return {**payload, "candidates": kept}
 
 
+#: How many of the archive's most recent rows count as "where the field is
+#: standing now". The archive is append-ordered, so the tail is the recent
+#: epochs.
+FIELD_CROWD_ROWS = 600
+
+
+def _recent_field_sequences(archive: Path, rows: int = FIELD_CROWD_ROWS) -> list[str]:
+    """What the field submitted recently, as a collision hazard list.
+
+    Our own past submissions are in there too and are harmless to include: we
+    never resubmit them, so they only ever push us further from a crowded spot.
+    """
+    try:
+        with archive.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "sequence" not in reader.fieldnames:
+                return []
+            tail: deque[str] = deque(maxlen=rows)
+            for row in reader:
+                sequence = str(row.get("sequence") or "").strip().upper()
+                if sequence:
+                    tail.append(sequence)
+    except OSError:
+        return []
+    return list(tail)
+
+
 def _publish_fleet(
     *,
     args: argparse.Namespace,
@@ -760,7 +788,12 @@ def _publish_fleet(
         gate="validator-novelty",
         source=novelty,
     )
-    sequences = fleet_module.distinct_sequences(payload, len(crew))
+    # In epoch 25099 our uid 12 was 0.9528 identical to another miner's
+    # submission in the same epoch: the validator scored theirs and dropped
+    # ours. Separation among our own tickets does not see that.
+    sequences = fleet_module.distinct_sequences(
+        payload, len(crew), crowd=_recent_field_sequences(archive)
+    )
     try:
         blocks = fleet_module.commitment_blocks(
             epoch=epoch,
