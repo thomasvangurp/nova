@@ -31,6 +31,11 @@ PLAYBOOK=${1:-nanobody_services.yml}
 CHAIN_WRITER=${NOVA_CHAIN_WRITER:-true}
 CHAIN_WRITER_HOTKEY=${NOVA_CHAIN_WRITER_HOTKEY:-nova68-slot-1}
 
+# The producer is the service the GPU rental exists to run, and it is gated off
+# by default in the playbook. Omitting this is a green deploy that leaves no
+# producer running -- ok=73, failed=0, and nothing generating candidates.
+PRODUCER=${NOVA_PRODUCER:-true}
+
 [ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
 [ -r "$TOKEN_FILE" ] || { echo "github token file not readable: $TOKEN_FILE" >&2; exit 2; }
 
@@ -40,4 +45,5 @@ exec ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
   -e "nanobody_github_token_file=$TOKEN_FILE" \
   -e "nanobody_chain_writer_activate=$CHAIN_WRITER" \
   -e "nanobody_chain_writer_hotkey=$CHAIN_WRITER_HOTKEY" \
+  -e "nanobody_producer_activate=$PRODUCER" \
   "${@:2}"
