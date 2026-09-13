@@ -605,7 +605,7 @@
           - /root/.pixi/envs/bgen/bin/python
           - -c
           - >-
-            import sys, importlib; sys.path.insert(0, "/root");
+            import sys, importlib.util; sys.path.insert(0, "/root");
             import nanobody_opt.score_boltzgen_batch;
             import nanobody_opt.score_boltzgen_waves;
             import nanobody_opt.score_boltzgen_fast_adapter;
