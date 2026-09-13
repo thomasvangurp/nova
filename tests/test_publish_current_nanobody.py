@@ -797,3 +797,38 @@ class _FixedParser:
 
     def parse_args(self):
         return self.namespace
+
+
+def test_a_missing_legacy_default_does_not_defer_publication(tmp_path):
+    """DEFAULT_EXACT_INPUTS are paths from epoch 25021 on a destroyed machine.
+
+    Requiring them meant a rebuilt box deferred publication for ever while
+    sitting on a score bank the glob had already discovered -- observed live:
+    five exact_all.json files present, four uids held, and every epoch deferred
+    on /root/local_neighborhood_round1_exact.json.
+    """
+    import tools.publish_current_nanobody as pub
+
+    root = tmp_path
+    found = root / "live" / "epoch25085" / "race" / "screen"
+    found.mkdir(parents=True)
+    (found / "exact_all.json").write_text("[]")
+
+    discovered = pub._default_exact_inputs(root)
+    # The legacy names are offered...
+    assert any("local_neighborhood_round1_exact.json" in str(p) for p in discovered)
+    # ...and the real file is discovered alongside them.
+    assert any(p.name == "exact_all.json" for p in discovered)
+    # Only the real one exists, which must be enough to proceed.
+    assert [p for p in discovered if p.is_file()] == [found / "exact_all.json"]
+
+
+def test_publication_still_refuses_when_there_is_no_evidence_at_all(tmp_path):
+    """Relaxing the legacy requirement must not let us publish on nothing."""
+    import tools.publish_current_nanobody as pub
+
+    discovered = pub._default_exact_inputs(tmp_path)
+    assert [p for p in discovered if p.is_file()] == []
+    source = (Path(__file__).resolve().parents[1]
+              / "tools" / "publish_current_nanobody.py").read_text()
+    assert "no exact score-bank inputs found under" in source

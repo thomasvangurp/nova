@@ -951,9 +951,30 @@ def _publish_once(args: argparse.Namespace) -> None:
         historical_layer2 = tuple(
             args.historical_layer2 or map(Path, DEFAULT_LAYER2_INPUTS)
         )
-        missing = [str(path) for path in (*exact_inputs, *historical_layer2) if not path.is_file()]
+        # An input the operator NAMED must exist -- a typo there should stop the
+        # run. A default must not: DEFAULT_EXACT_INPUTS and DEFAULT_LAYER2_INPUTS
+        # are paths from epoch 25021 on a machine that no longer exists, and
+        # requiring them meant a rebuilt box deferred publication for ever while
+        # sitting on a perfectly good score bank the glob had already found.
+        explicit = [
+            *(args.exact or ()),
+            *(args.historical_layer2 or ()),
+        ]
+        missing = [str(path) for path in explicit if not path.is_file()]
         if missing:
-            raise SystemExit("required qualified score-bank inputs are missing: " + ", ".join(missing))
+            raise SystemExit(
+                "score-bank inputs named on the command line are missing: "
+                + ", ".join(missing)
+            )
+        exact_inputs = tuple(path for path in exact_inputs if path.is_file())
+        historical_layer2 = tuple(path for path in historical_layer2 if path.is_file())
+        # Publishing with no evidence at all is the thing to refuse.
+        if not exact_inputs:
+            raise SystemExit(
+                "no exact score-bank inputs found under "
+                f"{args.score_bank_root}: the producer has not written an "
+                "exact_all.json yet, so there is nothing qualified to publish"
+            )
 
         shortlist = max(SHORTLIST_LIMIT, len(crew))
         if current_qualified:
