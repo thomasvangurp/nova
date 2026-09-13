@@ -316,7 +316,11 @@ DEFAULT_VALUE_SHARE = 0.5
 # proxy: the validator aligns, and an alignment can only find MORE identity
 # than position-for-position comparison of equal-length sequences. The margin
 # is what keeps a proxy conservative.
-MAXIMUM_FLEET_IDENTITY = 0.93
+#: The line the validator itself dedupes on. Nothing we commit may sit at or
+#: above it relative to another of our own tickets, because the second one is
+#: discarded and the registration is wasted.
+VALIDATOR_DUPLICATE_IDENTITY = 0.95
+MAXIMUM_FLEET_IDENTITY = 0.94
 
 
 def sequence_identity(left: str, right: str) -> float:
@@ -384,6 +388,11 @@ def _best_by_expected_score(
     for _, _, sequence in scored:
         if sequence in taken:
             continue
+        # The value half is chosen on expected score alone, but two molecules
+        # the validator calls the same are still one ticket: without this the
+        # best two by p90 were 0.9921 apart and the second scored nothing.
+        if _closest(sequence, taken) >= limit:
+            continue
         taken.add(sequence)
         chosen.append(sequence)
         if len(chosen) == wanted:
@@ -431,7 +440,7 @@ def distinct_sequences(
     if value_wanted:
         chosen.extend(
             _best_by_expected_score(
-                candidates, value_wanted, seen, maximum_identity
+                candidates, value_wanted, seen, VALIDATOR_DUPLICATE_IDENTITY
             )
         )
     for candidate in candidates:
@@ -464,11 +473,17 @@ def distinct_sequences(
             if _closest(sequence, chosen) < maximum_identity:
                 chosen.append(sequence)
     if len(chosen) < count:
-        # Nothing far enough left: fill by farthest-first, best rank breaking
-        # ties, so the tickets we do spend are the most separated available.
+        # Fill farthest-first, but never past the line the validator dedupes
+        # on. Filling blindly spent registrations on certain duplicates: in
+        # epoch 25100 our uid 46 went out 0.9843 identical to our own uid 59
+        # and was discarded, one of five tickets of seven that scored nothing.
+        # A uid left unspent and a uid spent on a duplicate both score zero;
+        # the difference is that one of them is honest about it.
         remaining = [item for item in eligible if item not in chosen]
         while remaining and len(chosen) < count:
             pick = min(remaining, key=lambda item: _closest(item, chosen))
+            if _closest(pick, chosen) >= VALIDATOR_DUPLICATE_IDENTITY:
+                break
             chosen.append(pick)
             remaining.remove(pick)
     if not chosen:

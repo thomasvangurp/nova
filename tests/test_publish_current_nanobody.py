@@ -66,9 +66,17 @@ REQUIREMENTS = {
 
 
 def _sequence(index: int) -> str:
-    """A distinct, canonical, correctly sized nanobody sequence."""
-    body = ("ACDEFGHIKLMNPQRSTVWY" * 6)[:116]
-    return "ACDEFGHIKLMNPQRSTVWY"[index] + body
+    """A distinct, canonical, correctly sized nanobody sequence.
+
+    Distinct by more than one residue, because the validator dedupes at 0.95
+    identity: sequences differing in a single position out of 117 are the same
+    molecule to it, and a harness built from those cannot exercise the fleet's
+    separation at all.
+    """
+    alphabet = "ACDEFGHIKLMNPQRSTVWY"
+    rotation = (alphabet * 12)[index * 3 : index * 3 + len(alphabet)]
+    body = (rotation * 6)[:116]
+    return alphabet[index] + body
 
 
 SEQUENCE = _sequence(0)

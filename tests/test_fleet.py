@@ -387,15 +387,20 @@ def test_a_near_duplicate_yields_to_a_separated_candidate():
     assert twin not in chosen
 
 
-def test_a_degenerate_pool_still_fills_the_fleet_with_its_most_separated():
-    """A hard floor is the wrong tool: on the epoch-25095 pool it left one
-    assignable candidate out of thirty, because the search produces one
-    molecule thirty times. Fewer tickets is worse than close tickets."""
+def test_a_degenerate_pool_yields_fewer_tickets_rather_than_duplicates():
+    """Filling the fleet regardless was wrong, and epoch 25100 showed the cost.
+
+    Our uid 46 went out 0.9843 identical to our own uid 59, was discarded, and
+    was one of five tickets of seven that scored nothing. A uid left unspent
+    and a uid spent on a certain duplicate both score zero.
+    """
     twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
              for i, aa in enumerate("MVQTA")]
     chosen = fleet.distinct_sequences(_pool(twins), 5)
-    assert len(chosen) == 5, "the fleet went unspent over similarity"
-    assert len(set(chosen)) == 5
+    assert len(chosen) < 5, "spent uids on molecules the validator will discard"
+    for i, a in enumerate(chosen):
+        for b in chosen[:i]:
+            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
 
 
 def test_sequence_identity_is_conservative_against_the_validators_rule():
@@ -423,12 +428,14 @@ def test_a_candidate_the_field_is_sitting_on_is_avoided():
     assert chosen == [clear], "took a molecule the field already occupies"
 
 
-def test_crowding_never_leaves_a_uid_unspent():
-    """A registration held is paid for; a contested ticket still beats none."""
+def test_crowding_does_not_force_a_duplicate():
+    """Contested beats nothing, but a duplicate of our own ticket does not."""
     contested = [_variant(REAL, [(2, aa)]) for aa in "MVQ"]
     pool = _pool([(s, 0.3 - i * 0.01, 100.0 + i) for i, s in enumerate(contested)])
     chosen = fleet.distinct_sequences(pool, 2, crowd=[REAL])
-    assert len(chosen) == 2
+    for i, a in enumerate(chosen):
+        for b in chosen[:i]:
+            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
 
 
 def test_no_crowd_is_the_previous_behaviour():
@@ -437,3 +444,23 @@ def test_no_crowd_is_the_previous_behaviour():
     assert fleet.distinct_sequences(pool, 2) == fleet.distinct_sequences(
         pool, 2, crowd=[]
     )
+
+
+def test_the_fallback_never_commits_a_certain_duplicate():
+    """Epoch 25100 sent our uid 46 out 0.9843 identical to our own uid 59.
+
+    It was discarded, one of five tickets of seven that scored nothing. A uid
+    left unspent and a uid spent on a duplicate both score zero; only one of
+    them is honest about it.
+    """
+    twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
+             for i, aa in enumerate("MVQTA")]
+    chosen = fleet.distinct_sequences(_pool(twins), 5)
+    for i, a in enumerate(chosen):
+        for b in chosen[:i]:
+            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
+
+
+def test_the_fleet_threshold_sits_just_under_the_validators_line():
+    assert fleet.MAXIMUM_FLEET_IDENTITY < fleet.VALIDATOR_DUPLICATE_IDENTITY
+    assert fleet.VALIDATOR_DUPLICATE_IDENTITY == 0.95
