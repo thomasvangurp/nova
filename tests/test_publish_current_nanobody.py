@@ -479,6 +479,8 @@ class _Host:
         # Sequences publish_checkpoint.py refuses, so a test can reproduce
         # the live "winner lacks a current Layer-2 pass" exit for one uid.
         self.unpublishable: set[str] = set()
+        # Ranked candidates this epoch's Layer-2 run does not pass.
+        self.layer2_failures: set[str] = set()
         runtime = root / "runtime"
         (runtime / ".pixi/envs/bgen/bin").mkdir(parents=True)
         (runtime / ".pixi/envs/bgen/bin/python").write_text("#!/bin/sh\n")
@@ -585,7 +587,10 @@ class _Host:
             output = Path(value("--output"))
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps({"candidates": [
-                {"sequence": sequence, "layer2_passed": True}
+                {
+                    "sequence": sequence,
+                    "layer2_passed": sequence not in self.layer2_failures,
+                }
                 for sequence in self.candidate_sequences
             ]}))
         elif "publish_checkpoint.py" in joined:
@@ -985,4 +990,34 @@ def test_a_fleet_with_no_publishable_uid_stops_rather_than_writing_nothing(
     host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
     host.unpublishable = set(host.candidate_sequences)
     with pytest.raises(SystemExit, match="no uid could be published"):
+        _publish_once(host.args(strict_qualification=False))
+
+
+def test_uids_are_assigned_only_sequences_that_passed_current_layer_2(
+    tmp_path, monkeypatch
+):
+    """The ranking is ordered by win probability and ignores Layer-2.
+
+    In epoch 25092 only three of the top six ranked sequences held a current
+    pass, so the fleet assigned three uids a sequence publish_checkpoint.py
+    then refused outright. The assignable pool must be the passing subsequence.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    # Fail the top two: a naive top-k slice would hand these to uid 0 and uid 1.
+    host.layer2_failures = {_sequence(0), _sequence(1)}
+
+    _publish_once(host.args(strict_qualification=False))
+
+    artifact = json.loads(host.artifact.read_text())
+    published = {entry["sequence"] for entry in artifact["submissions"]}
+    assert len(published) == 3
+    assert not published & host.layer2_failures
+
+
+def test_publication_stops_when_no_ranked_candidate_passed_layer_2(
+    tmp_path, monkeypatch
+):
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1))
+    host.layer2_failures = set(host.candidate_sequences)
+    with pytest.raises(SystemExit, match="no ranked candidate passed Layer-2"):
         _publish_once(host.args(strict_qualification=False))

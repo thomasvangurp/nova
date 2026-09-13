@@ -47,7 +47,7 @@ import traceback
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple, Sequence
+from typing import Any, Iterator, Mapping, NamedTuple, Sequence
 
 import requests
 import yaml
@@ -627,6 +627,51 @@ def _layer2_command(
     ]
 
 
+def _current_layer2_passes(layer2: Path) -> set[str]:
+    """Sequences this epoch's Layer-2 run passed, upper-cased for comparison."""
+    payload = json.loads(layer2.read_text())
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise SystemExit(f"{layer2} holds no Layer-2 candidate list")
+    return {
+        str(entry.get("sequence") or "").strip().upper()
+        for entry in candidates
+        if isinstance(entry, Mapping) and entry.get("layer2_passed")
+    }
+
+
+def _restrict_to_current_layer2(
+    payload: dict[str, Any], layer2: Path
+) -> dict[str, Any]:
+    """Drop ranked candidates with no current Layer-2 pass, keeping the order.
+
+    Win-probability order is preserved, so the ranking's own monotonicity
+    assertion still holds on the subsequence.
+    """
+    passes = _current_layer2_passes(layer2)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise SystemExit("ranking contains no candidate list")
+    kept = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping)
+        and str(candidate.get("sequence") or "").strip().upper() in passes
+    ]
+    if not kept:
+        raise SystemExit(
+            f"no ranked candidate passed Layer-2 in {layer2}: there is nothing "
+            "publishable this epoch"
+        )
+    if len(kept) < len(candidates):
+        print(
+            f"Layer-2 pool: {len(kept)} of {len(candidates)} ranked "
+            "candidate(s) hold a current pass and are assignable",
+            flush=True,
+        )
+    return {**payload, "candidates": kept}
+
+
 def _publish_fleet(
     *,
     args: argparse.Namespace,
@@ -646,6 +691,13 @@ def _publish_fleet(
 ) -> tuple[dict[str, Any], list[fleet_module.Assignment]]:
     """Bind k distinct sequences to k uids and build the single fleet artifact."""
     payload = json.loads(rankings.read_text())
+    # Assign only from sequences that hold a CURRENT Layer-2 pass. The ranking
+    # is ordered by win probability and knows nothing about Layer-2, so the
+    # top-k slice routinely contained sequences publish_checkpoint.py then
+    # refused with "winner lacks a current Layer-2 pass": in epoch 25092 only
+    # three of the top six passed. layer2[0] is this epoch's file; the rest are
+    # historical and are not what "current" means.
+    payload = _restrict_to_current_layer2(payload, layer2[0])
     sequences = fleet_module.distinct_sequences(payload, len(crew))
     try:
         blocks = fleet_module.commitment_blocks(
