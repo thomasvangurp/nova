@@ -1,0 +1,81 @@
+# {{ ansible_managed }}
+#
+# Push newly purchased hotkeys from the purchase host to whichever GPU box is
+# rented right now.
+#
+# This unit exists because the two halves of the fleet are deliberately on
+# different machines: the purchaser creates hotkeys where the COLDKEY is (here),
+# and the miner needs them where the GPU is (a rental that must never hold a
+# coldkey). Nothing moved them between deploys, so the fleet drifted -- the Pi
+# held three hotkeys while the box had two, and the publisher was preparing a
+# submission for a uid whose key was not on the box. That failure is invisible
+# from the leaderboard: it looks exactly like never having bought the slot.
+#
+# It was installed by hand for the first week of its life, which meant a rebuilt
+# purchase host silently came back without it -- buying slots it never delivered.
+# It is now rendered from ansible/slots.yml; do not edit it on the host.
+#
+# Only hotkeys move. The coldkey stays here, ansible/nanobody.yml and
+# ansible/nanobody_services.yml both assert it is absent on the rental, and
+# neither this unit nor {{ hotkey_sync_script | basename }} names it.
+#
+# No credential is needed and none is referenced: the purchase agent's coldkey
+# password arrives through LoadCredentialEncrypted in nova-slot-manager.service
+# and has nothing to do with moving public-key material around. The only
+# credential this unit's script reads is the vast.ai API key, which it reads
+# itself from a file in {{ slot_manager_home }} that this playbook only ever
+# stats. The Environment= lines below are locators -- a wallet name, a key
+# prefix, an instance label, an interpreter path -- never secrets.
+[Unit]
+Description=Push purchased hotkeys to the rented GPU box
+Documentation=file://{{ hotkey_sync_script }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs as the wallet's owner, not root: the hotkeys, the SSH key that reaches the
+# box and the vast.ai API key all live in this user's home, and a file-copy job
+# has no reason to be root.
+User={{ slot_manager_user }}
+Group={{ slot_manager_user }}
+Environment=HOME={{ slot_manager_home }}
+# oneshot driven by {{ hotkey_sync_service }}.timer, not a resident loop: there is
+# nothing to keep in memory between runs, and a process that exits cannot wedge
+# holding an ssh connection to a box that has since been destroyed.
+Type=oneshot
+WorkingDirectory={{ slot_host_workspace }}
+# Every value the script would otherwise take from its own defaults is passed
+# explicitly, because those defaults are a second, silent copy of this
+# deployment's configuration. The script hardcodes wallet "mining_ops", prefix
+# "nova68-slot" and a vastai under /opt/nova-nanobody -- all correct today and
+# all wrong the moment slot_manager_wallet, slot_manager_hotkey_prefix or
+# slot_manager_remote_repo is changed here. A prefix that no longer matches is
+# the worst of the three: the script reports "no hotkeys matching ... yet",
+# exits 0, and the drift it exists to prevent comes back looking healthy.
+Environment=NOVA_WALLET_NAME={{ slot_manager_wallet }}
+Environment=NOVA_HOTKEY_PREFIX={{ slot_manager_hotkey_prefix }}
+# The same label the Ansible inventory resolves the box by, so a rotated SSH
+# port is never mistaken for an absent host and the unit and the inventory can
+# never disagree about which box is "the" box.
+Environment=NOVA_VAST_LABEL={{ hotkey_sync_vast_label }}
+Environment=NOVA_VASTAI={{ hotkey_sync_vastai }}
+ExecStart={{ hotkey_sync_script }}
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+# full, not strict, unlike nova-slot-manager.service. strict mounts the WHOLE
+# hierarchy read-only -- including this user's home -- and this unit shells out
+# to ssh, rsync and the vastai client, which read keys from and may cache under
+# {{ slot_manager_home }}. full still makes /usr, /boot and /etc read-only, which
+# is the part worth protecting on a host that holds a coldkey.
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# No [Install]: the timer is what gets enabled, not the service. Enabling this
+# unit directly would push once at boot and then never again, which is exactly
+# the hand-run-once behaviour it replaces.

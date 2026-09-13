@@ -1,0 +1,35 @@
+# {{ ansible_managed }}
+#
+# How often to check that the box holds what has been bought.
+#
+# {{ (hotkey_sync_interval_seconds / 60) | round | int }} minutes is comfortably
+# faster than the fleet can change: the purchaser buys at most one registration
+# per 360-block (72-minute) adjustment interval, so no more than one hotkey can
+# appear between ticks. A tick with nothing to do costs one vast.ai API call and
+# an rsync that transfers nothing, which is why this is a schedule rather than a
+# hook on the purchase unit -- a box rented hours after a purchase still gets the
+# key, and so does a box that was replaced by a different rental.
+[Unit]
+Description=Keep the GPU box in step with the purchased fleet
+
+[Timer]
+# Named explicitly rather than left to the implicit same-basename default, and
+# NOT as Requires= in [Unit] -- which is how this unit was installed by hand.
+# Requires= on a timer activates the service the moment the timer itself is
+# started, so `systemctl restart <timer>` (what the deploy does) fires an
+# unscheduled run before the deploy has finished checking that the run can work.
+# Harmless for a file copy and not harmless for the purchase timer next door;
+# the two schedules should not differ in a way a reader has to explain.
+Unit={{ hotkey_sync_service }}.service
+OnBootSec={{ hotkey_sync_boot_seconds }}
+OnUnitActiveSec={{ hotkey_sync_interval_seconds }}
+# Kept so this schedule reads the same as the purchase timer's. It only has an
+# effect on calendar timers, and both of these are monotonic: a reboot restarts
+# the OnBootSec countdown, which is the behaviour wanted here anyway -- the box
+# is checked {{ (hotkey_sync_boot_seconds / 60) | round | int }} minutes after
+# boot, once the network is up and the purchaser has had a chance to run.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

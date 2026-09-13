@@ -44,7 +44,7 @@
     # redeploys because .pixi is excluded from the sync; putting it at the tree
     # ROOT does not survive, because the sync overwrites the manifest there with
     # the workspace root's, whose pinned pixi version the Pi does not have.
-    slot_manager_python: "{{ (slot_manager_remote_repo ~ '/deploy/slot_host/.pixi/envs/default/bin/python') if ansible_system == 'Linux' else 'python3' }}"
+    slot_manager_python: "{{ (slot_host_workspace ~ '/.pixi/envs/default/bin/python') if ansible_system == 'Linux' else 'python3' }}"
     slot_manager_minimum_hotkeys: 9
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
@@ -77,6 +77,35 @@
     slot_manager_execute: false
     # Where the repository lives on a remote purchase host.
     slot_manager_remote_repo: /opt/nova-nanobody
+    # The purchase host's own Pixi workspace inside the synced tree. It is not
+    # the tree root: the sync overwrites the root manifest with the workspace
+    # root's, whose pinned pixi version the Pi does not have.
+    slot_host_workspace: "{{ slot_manager_remote_repo }}/deploy/slot_host"
+    # pixi is installed per-user by its own installer, so it is under the service
+    # user's home rather than on PATH for a non-login ansible shell. Named here
+    # so a host that keeps it elsewhere can be pointed at it without a patch.
+    slot_host_pixi: "{{ slot_manager_home }}/.pixi/bin/pixi"
+
+    # ---- Hotkey delivery ---------------------------------------------------
+    # The purchaser creates hotkeys where the coldkey is; the miner needs them
+    # where the GPU is. This timer is the only thing that moves them, and it ran
+    # for a week as two hand-installed units that a rebuild would have dropped.
+    hotkey_sync_service: nova-hotkey-sync
+    hotkey_sync_script: "{{ slot_host_workspace }}/sync_hotkeys.sh"
+    hotkey_sync_vastai: "{{ slot_host_workspace }}/.pixi/envs/default/bin/vastai"
+    # Resolved on the controller from the same variable the dynamic inventory
+    # reads, with the same default, so the unit looks for the box under the label
+    # this deploy's inventory just used. Hardcoding it here would let the two
+    # disagree, and the script's failure mode for "no box under that label" is a
+    # successful no-op.
+    hotkey_sync_vast_label: "{{ lookup('env', 'NOVA_VAST_LABEL') | default('nova-nanobody-pixi', true) }}"
+    hotkey_sync_boot_seconds: 300
+    hotkey_sync_interval_seconds: 600
+    # Locators only: the paths the vastai client itself reads its API key from.
+    # This playbook stats them and never opens them.
+    hotkey_sync_api_key_paths:
+      - "{{ slot_manager_home }}/.config/vastai/vast_api_key"
+      - "{{ slot_manager_home }}/.vast_api_key"
 
   tasks:
     - name: Require committed source for the deployed agent
@@ -148,6 +177,72 @@
           - "--exclude=.pixi"
           - "--exclude=snapshots"
           - "--exclude=external_tools"
+
+    # ---- The interpreter, from the committed lock ---------------------------
+    # Until now the environment every task below runs was built by hand on the
+    # host -- the same gap as the two hand-installed sync units: nothing in the
+    # repository could rebuild it, so a reprovisioned Pi came back with a
+    # purchaser that could not import bittensor and a deploy that only told you
+    # so after it had already armed the timer. Building it here, before the
+    # --help probe and the import gate, is what makes those two checks mean
+    # something on a host that has never run this play.
+    #
+    # pixi runs as the connecting user, never with become: .pixi belongs to the
+    # service user, and a root-owned environment is one the unit cannot write to
+    # or rebuild.
+    - name: Require pixi on the purchase host (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.stat:
+        path: "{{ slot_host_pixi }}"
+      register: slot_host_pixi_stat
+
+    - name: Explain how to install pixi if it is absent (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that: slot_host_pixi_stat.stat.exists and slot_host_pixi_stat.stat.xusr
+        fail_msg: >-
+          {{ slot_host_pixi }} is missing or not executable. The purchase host's
+          interpreter is built from {{ slot_host_workspace }}/pixi.lock, so
+          install pixi there first (`curl -fsSL https://pixi.sh/install.sh | sh`
+          as {{ slot_manager_user }}) or point slot_host_pixi at the one this
+          host already has. Nothing here can bootstrap it silently.
+        success_msg: "pixi present at {{ slot_host_pixi }}"
+
+    # --locked, never a bare `pixi install`. A bare install resolves whatever is
+    # newest and writes a new lock on the host, which is exactly how the
+    # committed lock came to describe an environment the Pi did not have: the
+    # manifest declared vastai, the lock never mentioned it, and the purchaser
+    # ran a hand-installed vastai that no rebuild could reproduce. With --locked a
+    # lock that no longer matches this manifest fails the deploy here instead of
+    # quietly resolving something new onto a live spending host.
+    - name: Build the purchase host's environment from the committed lock (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv: ["{{ slot_host_pixi }}", install, --locked]
+        chdir: "{{ slot_host_workspace }}"
+      environment:
+        PIXI_COLOR: never
+      register: slot_host_install
+      # Same idiom as the GPU box's locked environments in ansible/nanobody.yml.
+      changed_when: "'Nothing to do' not in (slot_host_install.stdout ~ slot_host_install.stderr)"
+      # A bare failure here is `pixi install --locked` rc=1 with one line of
+      # context; the assert below says what to do about it instead.
+      failed_when: false
+
+    - name: Require the locked environment to have been installable (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that: slot_host_install.rc == 0
+        fail_msg: >-
+          `pixi install --locked` failed in {{ slot_host_workspace }}
+          ({{ (slot_host_install.stderr | default('')) | regex_replace('\s+', ' ')
+              | truncate(200, true) | default('see stderr', true) }}).
+          If it says the lock file is not up to date, the lock and
+          deploy/slot_host/pixi.toml have diverged: re-lock ON this host
+          (`{{ slot_host_pixi }} lock` in {{ slot_host_workspace }}), commit the
+          result, and re-run. Do not re-lock from the macOS controller -- that
+          manifest is linux-aarch64 only and cannot be cross-resolved.
+        success_msg: "Locked environment installed in {{ slot_host_workspace }}"
 
     - name: Verify the agent accepts every argument it is deployed with
       ansible.builtin.include_tasks: tasks/verify_entrypoint.yml
@@ -352,12 +447,21 @@
           - show
           - "{{ slot_manager_service }}.timer"
           - --property=ActiveState
-          - --property=NextElapseUSecRealtime
+          - --property=UnitFileState
+          - --property=NextElapseUSecMonotonic
       register: slot_manager_schedule
       changed_when: false
+      # This used to read NextElapseUSecRealtime and require the string
+      # "NextElapseUSecRealtime=" to be present -- which systemd always prints,
+      # EMPTY, for a monotonic timer like this one. The task therefore reported
+      # "has a next run" for every possible state of the timer, including none.
+      # The monotonic property carries the real answer: a timespan when a run is
+      # scheduled, the literal "infinity" when the timer is active but will never
+      # fire again.
       failed_when: >-
         'ActiveState=active' not in slot_manager_schedule.stdout
-        or 'NextElapseUSecRealtime=' not in slot_manager_schedule.stdout
+        or 'UnitFileState=enabled' not in slot_manager_schedule.stdout
+        or slot_manager_schedule.stdout is search('NextElapseUSecMonotonic=(infinity|0)?(\n|$)')
 
     # Prove the check itself runs to completion under the unit, rather than
     # trusting that a timer which is armed will fire something that works.
@@ -367,6 +471,284 @@
       ansible.builtin.command:
         argv: [systemctl, start, "--wait", "{{ slot_manager_service }}.service"]
       changed_when: true
+
+    # ---- Hotkey delivery: the other half of a purchase (Linux) -------------
+    # A bought slot that never reaches the box is indistinguishable from a slot
+    # that was never bought -- same empty leaderboard row, same "no submission
+    # for this uid". The delivery half ran for a week as two units installed by
+    # hand on the Pi, which means it existed only until the next rebuild. It is
+    # rendered here now, on the Linux path only: the macOS path runs the
+    # purchaser in tmux and has no systemd to install a timer into, and an
+    # operator's laptop is not where hotkeys are bought anyway.
+    - name: Require the hotkey sync script in the synced tree (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.stat:
+        path: "{{ hotkey_sync_script }}"
+        get_checksum: false
+      register: hotkey_sync_script_stat
+
+    - name: Explain a missing or non-executable sync script (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that:
+          - hotkey_sync_script_stat.stat.exists
+          - hotkey_sync_script_stat.stat.xusr
+        fail_msg: >-
+          {{ hotkey_sync_script }} is missing or not executable. The sync task
+          above rsyncs it from the controller preserving mode, so this means the
+          file left the repository or lost its 0755 mode in git; systemd would
+          take the unit as installed and fail every tick on Permission denied.
+        success_msg: "{{ hotkey_sync_script }} is present and executable."
+
+    # Locators only. The client reads the key itself; nothing here opens the file
+    # (get_checksum is off so not even its bytes are hashed), and its value never
+    # enters a unit, a command line or this play's output.
+    - name: Locate the vast.ai API key the sync unit needs (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ hotkey_sync_api_key_paths }}"
+      register: hotkey_sync_api_key
+      changed_when: false
+
+    - name: Require an API key for the sync unit's user (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that:
+          - hotkey_sync_api_key.results | selectattr('stat.exists') | list | length > 0
+        fail_msg: >-
+          None of {{ hotkey_sync_api_key_paths | join(', ') }} exists, so the
+          vastai client has no key when it runs as {{ slot_manager_user }} with
+          HOME={{ slot_manager_home }} -- and an unauthenticated `show instances`
+          fails into the same silent no-op as a missing client. Create it as
+          {{ slot_manager_user }} with `vastai set api-key <key>`, mode 0600.
+          Its value is never read here.
+        success_msg: "An API key file exists for {{ slot_manager_user }}; it was not read."
+
+    # The script's discovery step is
+    #   "$VASTAI" show instances --raw 2>/dev/null | python3 ... || true
+    # so a client that cannot answer is not an error there: the pipeline yields an
+    # empty host, the script reports "no running instance labelled ..." and exits
+    # 0. That is also exactly what a genuinely un-rented box looks like, so the
+    # journal cannot tell the two apart -- and neither can the proving run below,
+    # which is how an earlier version of this gate let a deploy pass with the
+    # client pointed at the wrong file entirely.
+    #
+    # So ask the client the same question the unit will ask, as the same user, and
+    # require an answer that PARSES. Missing binary, wrong binary, unreadable or
+    # rejected API key all fail here; "no box rented right now" returns [] and
+    # passes, because that is a healthy state of a purchase host and must never
+    # fail a deploy. `vastai --version` is not enough: /bin/true answers that.
+    #
+    # Only counts come back. The raw payload (instance ids, ssh hosts and ports)
+    # stays on the host, and the API key is never named, read or passed here --
+    # the client resolves it itself from the file stat'ed above.
+    - name: Ask the vastai client the same question the unit will (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.shell:
+        cmd: >-
+          "{{ hotkey_sync_vastai }}" show instances --raw 2>/dev/null
+          | python3 -c 'import json, os, sys;
+          d = json.load(sys.stdin);
+          m = [i for i in d if i.get("label") == os.environ["NOVA_VAST_LABEL"]];
+          r = [i for i in m if i.get("actual_status") == "running"];
+          print("VASTAI_RAW_OK", len(d), len(m), len(r))'
+      environment:
+        NOVA_VAST_LABEL: "{{ hotkey_sync_vast_label }}"
+      register: hotkey_sync_instances
+      changed_when: false
+      failed_when: false
+
+    - name: Require a vastai client that can answer (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that:
+          - hotkey_sync_instances.stdout is search('VASTAI_RAW_OK')
+        fail_msg: >-
+          {{ hotkey_sync_vastai }} did not return parseable instance JSON for
+          {{ slot_manager_user }}
+          ({{ (hotkey_sync_instances.stderr | default('')) | regex_replace('\s+', ' ')
+              | truncate(160, true) | default('no output', true) }}).
+          Either it is not the vastai client (the unit's NOVA_VASTAI points at
+          {{ hotkey_sync_vastai }}, built by the locked environment above), or the
+          API key at one of {{ hotkey_sync_api_key_paths | join(', ') }} is not
+          accepted. The sync script swallows exactly this failure, so left
+          unchecked every tick would report "no running instance labelled
+          {{ hotkey_sync_vast_label }}" and exit 0 -- indistinguishable from an
+          un-rented box, and an eternal, healthy-looking no-op.
+        # Padded before indexing. Ansible renders success_msg even when the
+        # assertion FAILS, so an unguarded stdout.split()[1] turns every failure
+        # of this gate into "object of type 'list' has no attribute 1" and the
+        # explanation above is never printed.
+        success_msg: >-
+          vastai answered for {{ slot_manager_user }}:
+          {{ (hotkey_sync_instances.stdout.split() + ['?', '?', '?', '?'])[1] }} instance(s),
+          {{ (hotkey_sync_instances.stdout.split() + ['?', '?', '?', '?'])[2] }} labelled
+          {{ hotkey_sync_vast_label }},
+          {{ (hotkey_sync_instances.stdout.split() + ['?', '?', '?', '?'])[3] }} running.
+
+    - name: Install the hotkey sync unit (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-hotkey-sync.service.j2
+        dest: "/etc/systemd/system/{{ hotkey_sync_service }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      register: hotkey_sync_unit
+
+    - name: Install the hotkey sync timer (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-hotkey-sync.timer.j2
+        dest: "/etc/systemd/system/{{ hotkey_sync_service }}.timer"
+        owner: root
+        group: root
+        mode: "0644"
+      register: hotkey_sync_timer_unit
+
+    # The TIMER is enabled, never the service: enabling a oneshot service would
+    # push once at boot and then never again.
+    - name: Schedule the hotkey sync (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.systemd_service:
+        name: "{{ hotkey_sync_service }}.timer"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Confirm the sync schedule is armed and has a next run (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ hotkey_sync_service }}.timer"
+          - --property=ActiveState
+          - --property=UnitFileState
+          - --property=NextElapseUSecMonotonic
+      register: hotkey_sync_schedule
+      changed_when: false
+      # Monotonic, not Realtime: these are OnBootSec/OnUnitActiveSec timers, so
+      # systemd leaves NextElapseUSecRealtime EMPTY and a check for the string
+      # "NextElapseUSecRealtime=" passes on a timer with no next run at all. The
+      # monotonic value is a timespan when a run is scheduled and the literal
+      # "infinity" when none is, which is a state an active timer can reach.
+      failed_when: >-
+        'ActiveState=active' not in hotkey_sync_schedule.stdout
+        or 'UnitFileState=enabled' not in hotkey_sync_schedule.stdout
+        or hotkey_sync_schedule.stdout is search('NextElapseUSecMonotonic=(infinity|0)?(\n|$)')
+
+    # An armed timer is not a working one. This unit's whole failure mode is
+    # running and achieving nothing, so the deploy runs it once, under its own
+    # User=, HOME= and WorkingDirectory=, and reads back what that run said.
+    - name: Note when the proving run starts (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: hotkey_sync_started
+      changed_when: false
+
+    - name: Run one hotkey sync now (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv: [systemctl, start, "--wait", "{{ hotkey_sync_service }}.service"]
+      changed_when: true
+
+    - name: Read back what that run reported (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - "{{ hotkey_sync_service }}.service"
+          - "--since"
+          - "@{{ hotkey_sync_started.stdout | trim }}"
+          - "--no-pager"
+          - -o
+          - cat
+      register: hotkey_sync_journal
+      changed_when: false
+
+    # All four of the script's outcomes are accepted, because three of them are
+    # healthy states of a live fleet: no wallet hotkey directory yet, no hotkey
+    # matching the prefix yet, and no box rented right now. Requiring a sync to
+    # have happened would fail every deploy made while no GPU is rented -- which
+    # is most of them, since the purchaser exists precisely to keep buying when
+    # no box is up. What is required is evidence that THIS unit reached one of
+    # them, rather than a timer pointing at something that no longer runs.
+    - name: Require that run to have reached one of the script's outcomes (Linux)
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that:
+          - hotkey_sync_journal.stdout is search('no hotkey directory at|no hotkeys matching|no running instance labelled|box now holds')
+        fail_msg: >-
+          {{ hotkey_sync_service }}.service exited 0 without reporting any of the
+          outcomes {{ hotkey_sync_script | basename }} can reach
+          ({{ hotkey_sync_journal.stdout | regex_replace('\s+', ' ')
+              | truncate(200, true) | default('no journal output', true) }}).
+          The unit ran something else, or its output is not reaching the journal,
+          so the one thing this timer exists to prove is unproven.
+        # default(..., true) because regex_search returns None when nothing
+        # matches, and Ansible renders success_msg even for a FAILING assert: a
+        # None here is rejected as "not str_or_list_of_str" and the explanation
+        # above is replaced by that type error, exactly when it is needed.
+        success_msg: >-
+          {{ hotkey_sync_journal.stdout
+             | regex_search('no hotkey directory at[^\n]*|no hotkeys matching[^\n]*|no running instance labelled[^\n]*|synced [^\n]*')
+             | default('no outcome reported', true) }}
+
+    - name: Count what crossed and what the box holds (Linux)
+      when:
+        - slot_manager_activate | bool
+        - ansible_system == 'Linux'
+        - hotkey_sync_journal.stdout is search('box now holds')
+      ansible.builtin.set_fact:
+        hotkey_sync_sent: "{{ hotkey_sync_journal.stdout | regex_search('synced [0-9]+ local') | regex_search('[0-9]+') }}"
+        hotkey_sync_present: "{{ hotkey_sync_journal.stdout | regex_search('box now holds [0-9]+') | regex_search('[0-9]+') }}"
+
+    # Only when a box is rented, and only one-directional: the box may legitimately
+    # hold more than crossed this run (keys from an earlier wallet generation are
+    # not deleted), but it must never hold FEWER than what was just pushed -- that
+    # is the drift this unit exists to end, and rsync reporting success while the
+    # box comes back short means the push is landing somewhere the miner does not
+    # read from.
+    - name: Require the box to hold at least what was pushed (Linux)
+      when:
+        - slot_manager_activate | bool
+        - ansible_system == 'Linux'
+        - hotkey_sync_present is defined
+      ansible.builtin.assert:
+        that:
+          - hotkey_sync_present | int >= hotkey_sync_sent | int
+          - hotkey_sync_sent | int > 0
+        fail_msg: >-
+          {{ hotkey_sync_sent }} hotkey file(s) were pushed but the box reports
+          {{ hotkey_sync_present }} matching {{ slot_manager_hotkey_prefix }}.
+          The miner reads them from its own wallet directory, so a short box is a
+          publisher preparing submissions for uids whose keys are not there --
+          invisible from the leaderboard. Check the remote wallet path and the
+          prefix both ends use.
+        success_msg: >-
+          Box holds {{ hotkey_sync_present }} key file(s) matching
+          {{ slot_manager_hotkey_prefix }}, at least the {{ hotkey_sync_sent }} just pushed.
+
+    - name: Report the hotkey delivery half (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.debug:
+        msg: >-
+          {{ hotkey_sync_service }}.timer delivers {{ slot_manager_hotkey_prefix }}*
+          from {{ slot_manager_wallet }} to the box labelled
+          {{ hotkey_sync_vast_label }} every
+          {{ (hotkey_sync_interval_seconds / 60) | round | int }} minutes; last run said:
+          {{ hotkey_sync_journal.stdout | regex_replace('\s+', ' ') | truncate(160, true) }}
 
     - name: Report the slot agent
       ansible.builtin.debug:
