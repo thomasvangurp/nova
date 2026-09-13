@@ -712,6 +712,10 @@ def _publish_fleet(
     return artifact, assignments
 
 
+COMMIT_FLEET_FAILED = "COMMIT_FLEET_UID_FAILED"
+COMMIT_FLEET_INCOMPLETE = "COMMIT_FLEET_INCOMPLETE"
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
@@ -729,6 +733,7 @@ def _commit_fleet(
     """
     if not template:
         return
+    failures: list[tuple[int, int]] = []
     for index, assignment in enumerate(assignments):
         command = [
             part.format(
@@ -743,7 +748,26 @@ def _commit_fleet(
         ]
         if index and pause_seconds > 0:
             time.sleep(pause_seconds)
-        _run(command)
+        try:
+            _run(command)
+        except subprocess.CalledProcessError as error:
+            # One uid's chain error must never cost the rest of the fleet its
+            # commitment: every uid gets its own attempt inside the reserve.
+            failures.append((assignment.uid, error.returncode))
+            print(
+                f"{COMMIT_FLEET_FAILED} uid={assignment.uid} "
+                f"hotkey={assignment.hotkey} rc={error.returncode}",
+                file=sys.stderr,
+                flush=True,
+            )
+    if failures:
+        detail = ", ".join(f"uid {uid} (rc {rc})" for uid, rc in failures)
+        print(
+            f"{COMMIT_FLEET_INCOMPLETE} {len(failures)} of "
+            f"{len(assignments)} uid(s) did not commit this epoch: {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:

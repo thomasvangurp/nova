@@ -20,6 +20,8 @@ from compound_miner.nanobody_provider import (
 )
 from nanobody_opt import fleet, publication_gates
 from tools.publish_current_nanobody import (
+    COMMIT_FLEET_FAILED,
+    COMMIT_FLEET_INCOMPLETE,
     RANK_QUALIFICATION_ARGUMENTS,
     SELECTION_ORDER,
     _archive_and_audit_previous,
@@ -31,6 +33,7 @@ from tools.publish_current_nanobody import (
     _has_new_exact_data,
     _is_current_qualified,
     _parser,
+    _commit_fleet,
     _publish_once,
     _publisher_state_matches,
     _retire_completed_epoch,
@@ -832,3 +835,59 @@ def test_publication_still_refuses_when_there_is_no_evidence_at_all(tmp_path):
     source = (Path(__file__).resolve().parents[1]
               / "tools" / "publish_current_nanobody.py").read_text()
     assert "no exact score-bank inputs found under" in source
+
+
+def test_one_uid_s_commit_failure_does_not_cost_the_rest_of_the_fleet(
+    monkeypatch, capsys, tmp_path
+):
+    """A chain error on the first uid must not skip the other three.
+
+    ``_run`` raises on a non-zero exit, so an unguarded loop would abandon
+    every later uid -- the exact way a four-uid fleet lands one commitment.
+    """
+    assignments = [
+        fleet.Assignment(uid=uid, hotkey=f"5Hotkey{uid}", sequence="Q" * 120,
+                         commit_block=9_000_000 + uid)
+        for uid in (1, 40, 46, 51)
+    ]
+    attempted: list[str] = []
+
+    def fake_run(command):
+        attempted.append(command[command.index("--uid") + 1])
+        if command[command.index("--uid") + 1] == "1":
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr("tools.publish_current_nanobody._run", fake_run)
+    _commit_fleet(
+        assignments,
+        template="commit --uid {uid} --hotkey {hotkey} --sequence {sequence}",
+        artifact=tmp_path / "artifact.json",
+        epoch=25_087,
+        pause_seconds=0,
+    )
+
+    assert attempted == ["1", "40", "46", "51"]
+    captured = capsys.readouterr().err
+    assert f"{COMMIT_FLEET_FAILED} uid=1" in captured
+    assert f"{COMMIT_FLEET_INCOMPLETE} 1 of 4" in captured
+
+
+def test_a_fully_successful_fleet_commit_reports_no_failure(
+    monkeypatch, capsys, tmp_path
+):
+    assignments = [
+        fleet.Assignment(uid=uid, hotkey=f"5Hotkey{uid}", sequence="Q" * 120,
+                         commit_block=9_000_000 + uid)
+        for uid in (1, 40)
+    ]
+    monkeypatch.setattr(
+        "tools.publish_current_nanobody._run", lambda command: None
+    )
+    _commit_fleet(
+        assignments,
+        template="commit --uid {uid}",
+        artifact=tmp_path / "artifact.json",
+        epoch=25_087,
+        pause_seconds=0,
+    )
+    assert COMMIT_FLEET_INCOMPLETE not in capsys.readouterr().err
