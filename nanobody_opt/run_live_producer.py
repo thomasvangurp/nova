@@ -278,12 +278,19 @@ def _run_iteration(
     # between then and here -- downloads, parent selection, elite Layer 2,
     # proposal generation over thousands of candidates, pool IgBLAST -- is
     # minutes long, and a stale snapshot decides the closing generation wrongly.
+    #
+    # Through _chain_state, not a bare read: the point of re-reading is freshness,
+    # and a bare read accepts a file whose miner died an hour ago as long as its
+    # epoch field still matches -- which it does for up to a whole epoch.  That
+    # substitutes an older block for a newer one and turns the closing generation
+    # into a non-closing one, spending no replication budget at all.
     try:
-        current = json.loads(Path(args.chain_state).read_text())
+        current = _chain_state(Path(args.chain_state), args.maximum_chain_state_age)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        print(f"PRODUCER_CHAIN_STATE_REREAD_REFUSED {error}", flush=True)
+    else:
         if int(current["epoch"]) == epoch:
             state = current
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        pass
     remaining_blocks = int(state["epoch_length"]) - (
         int(state["block"]) % int(state["epoch_length"])
     )

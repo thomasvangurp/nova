@@ -39,7 +39,6 @@ nanobody_basin_evidence_fraction: 0.4
 nanobody_basin_evidence_core_limit: 1
 nanobody_basin_top_core_weight: 2
 nanobody_basin_exploration_residues_per_position: 5
-nanobody_maximum_exhaustive_singles: 8192
 
 # One pass over the whole filtered shell, then every remaining second on
 # replication.  At 0.623 seconds per observation a 2,800-candidate pass is about

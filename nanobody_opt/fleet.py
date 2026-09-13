@@ -237,10 +237,26 @@ def neuron_rows(source: Any) -> list[dict[str, Any]]:
     for item in source:
         if not isinstance(item, Mapping):
             raise ValueError("neuron rows must be mappings")
+        coldkey = item["coldkey"]
+        # The exporter writes ``None`` when the metagraph's coldkeys column is
+        # shorter than its hotkeys column, and documents that so the consumer can
+        # tell a missing coldkey from somebody else's.  ``str()`` would turn the
+        # absence into the literal "None", which matches nothing and therefore
+        # silently DROPS the uid: a partly populated column shrinks the fleet we
+        # publish from, and an absent one raises EmptyFleetError whose banner
+        # tells the operator to register hotkeys they already hold.  The
+        # metagraph branch above already refuses a column-length mismatch; so
+        # does this one.
+        if coldkey is None or not str(coldkey).strip():
+            raise ValueError(
+                f"neuron row for uid {item.get('uid')!r} carries no coldkey; the "
+                "chain view is incomplete, which is not the same as the uid "
+                "belonging to another miner"
+            )
         rows.append({
             "uid": int(item["uid"]),
             "hotkey": str(item["hotkey"]).strip(),
-            "coldkey": str(item["coldkey"]).strip(),
+            "coldkey": str(coldkey).strip(),
         })
     return rows
 

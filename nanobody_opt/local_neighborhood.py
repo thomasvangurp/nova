@@ -845,9 +845,22 @@ EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE = 20
 def exhaustive_singles_ceiling(
     configured: int | None, proposal_limit: int
 ) -> int:
-    """The lane ceiling: explicit when given, else scaled to the budget."""
+    """The lane ceiling: explicit when given, else scaled to the budget.
+
+    An explicit value is validated here because making the flag default to
+    ``None`` took it out of the argument parser's positivity loop.  A ceiling of
+    zero parses, starts, and then raises on the first supported single of every
+    iteration -- the same look-healthy-and-produce-nothing failure the scaling
+    default exists to remove, so it is refused at startup instead.
+    """
     if configured is not None:
-        return configured
+        if int(configured) < 1:
+            raise ValueError(
+                "--maximum-exhaustive-singles must be positive: a ceiling of "
+                f"{configured} fails the supported-single lane on its first "
+                "candidate, every iteration, for the rest of the epoch"
+            )
+        return int(configured)
     return max(EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE * int(proposal_limit), 160)
 
 
@@ -1000,9 +1013,12 @@ def main() -> None:
         parser.error("--lineage-fraction must be between zero and one")
     if args.maximum_motif_mutations < 1:
         parser.error("--maximum-motif-mutations must be positive")
-    args.maximum_exhaustive_singles = exhaustive_singles_ceiling(
-        args.maximum_exhaustive_singles, args.proposal_limit
-    )
+    try:
+        args.maximum_exhaustive_singles = exhaustive_singles_ceiling(
+            args.maximum_exhaustive_singles, args.proposal_limit
+        )
+    except ValueError as error:
+        parser.error(str(error))
     for name in (
         "recent", "seed_count", "minimum_seeds", "per_seed", "donor_count",
         "min_support", "proposal_limit",

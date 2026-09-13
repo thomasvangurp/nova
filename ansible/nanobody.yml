@@ -47,7 +47,6 @@
     nanobody_basin_evidence_core_limit: 1
     nanobody_basin_top_core_weight: 2
     nanobody_basin_exploration_residues_per_position: 5
-    nanobody_maximum_exhaustive_singles: 8192
     nanobody_candidate_limit: 320
     nanobody_screen_tranche_size: 20
     nanobody_maximum_initial_screen_p90: 90
@@ -982,8 +981,6 @@
           - "{{ nanobody_basin_top_core_weight }}"
           - --basin-exploration-residues-per-position
           - "{{ nanobody_basin_exploration_residues_per_position }}"
-          - --maximum-exhaustive-singles
-          - "{{ nanobody_maximum_exhaustive_singles }}"
           - --candidate-limit
           - "{{ nanobody_candidate_limit }}"
           - --screen-tranche-size

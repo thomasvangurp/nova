@@ -93,6 +93,10 @@ BLOCKS_PER_DAY = 7200
 #: the price halves in exactly one adjustment interval.  Over nineteen blocks
 #: this reproduces the observed tau0.135167 -> tau0.130312 to within 1e-6.
 DECAY_PER_BLOCK = 0.5 ** (1.0 / ADJUSTMENT_INTERVAL)
+#: ss58 addresses are 47-49 characters.  Kept in step with
+#: ``nanobody_opt.fleet.MINIMUM_SS58_LENGTH``; duplicated rather than imported so
+#: the decision core keeps importing with the standard library alone.
+MINIMUM_SS58_LENGTH = 40
 #: Expected value of holding one registered ticket for one epoch, in tau.
 #: 155.6 alpha/epoch * 40% track share * ~tau0.0215/alpha ~= tau1.34 per win,
 #: spread over a field of about 42.
@@ -529,6 +533,13 @@ def read_chain_state(
     """
     metagraph = subtensor.metagraph(netuid)
     coldkeys = list(getattr(metagraph, "coldkeys", []) or [])
+    if not coldkeys:
+        # Fail closed before anything downstream can read "no neurons" as
+        # "we hold nothing" and buy a slot we already own.
+        raise EmptyRosterError(
+            f"metagraph for netuid {netuid} exposed no coldkeys; the subnet is "
+            "full, so this is a failed read and not an empty fleet"
+        )
     ours = tuple(
         uid for uid, coldkey in enumerate(coldkeys) if coldkey == coldkey_ss58
     )
@@ -545,6 +556,18 @@ def read_chain_state(
         registered_uids=ours,
         last_registration_block=max(ours_blocks) if ours_blocks else None,
     )
+
+
+class EmptyRosterError(RuntimeError):
+    """Raised when the metagraph exposed no neurons at all.
+
+    Subnet 68 is full -- ``MaxAllowedUids`` 64, ``n`` 64 -- so a coldkeys column
+    of length zero is a failed read, never a fact about the field.  Read as fact
+    it means "we hold nothing", which is below ``urgent_below`` and therefore an
+    immediate purchase at whatever the price happens to be.  The miner's
+    chain-state exporter refuses an empty roster for exactly this reason; the
+    component that spends tau must refuse it at least as hard.
+    """
 
 
 def _hotkey_names(wallet_name: str) -> list[str]:
@@ -808,7 +831,22 @@ def _resolve_coldkey_ss58(bittensor: Any, wallet_name: str, given: str | None) -
     by ``bittensor``, inside :func:`_unlock_coldkey`, and never read here.
     """
     if given:
-        return given
+        # A coldkey pasted from a dashboard arrives elided -- "5EkCwcNTfxeN..."
+        # -- and an address that matches no neuron row is indistinguishable here
+        # from holding nothing, which is below urgent_below and therefore a
+        # purchase.  nanobody_opt.fleet refuses the same shape for the same
+        # reason; there it only costs a refusal to publish, here it costs tau.
+        candidate = str(given).strip()
+        if (
+            "…" in candidate
+            or "..." in candidate
+            or len(candidate) < MINIMUM_SS58_LENGTH
+        ):
+            raise SystemExit(
+                f"--coldkey-ss58 {candidate!r} is truncated; a partial address "
+                "matches no uid and would be read as an empty fleet, which buys"
+            )
+        return candidate
     wallet_factory = getattr(bittensor, "Wallet", None) or bittensor.wallet
     wallet = wallet_factory(name=wallet_name)
     return str(wallet.coldkeypub.ss58_address)
@@ -900,12 +938,20 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     while True:
         records = read_records(args.decision_log)
-        state = read_chain_state(
-            subtensor,
-            args.netuid,
-            coldkey_ss58,
-            log_last_block=last_executed_block(records),
-        )
+        try:
+            state = read_chain_state(
+                subtensor,
+                args.netuid,
+                coldkey_ss58,
+                log_last_block=last_executed_block(records),
+            )
+        except EmptyRosterError as error:
+            # A failed read is a reason to poll again, never a reason to buy.
+            print(f"SLOT_CHAIN_READ_REFUSED {error}", flush=True)
+            if args.interval <= 0:
+                raise SystemExit(str(error)) from error
+            time.sleep(args.interval)
+            continue
         history = price_history(records) + [
             PriceSample(state.block, state.recycle_tao)
         ]
