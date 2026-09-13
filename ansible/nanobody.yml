@@ -588,22 +588,37 @@
     # "shard 0 exited 1 without writing out0.json. Refusing to report a partial
     # result." The refusal was right; the cause was two levels down.
     #
-    # These are the modules the shards actually import, measured rather than
-    # guessed -- an earlier version of this gate asserted utils.files too and
-    # failed on a healthy box, because utils.* import bittensor, which belongs to
-    # chain310 and has no business in the scorer environment.
+    # Two halves, because each catches what the other cannot. Importing the
+    # scorer's own entry modules catches a broken top-level import. Checking for
+    # the presence of BoltzGen's whole dependency set catches a LAZY import, which
+    # a top-level check cannot: `datasets` and `transformers` are imported inside
+    # functions and declared by nobody, so the gate passed and a shard then died
+    # with ModuleNotFoundError after the producer had already spent an epoch's
+    # generation budget.
+    #
+    # The module list is measured, not guessed. An earlier version asserted
+    # utils.files as well, which imports bittensor -- a chain310 dependency with
+    # no business here -- so the gate failed on a healthy box.
     - name: Verify the scorer environment imports the scorer's own dependencies
       ansible.builtin.command:
         argv:
           - /root/.pixi/envs/bgen/bin/python
           - -c
           - >-
-            import sys; sys.path.insert(0, "/root");
+            import sys, importlib; sys.path.insert(0, "/root");
             import nanobody_opt.score_boltzgen_batch;
             import nanobody_opt.score_boltzgen_waves;
             import nanobody_opt.score_boltzgen_fast_adapter;
             import config.config_loader;
-            print("SCORER_IMPORTS_OK")
+            missing = [m for m in (
+              "numpy","numba","matplotlib","hydride","biotite","pydssp","logomaker",
+              "gemmi","torch","sklearn","hydra","edit_distance","pytorch_lightning",
+              "torchmetrics","rdkit","pandas","pdbeccdutils","einx","einops",
+              "mashumaro","huggingface_hub","Bio","yaml","dotenv","scipy",
+              "datasets","transformers")
+              if not importlib.util.find_spec(m)];
+            print("SCORER_MISSING:" + ",".join(missing));
+            print("SCORER_IMPORTS_OK" if not missing else "SCORER_INCOMPLETE")
       args:
         chdir: /root
       changed_when: false
@@ -613,6 +628,7 @@
     - name: Name the missing module rather than leave a partial-result message
       ansible.builtin.assert:
         that: "'SCORER_IMPORTS_OK' in scorer_imports.stdout"
+        # The gate prints the missing names, so the failure says what to add.
         fail_msg: >-
           The bgen environment cannot import what every scorer shard imports.
           {{ (scorer_imports.stderr | default('')) | regex_search('ModuleNotFoundError[^\n]*') | default('see stderr', true) }}.
