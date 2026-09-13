@@ -1056,6 +1056,18 @@ def _publish_once(args: argparse.Namespace) -> None:
             _atomic_json(args.artifact, artifact)
             _report(artifact, "provisional")
             ledger_fingerprint = _record_fleet(args.ledger, assignments)
+            # Commit what we already have before the strict rank, which has
+            # run over twenty minutes and can outlast the epoch. A committed
+            # provisional fleet beats a qualified one that never lands; the
+            # qualified attempt below re-commits when the chain's commitment
+            # rate limit allows, and is a harmless no-op when it does not.
+            _commit_fleet(
+                assignments,
+                template=args.commit_command,
+                artifact=args.artifact,
+                epoch=epoch,
+                pause_seconds=args.commit_pause_seconds,
+            )
 
         if _strict_state_matches(
             publisher_state,

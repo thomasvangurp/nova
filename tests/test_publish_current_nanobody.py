@@ -5,6 +5,7 @@ the file the real program would have written, so the whole publication path --
 discovery, ordering, distinctness, the single artifact, the ledger -- is
 exercised without a host.
 """
+import inspect
 import json
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from compound_miner.nanobody_provider import (
     validator_boltzgen_metrics,
 )
 from nanobody_opt import fleet, publication_gates
+from tools import publish_current_nanobody
 from tools.publish_current_nanobody import (
     COMMIT_FLEET_FAILED,
     COMMIT_FLEET_INCOMPLETE,
@@ -671,8 +673,12 @@ def test_one_commit_extrinsic_is_sent_per_uid(tmp_path, monkeypatch):
     commits = [
         command for command in host.commands if command[0].endswith("commit.sh")
     ]
-    assert [command[1] for command in commits] == HOTKEYS[:3]
-    assert len({command[2] for command in commits}) == 3
+    # Two passes over the fleet: the provisional commit that guarantees every
+    # uid lands inside the epoch, then the qualified upgrade. The chain's own
+    # rate limit decides whether the second one takes.
+    assert [command[1] for command in commits] == HOTKEYS[:3] * 2
+    assert len({command[2] for command in commits[:3]}) == 3
+    assert len({command[2] for command in commits[3:]}) == 3
 
 
 def test_a_registration_is_picked_up_without_touching_configuration(tmp_path, monkeypatch):
@@ -891,3 +897,17 @@ def test_a_fully_successful_fleet_commit_reports_no_failure(
         pause_seconds=0,
     )
     assert COMMIT_FLEET_INCOMPLETE not in capsys.readouterr().err
+
+
+def test_the_provisional_fleet_commits_before_the_strict_rank_runs():
+    """The strict rank has run over twenty minutes; the epoch is 72.
+
+    Committing only after it means a slow rank silently costs every uid its
+    commitment for the epoch, so the provisional fleet must reach the chain
+    first and let the qualified upgrade re-commit if the rate limit allows.
+    """
+    source = inspect.getsource(publish_current_nanobody._publish_once)
+    provisional = source.index('_report(artifact, "provisional")')
+    strict_rank = source.index("strict=True")
+    commit = source.index("_commit_fleet(", provisional)
+    assert provisional < commit < strict_rank
