@@ -331,19 +331,6 @@ def _run_iteration(
             if previous != candidates:
                 command.extend(["--exclude", str(previous)])
         _run(command)
-        grafts = args.graft_candidates
-        if grafts is None and args.donor_grafts:
-            grafts = refresh_donor_grafts(
-                epoch_root=args.runtime_root / "live" / f"epoch{epoch}",
-                archive=archive,
-                config=config,
-                pixi=Path("/usr/local/bin/pixi"),
-                manifest=args.runtime_root / "pixi.toml",
-                teacher_rank=args.graft_teacher_rank,
-                limit=args.graft_limit,
-            )
-        if grafts is not None:
-            merge_graft_candidates(candidates, grafts)
         if args.public_neighbourhood_distance:
             # Every winner in the leakage-free replay sat one substitution from
             # a sequence another hotkey had already published, and about forty
@@ -361,6 +348,27 @@ def _run_iteration(
                 "--minimum-keep", str(args.candidate_limit),
             ])
             os.replace(filtered, candidates)
+        # AFTER the public-neighbourhood filter, never before it. That filter
+        # keeps proposals within --public-neighbourhood-distance substitutions
+        # of a published sequence, which is 2 in production, and a graft is
+        # 16-18 mutations from its teacher by construction. Merging first meant
+        # every graft was added and then stripped on the next line: epochs
+        # 25097 and 25098 generated sixty cases each and screened none of them.
+        # The filter is an exploitation heuristic; grafts are the deliberate
+        # exception to it.
+        grafts = args.graft_candidates
+        if grafts is None and args.donor_grafts:
+            grafts = refresh_donor_grafts(
+                epoch_root=args.runtime_root / "live" / f"epoch{epoch}",
+                archive=archive,
+                config=config,
+                pixi=Path("/usr/local/bin/pixi"),
+                manifest=args.runtime_root / "pixi.toml",
+                teacher_rank=args.graft_teacher_rank,
+                limit=args.graft_limit,
+            )
+        if grafts is not None:
+            merge_graft_candidates(candidates, grafts)
     layer2 = iteration_root / "layer2.json"
     if not layer2.is_file():
         _run([

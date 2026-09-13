@@ -138,3 +138,46 @@ def test_a_graft_build_failure_costs_diversity_not_the_epoch(tmp_path, monkeypat
     )
     assert result is None
     assert "continuing with neighbourhood proposals alone" in capsys.readouterr().err
+
+
+def test_grafts_are_merged_after_the_public_neighbourhood_filter():
+    """Order is the whole fix.
+
+    filter_public_neighborhood keeps proposals within
+    --public-neighbourhood-distance substitutions of a published sequence -- 2
+    in production -- and a graft is 16-18 mutations from its teacher by
+    construction. Merging before the filter added sixty cases per epoch and
+    stripped every one of them on the next line: epochs 25097 and 25098
+    generated grafts and screened none.
+    """
+    import inspect
+
+    from nanobody_opt import run_live_producer as producer
+
+    source = inspect.getsource(producer)
+    filtered = source.index("os.replace(filtered, candidates)")
+    merged = source.index("merge_graft_candidates(candidates, grafts)")
+    assert filtered < merged, "grafts merge before the filter that removes them"
+
+
+def test_grafts_merge_even_when_the_neighbourhood_filter_is_disabled():
+    """The merge must not be nested inside the filter's branch."""
+    import inspect
+    import textwrap
+
+    from nanobody_opt import run_live_producer as producer
+
+    source = inspect.getsource(producer)
+    line = next(
+        raw for raw in source.splitlines()
+        if raw.strip() == "if grafts is not None:"
+    )
+    guard = next(
+        raw for raw in source.splitlines()
+        if "if args.public_neighbourhood_distance:" in raw
+    )
+    indent = len(line) - len(line.lstrip())
+    guard_indent = len(guard) - len(guard.lstrip())
+    assert indent <= guard_indent, (
+        "the merge is nested inside the neighbourhood filter's branch"
+    )
