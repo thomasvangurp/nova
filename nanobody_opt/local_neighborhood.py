@@ -834,6 +834,23 @@ def interleave_novel_lane(
     return selected[:limit]
 
 
+#: The supported-single lane is bounded by the archive, which grows every epoch,
+#: so any fixed ceiling eventually trips on nothing but age -- it did, at 8192,
+#: and the producer then failed every iteration while looking healthy. Scaling
+#: with the proposal budget keeps the guard meaningful (a true runaway is orders
+#: of magnitude larger) without it expiring.
+EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE = 20
+
+
+def exhaustive_singles_ceiling(
+    configured: int | None, proposal_limit: int
+) -> int:
+    """The lane ceiling: explicit when given, else scaled to the budget."""
+    if configured is not None:
+        return configured
+    return max(EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE * int(proposal_limit), 160)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", required=True, type=Path)
@@ -945,8 +962,9 @@ def main() -> None:
     parser.add_argument(
         "--maximum-exhaustive-singles",
         type=int,
-        default=160,
-        help="fail closed if deterministic supported-single coverage exceeds this",
+        default=None,
+        help="fail closed if deterministic supported-single coverage exceeds this; "
+        "defaults to EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE x --proposal-limit",
     )
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument(
@@ -982,9 +1000,12 @@ def main() -> None:
         parser.error("--lineage-fraction must be between zero and one")
     if args.maximum_motif_mutations < 1:
         parser.error("--maximum-motif-mutations must be positive")
+    args.maximum_exhaustive_singles = exhaustive_singles_ceiling(
+        args.maximum_exhaustive_singles, args.proposal_limit
+    )
     for name in (
         "recent", "seed_count", "minimum_seeds", "per_seed", "donor_count",
-        "min_support", "maximum_exhaustive_singles", "proposal_limit",
+        "min_support", "proposal_limit",
         "framework_per_seed", "terminal_width",
         "basin_routes_per_core",
         "basin_exploration_residues_per_position",

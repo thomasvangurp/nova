@@ -54,10 +54,6 @@ requests = "*"
 pyyaml = "*"
 
 [feature.bgen.pypi-dependencies]
-# utils/files.py and utils/molecules.py import dotenv, and the scorer imports
-# them -- so every shard died with ModuleNotFoundError before writing output,
-# which surfaced only as "shard 0 exited 1 without writing out0.json".
-python-dotenv = "*"
 hydride = "==1.2.3"
 pydssp = "==0.9.1"
 logomaker = "==0.8.7"
@@ -97,6 +93,12 @@ NUMEXPR_NUM_THREADS = "1"
 python = "3.12.*"
 
 [feature.validator-bgen.pypi-dependencies]
+# The environment named "bgen" is built from THIS feature, not from
+# [feature.bgen] -- that one builds bgen-conda, kept for parity comparisons only.
+# Every scorer shard imports utils.files and config.config_loader, which import
+# dotenv; without it each shard exited 1 before writing output and the producer
+# could only report "shard 0 exited 1 without writing out0.json".
+python-dotenv = "*"
 torch = { version = "==2.7.1", index = "https://download.pytorch.org/whl/cu126" }
 torchvision = { version = "==0.22.1", index = "https://download.pytorch.org/whl/cu126" }
 torchaudio = { version = "==2.7.1", index = "https://download.pytorch.org/whl/cu126" }

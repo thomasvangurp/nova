@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 import time
 
@@ -54,7 +55,10 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.proposal_limit == 384
     assert args.basin_fraction == 0.70
     assert args.basin_routes_per_core == 192
-    assert args.maximum_exhaustive_singles == 8192
+    # None on purpose: the generator scales the lane ceiling to the proposal
+    # budget. A pinned 8192 expired as the archive grew and failed every
+    # iteration on nothing but age.
+    assert args.maximum_exhaustive_singles is None
     assert args.candidate_limit == 320
     assert args.screen_tranche_size == 20
     assert args.maximum_initial_screen_p90 == 90.0
@@ -65,3 +69,15 @@ def test_live_producer_uses_elite_multi_epoch_parent_defaults():
     assert args.minimum_basin_samples == 3
     assert args.challenger_p90_margin == 20.0
     assert args.single_mutation_fraction == 0.75
+
+
+def test_the_producer_omits_the_lane_ceiling_unless_it_is_set():
+    """Passing a fixed ceiling defeats the generator's scaling default."""
+    import nanobody_opt.run_live_producer as rlp
+
+    args = rlp._parser().parse_args([])
+    assert args.maximum_exhaustive_singles is None
+    # ...and the flag is only forwarded when explicitly set.
+    source = (Path(__file__).resolve().parents[1]
+              / "nanobody_opt" / "run_live_producer.py").read_text()
+    assert "if args.maximum_exhaustive_singles is not None" in source

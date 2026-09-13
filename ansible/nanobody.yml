@@ -583,6 +583,38 @@
         PYTHONPATH: /root/.pixi/envs/metanano/lib/python3.12/site-packages
       changed_when: false
 
+    # Importing boltzgen is not enough. Every scorer shard imports utils.files and
+    # config.config_loader, which import dotenv -- and when bgen lacked it the
+    # shards died before writing anything, surfacing only as "shard 0 exited 1
+    # without writing out0.json. Refusing to report a partial result." The refusal
+    # was correct and the cause was two levels down. Import what the scorer
+    # imports, in the environment the scorer runs in.
+    - name: Verify the scorer environment imports the scorer's own dependencies
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/bgen/bin/python
+          - -c
+          - >-
+            import sys; sys.path.insert(0, "/root");
+            import dotenv, yaml, pandas, numpy;
+            import utils.files, utils.molecules, config.config_loader;
+            print("SCORER_IMPORTS_OK")
+      args:
+        chdir: /root
+      changed_when: false
+      failed_when: false
+      register: scorer_imports
+
+    - name: Name the missing module rather than leave a partial-result message
+      ansible.builtin.assert:
+        that: "'SCORER_IMPORTS_OK' in scorer_imports.stdout"
+        fail_msg: >-
+          The bgen environment cannot import what every scorer shard imports.
+          {{ (scorer_imports.stderr | default('')) | regex_search('ModuleNotFoundError[^\n]*') | default('see stderr', true) }}.
+          Add it to [feature.bgen.pypi-dependencies] in pixi.toml and re-lock with
+          ansible/lock.yml.
+        success_msg: "bgen imports dotenv, utils.* and config.config_loader."
+
     - name: Verify BoltzGen imports and sees every rented GPU
       ansible.builtin.command: >-
         /root/bgen_python.sh -c

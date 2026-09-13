@@ -225,8 +225,10 @@ def _run_iteration(
             "--motif-fraction", str(args.motif_fraction),
             "--single-mutation-fraction", str(args.single_mutation_fraction),
             "--maximum-motif-mutations", str(args.maximum_motif_mutations),
-            "--maximum-exhaustive-singles", str(
-                args.maximum_exhaustive_singles
+            *(
+                ["--maximum-exhaustive-singles", str(args.maximum_exhaustive_singles)]
+                if args.maximum_exhaustive_singles is not None
+                else []
             ),
             "--random-seed", str(epoch * 100 + iteration),
         ]
@@ -426,7 +428,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--motif-fraction", type=float, default=0.25)
     parser.add_argument("--single-mutation-fraction", type=float, default=0.75)
     parser.add_argument("--maximum-motif-mutations", type=int, default=6)
-    parser.add_argument("--maximum-exhaustive-singles", type=int, default=8192)
+    parser.add_argument(
+        "--maximum-exhaustive-singles",
+        type=int,
+        default=None,
+        help="passed through; None lets the generator scale it to the proposal budget",
+    )
     parser.add_argument(
         "--scout-iterations",
         type=int,

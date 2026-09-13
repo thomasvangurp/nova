@@ -21,6 +21,12 @@
 # Each imported playbook is also runnable on its own, and each re-asserts what
 # it needs rather than trusting the one before it.
 
+# First, because the GPU plays install whatever is staged: a fleet that grew
+# since the last deploy would otherwise be installed one purchase behind, and the
+# publisher would prepare submissions for uids whose keys are not on the box.
+- name: Collect hotkeys the purchaser has bought
+  ansible.builtin.import_playbook: collect_hotkeys.yml
+
 - name: Provision the GPU box and the design/scoring producer
   ansible.builtin.import_playbook: nanobody.yml
 

@@ -67,7 +67,15 @@
     # Controller-side paths to the hotkey keyfiles to install, as a LIST.
     # These are locators, never values: Ansible reads the files locally and the
     # copy tasks are no_log. The coldkey is not in this list and must never be.
-    nanobody_hotkey_sources: []
+    # Discovered, not hand-listed. collect_hotkeys.yml stages whatever the
+    # purchaser has bought into this directory; globbing it means a newly bought
+    # hotkey reaches the box on the next deploy with no command line to update.
+    # Passing a list literal through -e is how this went wrong once: Ansible took
+    # `-e nanobody_hotkey_sources=[...]` as a STRING, the copy loop iterated over
+    # its characters, and every item failed inside a no_log task that could not
+    # say why.
+    nanobody_hotkey_staging_dir: "{{ lookup('env', 'HOME') }}/.nova-hotkeys"
+    nanobody_hotkey_sources: "{{ query('fileglob', nanobody_hotkey_staging_dir ~ '/*') | sort }}"
     nanobody_wallet_name: mining_ops
     nanobody_wallet_path: /root/.bittensor/wallets
 
@@ -253,6 +261,20 @@
     # Hotkeys only, as many as exist. Each entry is a controller-side path; the
     # file content never appears in a playbook, a variable file, a command line
     # or task output.
+    # A string here would be iterated character by character inside a no_log
+    # task, which reports a failure it cannot explain. Fail with a sentence
+    # instead.
+    - name: Require the hotkey sources to be a list of paths
+      ansible.builtin.assert:
+        that:
+          - nanobody_hotkey_sources is sequence
+          - nanobody_hotkey_sources is not string
+        fail_msg: >-
+          nanobody_hotkey_sources must be a list, not
+          {{ nanobody_hotkey_sources | type_debug }}. Pass it with -e @file.json,
+          or leave it unset and let it glob
+          {{ nanobody_hotkey_staging_dir }} after running collect_hotkeys.yml.
+
     - name: Install every hotkey keyfile this fleet uses
       ansible.builtin.copy:
         src: "{{ item }}"
