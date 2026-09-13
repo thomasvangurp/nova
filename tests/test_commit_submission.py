@@ -98,3 +98,18 @@ def test_help_works_without_the_chain_stack():
     assert done.returncode == 0
     assert "--uid" in done.stdout
     assert "bittensor" not in done.stderr.lower()
+
+
+def test_an_ss58_is_distinguished_from_a_key_file_name():
+    """The publisher substitutes {hotkey} from the CHAIN, so it arrives as an
+    address, while a wallet is built from a key-file name. Getting this wrong
+    means a "keyfile not found" at the last step of an epoch."""
+    assert cs._looks_like_address("5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ")
+    assert not cs._looks_like_address("nova68-slot-1")
+
+
+def test_a_truncated_address_is_not_mistaken_for_either():
+    """A truncated address is what appears in a log line or a copied summary.
+    It matches no neuron row, so treating it as a key-file name would look up a
+    file that cannot exist."""
+    assert not cs._looks_like_address("5EkCwcNTfxeN")

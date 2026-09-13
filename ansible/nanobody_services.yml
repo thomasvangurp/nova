@@ -357,7 +357,12 @@
     - name: Refuse coldkey material on the rental
       ansible.builtin.find:
         paths: "{{ nanobody_wallet_path }}"
-        patterns: [coldkey]
+        # Any coldkey-shaped file, not the one exact name: coldkeypub.txt,
+        # coldkey.bak and mining_ops_coldkey all passed a gate whose whole
+        # purpose is that no coldkey material reaches rented hardware. Nothing
+        # on the box matches today, so this is a free strengthening of a
+        # boundary gate rather than a fix for a live miss.
+        patterns: ["*coldkey*"]
         recurse: true
         file_type: file
       register: rental_coldkeys
@@ -572,6 +577,21 @@
           - "{{ nanobody_wallet_path }}"
           - --reserve-blocks
           - "{{ nanobody_reserve_blocks }}"
+          # One commitment per uid, each signed by that uid's own hotkey. Without
+          # this the publisher selects a distinct sequence for every uid the
+          # coldkey holds and then only one is ever sent, because a commitment is
+          # signed by a wallet and a wallet is one hotkey. With three uids that is
+          # two thirds of the fleet idle, and the waste grows with every slot
+          # bought. {hotkey} arrives as an ss58 from the chain; the driver
+          # resolves it to the local key file.
+          - --commit-command
+          - >-
+            /root/.pixi/envs/chain310/bin/python -m nanobody_opt.commit_submission
+            --uid {uid} --hotkey {hotkey} --sequence {sequence}
+            --wallet-name {{ nanobody_wallet_name }}
+            --wallet-path {{ nanobody_wallet_path }}
+            --netuid {{ nanobody_netuid | default(68) }}
+            --network {{ nanobody_network | default('finney') }}
 
     - name: Compile the deployed publisher and chain writer
       ansible.builtin.command:

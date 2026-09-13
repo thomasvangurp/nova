@@ -53,6 +53,21 @@ def encoded_payload(message: str, uid: int, block: int, timelock) -> tuple[str, 
     return filename, encoded
 
 
+def _looks_like_address(value: str) -> str | bool:
+    """Whether this is an ss58 address rather than a wallet key-file name.
+
+    Addresses on this chain start with "5" and run to 48 characters; key files
+    are named things like ``nova68-slot-1``. The length bound comes from
+    ``fleet.MINIMUM_SS58_LENGTH``, which exists because a TRUNCATED address --
+    the kind that appears in a log line or a copied-out summary -- matches no
+    neuron row and would otherwise be treated as a name.
+    """
+    from nanobody_opt import fleet
+
+    candidate = str(value).strip()
+    return candidate.startswith("5") and len(candidate) >= fleet.MINIMUM_SS58_LENGTH
+
+
 def holds_uid(neurons, hotkey_ss58: str, uid: int) -> bool:
     """Whether this hotkey still holds this uid, from a chain roster.
 
@@ -69,7 +84,12 @@ def holds_uid(neurons, hotkey_ss58: str, uid: int) -> bool:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uid", type=int, required=True)
-    parser.add_argument("--hotkey", required=True, help="hotkey NAME in the wallet")
+    parser.add_argument(
+        "--hotkey",
+        required=True,
+        help="hotkey wallet NAME or ss58 address; an address is resolved to the "
+        "local key file that holds it",
+    )
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--wallet-name", default="mining_ops")
     parser.add_argument("--wallet-path", default="/root/.bittensor/wallets")
@@ -99,9 +119,25 @@ def main(argv: list[str] | None = None) -> int:
     from btdr import QuicknetBittensorDrandTimelock
     from files import load_github_path, upload_file_to_github
 
+    from nanobody_opt import fleet
+
+    # The publisher substitutes {hotkey} from the chain, so it arrives as an
+    # ss58 address, while a wallet is constructed from a key FILE NAME. Accept
+    # either: resolving here is the difference between submitting and a
+    # confusing "keyfile not found" at the last step of an epoch.
+    hotkey_name = args.hotkey
+    if _looks_like_address(args.hotkey):
+        addresses = fleet.local_hotkey_addresses(args.wallet_path, args.wallet_name)
+        hotkey_name = addresses.get(args.hotkey)
+        if hotkey_name is None:
+            # An on-chain hotkey with no local key is the stale case seen from
+            # the other side: the fleet moved and this box has not caught up.
+            print(f"{RESULT_STALE} uid={args.uid} hotkey={args.hotkey} (no local key file)")
+            return 0
+
     wallet_factory = getattr(bt, "Wallet", None) or bt.wallet
     wallet = wallet_factory(
-        name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path
+        name=args.wallet_name, hotkey=hotkey_name, path=args.wallet_path
     )
     hotkey_ss58 = wallet.hotkey.ss58_address
 
@@ -115,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not holds_uid(neurons, hotkey_ss58, args.uid):
         # Routine, not broken: report and let the other uids proceed.
-        print(f"{RESULT_STALE} uid={args.uid} hotkey={args.hotkey}")
+        print(f"{RESULT_STALE} uid={args.uid} hotkey={hotkey_name}")
         return 0
 
     block = subtensor.get_current_block()
@@ -134,11 +170,11 @@ def main(argv: list[str] | None = None) -> int:
             wallet=wallet, netuid=args.netuid, data=commit_content
         )
     except MetadataError:
-        print(f"{RESULT_TOO_SOON} uid={args.uid} hotkey={args.hotkey}")
+        print(f"{RESULT_TOO_SOON} uid={args.uid} hotkey={hotkey_name}")
         return 0
 
     if not committed:
-        print(f"COMMIT_REFUSED uid={args.uid} hotkey={args.hotkey}", file=sys.stderr)
+        print(f"COMMIT_REFUSED uid={args.uid} hotkey={hotkey_name}", file=sys.stderr)
         return 1
 
     # Upload only after the chain accepted it. The reverse order publishes a
@@ -147,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"COMMIT_UPLOAD_FAILED uid={args.uid} content={commit_content}", file=sys.stderr)
         return 1
 
-    print(f"{RESULT_COMMITTED} uid={args.uid} hotkey={args.hotkey} content={commit_content}")
+    print(f"{RESULT_COMMITTED} uid={args.uid} hotkey={hotkey_name} content={commit_content}")
     return 0
 
 

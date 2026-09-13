@@ -27,7 +27,6 @@ nanobody_coldkey_ss58: ""
 # nanobody_hotkey_sources:
 #   - ~/.bittensor/wallets/mining_ops/hotkeys/nova68-slot1
 #   - ~/.bittensor/wallets/mining_ops/hotkeys/nova68-slot2
-nanobody_hotkey_sources: []
 
 nanobody_wallet_name: mining_ops
 nanobody_wallet_path: /root/.bittensor/wallets
