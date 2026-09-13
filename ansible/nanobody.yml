@@ -583,12 +583,15 @@
         PYTHONPATH: /root/.pixi/envs/metanano/lib/python3.12/site-packages
       changed_when: false
 
-    # Importing boltzgen is not enough. Every scorer shard imports utils.files and
-    # config.config_loader, which import dotenv -- and when bgen lacked it the
-    # shards died before writing anything, surfacing only as "shard 0 exited 1
-    # without writing out0.json. Refusing to report a partial result." The refusal
-    # was correct and the cause was two levels down. Import what the scorer
-    # imports, in the environment the scorer runs in.
+    # Importing boltzgen is not enough: when bgen lacked python-dotenv every shard
+    # exited 1 before writing anything, and the producer could only report
+    # "shard 0 exited 1 without writing out0.json. Refusing to report a partial
+    # result." The refusal was right; the cause was two levels down.
+    #
+    # These are the modules the shards actually import, measured rather than
+    # guessed -- an earlier version of this gate asserted utils.files too and
+    # failed on a healthy box, because utils.* import bittensor, which belongs to
+    # chain310 and has no business in the scorer environment.
     - name: Verify the scorer environment imports the scorer's own dependencies
       ansible.builtin.command:
         argv:
@@ -596,8 +599,10 @@
           - -c
           - >-
             import sys; sys.path.insert(0, "/root");
-            import dotenv, yaml, pandas, numpy;
-            import utils.files, utils.molecules, config.config_loader;
+            import nanobody_opt.score_boltzgen_batch;
+            import nanobody_opt.score_boltzgen_waves;
+            import nanobody_opt.score_boltzgen_fast_adapter;
+            import config.config_loader;
             print("SCORER_IMPORTS_OK")
       args:
         chdir: /root
