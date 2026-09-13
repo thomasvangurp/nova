@@ -30,6 +30,30 @@ ARCHIVE_URL = (
 )
 
 
+def visible_gpu_ids() -> str:
+    """The GPU ids this machine actually has, as the scorer's comma list.
+
+    The default used to be the literal "0,1,2,3,4,5,6,7,8,9", which was the old
+    ten-GPU box written down. On a two-GPU box that dispatches eight of every ten
+    shards to devices that do not exist; each chunk raises, the shard worker
+    catches it and continues, and the run ends with "MERGE LOST SEQUENCES:
+    submitted 350, merged 70" -- two surviving shards of ten, which is exactly
+    the 70. Nothing in the failure names CUDA or the missing devices.
+
+    Counting the devices costs one import and cannot be wrong about the hardware
+    it is running on.
+    """
+    try:
+        import torch
+
+        count = torch.cuda.device_count()
+    except Exception:
+        count = 0
+    if count < 1:
+        return "0"
+    return ",".join(str(index) for index in range(count))
+
+
 def _atomic_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -398,7 +422,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-chain-state-age", type=float, default=90)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--poll-interval", type=float, default=30)
-    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument(
+        "--gpus",
+        default=None,
+        help="comma-separated CUDA device ids; defaults to every device present",
+    )
     parser.add_argument(
         "--exact-scorer",
         type=Path,
@@ -586,6 +614,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if not args.gpus:
+        # Resolved here rather than as an argparse default so --help stays
+        # importable without torch, which the deploy gate depends on.
+        args.gpus = visible_gpu_ids()
     completed_iterations: dict[int, int] = {}
     #: Epochs whose neighbourhood is used up; generation stops, replication continues.
     exhausted_epochs: set[int] = set()

@@ -41,6 +41,30 @@ from nanobody_opt.metric_outliers import (
 STRICT_RANK_GATES = publication_gates.gate_defaults()
 
 
+def visible_gpu_ids() -> str:
+    """The GPU ids this machine actually has, as the scorer's comma list.
+
+    The default used to be the literal "0,1,2,3,4,5,6,7,8,9", which was the old
+    ten-GPU box written down. On a two-GPU box that dispatches eight of every ten
+    shards to devices that do not exist; each chunk raises, the shard worker
+    catches it and continues, and the run ends with "MERGE LOST SEQUENCES:
+    submitted 350, merged 70" -- two surviving shards of ten, which is exactly
+    the 70. Nothing in the failure names CUDA or the missing devices.
+
+    Counting the devices costs one import and cannot be wrong about the hardware
+    it is running on.
+    """
+    try:
+        import torch
+
+        count = torch.cuda.device_count()
+    except Exception:
+        count = 0
+    if count < 1:
+        return "0"
+    return ",".join(str(index) for index in range(count))
+
+
 def strict_rank_arguments(overrides: dict[str, Any] | None = None) -> list[str]:
     """Flatten the publication gates, applying calibrated overrides by name."""
     return publication_gates.gate_arguments(overrides)
@@ -1094,7 +1118,11 @@ def main() -> None:
     parser.add_argument("--mutation-database", type=Path)
     parser.add_argument("--chain-state", type=Path)
     parser.add_argument("--reserve-blocks", type=int, default=55)
-    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument(
+        "--gpus",
+        default=None,
+        help="comma-separated CUDA device ids; defaults to every device present",
+    )
     parser.add_argument(
         "--scorer",
         type=Path,
@@ -1280,6 +1308,10 @@ def main() -> None:
     parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
     parser.add_argument("--minimum-basin-samples", type=int, default=3)
     args = parser.parse_args()
+    if not args.gpus:
+        # Resolved here rather than as an argparse default so --help stays
+        # importable without torch, which the deploy gate depends on.
+        args.gpus = visible_gpu_ids()
     if not 1 <= args.finalists <= args.candidate_limit:
         parser.error("require 1 <= --finalists <= --candidate-limit")
     if not 1 <= args.screen_tranche_size <= args.candidate_limit:

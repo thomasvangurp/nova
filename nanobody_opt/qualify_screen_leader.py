@@ -20,6 +20,18 @@ from nanobody_opt.sequential_exact_race import (
 )
 
 
+def visible_gpu_ids() -> str:
+    """The GPU ids this machine actually has. See run_live_producer for why the
+    old hardcoded ten-device list silently lost eight shards in ten."""
+    try:
+        import torch
+
+        count = torch.cuda.device_count()
+    except Exception:
+        count = 0
+    return ",".join(str(i) for i in range(count)) if count >= 1 else "0"
+
+
 def _known_sequences(path: Path | None) -> set[str]:
     if path is None or not path.is_file():
         return set()
@@ -59,9 +71,15 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--chain-state", required=True, type=Path)
     parser.add_argument("--reserve-blocks", type=int, default=55)
-    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument(
+        "--gpus",
+        default=None,
+        help="comma-separated CUDA device ids; defaults to every device present",
+    )
     parser.add_argument("--qualification-observations", type=int, default=8)
     args = parser.parse_args()
+    if not args.gpus:
+        args.gpus = visible_gpu_ids()
     if args.qualification_observations < 8:
         parser.error("qualification requires at least eight observations")
     gpus = [item.strip() for item in args.gpus.split(",") if item.strip()]
