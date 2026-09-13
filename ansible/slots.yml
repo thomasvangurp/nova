@@ -183,6 +183,13 @@
              else 'DRY RUN: decisions are logged, nothing is bought. Pass
                    -e slot_manager_execute=true to spend.' }}
 
+    # On BOTH platforms, and on Linux especially. verify_entrypoint above proves
+    # only that --help runs, and --help deliberately runs with bittensor absent:
+    # everything above the agent's argparse call is standard library. So on the
+    # purchase host this was the one thing nothing checked -- the Linux branch
+    # skipped it, armed the timer, and left a broken chain stack to be discovered
+    # as an identical journal line every five minutes. deploy/slot_host/pixi.toml
+    # declares this exact import as its `check` task for this reason.
     - name: Require the chain stack the agent needs for its reads
       ansible.builtin.command:
         argv:
@@ -190,21 +197,27 @@
           - -c
           - >-
             import bittensor;
+            from async_substrate_interface.sync_substrate import SubstrateInterface;
             print('SLOT_MANAGER_BITTENSOR_OK', bittensor.__version__)
       changed_when: false
       failed_when: false
       register: slot_manager_bittensor
-      when: slot_manager_activate | bool and ansible_system == 'Darwin'
+      when: slot_manager_activate | bool
 
     - name: Report whether chain reads will work
       ansible.builtin.assert:
         that: "'SLOT_MANAGER_BITTENSOR_OK' in slot_manager_bittensor.stdout"
         fail_msg: >-
-          {{ slot_manager_python }} cannot import bittensor. The decision core
-          runs without it, but chain reads and registration cannot, so the agent
-          would exit on its first poll. Point slot_manager_python at an
-          interpreter that has it.
-      when: slot_manager_activate | bool and ansible_system == 'Darwin'
+          {{ slot_manager_python }} cannot import the chain stack
+          ({{ (slot_manager_bittensor.stderr | default(''))
+              | regex_search('(ModuleNotFoundError|ImportError|No such file)[^\n]*')
+              | default('see stderr', true) }}).
+          The decision core runs without it, but chain reads and registration
+          cannot, so the agent would exit on its first poll. On the purchase host
+          rebuild it there with `pixi install` in deploy/slot_host; elsewhere
+          point slot_manager_python at an interpreter that has it.
+        success_msg: "{{ slot_manager_bittensor.stdout | trim }}"
+      when: slot_manager_activate | bool
 
     # The session inherits the environment it is created in, which is how the
     # Keychain service NAME reaches the agent without ever being written down
@@ -231,7 +244,10 @@
       failed_when: false
       when: slot_manager_activate | bool and ansible_system == 'Darwin'
 
-    - name: Start the slot purchase agent as a logged dry run (macOS, tmux)
+    # Named for what it does rather than for one of the two modes it can start:
+    # slot_manager_spend_arguments is appended below, so this task launched a
+    # live spender under a task name that said "dry run".
+    - name: Start the slot purchase agent in the deployed mode (macOS, tmux)
       ansible.builtin.command:
         argv: >-
           {{ ['tmux', 'new-session', '-d', '-s', slot_manager_session]
@@ -252,16 +268,23 @@
     # one. The purchaser has to be awake for the quiet registration intervals or
     # it buys at the top of the decay curve, so "starts itself again" is a
     # correctness property here, not tidiness.
-    - name: Create the credential and decision-log directories (Linux)
+    # Only the credential directory. The decision log lives in the service user's
+    # home and is created unprivileged above; creating it as root here would give
+    # a 0700 root-owned directory to a unit that runs as {{ slot_manager_user }},
+    # and the agent's first append would fail on Permission denied -- silently,
+    # because a decision log that cannot be written is also the price history the
+    # floor test reads, so the agent would simply stop finding a floor and stop
+    # buying. It only worked because an earlier task happened to create it first;
+    # that ordering is not something a later edit should be able to break.
+    - name: Create the root-owned credential directory (Linux)
       become: true
       when: ansible_system == 'Linux'
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ slot_manager_credential_path | dirname }}"
         state: directory
+        owner: root
+        group: root
         mode: "0700"
-      loop:
-        - "{{ slot_manager_credential_path | dirname }}"
-        - "{{ slot_manager_decision_log | dirname }}"
 
     # Refuse to install a unit whose credential does not exist yet: systemd would
     # start, fail to decrypt, and Restart=always would retry forever while the

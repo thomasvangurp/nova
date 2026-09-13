@@ -13,10 +13,16 @@
 # minutes keeps several samples inside it; poll much slower and the agent cannot
 # tell a floor from a spike and declines to buy at all.
 [Unit]
-Description=Check subnet-68 registration slots on a schedule
-Requires=nova-slot-manager.service
+Description=Check subnet-68 registration slots on a schedule ({{ 'LIVE -- SPENDS TAO' if slot_manager_execute | bool else 'dry run' }})
 
 [Timer]
+# Named explicitly rather than left to the implicit same-basename default, and
+# NOT as Requires= in [Unit]: Requires= on a timer activates the service the
+# moment the timer itself is started, so `systemctl restart <timer>` -- which is
+# what the deploy does -- fired an unscheduled purchase check before the deploy
+# had even printed which mode it was in. Unit= says which service the schedule
+# triggers without pulling it in as a start-time dependency.
+Unit={{ slot_manager_service }}.service
 OnBootSec={{ slot_manager_check_seconds }}
 OnUnitActiveSec={{ slot_manager_check_seconds }}
 # Never land on the same block as every other scheduled buyer.

@@ -14,10 +14,24 @@
 #   systemd-ask-password -n | systemd-creds encrypt --name={{ slot_manager_credential_name }} - {{ slot_manager_credential_path }}
 #   chmod 0600 {{ slot_manager_credential_path }}
 #
-# The unit is a DRY RUN. --execute-registrations is what spends tau and is not
-# present below; enabling live purchase is an edit an operator makes knowingly.
+{% if slot_manager_execute | bool %}
+# THIS UNIT SPENDS TAO. It was rendered with slot_manager_execute=true, so
+# ExecStart below carries --execute-registrations and every timer tick can burn
+# up to {{ slot_manager_max_spend_tao_per_day }} TAO/day buying registrations.
+# Re-run ansible/slots.yml without -e slot_manager_execute=true to return it to
+# a dry run.
+{% else %}
+# This unit is a DRY RUN. --execute-registrations is what spends tao and is not
+# present below; live purchase comes from -e slot_manager_execute=true, which
+# also changes the Description so `systemctl status` cannot misreport the mode.
+{% endif %}
 [Unit]
-Description=Nova subnet-68 slot purchase check (dry run)
+# The mode is in the Description on purpose. A unit that says "dry run" while it
+# buys registrations makes `systemctl status`, `systemctl list-timers` and every
+# journal start/finish line a false report of what the machine is doing -- which
+# is exactly what this deployment did until it was caught spending 0.229 TAO
+# under a description that claimed it was not spending anything.
+Description=Nova subnet-68 slot purchase check ({{ 'LIVE -- SPENDS TAO' if slot_manager_execute | bool else 'dry run' }})
 Documentation=file://{{ slot_manager_repo }}/nanobody_opt/slot_manager.py
 After=network-online.target
 Wants=network-online.target
