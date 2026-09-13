@@ -301,3 +301,52 @@ def test_the_fleet_fingerprint_changes_when_the_uid_set_changes():
     two = [*one, fleet.FleetMember(uid=2, hotkey="5H2")]
 
     assert fleet.fleet_fingerprint(one) != fleet.fleet_fingerprint(two)
+
+
+def _pool(entries):
+    """entries: (sequence, win_probability, score_p90) in win-probability order."""
+    return {
+        "selection_order": fleet.REQUIRED_SELECTION_ORDER,
+        "candidates": [
+            {"sequence": s, "win_probability": w, "score_p90": p}
+            for s, w, p in entries
+        ],
+    }
+
+
+def test_half_the_fleet_buys_the_best_expected_score():
+    """Win-probability order is variance seeking, which is wrong for a fleet.
+
+    In epoch 25093 it spent every uid on candidates predicted at p90 170-203
+    while a candidate predicted at 128.5 sat unused further down the pool, and
+    our best actual finish was rank 20 of 40.
+    """
+    pool = _pool([
+        ("AAA", 0.30, 200.0),
+        ("BBB", 0.20, 190.0),
+        ("CCC", 0.10, 100.0),   # best expected score, worst draw odds
+        ("DDD", 0.05, 110.0),
+    ])
+    chosen = fleet.distinct_sequences(pool, 4, value_share=0.5)
+    assert set(chosen) == {"AAA", "BBB", "CCC", "DDD"}
+    # The two best expected scores are picked first, then the tail seekers.
+    assert chosen[:2] == ["CCC", "DDD"]
+
+
+def test_a_zero_value_share_is_pure_win_probability_order():
+    pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
+    assert fleet.distinct_sequences(pool, 2, value_share=0.0) == ["AAA", "BBB"]
+
+
+def test_the_fleet_never_repeats_a_sequence_across_the_two_halves():
+    """A molecule that is both the best expected score and the best draw must
+    not consume two uids: the validator scores one sequence once."""
+    pool = _pool([("AAA", 0.9, 100.0), ("BBB", 0.2, 200.0), ("CCC", 0.1, 300.0)])
+    chosen = fleet.distinct_sequences(pool, 3, value_share=0.5)
+    assert len(chosen) == len(set(chosen)) == 3
+
+
+def test_value_share_must_be_a_fraction():
+    pool = _pool([("AAA", 0.3, 200.0)])
+    with pytest.raises(ValueError, match="fraction"):
+        fleet.distinct_sequences(pool, 1, value_share=1.5)

@@ -287,11 +287,48 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
     return members
 
 
+# Share of the fleet spent on the best EXPECTED score rather than on the best
+# chance of a lucky draw. Win-probability order is deliberately variance
+# seeking, which is right when you hold one ticket and wrong when you hold
+# seven: in epoch 25093 it spent every uid on candidates predicted at p90
+# 170-203 while a candidate predicted at 128.5 sat unused at pool position 11,
+# and our best actual finish was rank 20 of 40. Half the fleet now buys the
+# expected score, half still buys the tail.
+DEFAULT_VALUE_SHARE = 0.5
+VALUE_KEY = "score_p90"
+
+
+def _best_by_expected_score(
+    candidates: Sequence[Any], wanted: int, taken: set[str]
+) -> list[str]:
+    """Lowest predicted p90 rank sum first; lower is better, ties keep order."""
+    scored: list[tuple[float, int, str]] = []
+    for position, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            continue
+        sequence = str(candidate.get("sequence") or "").strip().upper()
+        value = candidate.get(VALUE_KEY)
+        if not sequence or sequence in taken or not isinstance(value, (int, float)):
+            continue
+        scored.append((float(value), position, sequence))
+    scored.sort()
+    chosen: list[str] = []
+    for _, _, sequence in scored:
+        if sequence in taken:
+            continue
+        taken.add(sequence)
+        chosen.append(sequence)
+        if len(chosen) == wanted:
+            break
+    return chosen
+
+
 def distinct_sequences(
     rankings: Mapping[str, Any],
     count: int,
     *,
     required_order: str = REQUIRED_SELECTION_ORDER,
+    value_share: float = DEFAULT_VALUE_SHARE,
 ) -> list[str]:
     """Take the best ``count`` pairwise-distinct sequences from a ranking.
 
@@ -312,8 +349,15 @@ def distinct_sequences(
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("ranking contains no candidates")
     _assert_non_increasing_win_probability(candidates)
+    if not 0.0 <= value_share <= 1.0:
+        raise ValueError("value_share is a fraction of the fleet")
     chosen: list[str] = []
     seen: set[str] = set()
+    # The value half first, so the fleet always holds the best expected score
+    # it can see even when the pool is smaller than the fleet.
+    value_wanted = int(count * value_share)
+    if value_wanted:
+        chosen.extend(_best_by_expected_score(candidates, value_wanted, seen))
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("ranking candidates must be mappings")
