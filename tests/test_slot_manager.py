@@ -675,39 +675,59 @@ def test_hotkey_creation_survives_a_signature_without_suppress():
     assert seen == {"n_words": 12, "use_password": False, "overwrite": False}
 
 
-class _Metagraph:
-    def __init__(self, coldkeys, hotkeys, stakes):
-        self.coldkeys = coldkeys
-        self.hotkeys = hotkeys
-        self.alpha_stake = stakes
+class _StakeEntry:
+    def __init__(self, netuid, hotkey, alpha):
+        self.netuid = netuid
+        self.hotkey_ss58 = hotkey
+        self.stake = alpha
 
 
 class _Subtensor:
-    def __init__(self, metagraph):
-        self._metagraph = metagraph
+    def __init__(self, entries):
+        self._entries = entries
 
-    def metagraph(self, netuid):
-        return self._metagraph
+    def get_stake_info_for_coldkey(self, coldkey):
+        return list(self._entries)
 
 
 OURS = "5EkCwcNT"
-THEIRS = "5OtherCK"
 
 
-def test_only_our_coldkeys_holdings_are_reported():
-    subtensor = _Subtensor(_Metagraph(
-        coldkeys=[OURS, THEIRS, OURS],
-        hotkeys=["hkA", "hkB", "hkC"],
-        stakes=[2.5, 99.0, 1.5],
-    ))
+def test_delegated_alpha_is_counted_not_only_our_own_hotkeys():
+    """Our miner hotkeys held 0.000000 while the coldkey held 47.3 alpha on
+    this subnet delegated to three hotkeys we do not operate. A metagraph walk
+    keyed on our coldkey sees none of it and reports an empty treasury."""
+    subtensor = _Subtensor([
+        _StakeEntry(68, "5Gp6i5PLVV", 2.967264),
+        _StakeEntry(68, "5HmBXdq8Nj", 41.697699),
+        _StakeEntry(68, "5HMe8oMrVZ", 2.653606),
+        _StakeEntry(2, "5Fvq8unzMX", 528.290484),   # another subnet
+        _StakeEntry(68, "5Empty0000", 0.0),         # dust
+    ])
     holdings = sm.alpha_holdings(subtensor, 68, OURS)
-    assert [h["uid"] for h in holdings["holdings"]] == [0, 2]
-    assert holdings["alpha_total"] == pytest.approx(4.0)
+    assert holdings["alpha_total"] == pytest.approx(47.318569)
+    assert [h["hotkey"] for h in holdings["holdings"]] == [
+        "5HmBXdq8Nj", "5Gp6i5PLVV", "5HMe8oMrVZ"
+    ], "largest position first"
+
+
+def test_another_subnets_alpha_is_not_counted_as_ours_here():
+    subtensor = _Subtensor([_StakeEntry(2, "5Fvq8unzMX", 1753.3)])
+    assert sm.alpha_holdings(subtensor, 68, OURS)["alpha_total"] == 0.0
+
+
+def test_an_sdk_without_the_stake_map_fails_loudly():
+    class _Old:
+        def metagraph(self, netuid):
+            raise AssertionError("must not fall back to the metagraph")
+
+    with pytest.raises(RuntimeError, match="delegated alpha"):
+        sm.alpha_holdings(_Old(), 68, OURS)
 
 
 def test_the_report_values_the_position_and_writes_the_command():
     holdings = {"alpha_total": 10.0,
-                "holdings": [{"uid": 1, "hotkey": "hkA", "alpha": 10.0}]}
+                "holdings": [{"hotkey": "hkA", "alpha": 10.0}]}
     report = sm.treasury_report(
         holdings=holdings, price_tao=0.02151, netuid=68,
         wallet_name="mining_ops", slippage=0.02, floor_alpha=1.0,
@@ -730,7 +750,7 @@ def test_a_conversion_command_always_carries_a_price_limit():
 
 def test_a_position_below_the_floor_is_reported_but_not_actionable():
     holdings = {"alpha_total": 0.4,
-                "holdings": [{"uid": 1, "hotkey": "hkA", "alpha": 0.4}]}
+                "holdings": [{"hotkey": "hkA", "alpha": 0.4}]}
     report = sm.treasury_report(
         holdings=holdings, price_tao=0.02, netuid=68,
         wallet_name="mining_ops", slippage=0.02, floor_alpha=1.0,

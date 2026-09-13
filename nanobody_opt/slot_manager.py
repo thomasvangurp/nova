@@ -520,30 +520,42 @@ DEFAULT_ALPHA_REPORT_FLOOR = 1.0
 
 
 def alpha_holdings(subtensor: Any, netuid: int, coldkey: str) -> dict[str, Any]:
-    """Alpha accrued to our hotkeys, and what it is currently worth in tau.
+    """Every alpha position this coldkey holds on the subnet, and its value.
+
+    Asked of the stake map, not the metagraph. A metagraph walk keeping rows
+    whose coldkey is ours only sees alpha sitting on hotkeys we registered,
+    and that is not where the treasury is: on 2026-09-13 our own miner hotkeys
+    held 0.000000 while the coldkey held 47.3 alpha on this subnet delegated to
+    three hotkeys we do not operate -- taostats files exactly that as "other
+    alpha". A reporter blind to it reports an empty treasury.
 
     Read-only. The agent reports the position and the command that would
     convert it; the conversion itself is executed by the operator, because an
     unattended process holding the coldkey should not be able to move the
     treasury on its own.
     """
-    metagraph = subtensor.metagraph(netuid)
-    coldkeys = list(metagraph.coldkeys)
-    stakes = getattr(metagraph, "alpha_stake", None)
-    if stakes is None:
-        stakes = metagraph.stake
-    holdings = []
+    accessor = getattr(subtensor, "get_stake_info_for_coldkey", None)
+    if accessor is None:
+        raise RuntimeError(
+            "this bittensor SDK exposes no per-coldkey stake map; the "
+            "metagraph alone cannot see delegated alpha"
+        )
+    entries = accessor(coldkey)
+    if not isinstance(entries, list):
+        entries = [entries]
+    holdings: list[dict[str, Any]] = []
     total = 0.0
-    for uid, owner in enumerate(coldkeys):
-        if str(owner) != coldkey:
+    for entry in entries:
+        if int(getattr(entry, "netuid", -1)) != int(netuid):
             continue
-        amount = float(_scalar(stakes[uid]))
+        stake = getattr(entry, "stake", None)
+        amount = float(getattr(stake, "tao", stake) or 0.0)
+        if amount <= 0:
+            continue
+        hotkey = str(getattr(entry, "hotkey_ss58", ""))
         total += amount
-        holdings.append({
-            "uid": uid,
-            "hotkey": str(metagraph.hotkeys[uid]),
-            "alpha": amount,
-        })
+        holdings.append({"hotkey": hotkey, "alpha": amount})
+    holdings.sort(key=lambda item: item["alpha"], reverse=True)
     return {"holdings": holdings, "alpha_total": total}
 
 
