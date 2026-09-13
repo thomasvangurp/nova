@@ -538,7 +538,20 @@
     # publisher is still publishing.
     - name: Name the publisher's launcher and arguments once
       ansible.builtin.set_fact:
+        # The publisher spawns the commit driver, and that driver resolves the
+        # on-chain commit content from GITHUB_REPO_* and authenticates the
+        # upload with GITHUB_TOKEN. The miner is launched through dotenv for
+        # exactly this reason; the publisher was not, so every uid reached the
+        # last step of the epoch and died on "Missing one or more GitHub
+        # environment variables". Same file, same wrapper, one environment.
         nanobody_publisher_launcher:
+          - /root/.pixi/envs/chain310/bin/python
+          - -m
+          - dotenv
+          - -f
+          - /root/nanobody.env
+          - run
+          - --
           - /usr/local/bin/pixi
           - run
           - --manifest-path
@@ -690,9 +703,13 @@
     # block, in the real interpreter the --commit-command names.
     - name: Verify the commit driver's own imports resolve in the chain environment
       ansible.builtin.command:
+        # Through dotenv, because that is how the publisher that spawns it is
+        # launched. Running the gate in a barer environment than the real one
+        # is how a green deploy still commits nothing.
         cmd: >-
-          /root/.pixi/envs/chain310/bin/python -m nanobody_opt.commit_submission
-          --self-test
+          /root/.pixi/envs/chain310/bin/python -m dotenv -f /root/nanobody.env
+          run -- /root/.pixi/envs/chain310/bin/python
+          -m nanobody_opt.commit_submission --self-test
         chdir: /root
       changed_when: false
       failed_when: false

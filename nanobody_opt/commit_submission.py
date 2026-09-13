@@ -164,6 +164,10 @@ def main(argv: list[str] | None = None) -> int:
     from nanobody_opt import fleet
 
     if args.self_test:
+        # Resolving the path, not merely importing it: the import gate passed
+        # on a box where GITHUB_REPO_* was unset, and every uid then died on
+        # the resolution instead. Not a secret -- owner/repo/branch/path.
+        print(f"github_path={load_github_path()}")
         print(SELF_TEST_OK)
         return 0
 

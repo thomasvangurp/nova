@@ -1,6 +1,7 @@
 """Committing one uid's submission, and refusing to commit someone else's."""
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -158,3 +159,18 @@ def test_load_github_path_has_exactly_one_definition():
     marker = "def load_github_path"
     assert marker in (root / "utils" / "files.py").read_text()
     assert marker not in (root / "neurons" / "miner" / "miner.py").read_text()
+
+
+def test_self_test_resolves_the_github_path_and_not_only_the_imports():
+    """An import-only gate passed while GITHUB_REPO_* was unset in the
+    publisher's environment, and every uid then died on the resolution.
+
+    Checked at source level: main() imports bittensor, which is not installed
+    on a controller, so the branch cannot be executed here. The playbook runs
+    the real thing on the box, through the same dotenv wrapper the publisher
+    is launched with.
+    """
+    source = inspect.getsource(cs.main)
+    branch = source.index("if args.self_test:")
+    marker = source.index("print(SELF_TEST_OK)", branch)
+    assert "load_github_path()" in source[branch:marker]
