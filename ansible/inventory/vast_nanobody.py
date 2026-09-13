@@ -209,8 +209,24 @@ def build_inventory() -> dict[str, Any]:
         # The publisher fails closed on an unexpected GPU count and the producer
         # sizes its shards from it, so it is derived from the rental rather than
         # written into a vars file where it can disagree with the hardware.
-        if instance.get("num_gpus") is not None:
-            variables["gpu_count"] = int(instance["num_gpus"])
+        #
+        # A value that is not a number is reported and omitted, not raised. A
+        # traceback out of an inventory script makes every host unreachable at
+        # once -- the same unreadable "everything is down" shape as the rotated
+        # port -- whereas a missing gpu_count is exactly what
+        # nanobody_services.yml already asserts on, by name, with the
+        # -e gpu_count=N workaround in its message.
+        raw_gpus = instance.get("num_gpus")
+        if raw_gpus is not None:
+            try:
+                variables["gpu_count"] = int(raw_gpus)
+            except (TypeError, ValueError):
+                print(
+                    f"instance {identifier}: num_gpus={raw_gpus!r} is not a "
+                    "number, so gpu_count is omitted; the play asserts on it and "
+                    "will say so. Pass -e gpu_count=N for this run.",
+                    file=sys.stderr,
+                )
         hostvars[name] = variables
         producers.append(name)
 

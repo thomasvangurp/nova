@@ -56,12 +56,27 @@ def _instance(**overrides):
     return document
 
 
+# Every environment variable the script reads. All of them are cleared before
+# each build and only the ones a test names are set, because an operator's own
+# shell exports NOVA_SLOT_ADDRESS and NOVA_SLOT_USER -- so a test that read the
+# ambient environment would assert about that operator's Pi rather than about the
+# script, and would pass or fail depending on who ran it.
+_OVERRIDES = (
+    "NOVA_VAST_LABEL",
+    "NOVA_VAST_ANY_STATUS",
+    "NOVA_SLOT_HOST",
+    "NOVA_SLOT_ADDRESS",
+    "NOVA_SLOT_USER",
+    "NOVA_SLOT_PYTHON",
+)
+
+
 def _inventory(tmp_path, monkeypatch, instances, **environment):
     path = tmp_path / "instances.json"
     path.write_text(json.dumps(instances), encoding="utf-8")
     monkeypatch.setenv("NOVA_VAST_INSTANCES_FILE", str(path))
-    monkeypatch.delenv("NOVA_VAST_LABEL", raising=False)
-    monkeypatch.delenv("NOVA_VAST_ANY_STATUS", raising=False)
+    for key in _OVERRIDES:
+        monkeypatch.delenv(key, raising=False)
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
     return vast_nanobody.build_inventory()
@@ -148,7 +163,6 @@ def test_endpointless_instance_is_dropped_with_a_message(tmp_path, monkeypatch, 
 
 def test_slot_manager_exists_without_any_gpu_box(tmp_path, monkeypatch):
     """Registrations must keep being bought while no box is rented."""
-    monkeypatch.delenv("NOVA_SLOT_HOST", raising=False)
     inventory = _inventory(tmp_path, monkeypatch, [])
     # The default purchase host is the always-on node, not this machine: the
     # recycle price halves every 360 blocks, so a host that sleeps buys at the
@@ -159,18 +173,21 @@ def test_slot_manager_exists_without_any_gpu_box(tmp_path, monkeypatch):
 
 def test_the_purchase_host_can_be_moved_back_to_this_machine(tmp_path, monkeypatch):
     """While the always-on node is down, local is better than not buying."""
-    monkeypatch.setenv("NOVA_SLOT_HOST", "operator")
-    inventory = _inventory(tmp_path, monkeypatch, [])
+    inventory = _inventory(tmp_path, monkeypatch, [], NOVA_SLOT_HOST="operator")
     assert inventory["slot_manager"]["hosts"] == ["operator"]
     assert inventory["_meta"]["hostvars"]["operator"]["ansible_connection"] == "local"
 
 
 def test_the_purchase_host_address_and_user_are_overridable(tmp_path, monkeypatch):
     """A different always-on node should need no code change."""
-    monkeypatch.setenv("NOVA_SLOT_HOST", "buyer")
-    monkeypatch.setenv("NOVA_SLOT_ADDRESS", "100.64.0.9")
-    monkeypatch.setenv("NOVA_SLOT_USER", "nova")
-    inventory = _inventory(tmp_path, monkeypatch, [])
+    inventory = _inventory(
+        tmp_path,
+        monkeypatch,
+        [],
+        NOVA_SLOT_HOST="buyer",
+        NOVA_SLOT_ADDRESS="100.64.0.9",
+        NOVA_SLOT_USER="nova",
+    )
     host = inventory["_meta"]["hostvars"]["buyer"]
     assert inventory["slot_manager"]["hosts"] == ["buyer"]
     assert host["ansible_host"] == "100.64.0.9"
@@ -205,3 +222,157 @@ def test_instances_key_wrapper_is_accepted(tmp_path, monkeypatch):
     monkeypatch.setenv("NOVA_VAST_INSTANCES_FILE", str(path))
     wrapped = vast_nanobody.build_inventory()
     assert wrapped["nanobody_producer"]["hosts"] == ["vast50420868"]
+
+
+# --- Host-variable allowlisting -------------------------------------------
+# The instance document is the whole vast.ai API payload. Naming two known
+# credential fields is not enough, because the leak that matters is the field
+# nobody thought of: host variables are printed by ``ansible-inventory``, echoed
+# at -vvv and templated into task arguments, so the mechanism has to be an
+# allowlist and the test has to assert the allowlist, not a denylist.
+ALLOWED_PRODUCER_KEYS = frozenset(
+    {"ansible_host", "ansible_port", "ansible_user", "gpu_count"}
+    | set(vast_nanobody.SAFE_FIELDS.values())
+)
+
+
+def test_no_host_variable_escapes_the_allowlist(tmp_path, monkeypatch):
+    instance = _instance()
+    # Fields a future API version might add, of exactly the shape that must not
+    # be published. None of them are named anywhere in the script.
+    instance.update(
+        {
+            "ssh_idx": "ssh5",
+            "api_key": "vast-api-key-shaped-value",
+            "jupyter_url": "https://jupyter.vast.ai/?token=another-token-shape",
+            "extra_env": {"WANDB_API_KEY": "secret-shaped"},
+            "client_secret": "client-secret-shaped",
+        }
+    )
+    variables = _inventory(tmp_path, monkeypatch, [instance])["_meta"]["hostvars"][
+        "vast50420868"
+    ]
+    assert set(variables) <= ALLOWED_PRODUCER_KEYS, sorted(
+        set(variables) - ALLOWED_PRODUCER_KEYS
+    )
+    serialized = json.dumps(variables)
+    for secret in (
+        "vast-api-key-shaped-value",
+        "another-token-shape",
+        "secret-shaped",
+        "client-secret-shaped",
+    ):
+        assert secret not in serialized
+
+
+# --- gpu_count ------------------------------------------------------------
+# nanobody_services.yml asserts `gpu_count is defined` and `| int > 0` with no
+# fallback, on purpose: the GPU count is a fact about the rental and a default
+# here would substitute a guess. That contract only holds if this script either
+# reports a usable integer or reports nothing at all.
+
+
+def test_absent_num_gpus_omits_gpu_count_for_the_play_to_catch(tmp_path, monkeypatch):
+    instance = _instance()
+    del instance["num_gpus"]
+    variables = _inventory(tmp_path, monkeypatch, [instance])["_meta"]["hostvars"][
+        "vast50420868"
+    ]
+    assert "gpu_count" not in variables
+    assert "vast_num_gpus" not in variables
+
+
+def test_a_string_num_gpus_is_still_an_int(tmp_path, monkeypatch):
+    """The play does `gpu_count | int > 0`; the publisher wants a real number."""
+    variables = _inventory(tmp_path, monkeypatch, [_instance(num_gpus="2")])["_meta"][
+        "hostvars"
+    ]["vast50420868"]
+    assert variables["gpu_count"] == 2
+    assert isinstance(variables["gpu_count"], int)
+
+
+def test_an_unparseable_num_gpus_is_reported_not_raised(tmp_path, monkeypatch, capsys):
+    """A traceback out of an inventory script takes every host down at once."""
+    inventory = _inventory(tmp_path, monkeypatch, [_instance(num_gpus="")])
+    variables = inventory["_meta"]["hostvars"]["vast50420868"]
+    # The host is still usable, and gpu_count is absent so the play's own
+    # assertion reports it by name.
+    assert inventory["nanobody_producer"]["hosts"] == ["vast50420868"]
+    assert "gpu_count" not in variables
+    assert "is not a number" in capsys.readouterr().err
+
+
+# --- The purchase host ----------------------------------------------------
+
+
+def test_the_purchase_host_address_defaults_to_its_name(tmp_path, monkeypatch):
+    """No NOVA_SLOT_ADDRESS means resolve the tailscale name, not an empty host."""
+    host = _inventory(tmp_path, monkeypatch, [], NOVA_SLOT_HOST="buyer")["_meta"][
+        "hostvars"
+    ]["buyer"]
+    assert host["ansible_host"] == "buyer"
+    assert host["ansible_user"] == "root"
+    assert host["ansible_python_interpreter"] == "/usr/bin/python3"
+
+
+def test_the_purchase_host_overrides_tolerate_shell_whitespace(tmp_path, monkeypatch):
+    """`export NOVA_SLOT_USER='thomasg '` must not produce the user 'thomasg '."""
+    inventory = _inventory(
+        tmp_path,
+        monkeypatch,
+        [],
+        NOVA_SLOT_HOST=" buyer ",
+        NOVA_SLOT_ADDRESS=" 100.64.243.65\t",
+        NOVA_SLOT_USER="thomasg ",
+        NOVA_SLOT_PYTHON=" /usr/bin/python3 ",
+    )
+    # The group member and the hostvars key have to be the same stripped name, or
+    # `hosts: slot_manager` resolves a host with no variables at all.
+    assert inventory["slot_manager"]["hosts"] == ["buyer"]
+    host = inventory["_meta"]["hostvars"]["buyer"]
+    assert host["ansible_host"] == "100.64.243.65"
+    assert host["ansible_user"] == "thomasg"
+    assert host["ansible_python_interpreter"] == "/usr/bin/python3"
+
+
+def test_the_purchase_host_is_the_only_member_of_its_group(tmp_path, monkeypatch):
+    """slots.yml runs on slot_manager; a second member would buy twice."""
+    inventory = _inventory(
+        tmp_path, monkeypatch, [_instance()], NOVA_SLOT_HOST="buyer"
+    )
+    assert inventory["slot_manager"]["hosts"] == ["buyer"]
+    # And the GPU box is never in it: the coldkey must not reach rented hardware.
+    assert "vast50420868" not in inventory["slot_manager"]["hosts"]
+
+
+# --- Zero instances -------------------------------------------------------
+
+
+def test_zero_instances_names_the_label_it_looked_for(tmp_path, monkeypatch, capsys):
+    """An empty producer group makes the GPU plays say "no hosts matched" and
+    exit 0, so the inventory has to say what it searched for on stderr."""
+    inventory = _inventory(tmp_path, monkeypatch, [])
+    assert inventory["nanobody_producer"]["hosts"] == []
+    assert inventory["nanobody_publisher"]["hosts"] == []
+    message = capsys.readouterr().err
+    assert "nova-nanobody-pixi" in message
+    assert "vastai label instance" in message
+
+
+def test_a_label_nothing_matches_is_not_a_silent_empty_inventory(
+    tmp_path, monkeypatch, capsys
+):
+    inventory = _inventory(
+        tmp_path, monkeypatch, [_instance()], NOVA_VAST_LABEL="nova-nanobody-spot"
+    )
+    assert inventory["nanobody_producer"]["hosts"] == []
+    assert "nova-nanobody-spot" in capsys.readouterr().err
+
+
+def test_a_skipped_non_running_instance_says_which_and_why(
+    tmp_path, monkeypatch, capsys
+):
+    _inventory(tmp_path, monkeypatch, [_instance(actual_status="exited")])
+    message = capsys.readouterr().err
+    assert "'exited'" in message
+    assert "NOVA_VAST_ANY_STATUS=1" in message
