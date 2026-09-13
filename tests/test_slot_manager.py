@@ -86,7 +86,7 @@ def test_pure_decay_below_target_buys():
     )
     assert decision.action == sm.BUY
     assert decision.reason == sm.REASON_BUY
-    assert decision.detail["shortfall"] == 4
+    assert decision.detail["shortfall"] == sm.SlotPolicy().target - 5
     # Under pure decay every sample projects to the same price, so the live
     # price sits exactly on its own floor.
     assert decision.detail["floor_ratio"] == pytest.approx(1.0, abs=1e-9)
@@ -227,7 +227,7 @@ def test_the_recycle_ceiling_refuses_an_expensive_floor():
 def test_target_already_met_is_a_no_op():
     history = decaying(1_000_000, 61, 0.01)  # free, and still nothing to do
     decision = sm.decide(
-        state_at(history, registered=tuple(range(9))), history, [], sm.SlotPolicy()
+        state_at(history, registered=tuple(range(sm.SlotPolicy().target))), history, [], sm.SlotPolicy()
     )
     assert decision.action == sm.WAIT
     assert decision.reason == sm.REASON_TARGET_MET
@@ -251,7 +251,7 @@ def test_the_stagger_window_holds_expiries_apart():
     history = decaying(1_000_000, 61, 0.12)
     block = history[-1].block
     policy = sm.SlotPolicy()
-    assert policy.stagger == 555  # immunity_period // 9
+    assert policy.stagger == sm.default_stagger_blocks(policy.target)
     inside = sm.decide(state_at(history, last=block - 400), history, [], policy)
     assert inside.reason == sm.REASON_STAGGER
     outside = sm.decide(state_at(history, last=block - 600), history, [], policy)
@@ -328,7 +328,9 @@ def test_the_policy_imports_without_bittensor_or_site_packages():
         capture_output=True, text=True, cwd=str(REPO), check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "555"
+    assert completed.stdout.strip() == str(
+        sm.default_stagger_blocks(sm.SlotPolicy().target)
+    )
 
 
 def test_registration_is_never_reachable_without_the_explicit_flag():
@@ -438,7 +440,7 @@ def test_help_works_with_no_keychain_wallet_or_chain():
     for flag in ("--minimum-hotkeys", "--interval", "--execute-registrations",
                  "--max-recycle-tao", "--max-spend-tao-per-day", "--decision-log"):
         assert flag in completed.stdout, flag
-    assert "default: 9" in completed.stdout
+    assert f"default: {sm.SlotPolicy().target}" in completed.stdout
     # Nothing was imported, unlocked or connected to in order to answer it.
     assert "bittensor" not in completed.stderr
 
@@ -484,7 +486,7 @@ def test_holding_nothing_on_chain_is_the_ordinary_starting_case():
     )
     assert decision.action == sm.BUY
     assert decision.detail["registered"] == 0
-    assert decision.detail["shortfall"] == 9
+    assert decision.detail["shortfall"] == sm.SlotPolicy().target
     assert decision.detail["blocks_since_our_last_registration"] is None
 
 
@@ -576,7 +578,7 @@ def test_the_report_line_is_printable_for_every_decision(capsys):
     for state in (
         state_at(history),
         state_at(history, registered=()),
-        state_at(history, registered=tuple(range(9))),
+        state_at(history, registered=tuple(range(sm.SlotPolicy().target))),
         state_at(history, last=history[-1].block - 1),
     ):
         decision = sm.decide(state, history, [], sm.SlotPolicy())
