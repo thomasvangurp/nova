@@ -22,8 +22,8 @@
           the inventory at a different label with NOVA_VAST_LABEL. The
           inventory script prints what it did see on stderr.
         success_msg: >-
-          {{ groups['nanobody_producer'] | length }} labelled instance(s)
-          discovered.
+          {{ groups['nanobody_producer'] | default([]) | length }} labelled
+          instance(s) discovered.
 
     - name: Report the endpoint discovered for this run
       ansible.builtin.debug:
@@ -32,6 +32,6 @@
           ({{ hostvars[item].vast_num_gpus | default('?') }}x
           {{ hostvars[item].vast_gpu_name | default('GPU') }},
           instance {{ hostvars[item].vast_instance_id | default('?') }})
-      loop: "{{ groups['nanobody_producer'] }}"
+      loop: "{{ groups['nanobody_producer'] | default([]) }}"
       loop_control:
         label: "{{ item }}"
