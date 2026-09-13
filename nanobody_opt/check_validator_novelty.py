@@ -15,8 +15,36 @@ from typing import Any
 
 import pandas as pd
 
-from nanobody_opt.diversity import minmax_weighted_rank
 from nanobody_opt.filter_layer2 import _load_candidates
+
+
+def _rank_binders(archive: pd.DataFrame, top: int, max_violations: int):
+    """The validator's own top-k selection, not our reimplementation of it.
+
+    utils/nanobodies.py::index_top_sequences calls
+    utils.minmax_weighted_rank.rank_binders. This module used
+    nanobody_opt.diversity.minmax_weighted_rank -- a different function with a
+    different score -- so the replay indexed a different fifty sequences than
+    the validator and reported "30/30 novel" with zero coarse candidates while
+    our fleet sat at 0.95+ identity to the live rank-1 sequence. Replaying a
+    gate with a lookalike of its inputs proves nothing.
+    """
+    # Loaded by path, not as utils.minmax_weighted_rank: utils/__init__.py
+    # pulls in rdkit, which the metanano environment does not carry. This is
+    # still the validator's own source file, not a copy of it.
+    import importlib.util
+
+    source = Path(__file__).resolve().parent.parent / "utils" / "minmax_weighted_rank.py"
+    spec = importlib.util.spec_from_file_location("_nova_minmax_weighted_rank", source)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load the validator's ranking from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rank_binders = module.rank_binders
+
+    return rank_binders(
+        archive, k=top, max_liability_violations=max_violations
+    ).head(top)
 
 
 def duplicate_reason(identity: float, cdr_similarity: dict[str, float] | None) -> str | None:
@@ -79,10 +107,9 @@ def main() -> None:
         raise SystemExit("no candidate sequences found")
     archive = pd.read_csv(args.archive)
     historical = set(archive.sequence.dropna().astype(str).str.strip().str.upper())
-    eligible = archive[
-        archive.liability_num_violations <= args.max_liability_violations
-    ].copy()
-    top = minmax_weighted_rank(eligible, k=args.top)
+    # No pre-filter of our own: rank_binders applies the liability filter
+    # itself, exactly as index_top_sequences hands it the raw frame.
+    top = _rank_binders(archive, args.top, args.max_liability_violations)
     if len(top) != args.top:
         raise SystemExit(f"expected {args.top} top sequences, got {len(top)}")
     engine = _build_search_engine(top)
@@ -91,7 +118,19 @@ def main() -> None:
     for candidate in candidates:
         sequence = candidate["sequence"]
         exact_historical = sequence in historical
-        search = engine.search(sequence, include_alignment=True)
+        # Exactly the call neurons/validator/nanobody_validity.py makes. The
+        # engine's DEFAULT coarse k-mer prefilter discards every top sequence
+        # before alignment -- this replay reported coarse=0, max_identity=0.000
+        # and "30/30 novel" for a fleet that was 0.95-0.98 identical to the
+        # live rank-1 sequence. The validator disables that prefilter, so a
+        # replay that leaves it on proves nothing.
+        search = engine.search(
+            sequence,
+            include_alignment=True,
+            exclude_ids=None,
+            coarse_min_shared=None,
+            coarse_jaccard=None,
+        )
         matches = []
         for match in search.matches:
             reason = duplicate_reason(match.identity, match.cdr_similarity)

@@ -174,3 +174,73 @@ def test_self_test_resolves_the_github_path_and_not_only_the_imports():
     branch = source.index("if args.self_test:")
     marker = source.index("print(SELF_TEST_OK)", branch)
     assert "load_github_path()" in source[branch:marker]
+
+
+def _validator_parser():
+    """Load the validator's real parse_decrypted_submission.
+
+    bittensor is not installed on a controller, so its two imports are stubbed;
+    nothing else in the module is touched. Mirroring the rule in a test would
+    only prove our mirror agrees with itself -- the point is to run the code
+    that actually rejected every submission we made.
+    """
+    import importlib.util
+    import types
+
+    stub = types.ModuleType("bittensor")
+    stub.logging = types.SimpleNamespace(
+        warning=lambda *a, **k: None, info=lambda *a, **k: None,
+        debug=lambda *a, **k: None, error=lambda *a, **k: None,
+    )
+    chain_data = types.ModuleType("bittensor.core.chain_data.utils")
+    chain_data.decode_metadata = lambda *a, **k: None
+    saved = {k: sys.modules.get(k) for k in
+             ("bittensor", "bittensor.core", "bittensor.core.chain_data",
+              "bittensor.core.chain_data.utils")}
+    sys.modules["bittensor"] = stub
+    sys.modules["bittensor.core"] = types.ModuleType("bittensor.core")
+    sys.modules["bittensor.core.chain_data"] = types.ModuleType(
+        "bittensor.core.chain_data")
+    sys.modules["bittensor.core.chain_data.utils"] = chain_data
+    try:
+        path = (Path(cs.__file__).resolve().parent.parent
+                / "neurons" / "validator" / "commitments.py")
+        spec = importlib.util.spec_from_file_location("_nova_commitments", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
+
+
+SEQ = "KWALVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDS"
+
+
+def test_the_validators_own_parser_accepts_what_we_commit():
+    """This is the check that was missing while we scored zero every epoch."""
+    validator = _validator_parser()
+    parsed = validator.parse_decrypted_submission(
+        1, cs.submission_message(SEQ), num_molecules=1, num_sequences=1
+    )
+    assert parsed is not None, "the validator would discard this submission"
+    molecules, sequences = parsed
+    assert molecules == []
+    assert sequences == [SEQ]
+
+
+def test_the_validators_own_parser_rejects_a_bare_sequence():
+    """What this driver used to send: zero delimiters, silently discarded."""
+    validator = _validator_parser()
+    assert validator.parse_decrypted_submission(
+        1, SEQ, num_molecules=1, num_sequences=1
+    ) is None
+
+
+def test_a_submission_message_is_refused_rather_than_sent_malformed():
+    for bad in ("", "   ", "SEQ WITH SPACE", "SEQ|WITH|PIPES", "SEQÜ"):
+        with pytest.raises(ValueError):
+            cs.submission_message(bad)

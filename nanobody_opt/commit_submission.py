@@ -39,8 +39,42 @@ RESULT_STALE = "COMMIT_SKIPPED_STALE_HOTKEY"
 RESULT_TOO_SOON = "COMMIT_SKIPPED_RATE_LIMITED"
 
 
+# neurons/validator/commitments.py: SEPARATOR "," separates items within a
+# section, NULL_TOKEN "~" is the empty list, and the two sections are joined by
+# exactly one "|".
+NULL_TOKEN = "~"
+SUBMISSION_DELIMITER = "|"
+
+
+def submission_message(sequence: str) -> str:
+    """Format one nanobody submission the way the validator parses it.
+
+    parse_decrypted_submission refuses anything that does not hold exactly one
+    "|", separating the molecule section from the sequence section, and refuses
+    whitespace and non-ascii outright. This driver used to encrypt the bare
+    sequence -- zero delimiters -- so every uid we committed was discarded at
+    parse time, before scoring, similarity or any validity check. It looked
+    like a healthy fleet from our side: COMMIT_OK for every uid, and not one
+    row on the leaderboard in any epoch. The miner has always sent "~|<seq>";
+    the fleet driver did not.
+    """
+    text = str(sequence).strip().upper()
+    if not text:
+        raise ValueError("refusing to commit an empty sequence")
+    if any(character.isspace() for character in text):
+        raise ValueError("a submission may not contain whitespace")
+    if not text.isascii():
+        raise ValueError("a submission must be ascii")
+    if SUBMISSION_DELIMITER in text:
+        raise ValueError("a sequence may not contain the section delimiter")
+    return f"{NULL_TOKEN}{SUBMISSION_DELIMITER}{text}"
+
+
 def encoded_payload(message: str, uid: int, block: int, timelock) -> tuple[str, str]:
     """Timelock-encrypt one submission, returning (filename, base64 content).
+
+    ``message`` must already be in the validator's wire format; build it with
+    ``submission_message``.
 
     The encryption is keyed on the uid, which is why this cannot be done once for
     the whole fleet: each uid's payload is distinct even for an identical
@@ -206,7 +240,10 @@ def main(argv: list[str] | None = None) -> int:
 
     block = subtensor.get_current_block()
     filename, encoded = encoded_payload(
-        args.sequence, args.uid, block, QuicknetBittensorDrandTimelock()
+        submission_message(args.sequence),
+        args.uid,
+        block,
+        QuicknetBittensorDrandTimelock(),
     )
     github_path = args.github_path or load_github_path()
     commit_content = f"{github_path}/{filename}.txt"

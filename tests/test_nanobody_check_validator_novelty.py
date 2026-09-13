@@ -14,3 +14,23 @@ def test_validator_duplicate_rules_allow_distant_sequences():
     assert duplicate_reason(
         0.89, {"CDR1": 1.0, "CDR2": 1.0, "CDR3": 0.79}
     ) is None
+
+
+def test_the_replay_disables_the_coarse_prefilter_like_the_validator_does():
+    """The engine's default prefilter made this replay useless.
+
+    neurons/validator/nanobody_validity.py calls search() with
+    coarse_min_shared=None and coarse_jaccard=None. Leaving the defaults on
+    discarded every top sequence before alignment: the replay reported
+    coarse=0, max_identity=0.000 and "30/30 novel" for a candidate pool that
+    was 0.95-0.98 identical to the live rank-1 sequence.
+    """
+    import inspect
+
+    from nanobody_opt import check_validator_novelty
+
+    source = inspect.getsource(check_validator_novelty.main)
+    call = source[source.index("engine.search("):]
+    call = call[: call.index(")")]
+    assert "coarse_min_shared=None" in call
+    assert "coarse_jaccard=None" in call

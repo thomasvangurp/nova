@@ -694,6 +694,35 @@
         success_msg: "Miner exports the chain view the publisher reads."
       when: nanobody_publisher_activate | bool or nanobody_chain_writer_activate | bool
 
+    # The wire format is the whole submission. commitments.py refuses a
+    # payload that does not hold exactly one "|" between the molecule section
+    # and the sequence section, and refuses it before scoring, similarity or
+    # any validity check -- invisibly, from our side. This driver sent the bare
+    # sequence for every uid of every epoch.
+    - name: Verify the commit driver emits the validator's submission format
+      ansible.builtin.shell: |
+        set -eu
+        grep -q 'def submission_message' /root/nanobody_opt/commit_submission.py
+        grep -q 'submission_message(args.sequence)' /root/nanobody_opt/commit_submission.py
+        grep -q 'NULL_TOKEN = "~"' /root/neurons/validator/commitments.py
+        echo SUBMISSION_FORMAT_PRESENT
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      register: submission_format
+
+    - name: Require a commit driver the validator can parse
+      ansible.builtin.assert:
+        that: "'SUBMISSION_FORMAT_PRESENT' in submission_format.stdout"
+        fail_msg: >-
+          The commit driver does not build the validator's "molecules|sequences"
+          payload, or the validator's null token has changed. Every uid would
+          be discarded at parse time and the fleet would score nothing while
+          reporting COMMIT_OK for every uid.
+        success_msg: "Commit driver emits the validator's submission format."
+      when: nanobody_publisher_activate | bool
+
     # The validator's duplicate gates are the difference between six tickets
     # and none: a UID whose sequence is >=0.95 identical to a top sequence, or
     # shares a CDR3 at >=0.85, is dropped before scoring. That check existed in
