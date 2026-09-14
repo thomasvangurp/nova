@@ -92,7 +92,14 @@ def _motif(sequence: str, bounds: tuple[int, int]) -> str:
 # how we search; at or above it, a deviation is a defect.
 FIELD_CONSENSUS_THRESHOLD = 0.80
 
-
+# Winners do not sit ON the consensus, they sit one step off it. Across the six
+# molecules that won an epoch for the strongest competing coldkey, each deviates
+# from settled consensus at a mean of 1.00 positions, while our own fielded
+# molecules deviate at 1.73. So consensus is a pull, never a rule: a hard gate
+# at any budget forbids some winner outright -- freezing every settled position
+# reaches 3 of those 6, a one-deviation budget 4, a two-deviation budget 5.
+# Nothing here is forbidden; the prior only makes deviation less likely where
+# the field has settled.
 def field_consensus(
     background_sequences: list[str], length: int
 ) -> dict[int, tuple[str, float]]:
@@ -1586,23 +1593,9 @@ def main() -> None:
                         if lower <= args.max_mutations
                         else args.min_mutations
                     )
-                # A mutation cannot keep the parent's residue -- `options`
-                # below excludes it -- so sampling a position where the parent
-                # already holds the field's settled residue can only move off
-                # it. Repeated over a lineage that is one-way drift away from
-                # consensus, which is how we reached 48% G at position 99
-                # against the field's 81%. Where the parent already agrees with
-                # a settled position, spend the mutation budget elsewhere; where
-                # it disagrees, leave the position mutable so it can be
-                # corrected toward the field.
                 mutable = [
                     position for position in cdr_positions
                     if position not in protected
-                    if not (
-                        consensus.get(position, ("", 0.0))[1]
-                        >= FIELD_CONSENSUS_THRESHOLD
-                        and parent[position] == consensus[position][0]
-                    )
                     if any(residue != parent[position] for residue in allowed[position])
                 ]
                 if len(mutable) < mutation_count:
@@ -1610,9 +1603,21 @@ def main() -> None:
                 positions = rng.choice(mutable, size=mutation_count, replace=False)
                 for position_value in positions:
                     position = int(position_value)
+                    # Everywhere else a mutation must change something, or the
+                    # candidate is a duplicate of its parent. But at a position
+                    # the field has settled, excluding the parent's residue means
+                    # sampling there can ONLY move off consensus -- one-way drift
+                    # that took us to 48% G at position 99 against the field's
+                    # 81%. Leaving the parent residue on the table lets the
+                    # weighted draw decline to displace it, while the prior still
+                    # allows the deliberate single deviation the winners carry.
+                    settled_here = (
+                        consensus.get(position, ("", 0.0))[1]
+                        >= FIELD_CONSENSUS_THRESHOLD
+                    )
                     options = [
                         residue for residue in allowed[position]
-                        if residue != parent[position]
+                        if residue != parent[position] or settled_here
                     ]
                     sequence[position] = _weighted_choice(
                         rng,

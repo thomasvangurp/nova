@@ -489,10 +489,12 @@ def test_the_consensus_threshold_is_where_the_field_stops_tolerating_deviation()
     assert FIELD_CONSENSUS_THRESHOLD == 0.80
 
 
-def test_a_parent_already_at_consensus_is_not_mutated_off_it():
+def test_a_settled_position_can_decline_to_displace_consensus():
     """
-    `options` excludes the parent's own residue, so sampling a settled position
-    can only move away from it. Over a lineage that is one-way drift.
+    Everywhere else a mutation must change something. At a settled position,
+    excluding the parent's residue means sampling there can ONLY move off
+    consensus -- one-way drift, which is how we reached 48% G at position 99
+    against the field's 81%.
     """
     from nanobody_opt.local_neighborhood import (
         FIELD_CONSENSUS_THRESHOLD,
@@ -500,25 +502,41 @@ def test_a_parent_already_at_consensus_is_not_mutated_off_it():
     )
 
     consensus = field_consensus(_field(settled_share=0.9), 10)
-    parent = "AAAAGAAAAA"          # agrees with the field at position 4
-    cdr_positions = list(range(10))
-    mutable = [
-        position for position in cdr_positions
-        if not (
-            consensus.get(position, ("", 0.0))[1] >= FIELD_CONSENSUS_THRESHOLD
-            and parent[position] == consensus[position][0]
-        )
-    ]
-    assert 4 not in mutable, "a settled position the parent already holds stays put"
+    allowed = {position: list("ACDEFGHIKL") for position in range(10)}
+    parent = "AAAAGAAAAA"          # holds the settled residue at position 4
 
-    # ...but a parent that DISAGREES keeps the position mutable, so it can be
-    # corrected toward the field rather than frozen at the wrong residue.
-    divergent = "AAAAAAAAAA"
-    mutable_divergent = [
-        position for position in cdr_positions
-        if not (
+    def options_at(position):
+        settled_here = (
             consensus.get(position, ("", 0.0))[1] >= FIELD_CONSENSUS_THRESHOLD
-            and divergent[position] == consensus[position][0]
         )
-    ]
-    assert 4 in mutable_divergent
+        return [
+            residue for residue in allowed[position]
+            if residue != parent[position] or settled_here
+        ]
+
+    assert parent[4] in options_at(4), "a settled position must be able to hold"
+    assert parent[0] not in options_at(0), "elsewhere a mutation must still change"
+
+
+def test_consensus_is_a_pull_and_never_a_gate():
+    """
+    A hard gate at any budget forbids some winner: freezing every settled
+    position reaches 3 of the rival's 6 winning molecules, a one-deviation
+    budget 4, a two-deviation budget 5. Nothing may be forbidden -- every
+    residue the gates allow must remain drawable at a settled position.
+    """
+    from nanobody_opt.local_neighborhood import (
+        FIELD_CONSENSUS_THRESHOLD,
+        field_consensus,
+    )
+
+    consensus = field_consensus(_field(settled_share=0.95), 10)
+    allowed = list("ACDEFGHIKL")
+    parent = "AAAAGAAAAA"
+    settled_here = consensus[4][1] >= FIELD_CONSENSUS_THRESHOLD
+    options = [r for r in allowed if r != parent[4] or settled_here]
+    assert set(options) == set(allowed), (
+        "every allowed residue must stay reachable at a settled position"
+    )
+
+
