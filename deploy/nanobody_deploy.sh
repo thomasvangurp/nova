@@ -44,6 +44,13 @@ if [ -z "$CHAIN_WRITER_HOTKEY" ]; then
   exit 2
 fi
 echo "chain writer signs with: $CHAIN_WRITER_HOTKEY"
+
+# The producer is the service the GPU rental exists to run, and the playbook
+# gates it off by default. Omitting this is a green deploy that leaves nothing
+# generating candidates.
+PRODUCER=${NOVA_PRODUCER:-true}
+
+[ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
 [ -r "$TOKEN_FILE" ] || { echo "github token file not readable: $TOKEN_FILE" >&2; exit 2; }
 
 exec ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
