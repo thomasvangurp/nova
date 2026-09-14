@@ -329,11 +329,12 @@ def test_the_value_share_knob_buys_expected_score_when_asked():
     assert chosen[:2] == ["CCC", "DDD"]
 
 
-def test_the_fleet_splits_between_expected_score_and_the_tail():
-    """Predicted p90 correlated +0.807 with the actual score across our five
-    scored tickets in epoch 25099; win probability managed only -0.526. Half
-    the fleet buys expected quality, half still buys the tail."""
-    assert 0.0 < fleet.DEFAULT_VALUE_SHARE < 1.0
+def test_the_lead_ticket_is_chosen_as_it_was_in_our_best_epoch():
+    """Epoch 25096 tied the winner at 43 under pure win-probability order.
+    Every selection change after it coincided with worse results, so the first
+    pick is frozen there until several epochs of a fixed configuration say
+    otherwise. Changes affecting only slots two onward are kept."""
+    assert fleet.DEFAULT_VALUE_SHARE == 0.0
     pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
     assert set(fleet.distinct_sequences(pool, 2)) == {"AAA", "BBB"}
 

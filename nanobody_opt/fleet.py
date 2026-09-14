@@ -292,7 +292,19 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
 # objective here and buying the mean actively discards the candidates most
 # likely to win: only rank one pays and the validator takes a single draw.
 #
-# Half, on measured evidence rather than theory. Across our five scored
+# ZERO, and frozen. Our best epoch of the run -- 25096, score 43, tied with the
+# winner -- was produced by pure win-probability order. Every selection change
+# after it coincided with worse results: ranks went 20, 13, 5, 2, 3 and then
+# 19, 5, 17, 23. None of that is attributable, because selection was changed
+# almost every epoch and each epoch is one draw from a wide distribution, which
+# is the same error the estimator itself was making.
+#
+# So the lead ticket is chosen exactly as it was at 25096. Changes that only
+# affect slots two onward -- a wider shortlist, separation-first, the family
+# slate -- are kept, because they add tickets without touching the first pick.
+# Do not move this without several epochs of a fixed configuration behind it.
+#
+# The evidence that argued for 0.5 is still real and still unresolved: Across our five scored
 # tickets in epoch 25099 the predicted p90 correlated +0.807 with the actual
 # score while the win probability correlated only -0.526, and epoch 25101's
 # pool held a candidate at p90 108.2 with confidence rank 82.2 that
@@ -304,7 +316,7 @@ def discover_fleet(source: Any, coldkey: str, *, netuid: int = 68) -> list[Fleet
 # expected-score candidates are also the best-confidence ones. Half the fleet
 # buys them; half still buys the tail, because only rank one pays and the
 # validator draws once.
-DEFAULT_VALUE_SHARE = 0.5
+DEFAULT_VALUE_SHARE = 0.0
 
 # Two tickets closer than this are one ticket. The validator discards a
 # submission too similar to another, and measured over epochs 25093-25095 that
