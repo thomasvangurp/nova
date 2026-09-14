@@ -121,12 +121,17 @@ REASON_BUDGET = "daily_budget_would_be_exceeded"
 def default_stagger_blocks(target: int) -> int:
     """Spacing that spreads ``target`` immunity expiries evenly, in blocks.
 
-    Nine slots bought together lose immunity at the same block and all need
-    renewal at once -- a self-inflicted price spike every 16.7 hours, paid for
-    by us.  Spacing purchases ``immunity_period // target`` apart puts the
-    expiries at uniform intervals around the immunity clock instead.  At the
-    default target that is 555 blocks, about 1.9 hours, which also lets one of
-    our own +33% jumps decay roughly 2.9x before the next buy.
+    Slots bought together lose immunity at the same block and all need renewal
+    at once -- a self-inflicted price spike every 16.7 hours, paid for by us.
+    Spacing purchases ``immunity_period // target`` apart puts the expiries at
+    uniform intervals around the immunity clock instead.
+
+    The spacing has to stay above :data:`ADJUSTMENT_INTERVAL`, or two renewals
+    land in one adjustment interval and bid against each other.  That is what
+    bounds the fleet: 5000 // 13 is 384 blocks and clears 360, while 5000 // 14
+    is 357 and does not.  At the default target of 12 the spacing is 416 blocks,
+    about 1.4 hours, which also lets one of our own +33% jumps decay before the
+    next buy.
     """
     if target < 1:
         raise ValueError("target must be at least one hotkey")
@@ -179,14 +184,23 @@ class SpendRecord:
 class SlotPolicy:
     """Every knob the decision takes, so a decision is reproducible from a log."""
 
-    target: int = 7
+    #: Subnet 68 is full at 64 uids, so every registration evicts the lowest
+    #: pruning score and our share of the field is what our share of the wins
+    #: tracks.  12 of 64 is 18.8%% against 9.4%% at 6, and the funnel supports it:
+    #: the ranked pool yields 16 leads that are mutually below
+    #: ``fleet.MAXIMUM_FLEET_IDENTITY``, and the 55-block commitment reserve
+    #: holds 12 commits at the observed ~2.3 blocks per uid.
+    target: int = 12
     max_recycle_tao: float = 0.20
     #: Below this many held hotkeys, take any affordable price rather than wait
     #: for a decay floor.  A forfeited epoch costs more than a dear registration:
     #: the floor saves ~tau0.03, a missing ticket forfeits ~tau0.032 of expected
     #: value every epoch, and there are ~20 epochs a day.
     urgent_below: int = 3
-    max_spend_tao_per_day: float = 1.0
+    #: Scaled with ``target`` so raising the fleet does not also raise the risk
+    #: taken per uid: the cap was tau1.0/day at a target of 7, i.e. tau0.143 per
+    #: uid per day, and 12 uids hold that same posture at tau1.71.
+    max_spend_tao_per_day: float = 1.71
     #: ``None`` means :func:`default_stagger_blocks` of the target.
     stagger_blocks: int | None = None
     #: How far back the decay floor looks.  Deliberately finite: a competitor
@@ -959,8 +973,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--target",
         dest="target",
         type=int,
-        default=7,
-        help="registrations to hold on subnet 68 (default: 7)",
+        default=SlotPolicy().target,
+        help=(
+            "registrations to hold on subnet 68 "
+            f"(default: {SlotPolicy().target})"
+        ),
     )
     parser.add_argument(
         "--decision-log",

@@ -50,7 +50,7 @@
     # scored 5, 2 and 2 -- so a further registration buys a submission that
     # probably will not appear. Raise this again when scored-per-held is close
     # to one, not before.
-    slot_manager_minimum_hotkeys: 7
+    slot_manager_minimum_hotkeys: 12
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
     slot_manager_hotkey_prefix: nova68-slot
@@ -58,7 +58,7 @@
     slot_manager_network: finney
     slot_manager_decision_log: "{{ ansible_env.HOME }}/.nova/subnet68_slots.jsonl"
     slot_manager_max_recycle_tao: 0.20
-    slot_manager_max_spend_tao_per_day: 1.0
+    slot_manager_max_spend_tao_per_day: 1.71
     slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
     # auto resolves to keychain on macOS and systemd on Linux, matching what the
     # host actually has; the agent makes the same choice by platform.

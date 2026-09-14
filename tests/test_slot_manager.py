@@ -253,8 +253,14 @@ def test_the_stagger_window_holds_expiries_apart():
     block = history[-1].block
     policy = sm.SlotPolicy()
     assert policy.stagger == sm.default_stagger_blocks(policy.target)
+    # Probe a block that is inside the stagger window but past the adjustment
+    # interval, so the stagger guard is the one that answers. The window between
+    # the two narrows as the target rises, so derive the probe rather than
+    # assuming a fixed margin.
+    assert policy.stagger > sm.ADJUSTMENT_INTERVAL
+    probe = (policy.stagger + sm.ADJUSTMENT_INTERVAL) // 2
     inside = sm.decide(
-        state_at(history, last=block - (policy.stagger - 100)), history, [], policy
+        state_at(history, last=block - probe), history, [], policy
     )
     assert inside.reason == sm.REASON_STAGGER
     outside = sm.decide(
@@ -773,3 +779,47 @@ def test_the_agent_never_executes_the_conversion_itself():
     source = inspect.getsource(sm)
     for forbidden in ("unstake(", "remove_stake(", "swap_stake(", "sell("):
         assert forbidden not in source, f"slot_manager can execute {forbidden}"
+
+
+def test_the_cli_target_default_follows_the_policy():
+    """The CLI default must not be a literal that drifts from SlotPolicy."""
+    import inspect
+
+    source = inspect.getsource(sm)
+    completed = subprocess.run(
+        [sys.executable, "-m", "nanobody_opt.slot_manager", "--help"],
+        capture_output=True, text=True, check=True,
+    )
+    assert f"default: {sm.SlotPolicy().target}" in completed.stdout
+    # And the literal is gone, so raising the target cannot silently miss here.
+    assert "default=7," not in source
+
+
+def test_the_stagger_keeps_renewals_in_separate_intervals_at_the_live_target():
+    """
+    The fleet size is bounded by the renewal spacing, not by taste: two
+    immunity expiries inside one adjustment interval make us bid against
+    ourselves. 5000 // 13 is 384 and clears 360; 5000 // 14 is 357 and does not.
+    """
+    policy = sm.SlotPolicy()
+    assert sm.default_stagger_blocks(policy.target) > sm.ADJUSTMENT_INTERVAL, (
+        f"target {policy.target} spaces renewals "
+        f"{sm.default_stagger_blocks(policy.target)} blocks apart, inside the "
+        f"{sm.ADJUSTMENT_INTERVAL}-block adjustment interval"
+    )
+    assert sm.default_stagger_blocks(13) > sm.ADJUSTMENT_INTERVAL
+    assert sm.default_stagger_blocks(14) <= sm.ADJUSTMENT_INTERVAL
+
+
+def test_the_deployed_target_matches_the_policy():
+    """ansible/slots.yml and SlotPolicy must not disagree about the fleet size."""
+    import re
+
+    slots = (Path(__file__).resolve().parents[1] / "ansible" / "slots.yml").read_text()
+    deployed = re.search(r"slot_manager_minimum_hotkeys:\s*(\d+)", slots)
+    assert deployed, "slots.yml no longer sets slot_manager_minimum_hotkeys"
+    assert int(deployed.group(1)) == sm.SlotPolicy().target
+
+    spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
+    assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"
+    assert float(spend.group(1)) == sm.SlotPolicy().max_spend_tao_per_day
