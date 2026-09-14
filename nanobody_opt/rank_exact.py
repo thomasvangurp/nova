@@ -52,31 +52,51 @@ def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-# Which metrics the SELECTION order leans on.  This does not touch the validator
+# Which metrics the SELECTION order leans on. This does not touch the validator
 # estimate: `_compiled_category_rank_sums` still mirrors the validator exactly,
-# and the emitted aggregate_* fields are unchanged.  Only the ordering signal
-# below is weighted.
+# and the emitted aggregate_* fields are unchanged. Only the ordering signal is
+# weighted.
 #
 # Measured over epochs 25103-25112, our median category ranks against the field
 # were level on developability (-0.2) and physical interaction (-0.7) and behind
-# on confidence (+29.2, worse in 9 of 10 epochs).  Since the validator's score is
-# the sum of the three, confidence was the whole gap.  Within confidence, the
-# rank is driven by interaction_pae (Spearman +0.81 against confidence_rank over
-# 494 pooled scored submissions), min_design_to_target_pae (+0.73) and
-# design_to_target_iptm (-0.73).  Our own values on those sit within 0.5-1% of
-# the field median, so the pool is packed tightly enough that a small real gain
-# on them moves rank a long way.
+# on confidence (+29.2, worse in 9 of 10 epochs). The validator's score is the
+# sum of the three, so confidence was the whole gap -- and all three epochs we
+# have won are the epochs our confidence beat the field.
 #
-# The weights sum to len(METRICS), the same total the unweighted sum carried, so
-# --competitive-score-threshold and --maximum-p90-rank-sum keep the scale they
-# were calibrated on.  Leaving that total free would silently re-tune every gate.
-SELECTION_METRIC_WEIGHTS = {
-    "interaction_pae": 2.0,
-    "design_to_target_iptm": 2.0,
+# Spearman rho of each metric against the validator's own confidence_rank, over
+# 494 pooled scored submissions. Sign is dropped: what matters is how strongly a
+# metric moves the rank, not which way.
+CONFIDENCE_DRIVER_STRENGTH = {
+    "interaction_pae": 0.812,
+    "min_design_to_target_pae": 0.729,
+    "design_to_target_iptm": 0.725,
+    "design_ptm": 0.585,
+    "design_iiptm": 0.463,
 }
-SELECTION_BASE_WEIGHT = (
-    len(METRICS) - sum(SELECTION_METRIC_WEIGHTS.values())
-) / (len(METRICS) - len(SELECTION_METRIC_WEIGHTS))
+
+# The redistribution happens INSIDE the confidence category, and each category
+# keeps the total it had. The validator's score gives developability, confidence
+# and physical interaction equal footing, so buying confidence by starving the
+# other two trades away the parity we already hold there for nothing.
+#
+# The first cut of this weighting did not do that. It set interaction_pae and
+# design_to_target_iptm to 2.0 and, to hold the overall total, pushed every
+# other metric to 0.75 -- which demoted min_design_to_target_pae, the SECOND
+# strongest confidence driver, and thinned developability and physical
+# interaction as a side effect. Weighting by measured strength within the
+# category is what that should have been.
+def _confidence_weights() -> dict[str, float]:
+    """Spread the confidence category's own total across it by driver strength."""
+    total_strength = sum(CONFIDENCE_DRIVER_STRENGTH.values())
+    members = len(METRIC_CATEGORIES["confidence"])
+    return {
+        metric: strength / total_strength * members
+        for metric, strength in CONFIDENCE_DRIVER_STRENGTH.items()
+    }
+
+
+SELECTION_METRIC_WEIGHTS = _confidence_weights()
+SELECTION_BASE_WEIGHT = 1.0
 
 
 def selection_metric_weight(metric: str) -> float:

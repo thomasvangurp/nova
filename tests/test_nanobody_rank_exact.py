@@ -297,21 +297,60 @@ def test_selection_weights_preserve_the_rank_sum_scale():
 
 def test_selection_leans_on_the_confidence_drivers():
     """
-    Confidence was the whole gap to the field over 25103-25112, and inside it
-    the rank is driven by interaction_pae and design_to_target_iptm. Those must
-    carry more of the ordering than an unweighted metric does.
+    Confidence was the whole gap to the field over 25103-25112. The three
+    metrics that move confidence_rank hardest must each outweigh a plain metric,
+    and must outrank the two weaker confidence metrics.
     """
     from nanobody_opt.rank_exact import selection_metric_weight
     from nanobody_opt.simulate_round import METRICS
 
-    for driver in ("interaction_pae", "design_to_target_iptm"):
+    drivers = ("interaction_pae", "min_design_to_target_pae", "design_to_target_iptm")
+    weak = ("design_ptm", "design_iiptm")
+    for driver in drivers:
         assert driver in METRICS
-        others = [
-            selection_metric_weight(m)
-            for m in METRICS
-            if m not in ("interaction_pae", "design_to_target_iptm")
-        ]
-        assert selection_metric_weight(driver) > max(others)
+        assert selection_metric_weight(driver) > 1.0
+        for other in weak:
+            assert selection_metric_weight(driver) > selection_metric_weight(other)
+
+
+def test_no_confidence_driver_is_demoted_below_a_plain_metric():
+    """
+    The first cut of this weighting raised two drivers and, to hold the overall
+    total, pushed everything else to 0.75 -- which demoted
+    min_design_to_target_pae, the second strongest driver, and thinned the other
+    two categories as a side effect. Leaning on confidence must not cost a
+    driver its weight.
+    """
+    from nanobody_opt.rank_exact import (
+        CONFIDENCE_DRIVER_STRENGTH,
+        selection_metric_weight,
+    )
+
+    ordered = sorted(
+        CONFIDENCE_DRIVER_STRENGTH, key=CONFIDENCE_DRIVER_STRENGTH.get, reverse=True
+    )
+    weights = [selection_metric_weight(metric) for metric in ordered]
+    assert weights == sorted(weights, reverse=True), (
+        "weight order must follow measured driver strength"
+    )
+    assert selection_metric_weight("min_design_to_target_pae") > 1.0
+
+
+def test_each_category_keeps_its_share_of_the_ordering():
+    """
+    The validator scores developability, confidence and physical interaction
+    equally. Buying confidence by starving the other two would trade away the
+    parity we already hold there, so the redistribution happens inside the
+    confidence category and every category total is unchanged.
+    """
+    from nanobody_opt.rank_exact import selection_metric_weight
+    from nanobody_opt.simulate_round import METRIC_CATEGORIES
+
+    for category, names in METRIC_CATEGORIES.items():
+        total = sum(selection_metric_weight(metric) for metric in names)
+        assert total == pytest.approx(float(len(names))), (
+            f"{category} no longer carries its original share"
+        )
 
 
 def test_the_validator_estimate_stays_unweighted():
