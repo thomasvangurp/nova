@@ -311,7 +311,9 @@ def test_the_purchase_host_address_defaults_to_its_name(tmp_path, monkeypatch):
         "hostvars"
     ]["buyer"]
     assert host["ansible_host"] == "buyer"
-    assert host["ansible_user"] == "root"
+    # The Pi authorises a key for thomasg, which holds passwordless sudo; root
+    # has no authorized key there, so a root default fails at Gathering Facts.
+    assert host["ansible_user"] == "thomasg"
     assert host["ansible_python_interpreter"] == "/usr/bin/python3"
 
 

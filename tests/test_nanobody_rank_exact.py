@@ -279,3 +279,70 @@ def test_ranker_rejects_structurally_unstable_observations(tmp_path, monkeypatch
         assert "no complete exact candidates" in str(error)
     else:
         raise AssertionError("four good and four bad observations were accepted")
+
+
+def test_selection_weights_preserve_the_rank_sum_scale():
+    """
+    --competitive-score-threshold and --maximum-p90-rank-sum were calibrated
+    against an unweighted sum of len(METRICS) dense ranks. If the weights do not
+    sum to that same total, every one of those gates silently changes meaning.
+    """
+    from nanobody_opt.rank_exact import selection_metric_weight
+    from nanobody_opt.simulate_round import METRICS
+
+    total = sum(selection_metric_weight(metric) for metric in METRICS)
+    assert total == pytest.approx(float(len(METRICS)))
+    assert all(selection_metric_weight(metric) > 0 for metric in METRICS)
+
+
+def test_selection_leans_on_the_confidence_drivers():
+    """
+    Confidence was the whole gap to the field over 25103-25112, and inside it
+    the rank is driven by interaction_pae and design_to_target_iptm. Those must
+    carry more of the ordering than an unweighted metric does.
+    """
+    from nanobody_opt.rank_exact import selection_metric_weight
+    from nanobody_opt.simulate_round import METRICS
+
+    for driver in ("interaction_pae", "design_to_target_iptm"):
+        assert driver in METRICS
+        others = [
+            selection_metric_weight(m)
+            for m in METRICS
+            if m not in ("interaction_pae", "design_to_target_iptm")
+        ]
+        assert selection_metric_weight(driver) > max(others)
+
+
+def test_the_validator_estimate_stays_unweighted():
+    """
+    The weighting is a SELECTION change only. The emitted category rank sums are
+    our estimate of the validator's own score, and the validator does not weight
+    metrics -- so they must remain a plain sum of dense ranks.
+    """
+    import numpy as np
+    from nanobody_opt.rank_exact import (
+        _compiled_category_rank_sums,
+        _compiled_metric_ranks,
+        _compiled_selection_score,
+    )
+    from nanobody_opt.simulate_round import METRIC_CATEGORIES, METRICS
+
+    rng = np.random.default_rng(11)
+    field = {m: np.sort(rng.normal(size=64)) for m in METRICS}
+    point = {m: float(rng.normal()) for m in METRICS}
+
+    ranks = _compiled_metric_ranks(point, field)
+    categories = _compiled_category_rank_sums(point, field)
+    for category, names in METRIC_CATEGORIES.items():
+        assert categories[category] == pytest.approx(sum(ranks[n] for n in names))
+
+    # ...and the selection score is a different, weighted quantity.
+    unweighted = sum(ranks.values())
+    weighted = _compiled_selection_score(point, field)
+    from nanobody_opt.rank_exact import selection_metric_weight
+
+    assert weighted == pytest.approx(
+        sum(selection_metric_weight(m) * r for m, r in ranks.items())
+    )
+    assert weighted != pytest.approx(unweighted)

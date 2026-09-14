@@ -254,7 +254,7 @@ def build_inventory() -> dict[str, Any]:
     if slot_host != "operator":
         hostvars[slot_host] = {
             "ansible_host": os.environ.get("NOVA_SLOT_ADDRESS", slot_host).strip(),
-            "ansible_user": os.environ.get("NOVA_SLOT_USER", "root").strip(),
+            "ansible_user": os.environ.get("NOVA_SLOT_USER", DEFAULT_SLOT_USER).strip(),
             "ansible_python_interpreter": os.environ.get(
                 "NOVA_SLOT_PYTHON", "/usr/bin/python3"
             ).strip(),
@@ -272,6 +272,10 @@ def build_inventory() -> dict[str, Any]:
 # The Raspberry Pi on the tailnet. Reachable by tailscale name, so it follows the
 # device rather than an address, and overridable for a different purchase host.
 DEFAULT_SLOT_HOST = "raspberrypi"
+
+# The Pi takes key auth as thomasg, which holds passwordless sudo; root has no
+# authorized key, so connecting as root fails the playbook at Gathering Facts.
+DEFAULT_SLOT_USER = "thomasg"
 
 
 def main() -> None:

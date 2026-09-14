@@ -52,17 +52,42 @@ def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-def _compiled_category_rank_sums(
+# Which metrics the SELECTION order leans on.  This does not touch the validator
+# estimate: `_compiled_category_rank_sums` still mirrors the validator exactly,
+# and the emitted aggregate_* fields are unchanged.  Only the ordering signal
+# below is weighted.
+#
+# Measured over epochs 25103-25112, our median category ranks against the field
+# were level on developability (-0.2) and physical interaction (-0.7) and behind
+# on confidence (+29.2, worse in 9 of 10 epochs).  Since the validator's score is
+# the sum of the three, confidence was the whole gap.  Within confidence, the
+# rank is driven by interaction_pae (Spearman +0.81 against confidence_rank over
+# 494 pooled scored submissions), min_design_to_target_pae (+0.73) and
+# design_to_target_iptm (-0.73).  Our own values on those sit within 0.5-1% of
+# the field median, so the pool is packed tightly enough that a small real gain
+# on them moves rank a long way.
+#
+# The weights sum to len(METRICS), the same total the unweighted sum carried, so
+# --competitive-score-threshold and --maximum-p90-rank-sum keep the scale they
+# were calibrated on.  Leaving that total free would silently re-tune every gate.
+SELECTION_METRIC_WEIGHTS = {
+    "interaction_pae": 2.0,
+    "design_to_target_iptm": 2.0,
+}
+SELECTION_BASE_WEIGHT = (
+    len(METRICS) - sum(SELECTION_METRIC_WEIGHTS.values())
+) / (len(METRICS) - len(SELECTION_METRIC_WEIGHTS))
+
+
+def selection_metric_weight(metric: str) -> float:
+    """Weight this metric carries in the ORDERING, not in the score estimate."""
+    return SELECTION_METRIC_WEIGHTS.get(metric, SELECTION_BASE_WEIGHT)
+
+
+def _compiled_metric_ranks(
     metrics: dict[str, float], compiled: dict[str, np.ndarray]
 ) -> dict[str, float]:
-    """Exactly reproduce pandas dense ranks without rebuilding DataFrames.
-
-    A candidate's ascending dense rank is one plus the number of distinct field
-    values below it; descending is one plus the number above it.  Computing
-    those counts with binary search is equivalent to the validator's
-    ``Series.rank(method="dense")`` and makes runtime scale with observations,
-    not pandas object construction.
-    """
+    """Each metric's dense rank in its field, the shared basis for both sums."""
     ranks: dict[str, float] = {}
     for metric, direction in METRICS.items():
         values = compiled[metric]
@@ -74,6 +99,31 @@ def _compiled_category_rank_sums(
                 np.searchsorted(values, value, side="right")
             ) + 1
         ranks[metric] = float(rank)
+    return ranks
+
+
+def _compiled_selection_score(
+    metrics: dict[str, float], compiled: dict[str, np.ndarray]
+) -> float:
+    """The weighted rank sum the fleet is ordered by."""
+    ranks = _compiled_metric_ranks(metrics, compiled)
+    return float(
+        sum(selection_metric_weight(metric) * rank for metric, rank in ranks.items())
+    )
+
+
+def _compiled_category_rank_sums(
+    metrics: dict[str, float], compiled: dict[str, np.ndarray]
+) -> dict[str, float]:
+    """Exactly reproduce pandas dense ranks without rebuilding DataFrames.
+
+    A candidate's ascending dense rank is one plus the number of distinct field
+    values below it; descending is one plus the number above it.  Computing
+    those counts with binary search is equivalent to the validator's
+    ``Series.rank(method="dense")`` and makes runtime scale with observations,
+    not pandas object construction.
+    """
+    ranks = _compiled_metric_ranks(metrics, compiled)
     return {
         category: float(sum(ranks[metric] for metric in names))
         for category, names in METRIC_CATEGORIES.items()
@@ -374,9 +424,14 @@ def main() -> None:
             ]
             for metrics in observations
         ]
+        # Ordering runs on the weighted sum; the category matrix above still
+        # carries the validator's own unweighted view for the emitted estimate.
         score_matrix = [
-            [float(sum(categories.values())) for categories in by_field]
-            for by_field in category_matrix
+            [
+                _compiled_selection_score(metrics, field)
+                for field in compiled_fields
+            ]
+            for metrics in observations
         ]
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]
