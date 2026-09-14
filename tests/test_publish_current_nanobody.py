@@ -1291,3 +1291,102 @@ def test_the_publisher_annotates_cdrs_before_choosing(tmp_path, monkeypatch):
     assert [c for c in host.commands if "annotate-cdrs" in " ".join(c)], (
         "the fleet chose without knowing any clonotype"
     )
+
+
+def test_a_uid_lost_between_commit_and_epoch_end_is_reported(tmp_path, capsys):
+    """In epoch 25101 we committed for uid 46 and it scored 131 for another
+    coldkey. The commit driver's own check runs before the extrinsic, so a slot
+    recycled after that is invisible without this."""
+    assignments = [
+        fleet.Assignment(uid=0, hotkey=HOTKEYS[0], sequence="Q" * 120,
+                         commit_block=RESERVE_START),
+        fleet.Assignment(uid=1, hotkey=HOTKEYS[1], sequence="R" * 120,
+                         commit_block=RESERVE_START + 1),
+    ]
+    # uid 1 now belongs to somebody else.
+    state = _chain_state(
+        tmp_path / "chain.json", epoch=COMMIT_EPOCH,
+        block=EPOCH_LENGTH * COMMIT_EPOCH + 350,
+        neurons=[
+            {"uid": 0, "hotkey": HOTKEYS[0], "coldkey": OUR_COLDKEY},
+            {"uid": 1, "hotkey": "5SomeoneElse", "coldkey": "5TheirColdkey"},
+        ],
+    )
+    chain = publish_current_nanobody._chain_view(state, 68, 600.0)
+
+    lost = publish_current_nanobody.verify_fleet_ownership(
+        assignments, chain, COMMIT_EPOCH
+    )
+
+    assert lost == [1]
+    err = capsys.readouterr().err
+    assert publish_current_nanobody.FLEET_UID_LOST in err
+    assert "uid=1" in err
+
+
+def test_a_fleet_still_wholly_ours_reports_nothing(tmp_path, capsys):
+    assignments = [
+        fleet.Assignment(uid=0, hotkey=HOTKEYS[0], sequence="Q" * 120,
+                         commit_block=RESERVE_START),
+    ]
+    state = _chain_state(
+        tmp_path / "chain.json", epoch=COMMIT_EPOCH,
+        block=EPOCH_LENGTH * COMMIT_EPOCH + 350,
+        neurons=[{"uid": 0, "hotkey": HOTKEYS[0], "coldkey": OUR_COLDKEY}],
+    )
+    chain = publish_current_nanobody._chain_view(state, 68, 600.0)
+    assert publish_current_nanobody.verify_fleet_ownership(
+        assignments, chain, COMMIT_EPOCH
+    ) == []
+    assert publish_current_nanobody.FLEET_UID_LOST not in capsys.readouterr().err
+
+
+def _hotkey_file(directory, name, address):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(json.dumps({"ss58Address": address}))
+    (directory / f"{name}pub.txt").write_text(address)
+
+
+def test_unregistered_hotkeys_are_reported_and_never_moved(tmp_path, capsys):
+    """The box held sixteen key files for seven registered uids.
+
+    Reporting only: a hotkey that loses its slot vanishes from the metagraph,
+    which is indistinguishable from one the purchase agent just created, so
+    archiving on absence deletes the next slot we were about to buy.
+    """
+    hotkeys = tmp_path / "mining_ops" / "hotkeys"
+    _hotkey_file(hotkeys, "live-slot", HOTKEYS[0])
+    _hotkey_file(hotkeys, "staged-slot", "5" + "Fresh" * 9 + "AB")
+
+    state = _chain_state(
+        tmp_path / "chain.json", epoch=EPOCH,
+        neurons=[{"uid": 0, "hotkey": HOTKEYS[0], "coldkey": OUR_COLDKEY}],
+    )
+    chain = publish_current_nanobody._chain_view(state, 68, 600.0)
+
+    idle = publish_current_nanobody.report_unregistered_hotkeys(
+        wallet_root=tmp_path, wallet_name="mining_ops",
+        chain=chain, coldkey=OUR_COLDKEY,
+    )
+
+    assert idle == ["staged-slot"]
+    assert (hotkeys / "staged-slot").is_file(), "a key file was moved"
+    assert (hotkeys / "live-slot").is_file()
+    assert publish_current_nanobody.HOTKEY_UNREGISTERED in capsys.readouterr().out
+
+
+def test_an_empty_chain_view_reports_nothing(tmp_path):
+    """Discovering no registrations is a bad chain view, not an empty fleet;
+    acting on it would archive the entire wallet."""
+    hotkeys = tmp_path / "mining_ops" / "hotkeys"
+    _hotkey_file(hotkeys, "live-slot", HOTKEYS[0])
+    state = _chain_state(
+        tmp_path / "chain.json", epoch=EPOCH,
+        neurons=[{"uid": 0, "hotkey": "5SomebodyElse", "coldkey": "5NotOurColdkey"}],
+    )
+    chain = publish_current_nanobody._chain_view(state, 68, 600.0)
+    assert publish_current_nanobody.report_unregistered_hotkeys(
+        wallet_root=tmp_path, wallet_name="mining_ops",
+        chain=chain, coldkey=OUR_COLDKEY,
+    ) == []
+    assert (hotkeys / "live-slot").is_file()

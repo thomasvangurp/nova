@@ -989,6 +989,80 @@ def _record_commitment(ledger: Path, epoch: int, uid: int) -> None:
     _atomic_json(ledger, {"epoch": int(epoch), "uids": sorted(committed)})
 
 
+FLEET_UID_LOST = "NANOBODY_FLEET_UID_LOST"
+
+
+HOTKEY_UNREGISTERED = "NANOBODY_HOTKEY_UNREGISTERED"
+
+
+def report_unregistered_hotkeys(
+    *, wallet_root: Path, wallet_name: str, chain: ChainView, coldkey: str
+) -> list[str]:
+    """Name the local hotkeys the chain does not register to us. Report only.
+
+    The box held sixteen key files for seven registered uids, so knowing which
+    are live is worth having. Moving them automatically is not: a hotkey that
+    loses its slot VANISHES from the metagraph, which is indistinguishable from
+    one the purchase agent has just created and not yet registered. Archiving
+    on absence therefore deletes the next slot we were about to buy, and in
+    testing it did exactly that. Purging stays a deliberate act.
+    """
+    ours = {
+        str(row["hotkey"])
+        for row in chain.neurons
+        if str(row.get("coldkey") or "") == coldkey
+    }
+    if not ours:
+        # Discovering nothing is a bad chain view, not an empty fleet.
+        return []
+    addresses = fleet_module.local_hotkey_addresses(wallet_root, wallet_name)
+    idle = sorted(name for address, name in addresses.items() if address not in ours)
+    if idle:
+        print(
+            f"{HOTKEY_UNREGISTERED} {len(idle)} of {len(addresses)} local "
+            f"hotkey(s) are not registered to us: {', '.join(idle)}",
+            flush=True,
+        )
+    return idle
+
+
+def verify_fleet_ownership(
+    assignments: Sequence[fleet_module.Assignment],
+    chain: ChainView,
+    epoch: int,
+) -> list[int]:
+    """Re-check, after committing, that every uid we signed for is still ours.
+
+    The commit driver refuses a uid the chain no longer maps to our hotkey, but
+    that check happens before the extrinsic and a slot can be recycled between
+    then and the validator reading the epoch. In epoch 25101 we committed for
+    uid 46 and it scored 131 for another coldkey: the registration, the ticket
+    and the epoch's work for that slot were all spent on someone else's uid.
+
+    Reporting only. Nothing can be undone at this point; the value is knowing
+    the fleet is smaller than it looks before deciding to buy more.
+    """
+    held = {int(row["uid"]): str(row["hotkey"]) for row in chain.neurons}
+    lost: list[int] = []
+    for assignment in assignments:
+        if held.get(assignment.uid) != assignment.hotkey:
+            lost.append(assignment.uid)
+            print(
+                f"{FLEET_UID_LOST} uid={assignment.uid} "
+                f"hotkey={assignment.hotkey} is no longer ours at epoch "
+                f"{epoch}; that commitment scores for whoever holds it now",
+                file=sys.stderr,
+                flush=True,
+            )
+    if lost:
+        print(
+            f"fleet ownership: {len(assignments) - len(lost)} of "
+            f"{len(assignments)} committed uid(s) still ours",
+            flush=True,
+        )
+    return lost
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
@@ -1061,6 +1135,16 @@ def _commit_fleet(
                 file=sys.stderr,
                 flush=True,
             )
+    try:
+        verify_fleet_ownership(
+            assignments,
+            _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age),
+            epoch,
+        )
+    except RuntimeError as error:
+        # A stale chain view must not turn a healthy commit run into a failure.
+        print(f"fleet ownership unverified: {error}", file=sys.stderr, flush=True)
+
     if failures:
         detail = ", ".join(f"uid {uid} (rc {rc})" for uid, rc in failures)
         print(
@@ -1208,6 +1292,12 @@ def _publish_once(args: argparse.Namespace) -> None:
             wallet_name=args.wallet_name,
         )
         crew = fleet_module.discover_fleet(chain.neurons, coldkey, netuid=args.netuid)
+        report_unregistered_hotkeys(
+            wallet_root=args.wallet_path,
+            wallet_name=args.wallet_name,
+            chain=chain,
+            coldkey=coldkey,
+        )
         fleet_module.require_local_hotkeys(crew, args.wallet_path, args.wallet_name)
         fleet_fingerprint = fleet_module.fleet_fingerprint(crew)
         print(
