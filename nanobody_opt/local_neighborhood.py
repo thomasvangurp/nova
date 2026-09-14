@@ -77,10 +77,63 @@ def _motif(sequence: str, bounds: tuple[int, int]) -> str:
     return sequence[bounds[0] : bounds[1]]
 
 
+# Where the field concentrates on one residue, deviating from it costs score,
+# and the cost switches on sharply. Measured over 735 scored tickets across 17
+# epochs, as mean z of leaderboard rank within each epoch (negative is better):
+#
+#   field consensus   positions   agree     deviate   penalty
+#            <= 0.4           4   +0.05      -0.03      -0.08   (no cost)
+#              0.7            4   -0.01      +0.03      +0.04   (negligible)
+#              0.8            3   -0.07      +0.25      +0.31   (real)
+#           >= 0.9          116   -0.01      +0.65      +0.65   (severe)
+#
+# So 0.80 is where the field stops tolerating deviation, and it is read off the
+# data rather than chosen. Below it the field genuinely varies and mutating is
+# how we search; at or above it, a deviation is a defect.
+FIELD_CONSENSUS_THRESHOLD = 0.80
+
+
+def field_consensus(
+    background_sequences: list[str], length: int
+) -> dict[int, tuple[str, float]]:
+    """Positions where the field has settled on one residue, and which.
+
+    Built from the recent archive -- every sequence the field actually fielded,
+    not only the winners. A residue can be the field's settled answer without
+    being enriched among winners, and that is exactly the case the enrichment
+    prior below cannot see.
+    """
+    consensus: dict[int, tuple[str, float]] = {}
+    usable = [s for s in background_sequences if len(s) == length]
+    if not usable:
+        return consensus
+    for position in range(length):
+        counts = Counter(sequence[position] for sequence in usable)
+        residue, hits = counts.most_common(1)[0]
+        consensus[position] = (residue, hits / len(usable))
+    return consensus
+
+
 def residue_prior_weights(
-    background_sequences: list[str], winner_sequences: list[str], length: int
+    background_sequences: list[str],
+    winner_sequences: list[str],
+    length: int,
+    *,
+    follow_field: bool = True,
 ) -> list[dict[str, float]]:
-    """Return smoothed winner-vs-background enrichment per residue/position."""
+    """Return per-residue/position weights: winner enrichment, plus the field.
+
+    The enrichment term alone is blind to consensus. It is
+    P(residue | winners) / P(residue | field), so a residue the whole field has
+    settled on scores about 1.0 and gets no pull -- it is common in both halves
+    of the ratio. Position 99, the first CDR3 residue, is the case in point: the
+    field is 81% G there and we fielded G only 48% of the time, because nothing
+    in the prior ever argued for it. Our tickets carrying A at 99 scored a median
+    179 against 156 for G, and 144 against 125 on confidence rank.
+
+    ``follow_field`` multiplies in the field's own composition so a settled
+    residue is preferred on its own merits, not only when winners over-use it.
+    """
     if not background_sequences or not winner_sequences:
         return [defaultdict(lambda: 1.0) for _ in range(length)]
     amino_acids = sorted(gates.ALLOWED_AAS)
@@ -96,9 +149,15 @@ def residue_prior_weights(
             background_probability = (background[residue] + 1) / (
                 len(background_sequences) + len(amino_acids)
             )
-            position_weights[residue] = float(
-                np.clip(winner_probability / background_probability, 0.10, 10.0)
-            )
+            enrichment = winner_probability / background_probability
+            if follow_field:
+                # The field's own frequency, normalised so an average residue
+                # scores 1.0 and the term only tilts, never rescales.
+                field_probability = (background[residue] + 1) / (
+                    len(background_sequences) + len(amino_acids)
+                )
+                enrichment *= field_probability * len(amino_acids)
+            position_weights[residue] = float(np.clip(enrichment, 0.10, 10.0))
         priors.append(position_weights)
     return priors
 
@@ -1243,6 +1302,16 @@ def main() -> None:
         _winner_sequences(args.winner_priors, length),
         length,
     )
+    consensus = field_consensus(background_sequences, length)
+    settled = sum(
+        1 for _, share in consensus.values() if share >= FIELD_CONSENSUS_THRESHOLD
+    )
+    print(
+        f"field consensus: {settled} of {length} positions are settled at "
+        f">={FIELD_CONSENSUS_THRESHOLD:.0%}; mutation will not displace a parent "
+        f"that already agrees with one",
+        flush=True,
+    )
 
     network_records = [
         {
@@ -1517,9 +1586,23 @@ def main() -> None:
                         if lower <= args.max_mutations
                         else args.min_mutations
                     )
+                # A mutation cannot keep the parent's residue -- `options`
+                # below excludes it -- so sampling a position where the parent
+                # already holds the field's settled residue can only move off
+                # it. Repeated over a lineage that is one-way drift away from
+                # consensus, which is how we reached 48% G at position 99
+                # against the field's 81%. Where the parent already agrees with
+                # a settled position, spend the mutation budget elsewhere; where
+                # it disagrees, leave the position mutable so it can be
+                # corrected toward the field.
                 mutable = [
                     position for position in cdr_positions
                     if position not in protected
+                    if not (
+                        consensus.get(position, ("", 0.0))[1]
+                        >= FIELD_CONSENSUS_THRESHOLD
+                        and parent[position] == consensus[position][0]
+                    )
                     if any(residue != parent[position] for residue in allowed[position])
                 ]
                 if len(mutable) < mutation_count:

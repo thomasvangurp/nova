@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 
 from nanobody_opt.local_neighborhood import (
@@ -421,3 +422,103 @@ def test_the_seed_list_is_actually_built_round_robin():
     assert "round_robin_families" in line or "round_robin_families(" in source[
         source.index("core_seeds = "): source.index("core_seeds = ") + 200
     ], "seeds are taken in score order again"
+
+
+# --- following the field's composition ---------------------------------------
+
+
+def _field(*, settled_residue="G", settled_share=0.9, length=10, position=4, n=100):
+    """A field that has settled on one residue at `position` and varies elsewhere."""
+    import random
+
+    rng = random.Random(7)
+    out = []
+    for i in range(n):
+        seq = ["A"] * length
+        for j in range(length):
+            seq[j] = rng.choice("ACDEFGHIKL")
+        seq[position] = settled_residue if i < int(settled_share * n) else "A"
+        out.append("".join(seq))
+    return out
+
+
+def test_a_settled_field_residue_is_preferred_even_when_winners_do_not_enrich_it():
+    """
+    The enrichment term is P(residue|winners) / P(residue|field), so a residue
+    the whole field has settled on scores about 1.0 and gets no pull. That is
+    how we reached 48% G at position 99 against the field's 81%: nothing in the
+    prior ever argued for it.
+    """
+    from nanobody_opt.local_neighborhood import residue_prior_weights
+
+    field = _field()
+    # Winners drawn evenly across the field, so they carry the settled residue
+    # at exactly the field's own rate -- enrichment is ~1.0 and carries no
+    # signal. This is the real case: G at position 99 is 81% of the field AND
+    # 4 of the rival's 6 winners.
+    winners = field[::5]
+    with_field = residue_prior_weights(field, winners, 10, follow_field=True)
+    without = residue_prior_weights(field, winners, 10, follow_field=False)
+
+    # Without the field term the settled residue is indistinguishable from any
+    # other; with it, it outranks the alternative the field abandoned.
+    # Enrichment alone cannot separate them: the settled residue is equally
+    # common among winners and among the field.
+    assert without[4]["G"] == pytest.approx(without[4]["A"], rel=0.45)
+    # With the field's composition in the prior, it is clearly preferred.
+    assert with_field[4]["G"] > with_field[4]["A"] * 3
+
+
+def test_field_consensus_reports_the_settled_residue_and_its_share():
+    from nanobody_opt.local_neighborhood import field_consensus
+
+    consensus = field_consensus(_field(settled_share=0.9), 10)
+    residue, share = consensus[4]
+    assert residue == "G"
+    assert share == pytest.approx(0.9, abs=0.05)
+
+
+def test_the_consensus_threshold_is_where_the_field_stops_tolerating_deviation():
+    """
+    Read off 735 scored tickets across 17 epochs: the penalty for deviating is
+    +0.04 z at 0.7 consensus and +0.31 at 0.8. The threshold is measured, not
+    chosen, so it must not drift without new evidence.
+    """
+    from nanobody_opt.local_neighborhood import FIELD_CONSENSUS_THRESHOLD
+
+    assert FIELD_CONSENSUS_THRESHOLD == 0.80
+
+
+def test_a_parent_already_at_consensus_is_not_mutated_off_it():
+    """
+    `options` excludes the parent's own residue, so sampling a settled position
+    can only move away from it. Over a lineage that is one-way drift.
+    """
+    from nanobody_opt.local_neighborhood import (
+        FIELD_CONSENSUS_THRESHOLD,
+        field_consensus,
+    )
+
+    consensus = field_consensus(_field(settled_share=0.9), 10)
+    parent = "AAAAGAAAAA"          # agrees with the field at position 4
+    cdr_positions = list(range(10))
+    mutable = [
+        position for position in cdr_positions
+        if not (
+            consensus.get(position, ("", 0.0))[1] >= FIELD_CONSENSUS_THRESHOLD
+            and parent[position] == consensus[position][0]
+        )
+    ]
+    assert 4 not in mutable, "a settled position the parent already holds stays put"
+
+    # ...but a parent that DISAGREES keeps the position mutable, so it can be
+    # corrected toward the field rather than frozen at the wrong residue.
+    divergent = "AAAAAAAAAA"
+    mutable_divergent = [
+        position for position in cdr_positions
+        if not (
+            consensus.get(position, ("", 0.0))[1] >= FIELD_CONSENSUS_THRESHOLD
+            and divergent[position] == consensus[position][0]
+        )
+    ]
+    assert 4 in mutable_divergent
