@@ -32,6 +32,8 @@ at import time or during argument parsing.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import argparse
 import csv
 import fcntl
@@ -837,20 +839,29 @@ def _publish_fleet(
     # distance from what works. A collision costs one ticket; leading with the
     # worst molecule costs the epoch. _recent_field_sequences and
     # fleet.uncrowded are kept for when the pool is no longer degenerate.
+    # One sequence beyond the fleet, so a uid the chain hands us during the
+    # reserve has something distinct to commit instead of sitting idle for the
+    # epoch. One is enough: purchases are staggered ~416 blocks apart to keep
+    # immunity expiries in separate adjustment intervals, and the reserve is 55
+    # blocks, so at most one registration lands inside it. A uid lost at its own
+    # commit block also returns its sequence to the same pool.
+    SPARE_TICKETS = 1
     sequences = fleet_module.distinct_sequences(
-        payload, len(crew), cdrs=_annotated_cdrs(cdr_annotations)
+        payload, len(crew) + SPARE_TICKETS, cdrs=_annotated_cdrs(cdr_annotations)
     )
+    fleet_sequences = sequences[: len(crew)]
+    spare_sequences = sequences[len(crew) :]
     try:
         blocks = fleet_module.commitment_blocks(
             epoch=epoch,
             epoch_length=epoch_length,
             reserve_blocks=args.reserve_blocks,
-            count=len(sequences),
+            count=len(fleet_sequences),
             block=block if block >= 0 else None,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    assignments = fleet_module.assign_sequences(crew, sequences, blocks)
+    assignments = fleet_module.assign_sequences(crew, fleet_sequences, blocks)
     short = fleet_module.uncovered(crew, assignments)
     if short:
         print(
@@ -933,7 +944,10 @@ def _publish_fleet(
         checkpoints=checkpoints,
         unassigned=fleet_module.uncovered(crew, published),
     )
-    return artifact, published
+    return artifact, published, CommitContext(
+        spares=tuple(spare_sequences),
+        known_uids=frozenset(member.uid for member in crew),
+    )
 
 
 BLOCK_SECONDS = 12.0
@@ -996,6 +1010,10 @@ def _record_commitment(ledger: Path, epoch: int, uid: int) -> None:
 
 
 FLEET_UID_LOST = "NANOBODY_FLEET_UID_LOST"
+# A uid the chain handed us DURING the reserve, after the fleet was planned.
+FLEET_UID_GAINED = "NANOBODY_FLEET_UID_GAINED"
+# A planned uid dropped at its own commit block, before the extrinsic was sent.
+FLEET_UID_SKIPPED = "NANOBODY_FLEET_UID_SKIPPED"
 
 
 HOTKEY_UNREGISTERED = "NANOBODY_HOTKEY_UNREGISTERED"
@@ -1069,6 +1087,35 @@ def verify_fleet_ownership(
     return lost
 
 
+@dataclass(frozen=True)
+class CommitContext:
+    """What the commit path needs beyond the assignments themselves.
+
+    ``known_uids`` is every uid the chain attributed to us when the fleet was
+    planned, including any the publisher then rejected. A uid missing from it is
+    one the chain handed us DURING the reserve; a uid present in it but absent
+    from the assignments was deliberately left out, and must not be revived.
+    """
+
+    spares: tuple[str, ...] = ()
+    known_uids: frozenset[int] = frozenset()
+
+
+def _next_reserve_block(args: argparse.Namespace, epoch: int) -> int | None:
+    """The next block inside this epoch's reserve that has not gone by yet.
+
+    A uid gained mid-reserve was not in the planned schedule, so it has no block
+    of its own. One extrinsic per block is the pace the chain accepts, so it
+    takes the next one still ahead of us, and None once the epoch's reserve is
+    spent.
+    """
+    view = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
+    block = int(view.block)
+    epoch_end = (epoch + 1) * int(view.epoch_length)
+    candidate = block + 1
+    return candidate if candidate < epoch_end else None
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
@@ -1078,6 +1125,8 @@ def _commit_fleet(
     epoch: int,
     pause_seconds: float,
     ledger: Path,
+    coldkey: str | None = None,
+    context: CommitContext | None = None,
 ) -> None:
     """Send one commitment per uid, one block apart, inside the reserve.
 
@@ -1112,6 +1161,34 @@ def _commit_fleet(
     if not assignments:
         return
     failures: list[tuple[int, int]] = []
+    # Ownership is resolved once when the fleet is planned, but the commits then
+    # wait out the reserve one block at a time -- twenty minutes or more. Subnet
+    # 68 is full, so a registration recycles the lowest pruning score and a slot
+    # can change hands inside that gap. In epoch 25114 uid 59 passed to another
+    # coldkey 108 blocks before we committed to it, and the ticket was spent on
+    # their uid. Re-reading the chain at each block is what closes that window;
+    # the post-commit verification below only reports the loss afterwards.
+    def _fresh_fleet() -> dict[int, str] | None:
+        if not coldkey:
+            return None
+        try:
+            view = _chain_view(
+                args.chain_state, args.netuid, args.maximum_chain_state_age
+            )
+        except Exception as error:  # a stale read must not cancel the commits
+            print(f"commit: chain re-read failed ({error}); "
+                  f"committing on the planned fleet", flush=True)
+            return None
+        return {int(row["uid"]): str(row["hotkey"]) for row in view.neurons
+                if str(row.get("coldkey") or "") == coldkey}
+
+    context = context or CommitContext()
+    # Seeded with every uid known at plan time, so a uid the publisher rejected
+    # is not mistaken for one the chain just handed us.
+    planned = {assignment.uid for assignment in assignments} | set(context.known_uids)
+    unused = [str(item).strip().upper() for item in context.spares]
+    gained: list[fleet_module.Assignment] = []
+
     for index, assignment in enumerate(assignments):
         command = [
             part.format(
@@ -1126,6 +1203,37 @@ def _commit_fleet(
         ]
         # The schedule, not a fixed delay: one block apart INSIDE the reserve.
         _await_commit_block(args, assignment.commit_block, epoch)
+
+        held = _fresh_fleet()
+        if held is not None:
+            if held.get(assignment.uid) != assignment.hotkey:
+                # Spending the extrinsic now would commit our sequence to a uid
+                # that scores for whoever holds it. Keep the sequence instead:
+                # it is still distinct and a gained uid below can carry it.
+                print(
+                    f"{FLEET_UID_SKIPPED} uid={assignment.uid} "
+                    f"hotkey={assignment.hotkey} left our coldkey before its "
+                    f"commit block {assignment.commit_block}; not committing",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                unused.insert(0, assignment.sequence)
+                continue
+            for uid, hotkey in sorted(held.items()):
+                if uid in planned or uid in already:
+                    continue
+                planned.add(uid)
+                gained.append(
+                    fleet_module.Assignment(
+                        uid=uid, hotkey=hotkey, sequence="", commit_block=0
+                    )
+                )
+                print(
+                    f"{FLEET_UID_GAINED} uid={uid} hotkey={hotkey} joined our "
+                    f"coldkey during epoch {epoch}'s reserve",
+                    flush=True,
+                )
+
         if index and pause_seconds > 0:
             time.sleep(pause_seconds)
         try:
@@ -1141,6 +1249,57 @@ def _commit_fleet(
                 file=sys.stderr,
                 flush=True,
             )
+    # A uid gained mid-reserve is a ticket we already paid a registration for.
+    # Commit for it from the sequences the planned fleet did not use, in the
+    # blocks still left of the reserve, rather than leaving the slot idle for an
+    # epoch. Each sequence is distinct and none is committed twice, so this
+    # cannot collide with the planned fleet.
+    for member in gained:
+        if not unused:
+            print(
+                f"commit: uid {member.uid} joined mid-reserve but no distinct "
+                f"sequence is left to commit for it",
+                flush=True,
+            )
+            break
+        try:
+            block = _next_reserve_block(args, epoch)
+        except SystemExit:
+            raise
+        except Exception as error:
+            print(f"commit: no reserve block left for uid {member.uid} ({error})",
+                  flush=True)
+            break
+        if block is None:
+            print(f"commit: epoch {epoch}'s reserve is spent; uid {member.uid} "
+                  f"waits for the next epoch", flush=True)
+            break
+        sequence = unused.pop(0)
+        late = fleet_module.Assignment(
+            uid=member.uid, hotkey=member.hotkey,
+            sequence=sequence, commit_block=block,
+        )
+        _await_commit_block(args, block, epoch)
+        command = [
+            part.format(
+                uid=late.uid, hotkey=late.hotkey, sequence=late.sequence,
+                block=late.commit_block, epoch=epoch, artifact=str(artifact),
+            )
+            for part in shlex.split(template)
+        ]
+        try:
+            _run(command)
+            _record_commitment(ledger, epoch, late.uid)
+            assignments = list(assignments) + [late]
+        except subprocess.CalledProcessError as error:
+            failures.append((late.uid, error.returncode))
+            print(
+                f"{COMMIT_FLEET_FAILED} uid={late.uid} hotkey={late.hotkey} "
+                f"rc={error.returncode}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     try:
         verify_fleet_ownership(
             assignments,
@@ -1463,7 +1622,7 @@ def _publish_once(args: argparse.Namespace) -> None:
 
             _assert_same_epoch(args, epoch, "retrying on timer")
 
-            artifact, assignments = _publish_fleet(
+            artifact, assignments, commit_context = _publish_fleet(
                 args=args,
                 crew=crew,
                 rankings=rankings_path,
@@ -1497,6 +1656,8 @@ def _publish_once(args: argparse.Namespace) -> None:
                 artifact=args.artifact,
                 epoch=epoch,
                 pause_seconds=args.commit_pause_seconds,
+                coldkey=coldkey,
+                context=commit_context,
             )
 
         if not args.strict_qualification:
@@ -1552,6 +1713,8 @@ def _publish_once(args: argparse.Namespace) -> None:
                 artifact=args.artifact,
                 epoch=epoch,
                 pause_seconds=args.commit_pause_seconds,
+                coldkey=coldkey,
+                context=commit_context,
             )
             return
 
@@ -1596,6 +1759,8 @@ def _publish_once(args: argparse.Namespace) -> None:
                 artifact=args.artifact,
                 epoch=epoch,
                 pause_seconds=args.commit_pause_seconds,
+                coldkey=coldkey,
+                context=commit_context,
             )
             return
         _run(_layer2_command(
@@ -1623,7 +1788,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         ))
         _assert_same_epoch(args, epoch, "retaining the provisional fleet")
 
-        artifact, assignments = _publish_fleet(
+        artifact, assignments, commit_context = _publish_fleet(
             args=args,
             crew=crew,
             rankings=qualified_rankings,
@@ -1661,6 +1826,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             artifact=args.artifact,
             epoch=epoch,
             pause_seconds=args.commit_pause_seconds,
+                coldkey=coldkey,
+                context=commit_context,
         )
 
 

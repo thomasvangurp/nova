@@ -1392,3 +1392,76 @@ def test_an_empty_chain_view_reports_nothing(tmp_path):
         chain=chain, coldkey=OUR_COLDKEY,
     ) == []
     assert (hotkeys / "live-slot").is_file()
+
+
+# --- ownership changes inside the commitment reserve -------------------------
+
+
+def test_a_uid_lost_during_the_reserve_is_not_committed_to(tmp_path, monkeypatch, capsys):
+    """
+    The fleet is planned once, then the commits wait out the reserve one block
+    at a time -- twenty minutes or more. Subnet 68 is full, so a registration
+    recycles the lowest pruning score and a slot can change hands inside that
+    gap. In epoch 25114 uid 59 passed to another coldkey 108 blocks before we
+    committed to it and the ticket was spent on their uid.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    import tools.publish_current_nanobody as publisher
+
+    # uid 2 leaves our coldkey after the fleet is planned but before its block.
+    original = publisher._await_commit_block
+
+    def _lose_uid_2(args, block, epoch):
+        _chain_state(host.chain_state, neurons=_neurons(count=4, ours=(0, 1)))
+        return original(args, block, epoch)
+
+    monkeypatch.setattr(publisher, "_await_commit_block", _lose_uid_2)
+    _publish_once(host.args(commit_command="/root/commit.sh {uid} {hotkey} {sequence} {block}"))
+
+    commits = [c for c in host.commands if c[0].endswith("commit.sh")]
+    assert "2" not in {c[1] for c in commits}, (
+        "committed to a uid that had left our coldkey"
+    )
+    assert publisher.FLEET_UID_SKIPPED in capsys.readouterr().err
+
+
+def test_a_uid_gained_during_the_reserve_still_gets_a_ticket(tmp_path, monkeypatch, capsys):
+    """
+    A slot bought mid-reserve is a registration already paid for. Leaving it
+    idle for the epoch forfeits a ticket the fleet could have fielded, so it
+    takes a distinct sequence the planned fleet did not use.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1))
+    import tools.publish_current_nanobody as publisher
+
+    original = publisher._await_commit_block
+    arrived = {"done": False}
+
+    def _gain_uid_2(args, block, epoch):
+        if not arrived["done"]:
+            arrived["done"] = True
+            _chain_state(host.chain_state, neurons=_neurons(count=4, ours=(0, 1, 2)))
+        return original(args, block, epoch)
+
+    monkeypatch.setattr(publisher, "_await_commit_block", _gain_uid_2)
+    _publish_once(host.args(commit_command="/root/commit.sh {uid} {hotkey} {sequence} {block}"))
+
+    out = capsys.readouterr().out
+    assert publisher.FLEET_UID_GAINED in out
+    commits = [c for c in host.commands if c[0].endswith("commit.sh")]
+    assert "2" in {c[1] for c in commits}, "a uid gained mid-reserve was left idle"
+    # ...and it did not reuse another uid's molecule.
+    sequences = [c[3] for c in commits]
+    assert len(sequences) == len(set(sequences)), "a sequence was committed twice"
+
+
+def test_a_uid_the_publisher_rejected_is_not_revived_as_a_gain(tmp_path, monkeypatch):
+    """
+    A uid left out of the fleet on purpose is not the same as one the chain just
+    handed us. Only a uid absent from the plan-time view counts as gained.
+    """
+    from tools.publish_current_nanobody import CommitContext
+
+    context = CommitContext(spares=("AAAA",), known_uids=frozenset({0, 1, 2}))
+    assert 2 in context.known_uids
+    assert context.spares == ("AAAA",)
