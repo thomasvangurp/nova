@@ -1241,14 +1241,16 @@ def test_the_reserve_opening_is_noticed_within_a_block():
     assert publish_current_nanobody.COMMIT_WAIT_POLL_SECONDS <= 6.0
 
 
-def test_the_shortlist_scales_with_the_fleet():
-    """Thirty candidates is what a one-uid fleet needed.
+def test_the_shortlist_reaches_deep_enough_to_see_other_clonotypes():
+    """The funnel's narrowest stage. The generator proposes four clonotypes and
+    a 350-candidate pool carried two; the score bank holds nine among its best
+    eight hundred by score, so the pool must reach that deep.
 
     With eight uids the top thirty by win probability concentrated in one
     family -- 27 of 30 in epoch 25099 -- so the fleet found three separated
     molecules and committed five the validator discarded.
     """
-    assert publish_current_nanobody.SHORTLIST_LIMIT >= 300
+    assert publish_current_nanobody.SHORTLIST_LIMIT >= 1000
     assert publish_current_nanobody.SHORTLIST_PER_UID >= 20
 
 

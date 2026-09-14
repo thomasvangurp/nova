@@ -89,14 +89,20 @@ RANK_QUALIFICATION_ARGUMENTS = tuple(publication_gates.gate_arguments())
 # Only rank one pays and the validator draws once, so the shortlist that decides
 # what is published must be ordered by the chance of a winning draw.
 SELECTION_ORDER = fleet_module.REQUIRED_SELECTION_ORDER
-# How many ranked candidates the fleet gets to choose from. Thirty was enough
-# when a fleet was one uid; with eight it is the binding constraint on distinct
-# tickets. The top thirty by win probability concentrate in one family -- 27 of
-# 30 in epoch 25099 -- so the fleet found three separated molecules and
-# committed five duplicates the validator discarded. The score bank holds
-# thousands of scored sequences; the separated families are in there, below the
-# cut. Ranking more of them is CPU work, not GPU.
-SHORTLIST_LIMIT = 300
+# How many ranked candidates the fleet gets to choose from. This is the funnel's
+# last stage and it was its narrowest: the generator now proposes four
+# clonotypes and a 350-candidate pool carried two, because win-probability
+# order concentrates its head on the families with the most observations and
+# a new clonotype starts with few. The score bank holds nine clonotypes among
+# its best eight hundred by score, so the pool has to reach that deep to see
+# them.
+#
+# This cannot change the lead ticket -- the top of the ordering is the same
+# whether the list is thirty or a thousand -- so it is outside the selection
+# freeze. The cost is Layer-2 and CDR annotation over more candidates, and
+# both are almost entirely cache hits: 350 candidates cost one new TNP
+# measurement per cycle.
+SHORTLIST_LIMIT = 1000
 #: Ranked candidates per uid, so a growing fleet keeps room to find distinct
 #: molecules rather than competing for the same thirty.
 SHORTLIST_PER_UID = 50
