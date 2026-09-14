@@ -374,22 +374,25 @@ def _stranger(base, span):
     return "".join(out)
 
 
-def test_one_family_cannot_spend_the_whole_seed_budget():
-    """The parent bank carried three clonotypes and the generator proposed in
-    one: seeds were taken in score order and the leading family filled every
-    slot, so every ticket for every epoch was one molecule to the validator."""
+def test_the_leading_family_keeps_the_bulk_but_others_get_seats():
+    """Seeds were taken in pure score order, so the leading family filled all
+    thirty-two slots and every ticket of every epoch came from one molecule's
+    neighbourhood. An even split is the opposite error: it starves the family
+    that has earned the search."""
     from nanobody_opt.local_neighborhood import round_robin_families
 
-    big = [_seed(_kin(BASE, 2, aa), i) for i, aa in enumerate("MVQTAWY")]
-    other = [_seed(_stranger(BASE, 20), 90.0)]
-    third = [_seed(_stranger(BASE, 40), 95.0)]
+    leader = [_seed(_kin(BASE, 2, aa), i) for i, aa in enumerate("MVQTAWYCDEFG")]
+    others = [_seed(_stranger(BASE, n), 90.0 + n) for n in (20, 40, 60)]
 
-    taken = round_robin_families(big + other + third, 3)
+    taken = round_robin_families(leader + others, 10)
     sequences = [t[1] for t in taken]
+    from_leader = sum(1 for s in sequences if s in {x[1] for x in leader})
 
-    assert other[0][1] in sequences, "a whole family was left unsampled"
-    assert third[0][1] in sequences, "a whole family was left unsampled"
-    assert sequences[0] == big[0][1], "best-first within a family was lost"
+    assert len(taken) == 10
+    assert from_leader >= 6, "the leading family lost its share of the budget"
+    for other in others:
+        assert other[1] in sequences, "a family was left with no seats at all"
+    assert sequences[0] == leader[0][1], "best-first within the leader was lost"
 
 
 def test_a_single_family_still_fills_the_budget():

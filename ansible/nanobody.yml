@@ -31,8 +31,12 @@
     nanobody_mutation_database: /root/artifacts/nanobody_mutations.sqlite
     nanobody_backfill_exact_screens: false
     nanobody_parent_epochs: 0
-    nanobody_parent_limit: 64
-    nanobody_neighbor_parent_limit: 32
+    # Sixty-four parents carried three clonotypes; the score bank holds nine
+    # among its best eight hundred by score. Parents are proposal centres and
+    # are never submitted, so reaching deeper costs nothing but ranking, and
+    # the seed allocation keeps the leading family's share regardless.
+    nanobody_parent_limit: 400
+    nanobody_neighbor_parent_limit: 128
     nanobody_recent_parent_epoch_window: 16
     nanobody_recent_anchor_parent_limit: 16
     nanobody_recent_neighbor_parent_limit: 16

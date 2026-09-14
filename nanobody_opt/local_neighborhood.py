@@ -884,16 +884,28 @@ def _identity(left: str, right: str) -> float:
     return shared / max(len(left), len(right))
 
 
-def round_robin_families(seeds, limit, family_identity=SEED_FAMILY_IDENTITY):
-    """Take seeds a family at a time, so no one family spends the whole budget.
+#: Share of the seed budget reserved for families other than the leading one.
+#: Not an even split: the best family has earned the bulk of the search, and
+#: spreading the budget evenly starves it. But a family with no seats produces
+#: no proposals, is never scored and disappears -- which is how the pool came
+#: to hold one clonotype while the validator scored two tickets of seven.
+#: Exploit the leader, keep the others alive.
+EXPLORATION_SEED_SHARE = 0.35
 
-    The parent bank carried three clonotypes and the generator produced
-    proposals in exactly one of them: seeds were taken in score order and the
-    leading family filled all thirty-two slots. Every ticket for every epoch
-    then came from that family, and the validator scored two of seven because
-    they were one molecule to it.
 
-    Best-first within a family is preserved; only the interleaving is new.
+def round_robin_families(
+    seeds,
+    limit,
+    family_identity=SEED_FAMILY_IDENTITY,
+    exploration_share=EXPLORATION_SEED_SHARE,
+):
+    """Give the leading family the bulk of the seeds, the rest a reserved slice.
+
+    Seeds were taken in pure score order, so the leading family filled all
+    thirty-two slots and every ticket of every epoch came from one molecule's
+    neighbourhood. Best-first within a family is preserved throughout; what
+    changes is that the other families hold seats they cannot be outranked out
+    of, and that the leader still gets most of the budget.
     """
     if limit <= 0 or not seeds:
         return []
@@ -906,15 +918,27 @@ def round_robin_families(seeds, limit, family_identity=SEED_FAMILY_IDENTITY):
                 break
         else:
             families.append([seed])
-    taken: list = []
-    while len(taken) < limit and any(families):
-        for family in families:
+    if len(families) == 1:
+        return families[0][:limit]
+
+    others = families[1:]
+    reserved = min(len(others), max(1, int(round(limit * exploration_share))))
+    leader_share = max(1, limit - reserved)
+    leader = families[0]
+
+    taken: list = list(leader[:leader_share])
+    while len(taken) < limit and any(others):
+        for family in others:
             if not family:
                 continue
             taken.append(family.pop(0))
             if len(taken) == limit:
                 break
-    return taken
+    # Fewer exploration seeds than reserved seats: give the rest to the leader
+    # rather than leave the budget unspent.
+    if len(taken) < limit:
+        taken.extend(leader[leader_share:leader_share + (limit - len(taken))])
+    return taken[:limit]
 
 
 def main() -> None:
