@@ -479,7 +479,15 @@ def test_two_tickets_of_one_clonotype_are_one_ticket():
     assert not fleet.same_clonotype(CDR_A, CDR_FAR)
 
 
-def test_selection_refuses_a_second_ticket_of_the_same_clonotype():
+def test_clonotype_enforcement_is_off_until_the_pool_carries_more_than_one():
+    """Enforcing it pairwise cut epoch 25102 from seven tickets to one, and
+    epoch 25100 shows the validator scored two tickets this rule calls one
+    molecule. Two tickets that sometimes score beat one that always does."""
+    assert fleet.ENFORCE_ONE_UID_PER_CLONOTYPE is False
+
+
+def test_selection_refuses_a_second_ticket_of_the_same_clonotype(monkeypatch):
+    monkeypatch.setattr(fleet, "ENFORCE_ONE_UID_PER_CLONOTYPE", True)
     first = _variant(REAL, [(30, "K")])
     twin = _variant(REAL, [(i, "K") for i in range(30, 38)])   # far by identity
     far = _variant(REAL, [(i, "G") for i in range(30, 50)])

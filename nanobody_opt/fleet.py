@@ -373,6 +373,19 @@ def same_clonotype(
     )
 
 
+#: Whether one clonotype may hold more than one uid. OFF, on evidence: the
+#: ranked pool carries a single clonotype, so enforcing it pairwise cut the
+#: epoch-25102 fleet from seven tickets to one -- and epoch 25100 shows the
+#: validator scored TWO tickets that this rule calls one molecule, so the rule
+#: is stricter than the behaviour it was inferred from. Two tickets that
+#: sometimes score beat one that always does.
+#:
+#: The machinery stays: same_clonotype mirrors utils/nanobodies is_duplicate,
+#: and the annotator keeps running so the fleet's clonotype spread is visible
+#: in the artifact. Turn this on when the pool carries more than one.
+ENFORCE_ONE_UID_PER_CLONOTYPE = False
+
+
 def _clashes(
     sequence: str,
     chosen: Sequence[str],
@@ -382,6 +395,8 @@ def _clashes(
     """True when this sequence is a duplicate of something already chosen."""
     if _closest(sequence, chosen) >= limit:
         return True
+    if not ENFORCE_ONE_UID_PER_CLONOTYPE:
+        return False
     mine = cdrs.get(sequence)
     return any(same_clonotype(mine, cdrs.get(other)) for other in chosen)
 

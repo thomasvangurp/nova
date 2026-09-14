@@ -1263,6 +1263,11 @@ def test_fleet_selection_does_not_trade_quality_for_crowd_distance():
 
 
 def test_the_fleet_never_commits_two_tickets_of_one_clonotype(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        publish_current_nanobody.fleet_module,
+        "ENFORCE_ONE_UID_PER_CLONOTYPE",
+        True,
+    )
     """Epoch 25100 committed seven tickets all below 0.95 whole-sequence
     identity and lost five: every CDR3 was one or two residues from another."""
     host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
