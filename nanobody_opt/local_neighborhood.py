@@ -871,6 +871,52 @@ def exhaustive_singles_ceiling(
     return max(EXHAUSTIVE_SINGLES_BUDGET_MULTIPLE * int(proposal_limit), 160)
 
 
+#: Two parents this close are one family for seeding purposes. A conservative
+#: proxy for the validator's clonotype rule, which needs an annotator this
+#: environment does not carry.
+SEED_FAMILY_IDENTITY = 0.95
+
+
+def _identity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    shared = sum(1 for a, b in zip(left, right) if a == b)
+    return shared / max(len(left), len(right))
+
+
+def round_robin_families(seeds, limit, family_identity=SEED_FAMILY_IDENTITY):
+    """Take seeds a family at a time, so no one family spends the whole budget.
+
+    The parent bank carried three clonotypes and the generator produced
+    proposals in exactly one of them: seeds were taken in score order and the
+    leading family filled all thirty-two slots. Every ticket for every epoch
+    then came from that family, and the validator scored two of seven because
+    they were one molecule to it.
+
+    Best-first within a family is preserved; only the interleaving is new.
+    """
+    if limit <= 0 or not seeds:
+        return []
+    families: list[list] = []
+    for seed in seeds:
+        sequence = seed[1]
+        for family in families:
+            if _identity(sequence, family[0][1]) >= family_identity:
+                family.append(seed)
+                break
+        else:
+            families.append([seed])
+    taken: list = []
+    while len(taken) < limit and any(families):
+        for family in families:
+            if not family:
+                continue
+            taken.append(family.pop(0))
+            if len(taken) == limit:
+                break
+    return taken
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", required=True, type=Path)
@@ -1136,7 +1182,9 @@ def main() -> None:
         item for item in eligible
         if item[5] == "epoch_elite" and item[1] not in reserved_sequences
     ]
-    core_seeds = [*reserved_seeds, *legacy_seeds][: args.seed_count]
+    core_seeds = round_robin_families(
+        [*reserved_seeds, *legacy_seeds], args.seed_count
+    )
     if len(core_seeds) < args.minimum_seeds:
         raise SystemExit(
             f"only {len(core_seeds)} elite seeds passed current Layer-2 and diversity; "

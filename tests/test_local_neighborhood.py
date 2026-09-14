@@ -351,3 +351,70 @@ def test_top_basin_gets_evidence_and_an_extra_allocation_turn():
     assert [item["basin_route_policy"] for item in ordered[:3]] == [
         "legacy", "winner_position", "legacy"
     ]
+
+
+def _seed(sequence, score=0.0):
+    """A seed tuple shaped like the ones the eligible list carries."""
+    return (score, sequence, 0.0, "exact_shortlist", set(), "epoch_elite", "core", 0, False)
+
+
+BASE = "KWALVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDSVKGRFTSSRDNAKNSLYGQMNSLRAEDTAVYYCGVFLGAHPCPLEGEMDAFGAGTTVVVGQ"
+
+
+def _kin(base, position, residue):
+    out = list(base)
+    out[position] = residue
+    return "".join(out)
+
+
+def _stranger(base, span):
+    out = list(base)
+    for i in range(20, 20 + span):
+        out[i] = "G"
+    return "".join(out)
+
+
+def test_one_family_cannot_spend_the_whole_seed_budget():
+    """The parent bank carried three clonotypes and the generator proposed in
+    one: seeds were taken in score order and the leading family filled every
+    slot, so every ticket for every epoch was one molecule to the validator."""
+    from nanobody_opt.local_neighborhood import round_robin_families
+
+    big = [_seed(_kin(BASE, 2, aa), i) for i, aa in enumerate("MVQTAWY")]
+    other = [_seed(_stranger(BASE, 20), 90.0)]
+    third = [_seed(_stranger(BASE, 40), 95.0)]
+
+    taken = round_robin_families(big + other + third, 3)
+    sequences = [t[1] for t in taken]
+
+    assert other[0][1] in sequences, "a whole family was left unsampled"
+    assert third[0][1] in sequences, "a whole family was left unsampled"
+    assert sequences[0] == big[0][1], "best-first within a family was lost"
+
+
+def test_a_single_family_still_fills_the_budget():
+    from nanobody_opt.local_neighborhood import round_robin_families
+
+    only = [_seed(_kin(BASE, 2, aa), i) for i, aa in enumerate("MVQTA")]
+    assert len(round_robin_families(only, 4)) == 4
+
+
+def test_the_budget_is_never_exceeded():
+    from nanobody_opt.local_neighborhood import round_robin_families
+
+    seeds = [_seed(_stranger(BASE, n), n) for n in range(5, 40, 5)]
+    assert len(round_robin_families(seeds, 3)) == 3
+    assert round_robin_families(seeds, 0) == []
+
+
+def test_the_seed_list_is_actually_built_round_robin():
+    """Wiring, not arithmetic: the collapse happened where core_seeds is built."""
+    import inspect
+
+    from nanobody_opt import local_neighborhood
+
+    source = inspect.getsource(local_neighborhood)
+    line = next(l for l in source.splitlines() if "core_seeds = " in l)
+    assert "round_robin_families" in line or "round_robin_families(" in source[
+        source.index("core_seeds = "): source.index("core_seeds = ") + 200
+    ], "seeds are taken in score order again"
