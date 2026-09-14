@@ -24,8 +24,15 @@ nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_fast_adapter.py
 # winner's core sits in the top five, so breadth across cores buys nothing and
 # costs pool quality.  The throughput is spent screening MORE of the same good
 # neighbourhoods, not wider ones.
-nanobody_parent_limit: 64
-nanobody_neighbor_parent_limit: 32
+# 64 parents carried three clonotypes while the score bank holds nine among its
+# best eight hundred by score. Parents are proposal centres and are never
+# submitted, so reaching deeper costs ranking and nothing else; the weighted
+# seed allocation keeps the leading family's share regardless.
+#
+# This file is passed with -e, so it OVERRIDES the play defaults in
+# nanobody.yml. Changing the value there alone does nothing.
+nanobody_parent_limit: 400
+nanobody_neighbor_parent_limit: 128
 nanobody_recent_anchor_parent_limit: 16
 nanobody_recent_neighbor_parent_limit: 16
 nanobody_basin_core_limit: 5
