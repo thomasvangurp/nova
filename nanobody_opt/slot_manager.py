@@ -179,7 +179,7 @@ class SpendRecord:
 class SlotPolicy:
     """Every knob the decision takes, so a decision is reproducible from a log."""
 
-    target: int = 12
+    target: int = 7
     max_recycle_tao: float = 0.20
     #: Below this many held hotkeys, take any affordable price rather than wait
     #: for a decay floor.  A forfeited epoch costs more than a dear registration:
@@ -959,8 +959,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--target",
         dest="target",
         type=int,
-        default=12,
-        help="registrations to hold on subnet 68 (default: 12)",
+        default=7,
+        help="registrations to hold on subnet 68 (default: 7)",
     )
     parser.add_argument(
         "--decision-log",

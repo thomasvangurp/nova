@@ -135,7 +135,8 @@ def test_below_a_working_fleet_an_affordable_price_beats_a_perfect_one():
     assert decision.reason == sm.REASON_BUY_URGENT
     # ...and the same spike is declined once the fleet is nearly complete.
     patient = sm.decide(
-        state_at(spiked, registered=tuple(range(8))), spiked, [], sm.SlotPolicy()
+        state_at(spiked, registered=tuple(range(sm.SlotPolicy().target - 1))),
+        spiked, [], sm.SlotPolicy()
     )
     assert patient.action == sm.WAIT
     assert patient.reason == sm.REASON_ABOVE_FLOOR
@@ -252,9 +253,13 @@ def test_the_stagger_window_holds_expiries_apart():
     block = history[-1].block
     policy = sm.SlotPolicy()
     assert policy.stagger == sm.default_stagger_blocks(policy.target)
-    inside = sm.decide(state_at(history, last=block - 400), history, [], policy)
+    inside = sm.decide(
+        state_at(history, last=block - (policy.stagger - 100)), history, [], policy
+    )
     assert inside.reason == sm.REASON_STAGGER
-    outside = sm.decide(state_at(history, last=block - 600), history, [], policy)
+    outside = sm.decide(
+        state_at(history, last=block - (policy.stagger + 100)), history, [], policy
+    )
     assert outside.action == sm.BUY
 
 

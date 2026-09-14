@@ -45,12 +45,12 @@
     # ROOT does not survive, because the sync overwrites the manifest there with
     # the workspace root's, whose pinned pixi version the Pi does not have.
     slot_manager_python: "{{ (slot_host_workspace ~ '/.pixi/envs/default/bin/python') if ansible_system == 'Linux' else 'python3' }}"
-    # Twelve, not nine: the score bank supplies ten separated families in its
-    # top thirty by score and twenty in its top three hundred, and since
-    # epoch 25099 every committed ticket has been a distinct molecule (7 of 7,
-    # against 2 of 8 in 25097). Slots only pay while we can fill them with
-    # molecules the validator will not dedupe, and we now can.
-    slot_manager_minimum_hotkeys: 12
+    # Hold what we can convert, and no more. We commit every uid we hold and
+    # only two to five of seven are scored -- epochs 25099, 25100 and 25101
+    # scored 5, 2 and 2 -- so a further registration buys a submission that
+    # probably will not appear. Raise this again when scored-per-held is close
+    # to one, not before.
+    slot_manager_minimum_hotkeys: 7
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
     slot_manager_hotkey_prefix: nova68-slot

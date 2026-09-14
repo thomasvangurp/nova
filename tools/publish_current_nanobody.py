@@ -974,6 +974,21 @@ def _await_commit_block(
         _sleep(min(BLOCK_SECONDS * remaining, COMMIT_WAIT_POLL_SECONDS))
 
 
+def _committed_this_epoch(ledger: Path, epoch: int) -> set[int]:
+    """uids that already hold a commitment written this epoch."""
+    payload = _read_json(ledger)
+    if not isinstance(payload, dict) or int(payload.get("epoch", -1)) != int(epoch):
+        return set()
+    return {int(uid) for uid in payload.get("uids", [])}
+
+
+def _record_commitment(ledger: Path, epoch: int, uid: int) -> None:
+    """Remember it immediately, so a crash mid-fleet does not re-commit."""
+    committed = _committed_this_epoch(ledger, epoch)
+    committed.add(int(uid))
+    _atomic_json(ledger, {"epoch": int(epoch), "uids": sorted(committed)})
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
@@ -982,6 +997,7 @@ def _commit_fleet(
     artifact: Path,
     epoch: int,
     pause_seconds: float,
+    ledger: Path,
 ) -> None:
     """Send one commitment per uid, one block apart, inside the reserve.
 
@@ -995,6 +1011,25 @@ def _commit_fleet(
     recorded either way.
     """
     if not template:
+        return
+    # One commitment per uid per epoch. The publisher republishes several times
+    # inside an epoch and used to re-commit the whole fleet each pass; the
+    # chain's commitment rate limit then refused the later ones, and a uid
+    # whose only attempt that epoch was refused kept a commitment from the
+    # PREVIOUS epoch. Those fall outside the validator's window -- it reads
+    # start_block < commit < end - 10 -- and are never read at all. Epoch
+    # 25101 had 49 commitments read of a 64-uid subnet, and three of ours
+    # never reached the nanobody stage.
+    already = _committed_this_epoch(ledger, epoch)
+    pending = [item for item in assignments if item.uid not in already]
+    if len(pending) < len(assignments):
+        print(
+            f"commit: {len(assignments) - len(pending)} uid(s) already hold a "
+            f"commitment for epoch {epoch}; committing {len(pending)}",
+            flush=True,
+        )
+    assignments = pending
+    if not assignments:
         return
     failures: list[tuple[int, int]] = []
     for index, assignment in enumerate(assignments):
@@ -1015,6 +1050,7 @@ def _commit_fleet(
             time.sleep(pause_seconds)
         try:
             _run(command)
+            _record_commitment(ledger, epoch, assignment.uid)
         except subprocess.CalledProcessError as error:
             # One uid's chain error must never cost the rest of the fleet its
             # commitment: every uid gets its own attempt inside the reserve.
@@ -1185,6 +1221,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         archive_path = epoch_root / "archive.csv"
         rankings_path = epoch_root / "provisional_rankings.json"
         current_layer2_path = epoch_root / "provisional_layer2.json"
+        commit_ledger = epoch_root / "committed_uids.json"
         novelty_path = epoch_root / "provisional_novelty.json"
         cdr_path = epoch_root / "provisional_cdrs.json"
         _atomic_download(CONFIG_URL, config_path)
@@ -1359,6 +1396,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             _commit_fleet(
                 assignments,
                 args=args,
+                ledger=commit_ledger,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1413,6 +1451,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             _commit_fleet(
                 assignments,
                 args=args,
+                ledger=commit_ledger,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1456,6 +1495,7 @@ def _publish_once(args: argparse.Namespace) -> None:
             _commit_fleet(
                 assignments,
                 args=args,
+                ledger=commit_ledger,
                 template=args.commit_command,
                 artifact=args.artifact,
                 epoch=epoch,
@@ -1520,6 +1560,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         _commit_fleet(
             assignments,
             args=args,
+            ledger=commit_ledger,
             template=args.commit_command,
             artifact=args.artifact,
             epoch=epoch,

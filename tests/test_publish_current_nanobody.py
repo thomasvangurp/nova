@@ -736,12 +736,13 @@ def test_one_commit_extrinsic_is_sent_per_uid(tmp_path, monkeypatch):
     commits = [
         command for command in host.commands if command[0].endswith("commit.sh")
     ]
-    # Two passes over the fleet: the provisional commit that guarantees every
-    # uid lands inside the epoch, then the qualified upgrade. The chain's own
-    # rate limit decides whether the second one takes.
-    assert [command[1] for command in commits] == HOTKEYS[:3] * 2
-    assert len({command[2] for command in commits[:3]}) == 3
-    assert len({command[2] for command in commits[3:]}) == 3
+    # Exactly one extrinsic per uid per epoch. The publisher republishes
+    # several times inside an epoch; re-committing each pass meant the chain's
+    # rate limit refused the later attempts, and a uid whose only attempt was
+    # refused kept its PREVIOUS epoch's commitment -- which falls outside the
+    # validator's window and is never read.
+    assert [command[1] for command in commits] == HOTKEYS[:3]
+    assert len({command[2] for command in commits}) == 3
 
 
 def test_a_registration_is_picked_up_without_touching_configuration(tmp_path, monkeypatch):
@@ -947,6 +948,7 @@ def test_one_uid_s_commit_failure_does_not_cost_the_rest_of_the_fleet(
     _commit_fleet(
         assignments,
         args=_commit_args(tmp_path, RESERVE_START + 10),
+        ledger=tmp_path / "committed_uids.json",
         template="commit --uid {uid} --hotkey {hotkey} --sequence {sequence}",
         artifact=tmp_path / "artifact.json",
         epoch=COMMIT_EPOCH,
@@ -973,6 +975,7 @@ def test_a_fully_successful_fleet_commit_reports_no_failure(
     _commit_fleet(
         assignments,
         args=_commit_args(tmp_path, RESERVE_START + 10),
+        ledger=tmp_path / "committed_uids.json",
         template="commit --uid {uid}",
         artifact=tmp_path / "artifact.json",
         epoch=COMMIT_EPOCH,
@@ -1166,7 +1169,7 @@ def test_no_uid_commits_before_its_scheduled_reserve_block(tmp_path, monkeypatch
 
     _commit_fleet(assignments, args=args, template="commit --uid {uid}",
                   artifact=tmp_path / "a.json", epoch=COMMIT_EPOCH,
-                  pause_seconds=0)
+                  pause_seconds=0, ledger=tmp_path / "committed_uids.json")
 
     assert len(seen) == 3
     for block, assignment in zip(seen, assignments):
@@ -1197,7 +1200,7 @@ def test_a_rolled_epoch_stops_the_wait_rather_than_committing_late(
     with pytest.raises(SystemExit, match="epoch rolled"):
         _commit_fleet(assignments, args=args, template="commit --uid {uid}",
                       artifact=tmp_path / "a.json", epoch=COMMIT_EPOCH,
-                      pause_seconds=0)
+                      pause_seconds=0, ledger=tmp_path / "committed_uids.json")
 
 
 def test_the_fleet_does_not_pace_itself_out_of_a_tie_by_default():
