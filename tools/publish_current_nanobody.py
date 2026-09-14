@@ -1003,10 +1003,35 @@ def _committed_this_epoch(ledger: Path, epoch: int) -> set[int]:
 
 
 def _record_commitment(ledger: Path, epoch: int, uid: int) -> None:
-    """Remember it immediately, so a crash mid-fleet does not re-commit."""
+    """Remember it immediately, so a crash mid-fleet does not re-commit.
+
+    Only ever called once the commitment is known to belong to a uid we hold.
+    See ``_commitment_is_ours``: a commitment is written against a HOTKEY, not a
+    uid, so an extrinsic sent with a hotkey that has since been deregistered
+    succeeds and lands nowhere the validator will read for that uid. Recording
+    that as done also suppresses the retry, because the ledger is what the next
+    pass consults.
+    """
     committed = _committed_this_epoch(ledger, epoch)
     committed.add(int(uid))
     _atomic_json(ledger, {"epoch": int(epoch), "uids": sorted(committed)})
+
+
+def _commitment_is_ours(
+    held: dict[int, str] | None,
+    assignment: fleet_module.Assignment,
+) -> bool:
+    """Whether a commitment just sent actually lands on a uid we hold.
+
+    ``held`` is a fresh uid -> hotkey view of our own coldkey. ``None`` means the
+    chain could not be re-read, and an unverifiable commitment is not recorded:
+    the cost of not recording is one duplicate attempt next pass, which the
+    chain's own rate limit refuses harmlessly. The cost of recording wrongly is
+    a ticket silently forfeited for the epoch.
+    """
+    if held is None:
+        return False
+    return held.get(assignment.uid) == assignment.hotkey
 
 
 FLEET_UID_LOST = "NANOBODY_FLEET_UID_LOST"
@@ -1014,6 +1039,8 @@ FLEET_UID_LOST = "NANOBODY_FLEET_UID_LOST"
 FLEET_UID_GAINED = "NANOBODY_FLEET_UID_GAINED"
 # A planned uid dropped at its own commit block, before the extrinsic was sent.
 FLEET_UID_SKIPPED = "NANOBODY_FLEET_UID_SKIPPED"
+# An extrinsic went out but the chain does not show it landing on a uid we hold.
+COMMIT_UNVERIFIED = "COMMIT_FLEET_UID_UNVERIFIED"
 
 
 HOTKEY_UNREGISTERED = "NANOBODY_HOTKEY_UNREGISTERED"
@@ -1176,8 +1203,9 @@ def _commit_fleet(
                 args.chain_state, args.netuid, args.maximum_chain_state_age
             )
         except Exception as error:  # a stale read must not cancel the commits
-            print(f"commit: chain re-read failed ({error}); "
-                  f"committing on the planned fleet", flush=True)
+            print(f"commit: chain re-read failed ({error}); committing on the "
+                  f"planned fleet, and ownership is UNVERIFIED for this uid",
+                  file=sys.stderr, flush=True)
             return None
         return {int(row["uid"]): str(row["hotkey"]) for row in view.neurons
                 if str(row.get("coldkey") or "") == coldkey}
@@ -1238,7 +1266,17 @@ def _commit_fleet(
             time.sleep(pause_seconds)
         try:
             _run(command)
-            _record_commitment(ledger, epoch, assignment.uid)
+            if _commitment_is_ours(_fresh_fleet(), assignment):
+                _record_commitment(ledger, epoch, assignment.uid)
+            else:
+                print(
+                    f"{COMMIT_UNVERIFIED} uid={assignment.uid} "
+                    f"hotkey={assignment.hotkey} committed but the chain does "
+                    f"not map that hotkey to the uid; not recorded, so the next "
+                    f"pass may retry",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except subprocess.CalledProcessError as error:
             # One uid's chain error must never cost the rest of the fleet its
             # commitment: every uid gets its own attempt inside the reserve.
@@ -1289,6 +1327,15 @@ def _commit_fleet(
         ]
         try:
             _run(command)
+            if not _commitment_is_ours(_fresh_fleet(), late):
+                print(
+                    f"{COMMIT_UNVERIFIED} uid={late.uid} hotkey={late.hotkey} "
+                    f"committed but the chain does not map that hotkey to the "
+                    f"uid; not recorded",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
             _record_commitment(ledger, epoch, late.uid)
             assignments = list(assignments) + [late]
         except subprocess.CalledProcessError as error:

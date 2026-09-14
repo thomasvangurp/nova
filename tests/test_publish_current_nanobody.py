@@ -1465,3 +1465,53 @@ def test_a_uid_the_publisher_rejected_is_not_revived_as_a_gain(tmp_path, monkeyp
     context = CommitContext(spares=("AAAA",), known_uids=frozenset({0, 1, 2}))
     assert 2 in context.known_uids
     assert context.spares == ("AAAA",)
+
+
+def test_a_commitment_for_a_uid_we_no_longer_hold_is_not_recorded(tmp_path, monkeypatch, capsys):
+    """
+    A commitment is written against a HOTKEY, not a uid. An extrinsic sent with
+    a hotkey that has since been deregistered succeeds and lands nowhere the
+    validator reads for that uid -- epoch 25119 recorded uid 10 as committed
+    while the chain showed another miner's commitment there. Recording that as
+    done also suppresses the retry, because the ledger is what the next pass
+    consults.
+    """
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    import tools.publish_current_nanobody as publisher
+
+    original = publisher._await_commit_block
+
+    def _lose_uid_2_after_send(args, block, epoch):
+        result = original(args, block, epoch)
+        _chain_state(host.chain_state, neurons=_neurons(count=4, ours=(0, 1)))
+        return result
+
+    # uid 2 leaves our coldkey while its own extrinsic is in flight, so the send
+    # is attempted but the commitment cannot belong to a uid we hold.
+    monkeypatch.setattr(publisher, "_await_commit_block", _lose_uid_2_after_send)
+    _publish_once(host.args(commit_command="/root/commit.sh {uid} {hotkey} {sequence} {block}"))
+
+    ledger = json.loads((tmp_path / "live" / "epoch25062" / "committed_uids.json").read_text()) \
+        if (tmp_path / "live" / "epoch25062" / "committed_uids.json").exists() else None
+    if ledger is not None:
+        assert 2 not in ledger["uids"], (
+            "recorded a commitment for a uid the chain no longer maps to our hotkey"
+        )
+
+
+def test_an_unverifiable_chain_read_does_not_earn_a_ledger_entry():
+    """
+    If the chain cannot be re-read, ownership is unknown. Not recording costs one
+    duplicate attempt next pass, which the chain's rate limit refuses harmlessly;
+    recording wrongly costs the ticket for the whole epoch.
+    """
+    from tools.publish_current_nanobody import _commitment_is_ours
+    from nanobody_opt import fleet as fleet_module
+
+    assignment = fleet_module.Assignment(
+        uid=7, hotkey="5Hxxx", sequence="AAAA", commit_block=100
+    )
+    assert _commitment_is_ours(None, assignment) is False
+    assert _commitment_is_ours({7: "5Hxxx"}, assignment) is True
+    assert _commitment_is_ours({7: "5Hyyy"}, assignment) is False
+    assert _commitment_is_ours({}, assignment) is False
