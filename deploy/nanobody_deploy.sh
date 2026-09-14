@@ -32,48 +32,13 @@ CHAIN_WRITER=${NOVA_CHAIN_WRITER:-true}
 
 # The hotkey the miner signs with must be one we still hold. Hardcoding a name
 # is the stale-configuration failure this repo exists to avoid: nova68-slot-1
-# was deregistered and the miner spent every cycle failing
-# publish_metadata_extrinsic with "Custom error: 19". Ask the box which of our
-# hotkeys the chain currently registers, and fall back to the flag only if the
-# box cannot answer.
-resolve_writer_hotkey() {
-  ssh -o ConnectTimeout=12 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null       -p "$2" "root@$1" 'python3 - <<PY 2>/dev/null
-import json, glob, os
-state = json.load(open("/root/artifacts/chain_state.json"))
-ours = {r["hotkey"] for r in state["neurons"] if r.get("coldkey") == os.environ.get("CK")}
-root = "/root/.bittensor/wallets/mining_ops/hotkeys"
-for path in sorted(glob.glob(root + "/*")):
-    if path.endswith("pub.txt") or not os.path.isfile(path):
-        continue
-    try:
-        if json.load(open(path)).get("ss58Address") in ours:
-            print(os.path.basename(path)); break
-    except Exception:
-        pass
-PY' 2>/dev/null
-}
-
-# The producer is the service the GPU rental exists to run, and it is gated off
-# by default in the playbook. Omitting this is a green deploy that leaves no
-# producer running -- ok=73, failed=0, and nothing generating candidates.
-PRODUCER=${NOVA_PRODUCER:-true}
-
-[ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
-
-if [ -z "${NOVA_CHAIN_WRITER_HOTKEY:-}" ]; then
-  read -r WRITER_HOST WRITER_PORT <<<"$(
-    "$INVENTORY" --list 2>/dev/null | python3 -c '
-import json, sys
-d = json.load(sys.stdin)["_meta"]["hostvars"]
-for name, v in d.items():
-    if name.startswith("vast"):
-        print(v["ansible_host"], v["ansible_port"]); break
-' 2>/dev/null)"
-  if [ -n "${WRITER_HOST:-}" ]; then
-    CHAIN_WRITER_HOTKEY=$(CK="$COLDKEY" resolve_writer_hotkey "$WRITER_HOST" "$WRITER_PORT")
-  fi
+# was deregistered and the miner then failed publish_metadata_extrinsic with
+# "Custom error: 19" every cycle. Resolved from the chain; override only
+# deliberately.
+CHAIN_WRITER_HOTKEY="${NOVA_CHAIN_WRITER_HOTKEY:-}"
+if [ -z "$CHAIN_WRITER_HOTKEY" ]; then
+  CHAIN_WRITER_HOTKEY=$(../deploy/resolve_chain_writer.py "$INVENTORY" "$COLDKEY") || true
 fi
-CHAIN_WRITER_HOTKEY=${CHAIN_WRITER_HOTKEY:-${NOVA_CHAIN_WRITER_HOTKEY:-}}
 if [ -z "$CHAIN_WRITER_HOTKEY" ]; then
   echo "no registered hotkey found for the chain writer; set NOVA_CHAIN_WRITER_HOTKEY" >&2
   exit 2
