@@ -126,6 +126,29 @@
       register: controller_revision
       changed_when: false
 
+    # Scoped to the paths the publisher executes, not the whole repository: an
+    # ansible-only or docs-only commit moves HEAD without changing a line the
+    # publisher runs, and comparing HEAD would report a false staleness every
+    # time. This moves only when the publisher's own code does.
+    - name: Resolve the revision of the publisher's source
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ repo }}"
+          - log
+          - -1
+          - --format=%H
+          - --
+          - tools/publish_current_nanobody.py
+          - nanobody_opt
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: publisher_source_revision
+      changed_when: false
+
+
     - name: Require the coldkey address the fleet is discovered by
       ansible.builtin.assert:
         that:
@@ -841,6 +864,21 @@
       ansible.builtin.command:
         argv: [tmux, has-session, -t, "{{ publisher_session }}"]
       changed_when: false
+      when: nanobody_publisher_activate | bool
+
+    # The revision the RUNNING publisher process was launched from, as opposed
+    # to the revision that merely sits on disk. A source deploy that does not
+    # restart the publisher leaves the two disagreeing, and the publisher goes
+    # on committing from the code it started with. That is silent: the process
+    # stays healthy and the play reports success. Epoch 25116 found a publisher
+    # fourteen hours old that had missed every deploy of the day.
+    - name: Stamp the revision the publisher is running
+      ansible.builtin.copy:
+        content: "{{ publisher_source_revision.stdout }}\n"
+        dest: /root/artifacts/nanobody_publisher_running_commit.txt
+        owner: root
+        group: root
+        mode: "0644"
       when: nanobody_publisher_activate | bool
 
     - name: Keep the chain writer stopped unless it was explicitly activated

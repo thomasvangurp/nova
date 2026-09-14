@@ -133,6 +133,28 @@
       register: controller_revision
       changed_when: false
 
+    # Scoped to the paths the publisher executes, not the whole repository: an
+    # ansible-only or docs-only commit moves HEAD without changing a line the
+    # publisher runs, and comparing HEAD would report a false staleness every
+    # time. This moves only when the publisher's own code does.
+    - name: Resolve the revision of the publisher's source
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ repo }}"
+          - log
+          - -1
+          - --format=%H
+          - --
+          - tools/publish_current_nanobody.py
+          - nanobody_opt
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      register: publisher_source_revision
+      changed_when: false
+
     - name: Count effective CPUs
       ansible.builtin.shell: |
         if [ -f /sys/fs/cgroup/cpu.max ]; then
@@ -1192,6 +1214,34 @@
         argv: [tmux, has-session, -t, "{{ nanobody_producer_session }}"]
       changed_when: false
       when: nanobody_producer_activate | bool
+
+    # This play deploys the SOURCE the publisher runs from but does not own the
+    # publisher process -- nanobody_services.yml does. Deploying here alone
+    # therefore updates the code on disk and leaves the running publisher on the
+    # old revision, with nothing in the output to say so.
+    - name: Read the revision the running publisher was launched from
+      ansible.builtin.slurp:
+        src: /root/artifacts/nanobody_publisher_running_commit.txt
+      register: publisher_running_commit
+      failed_when: false
+
+    - name: Refuse to call a deploy done while the publisher runs older source
+      ansible.builtin.assert:
+        that:
+          - publisher_running_commit.content is not defined
+            or (publisher_running_commit.content | b64decode | trim)
+              == publisher_source_revision.stdout | trim
+        fail_msg: >-
+          The publisher is still running
+          {{ (publisher_running_commit.content | default('') | b64decode | trim)[:12]
+             | default('an unknown revision', true) }}
+          while this deploy put {{ publisher_source_revision.stdout[:12] }} on disk. It
+          commits from the code it was launched with, so the new code is not live
+          until the session is restarted. Run
+          `bash deploy/nanobody_deploy.sh nanobody_services.yml` -- and do it
+          outside the end-of-epoch commitment reserve, or this epoch loses its
+          commits.
+      when: nanobody_publisher_expected | default(true) | bool
 
     - name: Record successfully validated deployment revision
       ansible.builtin.copy:
