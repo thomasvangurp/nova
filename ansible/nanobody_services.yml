@@ -46,6 +46,34 @@
     publisher_session: nova-nanobody-publisher
     chain_writer_session: nova-nanobody-miner
 
+    # The chain writer's command line, in ONE place: the start task below runs
+    # it, and the drift check compares it against what is actually running.
+    # Anything added here -- a flag, a hotkey, a netuid -- therefore restarts a
+    # writer that predates it.  Kept separate from the tmux/dotenv wrapper
+    # because this is exactly what `ps -eo args` reports for the process.
+    #
+    # --chain-state-only is why this process is safe to run at all.  Its
+    # CANDIDATES are the upstream example -- a random 1-30 mutation of a
+    # hardcoded base sequence, "therefore not competitive" by its own docstring
+    # -- and resolve_chain_writer.py must give it a REGISTERED hotkey or it
+    # dies, so left submitting it overwrites one of our own fleet uids with
+    # noise.  Observed live on uid 19.
+    chain_writer_miner_argv:
+      - /root/.pixi/envs/chain310/bin/python
+      - neurons/miner/miner.py
+      - --network
+      - "{{ nanobody_network }}"
+      - --netuid
+      - "{{ nanobody_netuid }}"
+      - --wallet.path
+      - "{{ nanobody_wallet_path }}"
+      - --wallet.name
+      - "{{ nanobody_wallet_name }}"
+      - --wallet.hotkey
+      - "{{ nanobody_chain_writer_hotkey }}"
+      - --chain-state-only
+      - --logging.debug
+
     # The publisher is the service this deployment exists to run, so it is on
     # by default. The chain writer is off by default: it signs extrinsics, and
     # starting one as a side effect of a code deploy is not a thing a deploy
@@ -968,6 +996,35 @@
         - (chain_writer_running_hotkey.stdout | default('') | trim) | length > 0
         - (chain_writer_running_hotkey.stdout | trim) != nanobody_chain_writer_hotkey
 
+    # The hotkey was the first argument to drift, not the last.  --chain-state-only
+    # was added to stop the writer committing example candidates on uid 19, the
+    # deploy ran green, and the flag reached nothing: the session already
+    # existed, so the start task was skipped under `chain_writer_status.rc != 0`
+    # and the old process went on committing.  Compare the WHOLE command line.
+    - name: Read the command line the running chain writer was started with
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo args | grep -m1 -- '[n]eurons/miner/miner.py'
+        executable: /bin/bash
+      register: chain_writer_running_args
+      changed_when: false
+      failed_when: false
+      when: chain_writer_status.rc == 0
+
+    - name: Stop a chain writer running a different command line
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ chain_writer_session }}"]
+      register: chain_writer_stale_args
+      changed_when: chain_writer_stale_args.rc == 0
+      failed_when: false
+      when:
+        - chain_writer_status.rc == 0
+        - (chain_writer_running_args.stdout | default('') | trim) | length > 0
+        - >-
+          (chain_writer_running_args.stdout | trim)
+          != (chain_writer_miner_argv | map('string') | join(' '))
+
     # Re-check, so the start task below sees the session is gone and replaces it.
     - name: Re-check whether the chain writer is running
       ansible.builtin.command:
@@ -997,39 +1054,11 @@
 
     - name: Start the on-chain commitment writer
       ansible.builtin.command:
-        argv:
-          - tmux
-          - new-session
-          - -d
-          - -s
-          - "{{ chain_writer_session }}"
-          - /root/.pixi/envs/chain310/bin/python
-          - -m
-          - dotenv
-          - -f
-          - /root/nanobody.env
-          - run
-          - --
-          - /root/.pixi/envs/chain310/bin/python
-          - neurons/miner/miner.py
-          - --network
-          - "{{ nanobody_network }}"
-          - --netuid
-          - "{{ nanobody_netuid }}"
-          - --wallet.path
-          - "{{ nanobody_wallet_path }}"
-          - --wallet.name
-          - "{{ nanobody_wallet_name }}"
-          - --wallet.hotkey
-          - "{{ nanobody_chain_writer_hotkey }}"
-          # This process exists to write chain_state.json, which the publisher
-          # reads.  Its CANDIDATES are the upstream example -- a random 1-30
-          # mutation of a hardcoded base sequence, "therefore not competitive"
-          # by its own docstring -- and resolve_chain_writer.py must give it a
-          # REGISTERED hotkey or it dies, so left submitting it overwrites one
-          # of our own fleet uids with noise.  Observed live on uid 19.
-          - --chain-state-only
-          - --logging.debug
+        argv: >-
+          {{ ['tmux', 'new-session', '-d', '-s', chain_writer_session,
+              '/root/.pixi/envs/chain310/bin/python', '-m', 'dotenv',
+              '-f', '/root/nanobody.env', 'run', '--']
+             + chain_writer_miner_argv }}
       args:
         chdir: /root
       changed_when: true

@@ -53,3 +53,38 @@ def test_the_deployed_chain_writer_passes_the_flag():
         "ansible/nanobody_services.yml launches the chain writer; without this "
         "flag it commits example candidates on one of our registered uids"
     )
+
+
+def test_the_deploy_restarts_a_writer_whose_command_line_drifted():
+    """A running session is not a CORRECT one.
+
+    --chain-state-only was added, the deploy ran green, and the flag reached
+    nothing: the start task is gated on the tmux session being absent, so the
+    old process kept committing.  The deploy must compare the whole command
+    line against what it would launch, and restart on any difference.
+    """
+    services = SERVICES.read_text()
+    assert "chain_writer_miner_argv" in services, (
+        "the launch argv must be one var, or the drift check compares against "
+        "a copy that can disagree with what is started"
+    )
+    assert "chain_writer_running_args" in services, (
+        "the deploy must read the running writer's actual command line"
+    )
+    assert (
+        "(chain_writer_running_args.stdout | trim)\n"
+        "          != (chain_writer_miner_argv | map('string') | join(' '))"
+    ) in services, "the drift check must compare running argv to the launch argv"
+
+
+def test_the_launch_argv_carries_the_flag():
+    import yaml
+
+    doc = yaml.safe_load(SERVICES.read_text())
+    play = next(p for p in doc if isinstance(p, dict) and "vars" in p)
+    argv = play["vars"]["chain_writer_miner_argv"]
+    assert "--chain-state-only" in argv
+    assert argv[:2] == [
+        "/root/.pixi/envs/chain310/bin/python",
+        "neurons/miner/miner.py",
+    ], "the argv must start where `ps -eo args` starts, or drift never matches"
