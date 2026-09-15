@@ -35,6 +35,11 @@ chain310 = { features = ["chain310"], no-default-feature = true }
 # pyproject; CUDA-linked packages belong to this single conda-forge solve.
 [feature.bgen.dependencies]
 python = "3.11.*"
+# The mutation store is SQLite/WAL and is snapshotted from off-box by
+# deploy/slot_host/backup_artifacts.sh. Without the CLI the first scheduled
+# backup failed with "sqlite3: not found", and the manual rescue of the dead box
+# hit the same rc=127 an hour earlier.
+sqlite = "*"
 pytorch = { version = "==2.7.1", build = "cuda126*" }
 pytorch-gpu = "==2.7.1"
 numpy = "==2.0.2"
@@ -269,6 +274,7 @@ audit-live-generator-recall = "cd /root && python -m nanobody_opt.audit_live_gen
 [feature.chain310.dependencies]
 python = "3.10.*"
 pip = "*"
+sqlite = "*"
 numpy = ">=2,<2.3"
 pandas = "2.2.*"
 rdkit = "2024.09.*"
