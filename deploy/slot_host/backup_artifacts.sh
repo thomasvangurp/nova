@@ -61,9 +61,18 @@ fi
 # a straight copy taken mid-write restores as a torn database. `.backup` takes
 # the same consistent snapshot a reader would see and is safe against a producer
 # writing throughout.
+# Python's sqlite3, not the sqlite3 CLI: the GPU image does not ship the CLI,
+# and the first scheduled run failed on exactly that.
 SNAPSHOT="/tmp/nanobody_mutations.backup.sqlite"
 if ! ssh "${SSH_OPTS[@]}" -p "$port" "root@$host" \
-    "rm -f '$SNAPSHOT' && sqlite3 '$REMOTE_DB' \".backup '$SNAPSHOT'\"" 2>/dev/null; then
+    "rm -f '$SNAPSHOT' && python3 -c \"
+import sqlite3
+source = sqlite3.connect('$REMOTE_DB')
+target = sqlite3.connect('$SNAPSHOT')
+source.backup(target)
+target.close()
+source.close()
+\"" 2>/dev/null; then
   echo "could not snapshot the database on the box; leaving the last backup in place" >&2
   exit 1
 fi
@@ -80,7 +89,10 @@ ssh "${SSH_OPTS[@]}" -p "$port" "root@$host" "rm -f '$SNAPSHOT'" 2>/dev/null || 
 
 # Verify what landed before it is allowed to displace anything: a truncated
 # transfer is worse than no backup, because it looks like one.
-if ! sqlite3 "$target" "pragma integrity_check;" 2>/dev/null | grep -qx "ok"; then
+if ! python3 -c "
+import sqlite3, sys
+sys.exit(0 if sqlite3.connect('$target').execute('pragma integrity_check').fetchone()[0] == 'ok' else 1)
+" 2>/dev/null; then
   echo "fetched file failed integrity_check; discarding it" >&2
   rm -f "$target"
   exit 1
