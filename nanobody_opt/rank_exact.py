@@ -126,7 +126,7 @@ def _compiled_category_rank_sums(
 def settled_deviation_count(sequence: str, consensus: dict) -> int:
     """Settled positions this sequence disagrees with the field on.
 
-    Measured over 1,427 live tickets, each one costs about 14 rank points, and a
+    Measured over 1,678 live tickets, each one costs about 7-12 rank points, and a
     molecule carrying none averages final_score 132.7 -- better than the leading
     rival's own mean.  Ranking has been blind to this: it orders on screened
     metrics, which agree with the validator at r=0.19, while this structural

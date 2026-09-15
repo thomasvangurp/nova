@@ -115,7 +115,7 @@ def settled_site_options(
     be repaired toward consensus.  A new deviation at a settled position is
     never proposed, because it is the most expensive thing we do: measured over
     1,427 live tickets, 116 of 127 positions are settled at >=80% field
-    consensus, each deviation at one costs about 14 rank points, and a molecule
+    consensus, each deviation at one costs about 7-12 rank points, and a molecule
     carrying none averages final_score 132.7 -- better than the leading rival's
     own mean of 134.2.  That rival carries 0.74 such deviations against our
     1.21, which is most of the 27.8-point gap between us.
@@ -1612,7 +1612,23 @@ def main() -> None:
         for position in cdr_positions:
             if position in protected:
                 continue
-            for residue in allowed[position]:
+            # This lane enumerates the residue pool directly, so it has to
+            # consult the same policy the stochastic draw does or it walks
+            # straight past it.  Measured on a full epoch-25138 run it was the
+            # single largest remaining source of breakage under repair-only --
+            # 304 of 709 candidates carrying a new settled deviation, 43% of the
+            # total, from a lane the rule never touched.  Under repair-only a
+            # settled position the parent has right now yields only the parent
+            # residue, which the next line skips, and one it has wrong yields
+            # only the repair.
+            for residue in settled_site_options(
+                position,
+                parent=parent,
+                consensus=consensus,
+                allowed=allowed,
+                anchor=None,
+                repair_only=repair_only,
+            ):
                 if residue == parent[position]:
                     continue
                 candidate = parent[:position] + residue + parent[position + 1 :]
