@@ -841,6 +841,46 @@
           signs with. It is not the fleet -- the fleet comes from the chain.
       when: nanobody_chain_writer_activate | bool
 
+    # A NAME is not an identity. resolve_chain_writer.py only ever returns a
+    # hotkey the chain currently maps to our coldkey, but NOVA_CHAIN_WRITER_HOTKEY
+    # overrides it entirely -- and an override is exactly how a dead key gets in.
+    # nova68-slot-10 was named that way on a fresh box, having been deregistered
+    # minutes earlier, and the miner died on
+    #     ValueError: '5Eh7...' is not in list
+    # from metagraph.hotkeys.index(). Checking here turns a runtime death into a
+    # failed deploy that names the problem.
+    - name: Require the chain writer's hotkey to be registered right now
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          python3 - <<'PY'
+          import json, glob, os, sys
+          name = "{{ nanobody_chain_writer_hotkey }}"
+          coldkey = "{{ nanobody_coldkey_ss58 }}"
+          state = json.load(open("/root/artifacts/chain_state.json"))
+          ours = {r["hotkey"] for r in state["neurons"]
+                  if str(r.get("coldkey") or "") == coldkey}
+          for path in glob.glob("/root/.bittensor/wallets/*/hotkeys/*"):
+              if path.endswith("pub.txt") or os.path.basename(path) != name:
+                  continue
+              try:
+                  address = json.load(open(path)).get("ss58Address")
+              except Exception:
+                  continue
+              if address in ours:
+                  print("registered")
+                  sys.exit(0)
+              print("NOT REGISTERED", file=sys.stderr)
+              sys.exit(1)
+          print("no such hotkey file on the box", file=sys.stderr)
+          sys.exit(1)
+          PY
+        executable: /bin/bash
+      register: chain_writer_registered
+      changed_when: false
+      failed_when: chain_writer_registered.rc != 0
+      when: nanobody_chain_writer_activate | bool
+
     # ---- Services ----------------------------------------------------------
     - name: Restart the checkpoint publisher on committed source
       ansible.builtin.command:
@@ -890,6 +930,46 @@
       when: not (nanobody_chain_writer_activate | bool)
 
     - name: Check whether the chain writer is already running
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, "{{ chain_writer_session }}"]
+      register: chain_writer_status
+      changed_when: false
+      failed_when: false
+
+    # A running session is not the same as a CORRECT one. The writer signs with
+    # a hotkey named at deploy time, and the fleet churns: nova68-slot-12 was
+    # deregistered while the miner held it, and because the session existed the
+    # next deploy resolved the right replacement and then skipped the restart
+    # under `chain_writer_status.rc != 0`. The miner went on signing with a key
+    # the metagraph no longer knows, which is publish_metadata_extrinsic failing
+    # "Custom error: 19" every cycle while every process looks healthy -- the
+    # exact failure resolve_chain_writer.py exists to prevent, reintroduced one
+    # layer up.
+    - name: Read the hotkey the running chain writer actually signs with
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo args | grep '[n]eurons/miner/miner.py' \
+            | tr ' ' '\n' | grep -A1 -x -- '--wallet.hotkey' | tail -1
+        executable: /bin/bash
+      register: chain_writer_running_hotkey
+      changed_when: false
+      failed_when: false
+      when: chain_writer_status.rc == 0
+
+    - name: Stop a chain writer signing with the wrong hotkey
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, "{{ chain_writer_session }}"]
+      register: chain_writer_replaced
+      changed_when: chain_writer_replaced.rc == 0
+      failed_when: false
+      when:
+        - chain_writer_status.rc == 0
+        - (chain_writer_running_hotkey.stdout | default('') | trim) | length > 0
+        - (chain_writer_running_hotkey.stdout | trim) != nanobody_chain_writer_hotkey
+
+    # Re-check, so the start task below sees the session is gone and replaces it.
+    - name: Re-check whether the chain writer is running
       ansible.builtin.command:
         argv: [tmux, has-session, -t, "{{ chain_writer_session }}"]
       register: chain_writer_status
