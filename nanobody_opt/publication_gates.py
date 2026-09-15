@@ -44,24 +44,35 @@ QUALITY_GATES: dict[str, str] = {
     "--maximum-p90-developability-rank-sum": "30",
 }
 
-# Evidence requirements.  One observation of a fixed sequence lands about 34
-# leaderboard rank points from its own mean, so more observations buy a better
-# estimate.  Refusing to publish for want of the eighth observation would trade a
-# possible win for a certain zero, so this is not a hard floor: ranking relaxes
-# it one observation at a time rather than publishing nothing.
+# Evidence requirements.  The floor is ONE, and raising it is a trap.
 #
-# It is not one either.  A single pass is where our screen stops agreeing with
-# the validator at all -- measured Spearman by observation count was -0.184 at
-# one, +0.230 at two to three and +0.240 at four or more -- so selecting on a
-# one-observation estimate is selecting on noise.  Replaying 27 real epoch
-# fields with screen noise calibrated to the measured single-pass correlation,
-# the best true final_score of a twelve-ticket basket improved monotonically
-# with passes (72.4 -> 70.9 -> 68.9 -> 66.3 for k = 1, 2, 4, 8), and by three
-# times as much for a single-ticket epoch.  Four is where the measured
-# correlation plateaus; the race already targets eight and narrows the
-# shortlist rather than the observation count, so this floor is reachable.
+# It looks like it should be higher.  Our screen's agreement with the validator
+# rises sharply with the number of observations a sequence has (measured
+# Spearman -0.184 at one, +0.230 at two to three, +0.240 at four or more), and
+# replaying past epochs with independent repeat screens says averaging them is
+# worth several rank points.  Both of those are real.  Neither licenses a floor
+# above one, because of what an "observation" actually is here.
+#
+# Measured on the live score bank: a sequence's observation count equals the
+# number of distinct epochs it appears in, exactly, at every depth -- 1115
+# sequences at depth 1 spanning a mean of 1.00 epochs, 202 at depth 5 spanning
+# 5.00, and so on.  The producer screens each candidate once per epoch and never
+# repeats one within an epoch, so depth is not replication.  It is age.
+#
+# A floor above one is therefore a survivorship filter, not an evidence filter.
+# Every one of the 200 candidates our generator produced in epoch 25134 had
+# depth 1; a floor of four would have excluded all of them and restricted
+# selection to molecules carried over from four or more previous epochs.  That
+# also explains the correlation above: depth is confounded with having survived,
+# so the rise in Spearman cannot be read as replication buying accuracy.
+#
+# Averaging whatever observations a sequence does have is still right, and
+# ranking already does it -- those are genuine repeat draws of a fixed sequence.
+# The change that would actually buy the replay's benefit is in the PRODUCER:
+# screen each candidate k times within one epoch.  Until that exists, this stays
+# at one.
 EVIDENCE_GATES: dict[str, str] = {
-    "--minimum-observations": "4",
+    "--minimum-observations": "1",
     "--minimum-structure-observations": "1",
 }
 
