@@ -1022,6 +1022,13 @@
           - "{{ nanobody_wallet_name }}"
           - --wallet.hotkey
           - "{{ nanobody_chain_writer_hotkey }}"
+          # This process exists to write chain_state.json, which the publisher
+          # reads.  Its CANDIDATES are the upstream example -- a random 1-30
+          # mutation of a hardcoded base sequence, "therefore not competitive"
+          # by its own docstring -- and resolve_chain_writer.py must give it a
+          # REGISTERED hotkey or it dies, so left submitting it overwrites one
+          # of our own fleet uids with noise.  Observed live on uid 19.
+          - --chain-state-only
           - --logging.debug
       args:
         chdir: /root

@@ -123,6 +123,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--network', default=os.getenv('SUBTENSOR_NETWORK'), help='Network to use')
     # Adds override arguments for netuid.
     parser.add_argument('--netuid', type=int, default=379, help="The chain subnet uid.") #68 for mainnet
+    parser.add_argument(
+        '--chain-state-only',
+        action='store_true',
+        default=os.getenv('NOVA_CHAIN_STATE_ONLY') == '1',
+        help=(
+            "publish chain state but never commit candidates. Use when another "
+            "process owns submission: this miner's candidates are the upstream "
+            "example (a random mutation of a base sequence), and committing "
+            "them overwrites the real submission on the hotkey it signs with"
+        ),
+    )
     # Bittensor standard argument additions.
     BTSubtensor.add_args(parser)
     bt.logging.add_args(parser)
@@ -517,7 +528,29 @@ def _checkpoint_changed(state: Dict[str, Any], candidate_small_molecules: str) -
 
 
 async def _submit_current_candidates(state: Dict[str, Any]) -> bool:
-    """Submit changed candidates and update cooldown state only on chain success."""
+    """Submit changed candidates and update cooldown state only on chain success.
+
+    Refuses outright in chain-state-only mode.  This process is run here for one
+    reason -- it is the only writer of /root/artifacts/chain_state.json, which
+    the publisher reads for the block, the epoch and the fleet it discovers from
+    the metagraph.  Its CANDIDATES, though, come from the upstream example
+    implementation: dummy_get_candidate_products returns a random 1-30 mutation
+    of a hardcoded base sequence, which its own docstring calls "therefore not
+    competitive".
+
+    Left submitting, it commits that dummy on whichever hotkey it signs with --
+    and resolve_chain_writer.py deliberately picks a REGISTERED one, because the
+    miner dies otherwise.  So the chain writer is always one of our fleet uids,
+    and it overwrites that uid's real submission with noise: observed live on
+    uid 19, "Commitment set successfully", racing the publisher's own
+    set_commitment for the same uid.
+    """
+    if state.get("chain_state_only"):
+        bt.logging.debug(
+            "chain-state-only: not committing example candidates; this process "
+            "publishes chain state and nothing else"
+        )
+        return False
     candidate_small_molecules = state["candidate_small_molecules"]
     if not _checkpoint_changed(state, candidate_small_molecules):
         bt.logging.debug(
@@ -557,6 +590,9 @@ async def run_miner(config: argparse.Namespace) -> None:
         # environment / config
         'config': config,
         'submission_interval': 1200,
+        # When set, publish chain state and never commit: another process owns
+        # submission on this hotkey.  See _submit_current_candidates.
+        'chain_state_only': bool(getattr(config, 'chain_state_only', False)),
 
         # GitHub
         'github_path': load_github_path(),
