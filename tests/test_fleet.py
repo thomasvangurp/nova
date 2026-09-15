@@ -509,3 +509,48 @@ def test_an_unannotated_candidate_falls_back_to_identity_alone():
     b = _variant(REAL, [(i, "G") for i in range(30, 50)])
     pool = _pool([(a, 0.3, 100.0), (b, 0.2, 110.0)])
     assert len(fleet.distinct_sequences(pool, 2, cdrs={})) == 2
+
+
+def test_a_new_deviation_tier_restarts_the_win_probability_ladder():
+    """The order the ranker writes is two-level, and the invariant must say so.
+
+    rank_exact sorts by settled-deviation tier and keeps win probability
+    ordered inside each tier.  Asserting win probability alone raised
+    "ranking is not ordered best-first by win probability (0.0148 follows 0.0)"
+    on every publication cycle, and the fleet committed nothing at all.
+    """
+    fleet._assert_non_increasing_win_probability([
+        {"win_probability": 0.30, "settled_deviations": 0},
+        {"win_probability": 0.10, "settled_deviations": 0},
+        {"win_probability": 0.25, "settled_deviations": 1},
+        {"win_probability": 0.05, "settled_deviations": 1},
+    ])
+
+
+def test_win_probability_must_still_fall_inside_one_tier():
+    with pytest.raises(fleet.SelectionOrderError, match="win probability"):
+        fleet._assert_non_increasing_win_probability([
+            {"win_probability": 0.10, "settled_deviations": 0},
+            {"win_probability": 0.30, "settled_deviations": 0},
+        ])
+
+
+def test_tiers_must_not_go_backwards():
+    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
+        fleet._assert_non_increasing_win_probability([
+            {"win_probability": 0.30, "settled_deviations": 2},
+            {"win_probability": 0.20, "settled_deviations": 0},
+        ])
+
+
+def test_a_candidate_that_cannot_win_never_precedes_one_that_can():
+    """The deviation rule chooses between molecules that can win.
+
+    A clean molecule with no chance of a winning draw outranking a molecule
+    with one would spend a uid on a certainty of zero.
+    """
+    with pytest.raises(fleet.SelectionOrderError, match="cannot win"):
+        fleet._assert_non_increasing_win_probability([
+            {"win_probability": 0.0, "settled_deviations": 0},
+            {"win_probability": 0.0148, "settled_deviations": 1},
+        ])

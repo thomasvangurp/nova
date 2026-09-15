@@ -16,6 +16,7 @@ import math
 import sys
 from collections import defaultdict
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -121,6 +122,30 @@ def _compiled_category_rank_sums(
         category: float(sum(ranks[metric] for metric in names))
         for category, names in METRIC_CATEGORIES.items()
     }
+
+
+def deviation_tier(item: Mapping[str, Any]) -> int:
+    """How many settled sites this candidate breaks: the coarse ordering key."""
+    return int(item.get("settled_deviations", 0))
+
+
+def win_probability_order_key(item: Mapping[str, Any]) -> tuple[int, int]:
+    """The order the win-probability selection is written in.
+
+    Module-level on purpose.  The tier was applied as a one-line lambda inside
+    main() and the tests re-implemented that lambda on their own fixtures, so
+    both agreed while the ranker emitted an order fleet.distinct_sequences
+    refused -- "0.0148 follows 0.0" -- and the fleet committed nothing for an
+    epoch.  One definition, exercised by the tests and the ranker alike.
+
+    The chance key comes first: the deviation rule chooses between molecules
+    that can win, so a clean molecule with no chance of a winning draw must
+    never displace one that has a chance.  The sort is stable, so the
+    win-probability order the screen chose survives inside each tier.
+    """
+    probability = item.get("win_probability")
+    has_chance = probability is not None and float(probability) > 0.0
+    return (0 if has_chance else 1, deviation_tier(item))
 
 
 def settled_deviation_count(sequence: str, consensus: dict) -> int:
@@ -671,19 +696,21 @@ def main() -> None:
     # tier the screen still does all the ordering; it only stops us spending a
     # uid on a molecule that breaks something when one that does not is
     # available, which measurement says it is for ~27% of what we generate.
-    def _deviation_tier(item: dict[str, Any]) -> int:
-        return int(item.get("settled_deviations", 0))
-
     if args.selection_order == "win-probability":
         # Only rank one pays and the validator draws once, so the target is the
         # chance of a winning draw, not the best average.  Spread is an asset:
         # epoch 25062 was won by a molecule that drew 85 rank points better than
         # its own average and ranked 13th of 46 on averaged quality.
         ranked = rank_by_win_probability(ranked, args.competitive_score_threshold)
-        ranked.sort(key=_deviation_tier)   # stable: preserves win-probability order within a tier
+        # Stable, so the win-probability order survives inside a tier.  The
+        # zero key comes FIRST because the deviation rule is about choosing
+        # between molecules that can win, not about preferring a clean loser:
+        # a candidate with no chance of a winning draw must never be promoted
+        # over one that has a chance, however many settled sites it breaks.
+        ranked.sort(key=win_probability_order_key)
     elif args.selection_order == "p90":
         ranked.sort(key=lambda item: (
-            _deviation_tier(item),
+            deviation_tier(item),
             item["score_p90"],
             item["score_median"],
             -item["observation_competitive_rate"],
@@ -693,7 +720,7 @@ def main() -> None:
         ))
     else:
         ranked.sort(key=lambda item: (
-            _deviation_tier(item),
+            deviation_tier(item),
             -item["observation_competitive_rate"],
             -item["competitive_rate"],
             item["score_p90"],

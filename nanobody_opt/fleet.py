@@ -576,8 +576,24 @@ def distinct_sequences(
 
 
 def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
-    """Verify the file really is ordered best-first by win probability."""
+    """Verify the file really is ordered best-first.
+
+    Best-first is a two-level order, not a single column.  Settled-site
+    breakage is the coarse key -- a deviation costs ~14 rank points, while our
+    screened metrics agree with the validator at only r=0.19 -- and win
+    probability orders within a tier.  Asserting win probability alone was
+    correct until the tier became a sort key and then killed every publication
+    cycle with "0.0148 follows 0.0" while the fleet committed nothing; the
+    invariant has to describe the order the ranker actually writes, or it stops
+    being a check and becomes an outage.
+
+    Two things are still guaranteed and are what the callers below rely on:
+    candidates with a chance of winning all precede candidates with none, and
+    within one deviation tier the order is non-increasing by win probability.
+    """
     previous: float | None = None
+    previous_tier: int | None = None
+    seen_no_chance = False
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
@@ -587,12 +603,31 @@ def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
         probability = float(value)
         if not math.isfinite(probability):
             raise SelectionOrderError("candidate win_probability is not finite")
+        if probability > 0.0 and seen_no_chance:
+            raise SelectionOrderError(
+                "ranking puts a candidate that cannot win ahead of one that "
+                f"can ({probability} follows a zero win probability)"
+            )
+        if probability <= 0.0:
+            seen_no_chance = True
+        tier = candidate.get("settled_deviations")
+        tier = int(tier) if tier is not None else None
+        if tier is not None and previous_tier is not None:
+            if tier < previous_tier:
+                raise SelectionOrderError(
+                    "ranking is not ordered best-first by settled-site "
+                    f"deviations (tier {tier} follows tier {previous_tier})"
+                )
+            if tier > previous_tier:
+                # A new tier legitimately restarts the win-probability ladder.
+                previous = None
         if previous is not None and probability > previous + 1e-12:
             raise SelectionOrderError(
                 "ranking is not ordered best-first by win probability "
                 f"({probability} follows {previous})"
             )
         previous = probability
+        previous_tier = tier if tier is not None else previous_tier
 
 
 def commitment_blocks(

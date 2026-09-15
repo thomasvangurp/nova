@@ -423,19 +423,68 @@ def test_a_molecule_that_breaks_nothing_outranks_a_better_scoring_one():
 
 
 def test_the_deviation_tier_is_stable_within_itself():
-    """Sorting by tier must not disturb the order the screen already chose."""
+    """Sorting by tier must not disturb the order the screen already chose.
+
+    Exercises the ranker's own key.  This test used to re-implement the lambda
+    on its own fixtures, so it passed while the ranker emitted an order the
+    publisher refused and the fleet committed nothing for an epoch.
+    """
+    from nanobody_opt.rank_exact import win_probability_order_key
+
     ranked = [
-        {"sequence": "BEST_BUT_BROKEN", "settled_deviations": 2, "rank": 0},
-        {"sequence": "CLEAN_A", "settled_deviations": 0, "rank": 1},
-        {"sequence": "CLEAN_B", "settled_deviations": 0, "rank": 2},
-        {"sequence": "ONE_BROKEN", "settled_deviations": 1, "rank": 3},
+        {"sequence": "BEST_BUT_BROKEN", "settled_deviations": 2,
+         "win_probability": 0.9, "rank": 0},
+        {"sequence": "CLEAN_A", "settled_deviations": 0,
+         "win_probability": 0.3, "rank": 1},
+        {"sequence": "CLEAN_B", "settled_deviations": 0,
+         "win_probability": 0.2, "rank": 2},
+        {"sequence": "ONE_BROKEN", "settled_deviations": 1,
+         "win_probability": 0.5, "rank": 3},
     ]
-    ranked.sort(key=lambda item: int(item.get("settled_deviations", 0)))
+    ranked.sort(key=win_probability_order_key)
     assert [item["sequence"] for item in ranked] == [
         "CLEAN_A", "CLEAN_B", "ONE_BROKEN", "BEST_BUT_BROKEN"
     ]
     # Python's sort is stable, so the screen's own order survives inside tier 0.
     assert [item["rank"] for item in ranked[:2]] == [1, 2]
+
+
+def test_a_clean_candidate_that_cannot_win_does_not_displace_one_that_can():
+    """The deviation rule chooses between molecules that can win.
+
+    Tier-first alone promoted a zero-win-probability molecule over a 0.0148
+    one, which is spending a uid on a certainty of nothing -- and it is the
+    ordering the publisher then refused outright.
+    """
+    from nanobody_opt.rank_exact import win_probability_order_key
+
+    ranked = [
+        {"sequence": "CLEAN_NO_CHANCE", "settled_deviations": 0,
+         "win_probability": 0.0},
+        {"sequence": "BROKEN_BUT_LIVE", "settled_deviations": 1,
+         "win_probability": 0.0148},
+    ]
+    ranked.sort(key=win_probability_order_key)
+    assert [item["sequence"] for item in ranked] == [
+        "BROKEN_BUT_LIVE", "CLEAN_NO_CHANCE"
+    ]
+
+
+def test_the_ranker_order_satisfies_the_publisher_invariant():
+    """The two must agree, or every publication cycle dies on the assert."""
+    from nanobody_opt import fleet
+    from nanobody_opt.rank_exact import win_probability_order_key
+
+    ranked = [
+        {"sequence": "A", "settled_deviations": 1, "win_probability": 0.25},
+        {"sequence": "B", "settled_deviations": 0, "win_probability": 0.10},
+        {"sequence": "C", "settled_deviations": 0, "win_probability": 0.30},
+        {"sequence": "D", "settled_deviations": 0, "win_probability": 0.0},
+        {"sequence": "E", "settled_deviations": 2, "win_probability": 0.05},
+    ]
+    ranked.sort(key=lambda item: -float(item["win_probability"]))
+    ranked.sort(key=win_probability_order_key)
+    fleet._assert_non_increasing_win_probability(ranked)
 
 
 def test_a_candidate_without_the_field_is_treated_as_unbroken():
