@@ -52,56 +52,34 @@ def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-# Which metrics the SELECTION order leans on. This does not touch the validator
-# estimate: `_compiled_category_rank_sums` still mirrors the validator exactly,
-# and the emitted aggregate_* fields are unchanged. Only the ordering signal is
-# weighted.
+# Selection orders on the plain sum of dense ranks, the same quantity the
+# validator's own score is built from. A weighted variant ran for eleven epochs
+# in two shapes and is reverted.
 #
-# Measured over epochs 25103-25112, our median category ranks against the field
+# What it was for: over 25103-25112 our median category ranks against the field
 # were level on developability (-0.2) and physical interaction (-0.7) and behind
-# on confidence (+29.2, worse in 9 of 10 epochs). The validator's score is the
-# sum of the three, so confidence was the whole gap -- and all three epochs we
-# have won are the epochs our confidence beat the field.
+# on confidence (+29.2, worse in 9 of 10). Since the validator's score is the sum
+# of the three, confidence was the whole gap, and within it the rank is driven by
+# interaction_pae (Spearman +0.81 against confidence_rank over 494 pooled scored
+# submissions), min_design_to_target_pae (+0.73) and design_to_target_iptm
+# (-0.73). Leaning the ordering on those looked obvious.
 #
-# Spearman rho of each metric against the validator's own confidence_rank, over
-# 494 pooled scored submissions. Sign is dropped: what matters is how strongly a
-# metric moves the rank, not which way.
-CONFIDENCE_DRIVER_STRENGTH = {
-    "interaction_pae": 0.812,
-    "min_design_to_target_pae": 0.729,
-    "design_to_target_iptm": 0.725,
-    "design_ptm": 0.585,
-    "design_iiptm": 0.463,
-}
-
-# The redistribution happens INSIDE the confidence category, and each category
-# keeps the total it had. The validator's score gives developability, confidence
-# and physical interaction equal footing, so buying confidence by starving the
-# other two trades away the parity we already hold there for nothing.
+# What happened: the gap did not close and the ranks got worse. Across the three
+# configurations -- unweighted, weighted, and weighted plus the generator fixes --
+# best-rank medians were 3, 8 and 18, mean confidence gaps +3, +27 and +25, and
+# the single win in that stretch belongs to the unweighted ordering.
 #
-# The first cut of this weighting did not do that. It set interaction_pae and
-# design_to_target_iptm to 2.0 and, to hold the overall total, pushed every
-# other metric to 0.75 -- which demoted min_design_to_target_pae, the SECOND
-# strongest confidence driver, and thinned developability and physical
-# interaction as a side effect. Weighting by measured strength within the
-# category is what that should have been.
-def _confidence_weights() -> dict[str, float]:
-    """Spread the confidence category's own total across it by driver strength."""
-    total_strength = sum(CONFIDENCE_DRIVER_STRENGTH.values())
-    members = len(METRIC_CATEGORIES["confidence"])
-    return {
-        metric: strength / total_strength * members
-        for metric, strength in CONFIDENCE_DRIVER_STRENGTH.items()
-    }
-
-
-SELECTION_METRIC_WEIGHTS = _confidence_weights()
-SELECTION_BASE_WEIGHT = 1.0
-
-
-def selection_metric_weight(metric: str) -> float:
-    """Weight this metric carries in the ORDERING, not in the score estimate."""
-    return SELECTION_METRIC_WEIGHTS.get(metric, SELECTION_BASE_WEIGHT)
+# That is not proof the weighting caused it: the unweighted baseline is only
+# three epochs, an outage broke the series, and each epoch is one draw. But
+# eleven epochs across two weighted shapes produced no win and no improvement in
+# the very quantity they targeted, so the weighting is not earning its
+# complexity and the ordering goes back to what produced 25115.
+#
+# The likelier explanation is upstream anyway. Our local screen's rank
+# correlation with the validator is +0.139 (n=55 molecules scored by both), and
+# our own screen re-measuring the SAME molecule agrees with itself at only +0.373
+# (n=3,963, median spread 55 rank points). Reweighting an ordering built on a
+# signal that noisy cannot do much, whatever the weights.
 
 
 def _compiled_metric_ranks(
@@ -120,16 +98,6 @@ def _compiled_metric_ranks(
             ) + 1
         ranks[metric] = float(rank)
     return ranks
-
-
-def _compiled_selection_score(
-    metrics: dict[str, float], compiled: dict[str, np.ndarray]
-) -> float:
-    """The weighted rank sum the fleet is ordered by."""
-    ranks = _compiled_metric_ranks(metrics, compiled)
-    return float(
-        sum(selection_metric_weight(metric) * rank for metric, rank in ranks.items())
-    )
 
 
 def _compiled_category_rank_sums(
@@ -447,11 +415,8 @@ def main() -> None:
         # Ordering runs on the weighted sum; the category matrix above still
         # carries the validator's own unweighted view for the emitted estimate.
         score_matrix = [
-            [
-                _compiled_selection_score(metrics, field)
-                for field in compiled_fields
-            ]
-            for metrics in observations
+            [float(sum(categories.values())) for categories in by_field]
+            for by_field in category_matrix
         ]
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]

@@ -281,107 +281,44 @@ def test_ranker_rejects_structurally_unstable_observations(tmp_path, monkeypatch
         raise AssertionError("four good and four bad observations were accepted")
 
 
-def test_selection_weights_preserve_the_rank_sum_scale():
+def test_selection_orders_on_the_plain_rank_sum():
     """
-    --competitive-score-threshold and --maximum-p90-rank-sum were calibrated
-    against an unweighted sum of len(METRICS) dense ranks. If the weights do not
-    sum to that same total, every one of those gates silently changes meaning.
-    """
-    from nanobody_opt.rank_exact import selection_metric_weight
-    from nanobody_opt.simulate_round import METRICS
+    Selection orders on the unweighted sum of dense ranks -- the same quantity
+    the validator's own score is built from.
 
-    total = sum(selection_metric_weight(metric) for metric in METRICS)
-    assert total == pytest.approx(float(len(METRICS)))
-    assert all(selection_metric_weight(metric) > 0 for metric in METRICS)
-
-
-def test_selection_leans_on_the_confidence_drivers():
-    """
-    Confidence was the whole gap to the field over 25103-25112. The three
-    metrics that move confidence_rank hardest must each outweigh a plain metric,
-    and must outrank the two weaker confidence metrics.
-    """
-    from nanobody_opt.rank_exact import selection_metric_weight
-    from nanobody_opt.simulate_round import METRICS
-
-    drivers = ("interaction_pae", "min_design_to_target_pae", "design_to_target_iptm")
-    weak = ("design_ptm", "design_iiptm")
-    for driver in drivers:
-        assert driver in METRICS
-        assert selection_metric_weight(driver) > 1.0
-        for other in weak:
-            assert selection_metric_weight(driver) > selection_metric_weight(other)
-
-
-def test_no_confidence_driver_is_demoted_below_a_plain_metric():
-    """
-    The first cut of this weighting raised two drivers and, to hold the overall
-    total, pushed everything else to 0.75 -- which demoted
-    min_design_to_target_pae, the second strongest driver, and thinned the other
-    two categories as a side effect. Leaning on confidence must not cost a
-    driver its weight.
-    """
-    from nanobody_opt.rank_exact import (
-        CONFIDENCE_DRIVER_STRENGTH,
-        selection_metric_weight,
-    )
-
-    ordered = sorted(
-        CONFIDENCE_DRIVER_STRENGTH, key=CONFIDENCE_DRIVER_STRENGTH.get, reverse=True
-    )
-    weights = [selection_metric_weight(metric) for metric in ordered]
-    assert weights == sorted(weights, reverse=True), (
-        "weight order must follow measured driver strength"
-    )
-    assert selection_metric_weight("min_design_to_target_pae") > 1.0
-
-
-def test_each_category_keeps_its_share_of_the_ordering():
-    """
-    The validator scores developability, confidence and physical interaction
-    equally. Buying confidence by starving the other two would trade away the
-    parity we already hold there, so the redistribution happens inside the
-    confidence category and every category total is unchanged.
-    """
-    from nanobody_opt.rank_exact import selection_metric_weight
-    from nanobody_opt.simulate_round import METRIC_CATEGORIES
-
-    for category, names in METRIC_CATEGORIES.items():
-        total = sum(selection_metric_weight(metric) for metric in names)
-        assert total == pytest.approx(float(len(names))), (
-            f"{category} no longer carries its original share"
-        )
-
-
-def test_the_validator_estimate_stays_unweighted():
-    """
-    The weighting is a SELECTION change only. The emitted category rank sums are
-    our estimate of the validator's own score, and the validator does not weight
-    metrics -- so they must remain a plain sum of dense ranks.
+    A weighted variant ran for eleven epochs in two shapes and was reverted:
+    best-rank medians across unweighted, weighted, and weighted-plus-generator-
+    fixes were 3, 8 and 18, mean confidence gaps +3, +27 and +25, and the only
+    win in that stretch belongs to the unweighted ordering. Reintroducing a
+    weighting needs evidence that did not exist then, so this pins the contract.
     """
     import numpy as np
     from nanobody_opt.rank_exact import (
         _compiled_category_rank_sums,
         _compiled_metric_ranks,
-        _compiled_selection_score,
     )
     from nanobody_opt.simulate_round import METRIC_CATEGORIES, METRICS
 
-    rng = np.random.default_rng(11)
-    field = {m: np.sort(rng.normal(size=64)) for m in METRICS}
-    point = {m: float(rng.normal()) for m in METRICS}
+    rng = np.random.default_rng(23)
+    field = {metric: np.sort(rng.normal(size=64)) for metric in METRICS}
+    point = {metric: float(rng.normal()) for metric in METRICS}
 
     ranks = _compiled_metric_ranks(point, field)
     categories = _compiled_category_rank_sums(point, field)
+
+    # Every category is a plain sum of its members' dense ranks...
     for category, names in METRIC_CATEGORIES.items():
         assert categories[category] == pytest.approx(sum(ranks[n] for n in names))
+    # ...and the score the fleet is ordered by is the plain sum of those, with
+    # no metric counting for more than any other.
+    assert sum(categories.values()) == pytest.approx(sum(ranks.values()))
 
-    # ...and the selection score is a different, weighted quantity.
-    unweighted = sum(ranks.values())
-    weighted = _compiled_selection_score(point, field)
-    from nanobody_opt.rank_exact import selection_metric_weight
 
-    assert weighted == pytest.approx(
-        sum(selection_metric_weight(m) * r for m, r in ranks.items())
-    )
-    assert weighted != pytest.approx(unweighted)
+def test_no_per_metric_weighting_remains():
+    """The weighting is gone, not merely unused."""
+    from nanobody_opt import rank_exact
+
+    assert not hasattr(rank_exact, "selection_metric_weight")
+    assert not hasattr(rank_exact, "SELECTION_METRIC_WEIGHTS")
+    assert not hasattr(rank_exact, "_compiled_selection_score")
+
