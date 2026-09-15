@@ -15,9 +15,24 @@ uid.  Observed live on uid 19: "Commitment set successfully".
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 MINER = ROOT / "neurons/miner/miner.py"
 SERVICES = ROOT / "ansible/nanobody_services.yml"
+
+
+def _services_text() -> str:
+    """The playbook, or a skip.
+
+    The deploy copies the source tree to the box WITHOUT ansible/ and runs the
+    suite there, so an assertion about the playbook has nothing to read on the
+    host.  Reading it unguarded failed a deploy outright.
+    """
+    if not SERVICES.is_file():
+        pytest.skip("ansible/ is not part of the deployed tree")
+    return SERVICES.read_text()
+
 
 
 def test_the_submit_path_is_gated_on_chain_state_only():
@@ -47,7 +62,7 @@ def test_the_flag_exists_and_defaults_to_submitting():
 
 def test_the_deployed_chain_writer_passes_the_flag():
     """The gate is worthless if the deploy does not turn it on."""
-    services = SERVICES.read_text()
+    services = _services_text()
     assert "neurons/miner/miner.py" in services
     assert "--chain-state-only" in services, (
         "ansible/nanobody_services.yml launches the chain writer; without this "
@@ -63,7 +78,7 @@ def test_the_deploy_restarts_a_writer_whose_command_line_drifted():
     old process kept committing.  The deploy must compare the whole command
     line against what it would launch, and restart on any difference.
     """
-    services = SERVICES.read_text()
+    services = _services_text()
     assert "chain_writer_miner_argv" in services, (
         "the launch argv must be one var, or the drift check compares against "
         "a copy that can disagree with what is started"
@@ -80,7 +95,7 @@ def test_the_deploy_restarts_a_writer_whose_command_line_drifted():
 def test_the_launch_argv_carries_the_flag():
     import yaml
 
-    doc = yaml.safe_load(SERVICES.read_text())
+    doc = yaml.safe_load(_services_text())
     play = next(p for p in doc if isinstance(p, dict) and "vars" in p)
     argv = play["vars"]["chain_writer_miner_argv"]
     assert "--chain-state-only" in argv

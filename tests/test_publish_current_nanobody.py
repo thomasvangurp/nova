@@ -1528,10 +1528,15 @@ def test_the_strict_upgrade_is_wired_into_the_deploy():
     floor alone, no quality gate -- because --strict-qualification defaults off
     and nothing passed it.
     """
-    services = yaml.safe_load(
-        (Path(__file__).resolve().parents[1]
-         / "ansible/nanobody_services.yml").read_text()
+    playbook = (
+        Path(__file__).resolve().parents[1] / "ansible/nanobody_services.yml"
     )
+    if not playbook.is_file():
+        # The deploy copies the source tree to the box WITHOUT ansible/, and
+        # then runs this suite there.  This assertion is about the repository,
+        # so it has nothing to check on the host it deployed to.
+        pytest.skip("ansible/ is not part of the deployed tree")
+    services = yaml.safe_load(playbook.read_text())
     argv = None
     for play in services:
         for task in play.get("tasks", []) + play.get("post_tasks", []):
