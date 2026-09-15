@@ -662,11 +662,11 @@
           # and made fleets reach the chain late; the commit moved ahead of it,
           # so what is left is an upgrade attempt on a fleet that is already
           # on chain.  The reserve is what keeps it free: it will not start
-          # inside the last 150 blocks of an epoch, so it can never delay the
+          # inside the last 220 blocks of an epoch, so it can never delay the
           # next cycle.
           - --strict-qualification
           - --strict-qualification-reserve-blocks
-          - "{{ nanobody_strict_qualification_reserve_blocks | default(150) }}"
+          - "{{ nanobody_strict_qualification_reserve_blocks | default(220) }}"
           # One commitment per uid, each signed by that uid's own hotkey. Without
           # this the publisher selects a distinct sequence for every uid the
           # coldkey holds and then only one is ever sent, because a commitment is

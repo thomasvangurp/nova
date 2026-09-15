@@ -1452,14 +1452,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict-qualification-reserve-blocks",
         type=int,
-        default=150,
+        default=220,
         help=(
             "only start the strict upgrade when at least this many blocks "
-            "remain in the epoch. The strict rank has been measured at about "
-            "twenty minutes -- 100 blocks -- and starting one it cannot "
-            "finish burns the GPUs for an upgrade that _assert_same_epoch "
-            "then throws away. 150 blocks is that measurement plus room for "
-            "the layer-2, novelty and CDR passes that follow it"
+            "remain in the epoch. The epoch check that follows the strict rank "
+            "runs AFTER it, so a rank that overruns does not stop at the "
+            "boundary -- it delays the NEXT epoch's provisional publish, which "
+            "is the failure that had this whole stage switched off. Timed live "
+            "at over 25 minutes (125+ blocks), not the 20 the old comment "
+            "claimed; 220 is that measurement plus the layer-2, novelty and "
+            "CDR passes that follow it, plus margin. An upgrade is optional; "
+            "the commit it would delay is not"
         ),
     )
     parser.add_argument(
