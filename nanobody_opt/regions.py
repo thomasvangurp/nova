@@ -16,6 +16,7 @@ that motif. Immunoglobulin FR4 is eleven residues in the supported aligned VHH
 family, which provides a bounded fallback after the other anchors agree:
     Cys22 ... Trp(WVRQ) ... Cys96(YYC) ... [WF]GxG or 11-residue FR4
 """
+import re
 from dataclasses import dataclass
 
 
@@ -30,6 +31,9 @@ class Regions:
         for start, end in (self.cdr1, self.cdr2, self.cdr3):
             out.extend(range(start, end))
         return out
+
+
+_FR4_ANCHOR = re.compile(r"[WF]G.G")
 
 
 def find_regions(seq: str) -> Regions:
@@ -57,10 +61,9 @@ def find_regions(seq: str) -> Regions:
 
     # FR4 starts at the WGxG/FGxG motif after CDR3. The original WG-only
     # heuristic rejects current sequences that the validator numbers as VHH.
-    import re
-    m = re.search(r"[WF]G.G", seq[c2:])
+    m = _FR4_ANCHOR.search(seq, c2)
     if m:
-        fr4_start = c2 + m.start()
+        fr4_start = m.start()
     else:
         # Validator-accepted P20809 leaders include FR4 variants such as
         # ``FAAGT...`` that no longer match [WF]GxG.  Their V-domain alignment

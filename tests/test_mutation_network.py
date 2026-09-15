@@ -203,8 +203,51 @@ def _reference_neighbour_order(network, sequence, *, limit, maximum_distance,
     return compatible[: max(256, limit * 16)]
 
 
+def _reference_adjustment(network, source, candidate, *, distance_penalty):
+    """The directional-effect refinement exactly as it was before batching.
+
+    Walks every position of the pair through the public ``mutation_contexts``
+    and recomputes each effect's shrinkage and uncertainty terms per lookup --
+    the shape the batched path replaces.  Kept here so the fast path is pinned
+    to an independent implementation rather than to its own output.
+    """
+    import math
+
+    from nanobody_opt.mutation_network import mutation_contexts
+
+    adjustment = 0.0
+    supported = 0
+    uncertainty_squared = 0.0
+    for context in mutation_contexts(
+        source,
+        candidate,
+        contact_positions=network._contacts.get(source, set()),
+    ):
+        key = (
+            int(context["position"]),
+            str(context["from_residue"]),
+            str(context["to_residue"]),
+            str(context["region"]),
+            str(context["contact_class"]),
+        )
+        effect = network._effects.get(key)
+        if effect is None:
+            adjustment += distance_penalty
+            continue
+        support = int(effect["support"])
+        shrinkage = support / (support + 3.0)
+        uncertainty = float(effect["uncertainty"])
+        adjustment += (
+            shrinkage * float(effect["median_score_delta"])
+            + uncertainty / math.sqrt(max(support, 1))
+        )
+        supported += 1
+        uncertainty_squared += uncertainty**2
+    return adjustment, supported, math.sqrt(uncertainty_squared)
+
+
 def _refine(network, shortlist, query, *, limit, distance_penalty):
-    """Apply neighbours()' own refinement to a reference shortlist."""
+    """Refine a reference shortlist with the reference refinement."""
     refined = []
     import numpy as np
     from nanobody_opt.mutation_network import AA_INDEX
@@ -213,8 +256,8 @@ def _refine(network, shortlist, query, *, limit, distance_penalty):
     distances = np.count_nonzero(network._vectors != vector, axis=1)
     for index in shortlist:
         node = network.nodes[index]
-        adjustment, _, _ = network._prospective_adjustment(
-            node.sequence, query, distance_penalty=distance_penalty
+        adjustment, _, _ = _reference_adjustment(
+            network, node.sequence, query, distance_penalty=distance_penalty
         )
         refined.append((
             node.score + adjustment, int(distances[index]), node.sequence,
@@ -293,3 +336,267 @@ def test_the_neighbour_shortlist_boundary_keeps_ties():
     neighbours = network.neighbours("AAAA", limit=8, maximum_distance=None)
     assert neighbours
     assert len({item.sequence for item in neighbours}) == len(neighbours)
+
+
+# A real 127-residue VHH, so ``find_regions`` actually resolves cdr1/cdr2/cdr3
+# rather than falling back to an all-framework map.  Short synthetic sequences
+# never parse, which would leave the region and contact key components -- the
+# parts the batched refinement caches -- completely unexercised.
+_VHH_SCAFFOLD = (
+    "KWQLVESGGGLVKPGGSLRLSCAASGFTMSQGWYGMSWFRQAPGKEREWVSLISSSGSTWMDY"
+    "PDSVKGRFTSSRDNAKNSLYGQMNSLRAEDTAVYYCAVSLGAHPCPMEGEMESFGAGTTVTVAP"
+)
+
+
+def _mutate(rng, sequence, count, alphabet):
+    residues = list(sequence)
+    for position in rng.sample(range(len(residues)), count):
+        residues[position] = rng.choice(alphabet)
+    return "".join(residues)
+
+
+def _vhh_effect_network(rng, *, node_count=300, query_count=3, effect_count=140):
+    """A VHH network with learned effects that genuinely fire.
+
+    Effects are harvested from substitutions the queries actually make against
+    the nodes, so the refinement reorders instead of degenerating into
+    ``distance_penalty * distance`` for every candidate -- which is what a
+    network with no effects silently does.
+    """
+    from nanobody_opt.mutation_network import AMINO_ACIDS, mutation_contexts
+
+    alphabet = AMINO_ACIDS
+    sequences = {
+        _mutate(rng, _VHH_SCAFFOLD, rng.randint(1, 8), alphabet)
+        for _ in range(node_count)
+    }
+    # One node whose FR1 cysteine anchor is gone: ``find_regions`` raises for it
+    # and every position must fall back to "framework".  The cached parse has to
+    # reproduce that, not just the happy path.
+    unparseable = _VHH_SCAFFOLD[:21] + "A" + _VHH_SCAFFOLD[22:]
+    sequences.add(unparseable)
+    records = []
+    for order, sequence in enumerate(sorted(sequences)):
+        record = {
+            "sequence": sequence,
+            # A small score vocabulary forces exact ties in the primary key.
+            "score": float(rng.choice([10.0, 20.0, 30.0])),
+            "epoch": 1,
+            "source": "elite",
+        }
+        if order % 5 == 0:
+            record["pose_stability"] = {
+                "consensus_nanobody_contact_positions": sorted(
+                    rng.sample(range(1, len(sequence) + 1), 12)
+                )
+            }
+        records.append(record)
+
+    queries = []
+    while len(queries) < query_count:
+        candidate = _mutate(rng, _VHH_SCAFFOLD, rng.randint(1, 5), alphabet)
+        if candidate not in sequences and candidate not in queries:
+            queries.append(candidate)
+
+    probe = MutationNetwork(records)
+    harvest = []
+    for query in queries:
+        for node in rng.sample(probe.nodes, min(40, len(probe.nodes))):
+            harvest.extend(
+                (
+                    int(context["position"]),
+                    str(context["from_residue"]),
+                    str(context["to_residue"]),
+                    str(context["region"]),
+                    str(context["contact_class"]),
+                )
+                for context in mutation_contexts(
+                    node.sequence,
+                    query,
+                    contact_positions=probe._contacts.get(node.sequence, set()),
+                )
+            )
+    chosen = rng.sample(sorted(set(harvest)), min(effect_count, len(set(harvest))))
+    effects = [
+        {
+            "position": position,
+            "from_residue": before,
+            "to_residue": after,
+            "region": region,
+            "contact_class": contact_class,
+            "support": rng.randint(1, 40),
+            "median_score_delta": rng.uniform(-37.3, 37.3),
+            "uncertainty": rng.uniform(0.0, 19.7),
+        }
+        for position, before, after, region, contact_class in chosen
+    ]
+    return MutationNetwork(records, mutation_effects=effects), queries, unparseable
+
+
+def _key_coverage(network, queries):
+    """Which region / contact-class branches the effects in play actually hit."""
+    from nanobody_opt.mutation_network import mutation_contexts
+
+    regions = set()
+    contact_classes = set()
+    hits = 0
+    for query in queries:
+        for node in network.nodes:
+            for context in mutation_contexts(
+                node.sequence,
+                query,
+                contact_positions=network._contacts.get(node.sequence, set()),
+            ):
+                key = (
+                    int(context["position"]),
+                    str(context["from_residue"]),
+                    str(context["to_residue"]),
+                    str(context["region"]),
+                    str(context["contact_class"]),
+                )
+                if key in network._effects:
+                    hits += 1
+                    regions.add(key[3])
+                    contact_classes.add(key[4])
+    return hits, regions, contact_classes
+
+
+def test_batched_refinement_reproduces_the_original_effect_arithmetic():
+    # The refinement result is a sort key AND a returned field
+    # (``adjusted_score``), so "close enough" is not enough: compare the exact
+    # float, via repr so a -0.0/0.0 swap cannot slip through ``==``.
+    import random
+
+    import numpy as np
+    from nanobody_opt.mutation_network import AA_INDEX
+
+    rng = random.Random(20260916)
+    total_supported = 0
+    total_hits = 0
+    seen_regions = set()
+    seen_contact_classes = set()
+    for _ in range(2):
+        network, queries, unparseable = _vhh_effect_network(rng)
+        indices = list(range(len(network.nodes)))
+        for query in queries:
+            vector = np.asarray([AA_INDEX[r] for r in query], dtype=np.uint8)
+            batched = network._prospective_adjustments(
+                indices, query, vector, distance_penalty=5.0
+            )
+            reference = [
+                _reference_adjustment(
+                    network, network.nodes[index].sequence, query,
+                    distance_penalty=5.0,
+                )
+                for index in indices
+            ]
+            assert [repr(item) for item in batched] == [
+                repr(item) for item in reference
+            ]
+            assert batched == reference
+            total_supported += sum(item[1] for item in batched)
+        hits, regions, contact_classes = _key_coverage(network, queries)
+        total_hits += hits
+        seen_regions |= regions
+        seen_contact_classes |= contact_classes
+        # The node whose anchors are gone must take the failed-parse path.
+        broken = network._by_sequence[unparseable]
+        assert network._region_bounds(network.nodes.index(broken)) is None
+
+    # Guard the guard: if the effects never fired, the comparison above would
+    # be comparing distance_penalty * distance against itself.
+    assert total_supported > 0
+    assert total_hits > 0
+    assert {"cdr1", "cdr2", "cdr3", "framework"} <= seen_regions
+    assert {"contact", "unknown"} <= seen_contact_classes
+
+
+def test_cached_region_parse_matches_a_fresh_parse_for_every_node():
+    import random
+
+    from nanobody_opt.regions import find_regions
+
+    rng = random.Random(20260918)
+    network, _, _ = _vhh_effect_network(rng, node_count=120)
+    parsed = 0
+    failed = 0
+    for index, node in enumerate(network.nodes):
+        try:
+            regions = find_regions(node.sequence)
+        except ValueError:
+            expected = None
+            failed += 1
+        else:
+            expected = (regions.cdr1, regions.cdr2, regions.cdr3)
+            parsed += 1
+        assert network._region_bounds(index) == expected
+        # Second call must come from the cache and still agree.
+        assert network._region_bounds(index) == expected
+    assert parsed and failed
+
+
+def test_neighbours_with_learned_effects_match_the_full_sort_reference():
+    # The same contract as the unrefined ranking test, but on a network whose
+    # directional effects actually reorder the shortlist -- the case where the
+    # refinement, not the primary key, decides what is returned.
+    import random
+
+    rng = random.Random(20260917)
+    reordered = 0
+    for _ in range(2):
+        network, queries, _ = _vhh_effect_network(rng, node_count=320)
+        for query in queries:
+            for maximum_distance in (None, 6):
+                for limit in (1, 16):
+                    expected = _reference_neighbour_order(
+                        network, query, limit=limit,
+                        maximum_distance=maximum_distance,
+                        distance_penalty=5.0,
+                    )
+                    reference = _refine(
+                        network, expected, query, limit=limit,
+                        distance_penalty=5.0,
+                    )
+                    actual = network.neighbours(
+                        query, limit=limit,
+                        maximum_distance=maximum_distance,
+                        distance_penalty=5.0,
+                    )
+                    assert [
+                        (item.sequence, item.distance,
+                         round(item.adjusted_score, 12))
+                        for item in actual
+                    ] == reference
+                    if actual and expected and (
+                        actual[0].sequence
+                        != network.nodes[expected[0]].sequence
+                    ):
+                        reordered += 1
+    # If the refinement never moved anything, every assertion above would hold
+    # for a refinement that did nothing at all.
+    assert reordered > 0
+
+
+def test_supported_effect_count_and_uncertainty_survive_the_batched_path():
+    import random
+
+    import numpy as np
+    from nanobody_opt.mutation_network import AA_INDEX
+
+    rng = random.Random(20260919)
+    network, queries, _ = _vhh_effect_network(rng, node_count=200)
+    checked = 0
+    for query in queries:
+        vector = np.asarray([AA_INDEX[r] for r in query], dtype=np.uint8)
+        for neighbour in network.neighbours(query, limit=24,
+                                            maximum_distance=None):
+            _, supported, uncertainty = _reference_adjustment(
+                network, neighbour.sequence, query, distance_penalty=5.0
+            )
+            assert neighbour.supported_effect_count == supported
+            assert repr(neighbour.effect_uncertainty) == repr(uncertainty)
+            checked += 1
+        assert network._prospective_adjustments(
+            [], query, vector, distance_penalty=5.0
+        ) == []
+    assert checked >= 24
