@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import pytest
+from dataclasses import replace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -77,11 +78,25 @@ def test_the_decay_constant_reproduces_the_polled_measurement():
     assert 0.0019 < 1.0 - sm.DECAY_PER_BLOCK < 0.0020
 
 
-def test_waiting_pays_at_current_prices_and_stops_paying_near_tau0_046():
-    economics = sm.wait_economics(0.13, sm.SlotPolicy())
-    assert economics["wait_value_ratio"] > 2.5
-    assert 0.045 < economics["breakeven_recycle_tao"] < 0.048
-    assert sm.wait_economics(0.03, sm.SlotPolicy())["wait_value_ratio"] < 1.0
+def test_the_breakeven_price_follows_the_ticket_value_rather_than_a_literal():
+    """Waiting pays while the price is far above breakeven, and stops below it.
+
+    The breakeven is DERIVED from TICKET_TAO_PER_EPOCH, so it is computed here
+    rather than restated: a literal here silently contradicts the constant the
+    moment the ticket value is re-measured, which is exactly what happened when
+    the modelled tau1.34 prize was replaced by the real tau0.9106.
+    """
+    policy = sm.SlotPolicy()
+    breakeven = sm.wait_economics(0.13, policy)["breakeven_recycle_tao"]
+    # Breakeven scales with the ticket value: double the ticket, double the
+    # price at which waiting stops paying.
+    richer = sm.SlotPolicy(ticket_tao_per_epoch=policy.ticket_tao_per_epoch * 2)
+    assert sm.wait_economics(0.13, richer)["breakeven_recycle_tao"] == pytest.approx(
+        breakeven * 2, rel=1e-9
+    )
+    # Well above breakeven, waiting wins; well below it, buying wins.
+    assert sm.wait_economics(breakeven * 4, policy)["wait_value_ratio"] > 2.5
+    assert sm.wait_economics(breakeven * 0.5, policy)["wait_value_ratio"] < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -597,16 +612,28 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
     remembered = sm.read_chain_state(chain, 68, OURS, log_last_block=same_interval)
     assert remembered.registered == 0
     assert remembered.last_registration_block == same_interval
-    # A hotkey we bought and then had pruned still blocks a same-interval rebuy:
-    # the interval quota was spent even though nothing survived to show for it.
+    # Holding ZERO uids, the interval quota must not hold us: a hotkey we bought
+    # and then had pruned leaves us with no fleet at all, and pacing exists to
+    # buy a marginal ticket cheaply, not to decide whether we mine.  The quota
+    # and the stagger both rank below the urgent branch now.
     assert sm.decide(remembered, history, [], sm.SlotPolicy()).reason == (
-        sm.REASON_OWN_INTERVAL
+        sm.REASON_BUY_URGENT
     )
-    # One interval back it is the stagger, not the quota, that holds us.
     earlier = sm.read_chain_state(
         chain, 68, OURS, log_last_block=same_interval - sm.ADJUSTMENT_INTERVAL
     )
-    assert sm.decide(earlier, history, [], sm.SlotPolicy()).reason == sm.REASON_STAGGER
+    assert sm.decide(earlier, history, [], sm.SlotPolicy()).reason == (
+        sm.REASON_BUY_URGENT
+    )
+    # Pacing still governs the regime it was written for: once a working fleet
+    # is held, a marginal ticket is bought cheaply rather than immediately.
+    # With the live policy that regime is empty -- urgent_below is unset, so
+    # urgent_threshold IS the target and every shortfall is urgent by design.
+    paced = sm.SlotPolicy(urgent_below=4)
+    held = replace(remembered, registered_uids=(7, 19, 24, 38, 44, 46))
+    assert held.registered >= paced.urgent_threshold
+    assert paced.target - held.registered > 0
+    assert sm.decide(held, history, [], paced).reason == sm.REASON_OWN_INTERVAL
 
 
 def test_the_report_line_is_printable_for_every_decision(capsys):
@@ -615,7 +642,13 @@ def test_the_report_line_is_printable_for_every_decision(capsys):
         state_at(history),
         state_at(history, registered=()),
         state_at(history, registered=tuple(range(sm.SlotPolicy().target))),
-        state_at(history, last=history[-1].block - 1),
+        # A full fleet that bought this interval: pacing applies only once a
+        # working fleet is held, so this is where own_interval is reachable.
+        state_at(
+            history,
+            registered=tuple(range(sm.SlotPolicy().target)) + (99,),
+            last=history[-1].block - 1,
+        ),
     ):
         decision = sm.decide(state, history, [], sm.SlotPolicy())
         sm._report(decision, executed=False, hotkey="nova68-slot-1")
@@ -625,7 +658,7 @@ def test_the_report_line_is_printable_for_every_decision(capsys):
     assert all("executed=false" in line for line in lines)
     assert f"reason={sm.REASON_BUY_URGENT}" in lines[1]
     assert f"reason={sm.REASON_TARGET_MET}" in lines[2]
-    assert f"reason={sm.REASON_OWN_INTERVAL}" in lines[3]
+    assert f"reason={sm.REASON_TARGET_MET}" in lines[3]
 
 
 def test_the_credential_source_follows_the_platform():
@@ -847,7 +880,17 @@ def test_the_deployed_target_matches_the_policy():
 
     spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
     assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"
-    assert float(spend.group(1)) == sm.SlotPolicy().max_spend_tao_per_day
+    # The budget is DERIVED from the target and the price ceiling, so the
+    # deployed literal is checked against the derivation rather than against a
+    # second literal.  A budget that cannot sustain the target is how the fleet
+    # was capped below it twice without any gate saying so.
+    assert float(spend.group(1)) == pytest.approx(
+        sm.SlotPolicy().daily_budget_tao, abs=0.01
+    )
+    assert float(spend.group(1)) >= (
+        sm.SlotPolicy().target * (24.0 / sm.IMMUNITY_HOURS)
+        * sm.SlotPolicy().max_recycle_tao - 0.01
+    ), "the deployed budget cannot sustain the deployed target at the ceiling"
 
 
 def test_haggling_stops_below_a_full_fleet():

@@ -83,6 +83,8 @@ from typing import Any
 
 #: ``adjustment_interval`` as read from the subnet hyperparameters.
 ADJUSTMENT_INTERVAL = 360
+#: Immunity period a uid survives before it is evictable, in hours (5000 blocks).
+IMMUNITY_HOURS = 5000 * 12 / 3600
 #: ``epoch = block // 361`` on this subnet.  Used for logging and ticket EV.
 EPOCH_LENGTH = 361
 #: ``immunity_period``: 5000 blocks, 13.85 epochs, 16.7 hours.
@@ -98,9 +100,25 @@ DECAY_PER_BLOCK = 0.5 ** (1.0 / ADJUSTMENT_INTERVAL)
 #: the decision core keeps importing with the standard library alone.
 MINIMUM_SS58_LENGTH = 40
 #: Expected value of holding one registered ticket for one epoch, in tau.
-#: 155.6 alpha/epoch * 40% track share * ~tau0.0215/alpha ~= tau1.34 per win,
-#: spread over a field of about 42.
-TICKET_TAO_PER_EPOCH = 0.032
+#:
+#: Measured, not modelled: the prize is tau0.9106 per win, and our own per-ticket
+#: rank-1 rate is 2.3% against a chance rate of 1/42 = 2.38% -- our tickets are,
+#: to within measurement, exactly average.  So one ticket is worth its fair share
+#: of one prize per epoch: 0.9106 / 42.
+#:
+#: The previous 0.032 came from the same 1/42 share applied to a MODELLED prize
+#: of tau1.34 (155.6 alpha/epoch * 40% track share * ~tau0.0215/alpha).  The
+#: share was right; the prize was 47% too high, so every wait/buy comparison
+#: built on it over-valued the ticket being foregone.
+#:
+#: This is the AVERAGE marginal value at fair share, which holds precisely
+#: because our tickets measure as average quality.  It is not the marginal value
+#: of the next ticket in general: winner-take-all makes win probability concave
+#: in ticket count, so replaying real epoch fields, 6 -> 12 tickets moves the
+#: win rate 16.5% -> 29.9% (+2.2 points per ticket) while 12 -> 24 adds only
+#: +1.9 points per ticket.  Above a full fleet this constant overstates the
+#: next ticket; at our current holding it does not.
+TICKET_TAO_PER_EPOCH = 0.9106 / 42
 
 # Decision actions.
 BUY = "buy"
@@ -218,10 +236,24 @@ class SlotPolicy:
     #: about tau1.98. The previous tau1.71 was scaled per-uid from a target of 7
     #: and silently capped the fleet at ~10.3 however fast the gates allowed.
     #:
-    #: tau2.10 leaves headroom above that without reaching the stagger's own
-    #: ceiling of 17.3 buys/day, so the schedule stays the binding constraint
-    #: rather than the wallet.
-    max_spend_tao_per_day: float = 2.10
+    #: ``None`` derives it, because a fixed number silently caps the fleet the
+    #: moment the price moves.  That has now happened twice: tau1.71 was scaled
+    #: from a target of 7 and capped us at ~10.3, and tau2.10 was sized at
+    #: tau0.115 per registration -- at the tau0.13-0.18 actually being quoted it
+    #: funds only 8.1-9.7 uids, so the WALLET became the binding constraint
+    #: while the decision log kept reporting gate reasons.
+    #:
+    #: Derived, the budget cannot contradict the two numbers that define the
+    #: intent: sustaining ``target`` uids against churn at the highest price we
+    #: have said we will pay.  A uid is evictable when its 5000-block (16.7 h)
+    #: immunity lapses, so holding N costs N * 24/16.7 registrations a day.  At
+    #: the target of 12 and a tau0.20 ceiling that is 17.3 * 0.20 = tau3.46.
+    #:
+    #: It is worth it at that price: 12 uids win 1-(1-1/42)^12 = 25% of epochs,
+    #: which at tau0.9106 over 19.94 epochs/day earns tau4.56 against tau3.46.
+    #: Typical prices spend well under the cap; the ceiling still refuses
+    #: anything above tau0.20 per registration.
+    max_spend_tao_per_day: float | None = None
     #: ``None`` means :func:`default_stagger_blocks` of the target.
     stagger_blocks: int | None = None
     #: How far back the decay floor looks.  Deliberately finite: a competitor
@@ -241,7 +273,7 @@ class SlotPolicy:
             raise ValueError("target must be at least one hotkey")
         if self.max_recycle_tao <= 0:
             raise ValueError("recycle ceiling must be positive")
-        if self.max_spend_tao_per_day <= 0:
+        if self.max_spend_tao_per_day is not None and self.max_spend_tao_per_day <= 0:
             raise ValueError("daily budget must be positive")
         if not 0.0 < self.decay_per_block < 1.0:
             raise ValueError("decay per block must lie strictly inside (0, 1)")
@@ -249,6 +281,13 @@ class SlotPolicy:
             raise ValueError("floor tolerance cannot be negative")
         if self.lookback_blocks < 1 or self.min_history_samples < 2:
             raise ValueError("the decay floor needs a real window to be measured in")
+
+    @property
+    def daily_budget_tao(self) -> float:
+        """Spend cap: enough to SUSTAIN ``target`` uids at the price ceiling."""
+        if self.max_spend_tao_per_day is not None:
+            return self.max_spend_tao_per_day
+        return self.target * (24.0 / IMMUNITY_HOURS) * self.max_recycle_tao
 
     @property
     def urgent_threshold(self) -> int:
@@ -414,8 +453,8 @@ def decide(
         "stagger_blocks": policy.stagger,
         "max_recycle_tao": policy.max_recycle_tao,
         "spent_tao_last_day": spent,
-        "max_spend_tao_per_day": policy.max_spend_tao_per_day,
-        "budget_headroom_tao": policy.max_spend_tao_per_day - spent,
+        "max_spend_tao_per_day": policy.daily_budget_tao,
+        "budget_headroom_tao": policy.daily_budget_tao - spent,
         **wait_economics(state.recycle_tao, policy),
     }
 
@@ -424,6 +463,25 @@ def decide(
 
     if shortfall <= 0:
         return verdict(WAIT, REASON_TARGET_MET)
+    # Hard rails first: both refuse absolutely and cannot be traded away.
+    if state.recycle_tao > policy.max_recycle_tao:
+        return verdict(WAIT, REASON_CEILING)
+    if spent + state.recycle_tao > policy.daily_budget_tao:
+        return verdict(WAIT, REASON_BUDGET)
+    # Below a working fleet, an affordable price beats a perfect one -- and
+    # beats a tidy purchase cadence too.
+    #
+    # This check used to sit BELOW the two pacing rules, which made it dead
+    # code: every cycle that had bought recently returned own_interval or
+    # stagger first, so a fleet five short of target reported
+    # "already_registered_this_interval" indefinitely while the urgent branch
+    # it was supposed to reach never ran.  Pacing exists to buy a marginal
+    # twelfth ticket cheaply; it must not govern whether we hold a working
+    # fleet at all.  The two hard rails still outrank it, so this cannot spend
+    # past the ceiling or the daily budget.
+    if state.registered < policy.urgent_threshold:
+        return verdict(BUY, REASON_BUY_URGENT)
+    # Pacing, which only applies once a working fleet is already held.
     if (
         state.last_registration_block is not None
         and state.last_registration_block // ADJUSTMENT_INTERVAL == state.interval
@@ -431,14 +489,6 @@ def decide(
         return verdict(WAIT, REASON_OWN_INTERVAL)
     if blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
-    # Hard rails first: both refuse absolutely and cannot be traded away.
-    if state.recycle_tao > policy.max_recycle_tao:
-        return verdict(WAIT, REASON_CEILING)
-    if spent + state.recycle_tao > policy.max_spend_tao_per_day:
-        return verdict(WAIT, REASON_BUDGET)
-    # Below a working fleet, an affordable price beats a perfect one.
-    if state.registered < policy.urgent_threshold:
-        return verdict(BUY, REASON_BUY_URGENT)
     if floor is None:
         return verdict(WAIT, REASON_NO_HISTORY)
     if state.recycle_tao > floor * (1.0 + policy.floor_tolerance):
