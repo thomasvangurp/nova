@@ -854,28 +854,9 @@ def _publish_fleet(
     # blocks, so at most one registration lands inside it. A uid lost at its own
     # commit block also returns its sequence to the same pool.
     SPARE_TICKETS = 1
-    # Keep every ticket clear of the field the validator dedupes against, not
-    # only of our own other tickets.  Without this the fleet was mutually
-    # distinct and still collided with the crowd: on epoch 25138's committed
-    # fleet, 6 of 7 tickets sat at or above 0.95 identity to the previous
-    # epoch's top-50, which is why we commit seven and see two to five scored.
-    crowd = [
-        str(item).strip().upper()
-        for item in (payload.get("crowd") or [])
-        if isinstance(item, str) and item.strip()
-    ]
     sequences = fleet_module.distinct_sequences(
-        payload,
-        len(crew) + SPARE_TICKETS,
-        cdrs=_annotated_cdrs(cdr_annotations),
-        crowd=crowd,
+        payload, len(crew) + SPARE_TICKETS, cdrs=_annotated_cdrs(cdr_annotations)
     )
-    if len(sequences) < len(crew):
-        print(
-            f"FLEET_CROWDED only {len(sequences)} of {len(crew)} uid(s) have a "
-            f"ticket clear of the {len(crowd)}-sequence crowd",
-            flush=True,
-        )
     fleet_sequences = sequences[: len(crew)]
     spare_sequences = sequences[len(crew) :]
     try:
