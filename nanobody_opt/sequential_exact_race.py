@@ -1300,7 +1300,7 @@ def main() -> None:
             "which is the wrong statistic for a bound: a third of tranches "
             "overran the window it promised.  7.5 covers all but the outlier. "
             "The asymmetry justifies the margin -- over-estimating costs a few "
-            "screened candidates out of a pool already holding ~27% that break "
+            "screened candidates out of a pool already holding ~27%% that break "
             "no settled position, while under-estimating costs the entire "
             "replication window"
         ),
