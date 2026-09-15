@@ -56,7 +56,15 @@
     nanobody_maximum_initial_screen_p90: 90
     nanobody_weak_initial_fallback_after: 80
     nanobody_finalists: 5
-    nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_batch.py
+    # The fast adapter, not score_boltzgen_batch.py. Both implement the same
+    # validator protocol and produce the same metric vector, but the batch
+    # scorer runs the full BoltzGen pipeline at roughly 84 seconds of GPU per
+    # observation against the adapter's 0.62 -- about 100x. The live profile has
+    # always overridden this to the adapter; leaving the slow one as the DEFAULT
+    # meant a deploy that forgot the profile would come up looking healthy and
+    # screen a hundredth of the candidates, which is indistinguishable from
+    # bad luck on the leaderboard. The default is now what production runs.
+    nanobody_exact_scorer: /root/nanobody_opt/score_boltzgen_fast_adapter.py
     nanobody_basin_shrinkage_strength: 2.0
     nanobody_minimum_basin_samples: 3
     nanobody_qualification_observations: 8
