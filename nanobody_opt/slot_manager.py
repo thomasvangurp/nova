@@ -1024,9 +1024,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--urgent-below",
         type=int,
-        default=3,
+        default=None,
         help="below this many held hotkeys, buy at any affordable price rather "
-        "than waiting for a decay floor",
+        "than waiting for a decay floor (default: the target, because haggling "
+        "below a full fleet is a permanent refusal -- the price is within "
+        "tolerance of the floor only 4.7%% of the time)",
     )
     parser.add_argument("--lookback-blocks", type=int, default=180)
     parser.add_argument("--floor-tolerance", type=float, default=0.05)

@@ -898,3 +898,18 @@ def test_the_price_ceiling_and_budget_still_bound_an_urgent_buy():
     assert decision.action == sm.WAIT
     assert decision.reason == sm.REASON_CEILING
 
+
+
+def test_the_cli_does_not_hardcode_the_urgency_threshold():
+    """
+    --urgent-below carried default=3 while SlotPolicy defaulted to the target,
+    so the deployed purchaser kept haggling at 6 of 12 and the policy change had
+    no effect at all. The same literal-default trap as --minimum-hotkeys before
+    it: a value that looks configured and silently is not.
+    """
+    import inspect
+
+    source = inspect.getsource(sm)
+    assert '"--urgent-below",\n        type=int,\n        default=3,' not in source
+    # and the resolved policy must track the target when nothing is passed
+    assert sm.SlotPolicy().urgent_threshold == sm.SlotPolicy().target
