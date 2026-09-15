@@ -924,7 +924,8 @@ def _register(
     network: str,
     keychain_service_env: str,
     credential_source: str = "auto",
-) -> bool:
+    maximum_recycle_tao: float | None = None,
+) -> tuple[bool, float | None]:
     """Create the hotkey if needed and burn-register it.
 
     Only ``--execute-registrations`` reaches this function, and nothing in the
@@ -943,7 +944,22 @@ def _register(
     _unlock_coldkey(wallet, keychain_service_env, credential_source)
     subtensor_factory = getattr(bittensor, "Subtensor", None) or bittensor.subtensor
     subtensor = subtensor_factory(network=network)
-    return bool(
+    # The SDK's burned_register takes no max-cost argument, so nothing bounds
+    # what the chain charges when the extrinsic lands.  The price we gated on
+    # was read at decide() time, which may be many seconds and several
+    # registrations ago -- and the burn price rises with registrations in an
+    # interval.  Re-reading it here cannot close that window, but it shrinks it
+    # from "since the decision" to "since the last block", and it refuses a
+    # price that has already moved above the ceiling.
+    price_before = _recycle_tao(subtensor, netuid)
+    if maximum_recycle_tao is not None and price_before > maximum_recycle_tao:
+        print(
+            f"SLOT_ABORT price moved to {price_before:.6f} above ceiling "
+            f"{maximum_recycle_tao:.6f} between the decision and the extrinsic",
+            flush=True,
+        )
+        return False, None
+    registered = bool(
         subtensor.burned_register(
             wallet=wallet,
             netuid=netuid,
@@ -951,6 +967,16 @@ def _register(
             wait_for_finalization=True,
         )
     )
+    # What the ledger records decides the daily budget, so it must be what we
+    # PAID, not what we expected to pay.  The price at the block the extrinsic
+    # landed in is the closest observable; fall back to the pre-flight read.
+    realised: float | None = price_before
+    if registered:
+        try:
+            realised = _recycle_tao(subtensor, netuid)
+        except Exception:  # noqa: BLE001 - a failed read must not lose the buy
+            realised = price_before
+    return registered, realised
 
 
 def _policy_from_args(args: argparse.Namespace) -> SlotPolicy:
@@ -1163,17 +1189,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         hotkey = None
         executed = False
+        realised_tao: float | None = None
         if decision.is_buy:
             hotkey = next_hotkey_name(_hotkey_names(args.wallet), args.hotkey_prefix)
             if args.execute:
-                executed = _register(
+                executed, realised_tao = _register(
                     wallet_name=args.wallet,
                     hotkey_name=hotkey,
                     netuid=args.netuid,
                     network=args.network,
                     keychain_service_env=args.keychain_service_env,
                     credential_source=args.credential_source,
+                    maximum_recycle_tao=policy.max_recycle_tao,
                 )
+        # The budget counts what the ledger says we spent, so an executed buy
+        # records the realised price rather than the decision-time estimate.
+        spend_detail = dict(decision.detail)
+        if executed and realised_tao is not None:
+            spend_detail["decision_recycle_tao"] = spend_detail.get("recycle_tao")
+            spend_detail["recycle_tao"] = realised_tao
         append_record(
             args.decision_log,
             {
@@ -1185,7 +1219,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "hotkey": hotkey,
                 "netuid": args.netuid,
                 "coldkey_ss58": coldkey_ss58,
-                **decision.detail,
+                **spend_detail,
             },
         )
         _report(decision, executed=executed, hotkey=hotkey)

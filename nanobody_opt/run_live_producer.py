@@ -327,6 +327,7 @@ def _run_iteration(
                 if args.maximum_exhaustive_singles is not None
                 else []
             ),
+            "--settled-deviation-policy", str(args.settled_deviation_policy),
             "--random-seed", str(epoch * 100 + iteration),
         ]
         for previous in sorted(producer_root.glob("iteration_*/candidates.csv")):
@@ -609,6 +610,12 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         help="proposals generated per elite parent before Layer-2 filtering",
+    )
+    parser.add_argument(
+        "--settled-deviation-policy",
+        choices=("repair-only", "prefer", "off"),
+        default="repair-only",
+        help="forwarded to local_neighborhood; 'off' is the rollback lever",
     )
     parser.add_argument("--proposal-limit", type=int, default=384)
     parser.add_argument("--basin-fraction", type=float, default=0.70)

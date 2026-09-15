@@ -1291,25 +1291,36 @@ def main() -> None:
     parser.add_argument(
         "--screen-gpu-seconds-per-candidate",
         type=float,
-        default=6.0,
+        default=7.5,
         help=(
             "GPU-seconds to fold one screened candidate, for sizing a tranche "
             "against the window that will remain when it FINISHES.  Measured "
-            "5.43 on the fast adapter (1,899s for 700 candidates on two 4090s) "
-            "and rounded up: over-estimating costs a few screened candidates, "
-            "under-estimating costs the whole replication window"
+            "across seven live 700-candidate tranches: 5.16, 5.33, 5.43, 5.48, "
+            "5.73, 6.39, 9.01 -- mean 6.08.  The previous default WAS that mean, "
+            "which is the wrong statistic for a bound: a third of tranches "
+            "overran the window it promised.  7.5 covers all but the outlier. "
+            "The asymmetry justifies the margin -- over-estimating costs a few "
+            "screened candidates out of a pool already holding ~27% that break "
+            "no settled position, while under-estimating costs the entire "
+            "replication window"
         ),
     )
     parser.add_argument(
         "--replication-load-seconds",
         type=float,
-        default=39.0,
-        help="measured scorer start-up per invocation, for shortlist sizing",
+        default=80.0,
+        help=(
+            "measured scorer start-up per invocation, for shortlist sizing.  "
+            "Raised from 39 against 68-80s observed for the shortlist-1 rounds "
+            "of epoch 25136: start-up is amortised over fewer candidates in "
+            "exactly the narrowed regime this sizing exists to protect, so an "
+            "optimistic figure here is worst where it matters most"
+        ),
     )
     parser.add_argument(
         "--replication-seconds-per-observation",
         type=float,
-        default=9.2,
+        default=20.0,
         help=(
             "GPU-seconds per observation for shortlist sizing.  Deliberately "
             "conservative against the measured 6.23: the profile's own figure "

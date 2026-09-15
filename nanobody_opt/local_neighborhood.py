@@ -273,6 +273,11 @@ def _winner_records(path: Path | None, length: int) -> list[dict[str, object]]:
     return records
 
 
+#: Whether proposal ordering prefers candidates that break no settled position.
+#: Set from --settled-deviation-policy; "off" restores the pre-change ordering.
+_PREFER_ADHERENTS = True
+
+
 def _proposal_ranking_key(item: dict[str, object]) -> tuple[object, ...]:
     source_priority = {
         "c_terminal_single_substitution": 0,
@@ -297,7 +302,7 @@ def _proposal_ranking_key(item: dict[str, object]) -> tuple[object, ...]:
         # graded rather than binary: uids fill from candidates that adhere, and
         # only fall back to ones that deviate when the strict pool runs out --
         # and then to the least-deviating first.
-        int(item.get("new_settled_deviations", 0)),
+        int(item.get("new_settled_deviations", 0)) if _PREFER_ADHERENTS else 0,
         int(item.get("parent_basin_rank", 10**9)),
         float(item.get("predecessor_potential_score", math.inf)),
         float(item.get("predecessor_consensus_score", math.inf)),
@@ -1190,17 +1195,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--settled-deviation-policy",
-        choices=("repair-only", "allow"),
+        choices=("repair-only", "prefer", "off"),
         default="repair-only",
         help=(
             "repair-only: never propose a NEW deviation at a position the field "
-            "has settled (>=80%% consensus); a settled site may keep its residue "
-            "or be repaired toward consensus.  Measured over 1,427 live tickets, "
-            "each such deviation costs ~14 rank points and a molecule carrying "
-            "none averages 132.7, better than the leading rival's mean of 134.2. "
-            "Other lanes can still produce one, so every candidate records "
-            "new_settled_deviations and ordering prefers the lowest: uids fill "
-            "from candidates that adhere and fall back to the least-deviating"
+            "has settled (>=80%% consensus), AND order proposals by breakage.  "
+            "prefer: order by breakage but leave the draw unrestricted.  off: "
+            "neither -- the exact pre-change behaviour, which is the rollback "
+            "lever.  Measured over 1,427 live tickets, each such deviation costs "
+            "~14 rank points and a molecule carrying none averages 132.7, better "
+            "than the leading rival's mean of 134.2.  Other lanes can still "
+            "produce one, so every candidate records new_settled_deviations and "
+            "the ordering prefers the lowest: uids fill from candidates that "
+            "adhere and fall back to the least-deviating"
         ),
     )
     parser.add_argument("--min-mutations", type=int, default=1)
@@ -1399,6 +1406,12 @@ def main() -> None:
     )
     consensus = field_consensus(background_sequences, length)
     repair_only = args.settled_deviation_policy == "repair-only"
+    # The ordering key is a SEPARATE effect from the draw restriction: it drives
+    # deduplication, the per-lane limits and the proposal-limit truncation, so
+    # leaving it on while the draw is unrestricted still changes which molecules
+    # are emitted.  "off" disables both, which is what a rollback needs.
+    global _PREFER_ADHERENTS
+    _PREFER_ADHERENTS = args.settled_deviation_policy != "off"
     settled = sum(
         1 for _, share in consensus.values() if share >= FIELD_CONSENSUS_THRESHOLD
     )

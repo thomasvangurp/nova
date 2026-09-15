@@ -749,3 +749,36 @@ def test_ordering_puts_adhering_candidates_first():
     ordered = sorted([item(2, prior=99.0), item(0, prior=0.1), item(1, prior=50.0)],
                      key=_proposal_ranking_key)
     assert [i["new_settled_deviations"] for i in ordered] == [0, 1, 2]
+
+
+def test_off_restores_the_pre_change_ordering():
+    """'off' must disable the ordering key too, not only the draw.
+
+    The key drives _deduplicate_proposals, the per-lane limits and the
+    proposal-limit truncation, so leaving it on while the draw is unrestricted
+    still changes which molecules are emitted.  A rollback lever that only half
+    rolls back is not one.
+    """
+    from nanobody_opt import local_neighborhood as ln
+
+    def item(deviations, prior):
+        return {
+            "new_settled_deviations": deviations,
+            "parent_basin_rank": 0,
+            "proposal_prior_score": prior,
+            "edit_distance": 1,
+            "sequence": f"S{deviations}",
+            "proposal_type": "local_substitution",
+        }
+    items = [item(2, 99.0), item(0, 0.1)]
+    original = ln._PREFER_ADHERENTS
+    try:
+        ln._PREFER_ADHERENTS = True
+        assert [i["new_settled_deviations"]
+                for i in sorted(items, key=ln._proposal_ranking_key)] == [0, 2]
+        ln._PREFER_ADHERENTS = False
+        # With the lever off, the prior decides again, as it did before.
+        assert [i["new_settled_deviations"]
+                for i in sorted(items, key=ln._proposal_ranking_key)] == [2, 0]
+    finally:
+        ln._PREFER_ADHERENTS = original
