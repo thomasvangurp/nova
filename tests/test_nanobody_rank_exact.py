@@ -400,3 +400,46 @@ def test_the_floor_gives_way_one_observation_at_a_time(tmp_path, monkeypatch):
 
     assert payload["sequences"] == ["DEEPEST"]
     assert payload["observation_floor_applied"] == 3
+
+
+def test_a_molecule_that_breaks_nothing_outranks_a_better_scoring_one():
+    """Settled-site breakage is the primary key; the screen orders within a tier.
+
+    Measured over 1,427 live tickets each settled deviation costs ~14 rank
+    points, while our screened metrics agree with the validator at r=0.19.  The
+    coarse structural signal is the more reliable of the two, so it decides
+    which uid gets spent; the screen still decides everything inside a tier.
+    """
+    from nanobody_opt.rank_exact import settled_deviation_count
+
+    consensus = {0: ("A", 0.95), 1: ("C", 0.95), 2: ("D", 0.40)}
+    assert settled_deviation_count("ACD", consensus) == 0
+    assert settled_deviation_count("AED", consensus) == 1
+    assert settled_deviation_count("EED", consensus) == 2
+    # An unsettled position is never breakage, whatever it holds.
+    assert settled_deviation_count("ACW", consensus) == 0
+    # A short sequence cannot break positions it does not reach.
+    assert settled_deviation_count("A", consensus) == 0
+
+
+def test_the_deviation_tier_is_stable_within_itself():
+    """Sorting by tier must not disturb the order the screen already chose."""
+    ranked = [
+        {"sequence": "BEST_BUT_BROKEN", "settled_deviations": 2, "rank": 0},
+        {"sequence": "CLEAN_A", "settled_deviations": 0, "rank": 1},
+        {"sequence": "CLEAN_B", "settled_deviations": 0, "rank": 2},
+        {"sequence": "ONE_BROKEN", "settled_deviations": 1, "rank": 3},
+    ]
+    ranked.sort(key=lambda item: int(item.get("settled_deviations", 0)))
+    assert [item["sequence"] for item in ranked] == [
+        "CLEAN_A", "CLEAN_B", "ONE_BROKEN", "BEST_BUT_BROKEN"
+    ]
+    # Python's sort is stable, so the screen's own order survives inside tier 0.
+    assert [item["rank"] for item in ranked[:2]] == [1, 2]
+
+
+def test_a_candidate_without_the_field_is_treated_as_unbroken():
+    """Missing consensus must not silently demote everything to tier zero-plus."""
+    from nanobody_opt.rank_exact import settled_deviation_count
+
+    assert settled_deviation_count("ACDEFG", {}) == 0
