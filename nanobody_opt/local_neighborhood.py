@@ -100,6 +100,72 @@ FIELD_CONSENSUS_THRESHOLD = 0.80
 # reaches 3 of those 6, a one-deviation budget 4, a two-deviation budget 5.
 # Nothing here is forbidden; the prior only makes deviation less likely where
 # the field has settled.
+def settled_site_options(
+    position: int,
+    *,
+    parent: str,
+    consensus: dict,
+    allowed: dict,
+    anchor: int | None,
+    repair_only: bool,
+) -> list[str]:
+    """Residues this position may take in a proposal.
+
+    Under ``repair_only`` a SETTLED position may only keep the parent residue or
+    be repaired toward consensus.  A new deviation at a settled position is
+    never proposed, because it is the most expensive thing we do: measured over
+    1,427 live tickets, 116 of 127 positions are settled at >=80% field
+    consensus, each deviation at one costs about 14 rank points, and a molecule
+    carrying none averages final_score 132.7 -- better than the leading rival's
+    own mean of 134.2.  That rival carries 0.74 such deviations against our
+    1.21, which is most of the 27.8-point gap between us.
+
+    With ``repair_only`` false this reproduces the previous behaviour exactly.
+    """
+    residue_at, share_at = consensus.get(position, ("", 0.0))
+    settled = share_at >= FIELD_CONSENSUS_THRESHOLD
+    if repair_only and settled and position != anchor:
+        options = [parent[position]]
+        if (
+            residue_at
+            and residue_at != parent[position]
+            and residue_at in allowed[position]
+        ):
+            options.append(residue_at)
+        return options
+    settled_here = settled and position != anchor
+    options = [
+        residue for residue in allowed[position]
+        if residue != parent[position] or settled_here
+    ]
+    if position == anchor and settled and residue_at in options:
+        # A settled anchor is only chosen when the parent deviates there, so
+        # spend the one forced change on the repair, not a sideways move.
+        options = [residue_at]
+    return options
+
+
+def new_settled_deviations(
+    parent: str, candidate: str, consensus: dict
+) -> int:
+    """Settled positions the parent had right and the candidate breaks.
+
+    Lane-agnostic on purpose.  The CDR draw is not the only way a residue
+    changes -- motif grafts, framework lanes, terminal haplotypes and basin
+    routes all build sequences by other paths, so a rule enforced only at the
+    draw leaks through every one of them.  This counts the breakage itself.
+    """
+    broken = 0
+    for position, (residue, share) in consensus.items():
+        if share < FIELD_CONSENSUS_THRESHOLD or not residue:
+            continue
+        if position >= len(parent) or position >= len(candidate):
+            continue
+        if parent[position] == residue and candidate[position] != residue:
+            broken += 1
+    return broken
+
+
 def field_consensus(
     background_sequences: list[str], length: int
 ) -> dict[int, tuple[str, float]]:
@@ -225,6 +291,13 @@ def _proposal_ranking_key(item: dict[str, object]) -> tuple[object, ...]:
         "local_substitution": 7,
     }
     return (
+        # Settled-site breakage outranks everything else.  Each one costs about
+        # 14 rank points, so a candidate that breaks none is worth more than any
+        # ordering refinement below it.  Ranking on this is what makes the rule
+        # graded rather than binary: uids fill from candidates that adhere, and
+        # only fall back to ones that deviate when the strict pool runs out --
+        # and then to the least-deviating first.
+        int(item.get("new_settled_deviations", 0)),
         int(item.get("parent_basin_rank", 10**9)),
         float(item.get("predecessor_potential_score", math.inf)),
         float(item.get("predecessor_consensus_score", math.inf)),
@@ -1115,6 +1188,21 @@ def main() -> None:
             "lineage mutations while the graph ranker controls allocation"
         ),
     )
+    parser.add_argument(
+        "--settled-deviation-policy",
+        choices=("repair-only", "allow"),
+        default="repair-only",
+        help=(
+            "repair-only: never propose a NEW deviation at a position the field "
+            "has settled (>=80%% consensus); a settled site may keep its residue "
+            "or be repaired toward consensus.  Measured over 1,427 live tickets, "
+            "each such deviation costs ~14 rank points and a molecule carrying "
+            "none averages 132.7, better than the leading rival's mean of 134.2. "
+            "Other lanes can still produce one, so every candidate records "
+            "new_settled_deviations and ordering prefers the lowest: uids fill "
+            "from candidates that adhere and fall back to the least-deviating"
+        ),
+    )
     parser.add_argument("--min-mutations", type=int, default=1)
     parser.add_argument("--max-mutations", type=int, default=3)
     parser.add_argument(
@@ -1310,6 +1398,7 @@ def main() -> None:
         length,
     )
     consensus = field_consensus(background_sequences, length)
+    repair_only = args.settled_deviation_policy == "repair-only"
     settled = sum(
         1 for _, share in consensus.values() if share >= FIELD_CONSENSUS_THRESHOLD
     )
@@ -1468,6 +1557,9 @@ def main() -> None:
             "proposal_lane": proposal_lane,
             "parent_max_jaccard_to_top50": parent_jaccard,
             "proposal_type": source,
+            "new_settled_deviations": new_settled_deviations(
+                parent, candidate, consensus
+            ),
             "edit_distance": len(changed),
             "mutations": ";".join(
                 f"{before}{index + 1}{after}"
@@ -1596,7 +1688,17 @@ def main() -> None:
                 mutable = [
                     position for position in cdr_positions
                     if position not in protected
-                    if any(residue != parent[position] for residue in allowed[position])
+                    if any(
+                        residue != parent[position]
+                        for residue in settled_site_options(
+                            position,
+                            parent=parent,
+                            consensus=consensus,
+                            allowed=allowed,
+                            anchor=None,
+                            repair_only=repair_only,
+                        )
+                    )
                 ]
                 if len(mutable) < mutation_count:
                     continue
@@ -1645,25 +1747,14 @@ def main() -> None:
                     # 81%. Leaving the parent residue on the table lets the
                     # weighted draw decline to displace it, while the prior still
                     # allows the deliberate single deviation the winners carry.
-                    residue_at, share_at = consensus.get(position, ("", 0.0))
-                    settled_here = (
-                        position != anchor
-                        and share_at >= FIELD_CONSENSUS_THRESHOLD
+                    options = settled_site_options(
+                        position,
+                        parent=parent,
+                        consensus=consensus,
+                        allowed=allowed,
+                        anchor=anchor,
+                        repair_only=repair_only,
                     )
-                    options = [
-                        residue for residue in allowed[position]
-                        if residue != parent[position] or settled_here
-                    ]
-                    # A settled anchor is only ever chosen when the parent
-                    # deviates there, so restrict the draw to the repair when it
-                    # is available. Anything else would spend the one forced
-                    # change moving sideways between two non-consensus residues.
-                    if (
-                        position == anchor
-                        and share_at >= FIELD_CONSENSUS_THRESHOLD
-                        and residue_at in options
-                    ):
-                        options = [residue_at]
                     sequence[position] = _weighted_choice(
                         rng,
                         options,

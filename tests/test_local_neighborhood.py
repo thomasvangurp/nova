@@ -644,3 +644,108 @@ def test_a_settled_anchor_draws_the_consensus_residue():
     if position == anchor and share_at >= FIELD_CONSENSUS_THRESHOLD and residue_at in options:
         options = [residue_at]
     assert options == ["G"], "the forced change must restore consensus"
+
+
+# ---------------------------------------------------------------------------
+# Settled-site policy: never break what the field has already agreed on.
+# ---------------------------------------------------------------------------
+
+def _consensus(spec):
+    """{position: (residue, share)} from a compact {pos: (res, share)} spec."""
+    return dict(spec)
+
+
+def test_a_settled_site_the_parent_has_right_is_frozen_under_repair_only():
+    from nanobody_opt.local_neighborhood import settled_site_options
+
+    parent = "AAAA"
+    consensus = _consensus({1: ("A", 0.95)})
+    allowed = {1: ["A", "C", "D"]}
+    # Parent already agrees with a settled field: nothing may be proposed.
+    assert settled_site_options(
+        1, parent=parent, consensus=consensus, allowed=allowed,
+        anchor=None, repair_only=True,
+    ) == ["A"]
+    # Without the policy the other residues are still on the table.
+    assert set(settled_site_options(
+        1, parent=parent, consensus=consensus, allowed=allowed,
+        anchor=None, repair_only=False,
+    )) == {"A", "C", "D"}
+
+
+def test_a_settled_site_the_parent_has_wrong_may_only_be_repaired():
+    from nanobody_opt.local_neighborhood import settled_site_options
+
+    parent = "ACAA"
+    consensus = _consensus({1: ("A", 0.95)})
+    allowed = {1: ["A", "C", "D"]}
+    # Keep the deviation or repair it -- never move sideways to D.
+    assert settled_site_options(
+        1, parent=parent, consensus=consensus, allowed=allowed,
+        anchor=None, repair_only=True,
+    ) == ["C", "A"]
+
+
+def test_an_unsettled_site_is_untouched_by_the_policy():
+    from nanobody_opt.local_neighborhood import settled_site_options
+
+    parent = "AAAA"
+    consensus = _consensus({1: ("A", 0.40)})     # below threshold
+    allowed = {1: ["A", "C", "D"]}
+    strict = settled_site_options(
+        1, parent=parent, consensus=consensus, allowed=allowed,
+        anchor=None, repair_only=True,
+    )
+    free = settled_site_options(
+        1, parent=parent, consensus=consensus, allowed=allowed,
+        anchor=None, repair_only=False,
+    )
+    assert strict == free == ["C", "D"]
+
+
+def test_the_anchor_repair_still_wins_under_either_policy():
+    from nanobody_opt.local_neighborhood import settled_site_options
+
+    parent = "ACAA"
+    consensus = _consensus({1: ("A", 0.95)})
+    allowed = {1: ["A", "C", "D"]}
+    for repair_only in (True, False):
+        assert settled_site_options(
+            1, parent=parent, consensus=consensus, allowed=allowed,
+            anchor=1, repair_only=repair_only,
+        ) == ["A"], "a settled anchor spends its forced change on the repair"
+
+
+def test_breakage_is_counted_whatever_lane_produced_it():
+    from nanobody_opt.local_neighborhood import new_settled_deviations
+
+    consensus = _consensus({0: ("A", 0.95), 1: ("C", 0.95), 2: ("D", 0.40)})
+    parent = "ACD"
+    # A motif graft or terminal haplotype can break a settled site without ever
+    # touching the CDR draw; the count must see it regardless.
+    assert new_settled_deviations(parent, "ACD", consensus) == 0
+    assert new_settled_deviations(parent, "AED", consensus) == 1
+    assert new_settled_deviations(parent, "EED", consensus) == 2
+    # An unsettled position is not breakage.
+    assert new_settled_deviations(parent, "ACE", consensus) == 0
+    # Repairing a deviation the parent already had is not breakage either.
+    assert new_settled_deviations("AED", "ACD", consensus) == 0
+
+
+def test_ordering_puts_adhering_candidates_first():
+    from nanobody_opt.local_neighborhood import _proposal_ranking_key
+
+    def item(deviations, prior=1.0):
+        return {
+            "new_settled_deviations": deviations,
+            "parent_basin_rank": 0,
+            "proposal_prior_score": prior,
+            "edit_distance": 1,
+            "sequence": f"S{deviations}",
+            "proposal_type": "local_substitution",
+        }
+    # A candidate that breaks nothing outranks a better-scoring one that does,
+    # so the fleet fills from adhering candidates and only then falls back.
+    ordered = sorted([item(2, prior=99.0), item(0, prior=0.1), item(1, prior=50.0)],
+                     key=_proposal_ranking_key)
+    assert [i["new_settled_deviations"] for i in ordered] == [0, 1, 2]
