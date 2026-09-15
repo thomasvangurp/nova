@@ -899,6 +899,61 @@
     # expensive half, and the one that has actually broken -- would quietly stop
     # being proved. Several rows instead, requiring at least one to pass end to
     # end, keeps that proof while surviving one bad neighbour.
+    # ImmuneBuilder ships its four NanoBodyBuilder2 weight files as ZERO-BYTE
+    # placeholders and fetches them from Zenodo on first use. That fetch can
+    # fail silently, and the package's own are_weights_ready() only checks the
+    # files EXIST -- so a box with four empty files looks ready and then dies
+    # inside the canary with
+    #     RuntimeError: PytorchStreamReader failed reading zip archive
+    # which names neither the weights nor the download. A fresh box hit exactly
+    # this and cost an evening of epochs.
+    #
+    # Verify against Content-Length, never a size threshold. The four models are
+    # NOT the same size -- model_1 is about 61 MB and the rest about 214 MB --
+    # so any single floor either passes a truncated file or re-fetches a
+    # complete one. Both happened here: a 4 MB floor accepted a 23 MB truncated
+    # model_2 as done, and a 200 MB floor rejected a complete 61 MB model_1.
+    #
+    # aria2c with parallel connections, because Zenodo single-stream is slow
+    # enough to matter: three 214 MB files finished in about the time one curl
+    # took.
+    - name: Ensure the NanoBodyBuilder2 weights are present and complete
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          IB=/root/.pixi/envs/metanano/lib/python3.12/site-packages/ImmuneBuilder/trained_model
+          command -v aria2c >/dev/null 2>&1 || \
+            (apt-get update -qq && apt-get install -y -qq aria2) >/dev/null 2>&1
+          changed=0
+          for n in 1 2 3 4; do
+            url="https://zenodo.org/record/7258553/files/nanobody_model_${n}?download=1"
+            expected=$(curl -sSLI --max-time 60 "$url" \
+              | awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2}END{printf "%d", v+0}')
+            have=$(stat -c%s "$IB/nanobody_model_$n" 2>/dev/null || echo 0)
+            if [ "$expected" -gt 0 ] && [ "$have" = "$expected" ]; then
+              continue
+            fi
+            changed=1
+            rm -f "$IB/nanobody_model_$n" "$IB/nanobody_model_$n.aria2"
+            if command -v aria2c >/dev/null 2>&1; then
+              aria2c -x16 -s16 -k1M --retry-wait=3 --max-tries=10 \
+                     --console-log-level=warn --allow-overwrite=true \
+                     -d "$IB" -o "nanobody_model_$n" "$url" >/dev/null 2>&1
+            else
+              curl -sSL --retry 8 --retry-delay 5 --max-time 3600 \
+                   -o "$IB/nanobody_model_$n" "$url"
+            fi
+            got=$(stat -c%s "$IB/nanobody_model_$n" 2>/dev/null || echo 0)
+            if [ "$got" != "$expected" ]; then
+              echo "nanobody_model_$n is $got bytes, expected $expected" >&2
+              exit 1
+            fi
+          done
+          echo "changed=$changed"
+        executable: /bin/bash
+      register: immunebuilder_weights
+      changed_when: "'changed=1' in immunebuilder_weights.stdout"
+
     - name: Prove Layer-2 computes real IgBLAST and TNP results
       ansible.builtin.command:
         argv:

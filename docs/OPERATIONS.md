@@ -277,3 +277,60 @@ database all lived only on rented hardware. Snapshots now live in
   run the lean profile for two days and compare normalised rank.
 - Registration is priced 4–15× below a ticket's EV. That gap is what makes
   ticket-stacking pay, and it is the sort of thing a market closes.
+
+## Bringing up a fresh box
+
+Three things bite on a box that has never run before. All three cost epochs on
+2026-09-14 and all three now have a gate or a note.
+
+### The hotkeys must arrive before the deploy
+
+A fresh box has no wallets, so `deploy/nanobody_deploy.sh` stops at
+`no local hotkey is registered to this coldkey`. The Pi already knows how to fix
+this and finds the new box by its `nova-nanobody-pixi` label on its own:
+
+```bash
+ssh thomasg@raspberrypi sudo systemctl start nova-hotkey-sync.service
+```
+
+It syncs every `nova68-slot*` key and needs no reconfiguration for a new rental.
+
+### The chain-writer resolver cannot work on the first deploy
+
+`deploy/resolve_chain_writer.py` reads `/root/artifacts/chain_state.json` to find
+which local hotkey is registered -- but the *miner* writes that file, and the
+miner is what the deploy is about to install. On a fresh box it can never
+resolve, so name a registered hotkey explicitly for the first run only:
+
+```bash
+NOVA_CHAIN_WRITER_HOTKEY=nova68-slot-10 bash deploy/nanobody_deploy.sh nanobody.yml
+```
+
+Any hotkey currently registered to the coldkey will do; the playbook asserts it.
+Subsequent deploys resolve on their own once the miner has written chain state.
+
+### ImmuneBuilder weights are zero-byte placeholders until first use
+
+See "Ensure the NanoBodyBuilder2 weights are present and complete" in
+ansible/nanobody.yml. The short version: the package ships four empty files and
+downloads them from Zenodo on demand; when that fails the files still exist, so
+`are_weights_ready()` is satisfied and the failure surfaces much later as
+`RuntimeError: PytorchStreamReader failed reading zip archive` inside the
+Layer-2 canary.
+
+Verify against `Content-Length`, never a size threshold: **the four models are
+not the same size** -- model_1 is ~61 MB and models 2-4 are ~214 MB. A 4 MB
+floor accepted a truncated 23 MB model_2; a 200 MB floor rejected a complete
+61 MB model_1. Both mistakes were made here.
+
+## pkill -f from an Ansible ad-hoc shell kills the session
+
+`ansible ... -m shell -a "pkill -f curl.*nanobody_model"` matches Ansible's own
+command line -- the pattern is in it -- and the module dies with `rc=-15` before
+the real target is touched. Use the bracket trick so the pattern cannot match
+itself:
+
+```bash
+pkill -f '[c]url.*nanobody_model'
+```
+
