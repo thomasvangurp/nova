@@ -1,0 +1,60 @@
+# {{ ansible_managed }}
+#
+# Pull the mutation database off the rented GPU box and keep it here.
+#
+# The box is the one machine in this system that is expected to die, and it died
+# twice in a day: once when vast.ai credit ran out, once when the host stopped
+# being available. `vastai start` then answers "Required resources are currently
+# unavailable, state change queued" and that instance may never come back.
+#
+# Almost everything on it is reconstructible -- code from git, hotkeys from
+# here, the target archive by download, and the public half of the mutation
+# database with `pixi run seed-mutation-database` against the leaderboard API.
+# One thing is not: that database also holds every exact screen we ever ran
+# locally, 37,232 of them at the last count, against roughly 40 scored
+# submissions per epoch the public API can return. When the box died there was
+# no backup, and only a stale snapshot on a laptop and a lucky restart of the
+# dead instance saved it.
+#
+# It runs here because this is the machine that survived both deaths: it holds
+# the coldkey, so it is never a rental.
+#
+# No credential is involved. The script reads the vast.ai API key itself from a
+# file in {{ slot_manager_home }}, the same way {{ hotkey_sync_script | basename }}
+# does; the Environment= lines below are locators -- a label, an interpreter
+# path, a destination directory -- never secrets.
+[Unit]
+Description=Back up the mutation database from the rented GPU box
+Documentation=file://{{ artifact_backup_script }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Same user as the hotkey sync: the SSH key that reaches the box and the vast.ai
+# API key both live in this user's home, and a file copy has no reason to be root.
+User={{ slot_manager_user }}
+Group={{ slot_manager_user }}
+Environment=HOME={{ slot_manager_home }}
+# oneshot on a timer, not a resident loop: nothing to hold in memory between
+# runs, and a process that exits cannot wedge holding ssh to a destroyed box.
+Type=oneshot
+WorkingDirectory={{ slot_host_workspace }}
+Environment=NOVA_VAST_LABEL={{ hotkey_sync_vast_label }}
+Environment=NOVA_VASTAI={{ hotkey_sync_vastai }}
+Environment=NOVA_BACKUP_DIR={{ artifact_backup_dir }}
+Environment=NOVA_BACKUP_KEEP={{ artifact_backup_keep }}
+ExecStart={{ artifact_backup_script }}
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+# full, not strict: strict mounts this user's home read-only and the script
+# writes the backup there, and shells out to ssh and scp which read keys from it.
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# No [Install]: the timer is what gets enabled.

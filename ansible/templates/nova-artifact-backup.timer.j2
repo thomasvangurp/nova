@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+#
+# How much screening history we are willing to lose.
+#
+# {{ (artifact_backup_interval_seconds / 60) | round | int }} minutes is shorter
+# than one 72-minute epoch, so at most one epoch of exact screens is ever at
+# risk. A tick with nothing new costs one vast.ai API call, one sqlite .backup
+# on the box and one scp of a file that only grows a few MB an epoch, which is
+# why this is a schedule rather than a hook on anything.
+[Unit]
+Description=Keep a recent copy of the mutation database off the rental
+
+[Timer]
+# Named explicitly rather than left to the implicit same-basename default, and
+# NOT as Requires= in [Unit]: Requires= on a timer fires the service the moment
+# the timer starts, so `systemctl restart <timer>` -- what the deploy does --
+# would pull a backup before the deploy has finished checking it can.
+Unit={{ artifact_backup_service }}.service
+OnBootSec={{ artifact_backup_boot_seconds }}
+OnUnitActiveSec={{ artifact_backup_interval_seconds }}
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

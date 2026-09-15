@@ -106,6 +106,16 @@
     hotkey_sync_vast_label: "{{ lookup('env', 'NOVA_VAST_LABEL') | default('nova-nanobody-pixi', true) }}"
     hotkey_sync_boot_seconds: 300
     hotkey_sync_interval_seconds: 600
+    artifact_backup_service: nova-artifact-backup
+    artifact_backup_script: "{{ slot_host_workspace }}/backup_artifacts.sh"
+    artifact_backup_dir: "{{ slot_manager_home }}/nova-backups"
+    # A window of snapshots, not one copy: corruption noticed late is only
+    # recoverable if an older good one survives. 24 at 30 minutes is 12 hours.
+    artifact_backup_keep: 24
+    artifact_backup_boot_seconds: 420
+    # Shorter than one 72-minute epoch, so at most one epoch of exact screens
+    # is ever at risk.
+    artifact_backup_interval_seconds: 1800
     # Locators only: the paths the vastai client itself reads its API key from.
     # This playbook stats them and never opens them.
     hotkey_sync_api_key_paths:
@@ -625,6 +635,77 @@
         state: restarted
         enabled: true
         daemon_reload: true
+
+    - name: Require the artifact backup script in the synced tree (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.stat:
+        path: "{{ artifact_backup_script }}"
+      register: artifact_backup_script_stat
+
+    - name: Refuse to schedule a backup with no script to run (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.assert:
+        that: artifact_backup_script_stat.stat.exists
+        fail_msg: >-
+          {{ artifact_backup_script }} is missing. A timer pointing at nothing
+          reports active and backs nothing up, which is the failure it exists to
+          prevent.
+
+    - name: Create the backup directory (Linux)
+      when: ansible_system == 'Linux'
+      ansible.builtin.file:
+        path: "{{ artifact_backup_dir }}"
+        state: directory
+        owner: "{{ slot_manager_user }}"
+        group: "{{ slot_manager_user }}"
+        mode: "0750"
+
+    - name: Install the artifact backup unit (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-artifact-backup.service.j2
+        dest: "/etc/systemd/system/{{ artifact_backup_service }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the artifact backup timer (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-artifact-backup.timer.j2
+        dest: "/etc/systemd/system/{{ artifact_backup_service }}.timer"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Schedule the artifact backup (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.systemd_service:
+        name: "{{ artifact_backup_service }}.timer"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Confirm the backup schedule is armed and has a next run (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ artifact_backup_service }}.timer"
+          - --property=ActiveState
+          - --property=UnitFileState
+          - --property=NextElapseUSecMonotonic
+      register: artifact_backup_schedule
+      changed_when: false
+      failed_when: >-
+        'ActiveState=active' not in artifact_backup_schedule.stdout
+        or 'UnitFileState=enabled' not in artifact_backup_schedule.stdout
+        or artifact_backup_schedule.stdout is search('NextElapseUSecMonotonic=(infinity|0)?(\n|$)')
 
     - name: Confirm the sync schedule is armed and has a next run (Linux)
       become: true
