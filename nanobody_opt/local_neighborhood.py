@@ -1601,6 +1601,16 @@ def main() -> None:
                 if len(mutable) < mutation_count:
                     continue
                 positions = rng.choice(mutable, size=mutation_count, replace=False)
+                # One position must genuinely change, or the proposal can come
+                # back identical to its parent and be rejected as already seen.
+                # That is not hypothetical: the producer measures consensus
+                # against the most recent 600 submissions, where 18 of 19 CDR3
+                # positions sit above the threshold, so letting every sampled
+                # position hold its parent residue drove acceptance to 1 in 12.
+                # The anchor keeps the candidate novel; every OTHER sampled
+                # position may still hold, which is what stops the one-way drift
+                # off consensus.
+                anchor = int(positions[0])
                 for position_value in positions:
                     position = int(position_value)
                     # Everywhere else a mutation must change something, or the
@@ -1612,7 +1622,8 @@ def main() -> None:
                     # weighted draw decline to displace it, while the prior still
                     # allows the deliberate single deviation the winners carry.
                     settled_here = (
-                        consensus.get(position, ("", 0.0))[1]
+                        position != anchor
+                        and consensus.get(position, ("", 0.0))[1]
                         >= FIELD_CONSENSUS_THRESHOLD
                     )
                     options = [

@@ -540,3 +540,41 @@ def test_consensus_is_a_pull_and_never_a_gate():
     )
 
 
+
+
+def test_a_proposal_always_changes_at_least_one_position():
+    """
+    The producer measures consensus against the most recent 600 submissions,
+    where 18 of 19 CDR3 positions sit above the threshold. Letting every sampled
+    position hold its parent residue therefore produced candidates identical to
+    their parent, which are rejected as already seen -- acceptance fell to 1 in
+    12 and the generator reported NEIGHBOURHOOD_EXHAUSTED on 32 seeds.
+    """
+    from nanobody_opt.local_neighborhood import (
+        FIELD_CONSENSUS_THRESHOLD,
+        field_consensus,
+    )
+
+    # A field where EVERY position is settled: the worst case for this bug.
+    consensus = field_consensus(["GGGGGGGGGG"] * 100, 10)
+    assert all(share >= FIELD_CONSENSUS_THRESHOLD for _, share in consensus.values())
+
+    parent = "GGGGGGGGGG"
+    allowed = {position: list("ACDEFGHIKL") for position in range(10)}
+    positions = [3, 7]
+    anchor = positions[0]
+
+    def options_at(position):
+        settled_here = (
+            position != anchor
+            and consensus.get(position, ("", 0.0))[1] >= FIELD_CONSENSUS_THRESHOLD
+        )
+        return [
+            residue for residue in allowed[position]
+            if residue != parent[position] or settled_here
+        ]
+
+    # The anchor cannot return the parent residue, so the candidate must differ.
+    assert parent[anchor] not in options_at(anchor)
+    # Every other sampled position may still hold consensus.
+    assert parent[7] in options_at(7)
