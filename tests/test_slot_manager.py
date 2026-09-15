@@ -612,28 +612,49 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
     remembered = sm.read_chain_state(chain, 68, OURS, log_last_block=same_interval)
     assert remembered.registered == 0
     assert remembered.last_registration_block == same_interval
-    # Holding ZERO uids, the interval quota must not hold us: a hotkey we bought
-    # and then had pruned leaves us with no fleet at all, and pacing exists to
-    # buy a marginal ticket cheaply, not to decide whether we mine.  The quota
-    # and the stagger both rank below the urgent branch now.
+    # A hotkey we bought and then had pruned still blocks a same-interval rebuy:
+    # the interval quota was spent even though nothing survived to show for it.
+    # This wait is BOUNDED -- one adjustment interval -- and it stops us bidding
+    # the burn price up against ourselves, so urgency does not override it.
     assert sm.decide(remembered, history, [], sm.SlotPolicy()).reason == (
-        sm.REASON_BUY_URGENT
+        sm.REASON_OWN_INTERVAL
     )
+    # One interval back it is the stagger, not the quota, that holds us.  The
+    # stagger spreads immunity expiries; a fleet bought in a burst dies in a
+    # burst, which urgency cannot repair afterwards.
     earlier = sm.read_chain_state(
         chain, 68, OURS, log_last_block=same_interval - sm.ADJUSTMENT_INTERVAL
     )
-    assert sm.decide(earlier, history, [], sm.SlotPolicy()).reason == (
-        sm.REASON_BUY_URGENT
-    )
-    # Pacing still governs the regime it was written for: once a working fleet
-    # is held, a marginal ticket is bought cheaply rather than immediately.
-    # With the live policy that regime is empty -- urgent_below is unset, so
-    # urgent_threshold IS the target and every shortfall is urgent by design.
-    paced = sm.SlotPolicy(urgent_below=4)
-    held = replace(remembered, registered_uids=(7, 19, 24, 38, 44, 46))
-    assert held.registered >= paced.urgent_threshold
-    assert paced.target - held.registered > 0
-    assert sm.decide(held, history, [], paced).reason == sm.REASON_OWN_INTERVAL
+    assert sm.decide(earlier, history, [], sm.SlotPolicy()).reason == sm.REASON_STAGGER
+
+
+def test_urgency_overrides_the_decay_floor_and_nothing_else():
+    """The floor is the only gate that refuses without bound.
+
+    Measured, the price sat within tolerance of the projected floor in 4.7% of
+    decisions, and the gate refused 150 of 251 in a day while the fleet sat at
+    6 of 12.  Below a working fleet that is a permanent refusal, so urgency
+    disables it -- and disables nothing else.  Both hard rails still outrank
+    urgency, and so do both bounded pacing rules.
+    """
+    policy = sm.SlotPolicy()
+    history = spiked(1_000_000, 40, 61, 0.135167)
+    # Quiet interval, past the stagger, price well above the decay floor.
+    state = state_at(history, registered=(1, 2, 3), last=1_000_000 - 100_000)
+    assert state.registered < policy.urgent_threshold
+    assert sm.decide(state, history, [], policy).reason == sm.REASON_BUY_URGENT
+
+    # ... but a price above the CEILING is a hard rail and still refuses.
+    from dataclasses import replace as _replace
+    dear = _replace(state, recycle_tao=policy.max_recycle_tao + 0.01)
+    assert sm.decide(dear, history, [], policy).reason == sm.REASON_CEILING
+
+    # ... and so does the daily budget.
+    import time as _time
+    spent = [sm.SpendRecord(
+        timestamp=_time.time(), recycle_tao=policy.daily_budget_tao
+    )]
+    assert sm.decide(state, history, spent, policy).reason == sm.REASON_BUDGET
 
 
 def test_the_report_line_is_printable_for_every_decision(capsys):

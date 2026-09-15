@@ -468,27 +468,35 @@ def decide(
         return verdict(WAIT, REASON_CEILING)
     if spent + state.recycle_tao > policy.daily_budget_tao:
         return verdict(WAIT, REASON_BUDGET)
-    # Below a working fleet, an affordable price beats a perfect one -- and
-    # beats a tidy purchase cadence too.
+    # PACING outranks urgency, because both pacing rules are BOUNDED waits and
+    # each one protects something urgency cannot buy back.
     #
-    # This check used to sit BELOW the two pacing rules, which made it dead
-    # code: every cycle that had bought recently returned own_interval or
-    # stagger first, so a fleet five short of target reported
-    # "already_registered_this_interval" indefinitely while the urgent branch
-    # it was supposed to reach never ran.  Pacing exists to buy a marginal
-    # twelfth ticket cheaply; it must not govern whether we hold a working
-    # fleet at all.  The two hard rails still outrank it, so this cannot spend
-    # past the ceiling or the daily budget.
-    if state.registered < policy.urgent_threshold:
-        return verdict(BUY, REASON_BUY_URGENT)
-    # Pacing, which only applies once a working fleet is already held.
+    # One registration per adjustment interval: the burn price rises with
+    # registrations in an interval, so buying back-to-back bids the price up
+    # against ourselves, and the ceiling is the only other brake.  The wait is
+    # at most one interval.
     if (
         state.last_registration_block is not None
         and state.last_registration_block // ADJUSTMENT_INTERVAL == state.interval
     ):
         return verdict(WAIT, REASON_OWN_INTERVAL)
+    # The stagger spreads immunity expiries.  A fleet bought in a burst becomes
+    # evictable in a burst: uids die at almost exactly the 5000-block (16.7 h)
+    # immunity period, so twelve bought together is a synchronised churn cliff
+    # every 16.7 h, which no amount of urgency later repairs.
     if blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
+    # Urgency outranks only the DECAY FLOOR, which is the gate that refuses
+    # without bound.  Measured, the price sat within tolerance of the floor in
+    # 4.7% of decisions and the gate refused 150 of 251 in a day while the fleet
+    # sat at 6 of 12 -- that is not patience, it is a permanent refusal.  Below
+    # a working fleet an affordable price beats a perfect one; above it, haggle.
+    #
+    # Note urgent_threshold is the target by default, which makes this branch
+    # unconditional given the shortfall check above.  That is intended: it
+    # disables the floor gate below target, and nothing else.
+    if state.registered < policy.urgent_threshold:
+        return verdict(BUY, REASON_BUY_URGENT)
     if floor is None:
         return verdict(WAIT, REASON_NO_HISTORY)
     if state.recycle_tao > floor * (1.0 + policy.floor_tolerance):
@@ -1064,7 +1072,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="append-only audit trail; also the agent's price and spend memory",
     )
     parser.add_argument("--max-recycle-tao", type=float, default=0.20)
-    parser.add_argument("--max-spend-tao-per-day", type=float, default=1.0)
+    parser.add_argument(
+        "--max-spend-tao-per-day",
+        type=float,
+        default=None,
+        help=(
+            "daily spend cap; default derives it as target * 24/immunity_hours "
+            "* max_recycle_tao, i.e. enough to SUSTAIN the target against churn "
+            "at the highest price we will pay.  A literal here cannot track a "
+            "change to either, which is how the fleet was silently capped below "
+            "target twice"
+        ),
+    )
     parser.add_argument(
         "--stagger-blocks",
         type=int,
