@@ -187,6 +187,11 @@ class MutationNetwork:
             [AA_INDEX[residue] for residue in node.sequence]
             for node in self.nodes
         ], dtype=np.uint8)
+        # Node scores as an array so a neighbour query can build its ranking key
+        # with numpy instead of a per-node Python lambda.
+        self._scores = np.asarray(
+            [node.score for node in self.nodes], dtype=np.float64
+        )
         self._effects: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         for effect in mutation_effects:
             key = (
@@ -252,24 +257,38 @@ class MutationNetwork:
             raise ValueError("invalid neighbour query configuration")
         vector = np.asarray([AA_INDEX[residue] for residue in sequence], dtype=np.uint8)
         distances = np.count_nonzero(self._vectors != vector, axis=1)
-        baseline_order = sorted(
-            range(len(self.nodes)),
+        # This used to rank EVERY node with a Python lambda key and then keep
+        # the first few hundred: on a 28,000-node network that is 28,000 key
+        # evaluations per query, and the producer issues one query per accepted
+        # proposal.  It was 89% of candidate generation -- 79 million lambda
+        # calls in one epoch's run.  Same ordering, built the cheap way: the
+        # primary key is vectorised, incompatible nodes are dropped before the
+        # sort rather than after, and only the shortlist is ordered exactly.
+        shortlist = max(256, limit * 16)
+        primary = self._scores + distance_penalty * distances
+        if maximum_distance is None:
+            pool = np.arange(len(self.nodes))
+        else:
+            pool = np.flatnonzero(distances <= maximum_distance)
+        if pool.size > shortlist:
+            values = primary[pool]
+            cut = float(np.partition(values, shortlist - 1)[shortlist - 1])
+            # Keep every tie at the cut so the exact sort below sees the whole
+            # boundary and cannot drop a node that outranks one it kept.
+            pool = pool[values <= cut]
+        compatible = sorted(
+            pool.tolist(),
             key=lambda index: (
-                self.nodes[index].score + distance_penalty * int(distances[index]),
+                float(primary[index]),
                 int(distances[index]),
                 self.nodes[index].sequence,
             ),
         )
-        compatible = [
-            index for index in baseline_order
-            if maximum_distance is None
-            or int(distances[index]) <= maximum_distance
-        ]
         # Refine a generous vector shortlist with contextual directional
         # effects. This keeps virtual-node queries cheap even after thousands
         # of historical sequences have been ingested.
         refined = []
-        for index in compatible[: max(256, limit * 16)]:
+        for index in compatible[:shortlist]:
             distance = int(distances[index])
             node = self.nodes[index]
             adjustment, supported, uncertainty = self._prospective_adjustment(

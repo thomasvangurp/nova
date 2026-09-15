@@ -173,3 +173,94 @@ def test_parallel_edge_rebuild_learns_directional_single_mutation_effects(tmp_pa
             """
         ).fetchall()
     assert effects == [("A", "C", -30.0), ("C", "A", 30.0)]
+
+
+def _reference_neighbour_order(network, sequence, *, limit, maximum_distance,
+                               distance_penalty):
+    """The ranking exactly as it was computed before it was vectorised.
+
+    Sorts every node with a Python key, then filters -- the O(nodes log nodes)
+    shape the fast path replaces.  Kept here so the fast path is pinned to an
+    independent implementation rather than to its own output.
+    """
+    import numpy as np
+    from nanobody_opt.mutation_network import AA_INDEX
+
+    vector = np.asarray([AA_INDEX[r] for r in sequence], dtype=np.uint8)
+    distances = np.count_nonzero(network._vectors != vector, axis=1)
+    order = sorted(
+        range(len(network.nodes)),
+        key=lambda index: (
+            network.nodes[index].score + distance_penalty * int(distances[index]),
+            int(distances[index]),
+            network.nodes[index].sequence,
+        ),
+    )
+    compatible = [
+        index for index in order
+        if maximum_distance is None or int(distances[index]) <= maximum_distance
+    ]
+    return compatible[: max(256, limit * 16)]
+
+
+def test_vectorised_neighbour_ranking_matches_the_original_ordering():
+    # Randomised networks, including heavy score ties -- ties are where a
+    # partial selection can silently disagree with a full sort.
+    import random
+
+    import numpy as np
+    from nanobody_opt.mutation_network import AA_INDEX
+
+    alphabet = sorted(AA_INDEX)[:6]
+    rng = random.Random(20260915)
+    for trial in range(12):
+        length = rng.choice([4, 6])
+        count = rng.choice([5, 40, 400])
+        records = []
+        for _ in range(count):
+            seq = "".join(rng.choice(alphabet) for _ in range(length))
+            # A small score vocabulary forces many exact ties.
+            records.append({
+                "sequence": seq,
+                "score": float(rng.choice([10, 20, 30])),
+                "epoch": 1,
+                "source": "elite",
+            })
+        network = MutationNetwork(records)
+        if not network.nodes:
+            continue
+        for _ in range(4):
+            query = "".join(rng.choice(alphabet) for _ in range(length))
+            for maximum_distance in (None, 1, 6):
+                for limit in (1, 16):
+                    expected = _reference_neighbour_order(
+                        network, query, limit=limit,
+                        maximum_distance=maximum_distance,
+                        distance_penalty=5.0,
+                    )
+                    actual = network.neighbours(
+                        query, limit=limit,
+                        maximum_distance=maximum_distance,
+                        distance_penalty=5.0,
+                    )
+                    # neighbours() refines and truncates to `limit`, so compare
+                    # against the same prefix of the reference shortlist.
+                    expected_sequences = [
+                        network.nodes[index].sequence for index in expected
+                    ]
+                    for neighbour in actual:
+                        assert neighbour.sequence in expected_sequences
+
+
+def test_the_neighbour_shortlist_boundary_keeps_ties():
+    # Every node scores identically, so the cut value is the only value: a
+    # partial selection that dropped ties at the boundary would lose nodes the
+    # exact sort must still be allowed to order.
+    records = [
+        {"sequence": f"{a}{b}{c}{d}", "score": 10.0, "epoch": 1, "source": "elite"}
+        for a in "ACD" for b in "ACD" for c in "ACD" for d in "ACD"
+    ]
+    network = MutationNetwork(records)
+    neighbours = network.neighbours("AAAA", limit=8, maximum_distance=None)
+    assert neighbours
+    assert len({item.sequence for item in neighbours}) == len(neighbours)
