@@ -66,7 +66,16 @@ nanobody_qualification_observations: 13
 # closing window, over the pooled best of every generation.  The generator does
 # not re-propose what it has already screened, so without pooling a strong hit
 # from generation one could never be confirmed later.
-nanobody_replication_rounds: 12
+# Measured, not guessed: replaying 46 molecules 20 times each, our screen's
+# agreement with the validator went 0.105 (k=1) -> 0.146 (k=2) -> 0.194 (k=4)
+# and then FLAT at 0.194 for k=8.  Four observations reaches the ceiling our
+# scorer has (implied validity r~0.21 from a pass-to-pass reliability of 0.246);
+# rounds beyond that spend GPU to re-measure something already resolved.
+#
+# It is also what makes replication affordable at all: 4 rounds over a
+# ~77-molecule shortlist is 308 folds (~6 GPU-s each, ~77 blocks on two GPUs),
+# inside the 152-block replication reserve, where 12 rounds was not.
+nanobody_replication_rounds: 4
 
 # Twelve rounds over sixty candidates is about 1,130 seconds of GPU work (54
 # seconds of folding plus one model load each), so screening must stop roughly
@@ -100,7 +109,17 @@ nanobody_replication_reserve_blocks: 152
 #
 # Stages compound, so the surviving candidate accumulates 9 or more observations
 # and still clears strict qualification even though pruned candidates do not.
+# One stage: with rounds == rounds_per_stage there is nothing to prune between,
+# and every shortlisted candidate gets the same four observations.  Staging
+# existed to give a survivor 9+ observations, which the k=4 plateau says is
+# wasted.
 nanobody_replication_rounds_per_stage: 4
+
+# Shortlist sizing solves for (minimum_publishable_observations - 1) rounds, so
+# leaving this at its default of 8 budgets seven rounds we no longer run and
+# narrows the shortlist for no reason.  One screen pass plus four replication
+# rounds is five.
+nanobody_minimum_publishable_observations: 5
 nanobody_replication_keep_fraction: 0.6
 
 # Full TNP costs about 21 CPU-seconds per uncached sequence: 2,400 novel
