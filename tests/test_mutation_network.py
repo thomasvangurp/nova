@@ -203,6 +203,29 @@ def _reference_neighbour_order(network, sequence, *, limit, maximum_distance,
     return compatible[: max(256, limit * 16)]
 
 
+def _refine(network, shortlist, query, *, limit, distance_penalty):
+    """Apply neighbours()' own refinement to a reference shortlist."""
+    refined = []
+    import numpy as np
+    from nanobody_opt.mutation_network import AA_INDEX
+
+    vector = np.asarray([AA_INDEX[r] for r in query], dtype=np.uint8)
+    distances = np.count_nonzero(network._vectors != vector, axis=1)
+    for index in shortlist:
+        node = network.nodes[index]
+        adjustment, _, _ = network._prospective_adjustment(
+            node.sequence, query, distance_penalty=distance_penalty
+        )
+        refined.append((
+            node.score + adjustment, int(distances[index]), node.sequence,
+        ))
+    refined.sort()
+    return [
+        (sequence, distance, round(adjusted, 12))
+        for adjusted, distance, sequence in refined[:limit]
+    ]
+
+
 def test_vectorised_neighbour_ranking_matches_the_original_ordering():
     # Randomised networks, including heavy score ties -- ties are where a
     # partial selection can silently disagree with a full sort.
@@ -230,6 +253,8 @@ def test_vectorised_neighbour_ranking_matches_the_original_ordering():
         if not network.nodes:
             continue
         for _ in range(4):
+            # Novel queries, like the producer's: a node querying itself sits at
+            # distance zero and never exercises the shortlist boundary.
             query = "".join(rng.choice(alphabet) for _ in range(length))
             for maximum_distance in (None, 1, 6):
                 for limit in (1, 16):
@@ -243,13 +268,17 @@ def test_vectorised_neighbour_ranking_matches_the_original_ordering():
                         maximum_distance=maximum_distance,
                         distance_penalty=5.0,
                     )
-                    # neighbours() refines and truncates to `limit`, so compare
-                    # against the same prefix of the reference shortlist.
-                    expected_sequences = [
-                        network.nodes[index].sequence for index in expected
-                    ]
-                    for neighbour in actual:
-                        assert neighbour.sequence in expected_sequences
+                    # Compare the refined result the fast path produces against
+                    # the one the full-sort shortlist produces -- exact order
+                    # and exact adjusted scores, not mere membership.  A
+                    # membership check passes for a shortlist that silently
+                    # dropped a node it should have ranked.
+                    reference = _refine(network, expected, query,
+                                        limit=limit, distance_penalty=5.0)
+                    assert [
+                        (n.sequence, n.distance, round(n.adjusted_score, 12))
+                        for n in actual
+                    ] == reference
 
 
 def test_the_neighbour_shortlist_boundary_keeps_ties():

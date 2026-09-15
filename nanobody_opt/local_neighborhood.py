@@ -18,7 +18,6 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import math
-from typing import Any
 import sys
 from pathlib import Path
 
@@ -72,62 +71,6 @@ def _rank_sum(frame: pd.DataFrame) -> np.ndarray:
     if missing:
         raise ValueError(f"archive lacks exact metrics: {sorted(missing)}")
     return dense_rank_sums(frame, METRICS)
-
-
-def _donor_motifs_by_cdr(donors: list[str]) -> list[list[str]]:
-    """Each donor's CDR1/2/3 motif, computed once for the whole run.
-
-    A donor's regions depend only on the donor, so re-deriving them per
-    proposal attempt is pure waste -- and rejection sampling makes attempts
-    plentiful by design.
-    """
-    by_cdr: list[list[str]] = [[], [], []]
-    for donor in donors:
-        regions = find_regions(donor)
-        for index, bounds in enumerate(
-            (regions.cdr1, regions.cdr2, regions.cdr3)
-        ):
-            by_cdr[index].append(_motif(donor, bounds))
-    return by_cdr
-
-
-def _compatible_motifs(
-    donor_motifs: list[str],
-    *,
-    parent: str,
-    start: int,
-    end: int,
-    protected: set[int],
-    priors: Any,
-    maximum_mutations: int,
-) -> list[tuple[str, float]]:
-    """Donor motifs this parent may adopt at one CDR, with their priors.
-
-    Fixed for a given parent and CDR: nothing here is drawn, so it is computed
-    once per seed and CDR rather than once per attempt.
-    """
-    compatible: list[tuple[str, float]] = []
-    width = end - start
-    parent_motif = parent[start:end]
-    for donor_motif in donor_motifs:
-        if len(donor_motif) != width or donor_motif == parent_motif:
-            continue
-        changed = {
-            position
-            for position in range(start, end)
-            if donor_motif[position - start] != parent[position]
-        }
-        if changed & protected or len(changed) > maximum_mutations:
-            continue
-        motif_weights = [
-            priors[position][donor_motif[position - start]]
-            for position in changed
-        ]
-        prior = (
-            math.exp(np.mean(np.log(motif_weights))) if motif_weights else 1.0
-        )
-        compatible.append((donor_motif, prior))
-    return compatible
 
 
 def _motif(sequence: str, bounds: tuple[int, int]) -> str:
@@ -1348,7 +1291,6 @@ def main() -> None:
     ]
     if not donor_sequences:
         raise SystemExit("no current-gate donor sequences found")
-    donor_motifs = _donor_motifs_by_cdr(donor_sequences)
     background_sequences = [
         str(sequence).strip().upper()
         for sequence in recent.sequence
@@ -1556,8 +1498,6 @@ def main() -> None:
         regions = find_regions(parent)
         cdr_positions = list(regions.cdr_positions())
         bounds = [regions.cdr1, regions.cdr2, regions.cdr3]
-        # Filled on first use per CDR; see _compatible_motifs.
-        motif_options: dict[int, list[tuple[str, float]]] = {}
         attempts = 0
 
         # Deterministic coverage floor: every novel, supported, one-residue CDR
@@ -1605,18 +1545,33 @@ def main() -> None:
                 source = "whole_cdr_motif"
                 cdr_index = int(rng.integers(3))
                 start, end = bounds[cdr_index]
-                compatible = motif_options.get(cdr_index)
-                if compatible is None:
-                    compatible = _compatible_motifs(
-                        donor_motifs[cdr_index],
-                        parent=parent,
-                        start=start,
-                        end=end,
-                        protected=protected,
-                        priors=priors,
-                        maximum_mutations=args.maximum_motif_mutations,
-                    )
-                    motif_options[cdr_index] = compatible
+                compatible = []
+                for donor in donor_sequences:
+                    donor_regions = find_regions(donor)
+                    donor_bounds = [
+                        donor_regions.cdr1, donor_regions.cdr2, donor_regions.cdr3
+                    ][cdr_index]
+                    donor_motif = _motif(donor, donor_bounds)
+                    if len(donor_motif) == end - start and donor_motif != parent[start:end]:
+                        changed = {
+                            position
+                            for position in range(start, end)
+                            if donor_motif[position - start] != parent[position]
+                        }
+                        if (
+                            changed & protected
+                            or len(changed) > args.maximum_motif_mutations
+                        ):
+                            continue
+                        motif_weights = [
+                            priors[position][donor_motif[position - start]]
+                            for position in changed
+                        ]
+                        prior = (
+                            math.exp(np.mean(np.log(motif_weights)))
+                            if motif_weights else 1.0
+                        )
+                        compatible.append((donor_motif, prior))
                 if not compatible:
                     continue
                 selected_motif = _weighted_choice(
