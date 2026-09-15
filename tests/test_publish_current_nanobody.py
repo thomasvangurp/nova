@@ -1519,3 +1519,49 @@ def test_an_unverifiable_chain_read_does_not_earn_a_ledger_entry():
     assert _commitment_is_ours({7: "5Hxxx"}, assignment) is True
     assert _commitment_is_ours({7: "5Hyyy"}, assignment) is False
     assert _commitment_is_ours({}, assignment) is False
+
+
+def test_the_strict_upgrade_is_wired_into_the_deploy():
+    """The qualified stage only exists if the deploy asks for it.
+
+    Thirteen consecutive epochs published at stage=provisional -- the evidence
+    floor alone, no quality gate -- because --strict-qualification defaults off
+    and nothing passed it.
+    """
+    services = yaml.safe_load(
+        (Path(__file__).resolve().parents[1]
+         / "ansible/nanobody_services.yml").read_text()
+    )
+    argv = None
+    for play in services:
+        for task in play.get("tasks", []) + play.get("post_tasks", []):
+            command = task.get("ansible.builtin.command") or {}
+            candidate = command.get("argv") if isinstance(command, dict) else None
+            if candidate and any(
+                "publish_current_nanobody.py" in str(item) for item in candidate
+            ):
+                argv = [str(item) for item in candidate]
+    assert argv is not None, "no publisher launch found in the playbook"
+    assert "--strict-qualification" in argv, (
+        "without this the publisher stops at the provisional fleet forever"
+    )
+    assert "--strict-qualification-reserve-blocks" in argv, (
+        "the strict rank costs about a third of an epoch; it must be gated on "
+        "the window that is actually left"
+    )
+
+
+def test_the_strict_reserve_default_covers_the_measured_cost():
+    parser = publish_current_nanobody._parser() if hasattr(
+        publish_current_nanobody, "_parser"
+    ) else None
+    if parser is None:
+        source = Path(publish_current_nanobody.__file__).read_text()
+        assert '"--strict-qualification-reserve-blocks"' in source
+        assert "default=150" in source
+        return
+    args = parser.parse_args([])
+    assert args.strict_qualification_reserve_blocks >= 100, (
+        "the strict rank has been measured at about twenty minutes -- 100 "
+        "blocks -- and a reserve below that starts work it cannot finish"
+    )

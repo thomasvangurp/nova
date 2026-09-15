@@ -1445,8 +1445,21 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "run the strict rank_exact upgrade after the provisional fleet "
-            "has committed. Off by default: it has produced no upgrade in "
-            "live operation and costs about a third of an epoch"
+            "has committed. It costs about a third of an epoch, so it is "
+            "gated on --strict-qualification-reserve-blocks"
+        ),
+    )
+    parser.add_argument(
+        "--strict-qualification-reserve-blocks",
+        type=int,
+        default=150,
+        help=(
+            "only start the strict upgrade when at least this many blocks "
+            "remain in the epoch. The strict rank has been measured at about "
+            "twenty minutes -- 100 blocks -- and starting one it cannot "
+            "finish burns the GPUs for an upgrade that _assert_same_epoch "
+            "then throws away. 150 blocks is that measurement plus room for "
+            "the layer-2, novelty and CDR passes that follow it"
         ),
     )
     parser.add_argument(
@@ -1725,16 +1738,47 @@ def _publish_once(args: argparse.Namespace) -> None:
                 context=commit_context,
             )
 
+        # Two separate reasons this used to be off, and they are not the same
+        # reason. It cost a third of an epoch AND it ran BEFORE the commit, so
+        # a slow strict rank meant the fleet reached the chain late or not at
+        # all. The commit moved ahead of it, so the second reason is gone: by
+        # the time control arrives here the provisional fleet is already on
+        # chain and everything below is an upgrade attempt that can only
+        # improve on it or be discarded. The first reason is handled by the
+        # block reserve rather than by never running: an upgrade that cannot
+        # finish inside this epoch is not started.
+        skip_strict: str | None = None
         if not args.strict_qualification:
-            # Cut from the live path. Six consecutive epochs produced zero
-            # qualified upgrades while the strict rank consumed roughly twenty
-            # minutes of a seventy-two minute epoch, and until the provisional
-            # commit moved ahead of it, it was the reason a published fleet
-            # reached the chain late or not at all. Run it offline against the
-            # score bank, or pass --strict-qualification to restore it.
+            skip_strict = "strict qualification is disabled"
+        else:
+            # The provisional fleet is already on chain by now, so everything
+            # from here is optional.  A chain read that fails must therefore
+            # skip the upgrade, never raise: turning an optional upgrade into
+            # a failure path would cost the epoch a cycle it has already paid
+            # for.
+            try:
+                current = _chain_view(
+                    args.chain_state, args.netuid, args.maximum_chain_state_age
+                )
+            except (RuntimeError, SystemExit, OSError, ValueError) as error:
+                current = None
+                skip_strict = f"the chain view is unreadable ({error})"
+            strict_window = (
+                0 if current is None
+                else current.epoch_length - (current.block % current.epoch_length)
+            )
+            if current is not None and (
+                strict_window < args.strict_qualification_reserve_blocks
+            ):
+                skip_strict = (
+                    "too little of the epoch is left for the strict upgrade "
+                    f"({strict_window} blocks, need "
+                    f"{args.strict_qualification_reserve_blocks})"
+                )
+        if skip_strict is not None:
             print(
-                "strict qualification is disabled; the committed provisional "
-                "fleet stands for this epoch",
+                f"{skip_strict}; the committed provisional fleet stands "
+                "for this epoch",
                 flush=True,
             )
             _write_publisher_state(
