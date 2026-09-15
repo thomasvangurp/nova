@@ -453,6 +453,7 @@ def _run_iteration(
         "--pipeline-depth", str(args.pipeline_depth),
         "--screen-predict-batch-size", str(args.screen_predict_batch_size),
         "--two-stage", str(1 if args.replication_rounds else 0),
+        "--minimum-publishable-observations", str(args.minimum_publishable_observations),
         "--replication-rounds", str(replication_rounds),
         "--pooled-exact-root", str(producer_root),
         "--replication-reserve-blocks", str(args.replication_reserve_blocks),
@@ -743,6 +744,17 @@ def _parser() -> argparse.ArgumentParser:
         "--strict-gates",
         default="",
         help="re-derived strict qualification thresholds for the active scorer",
+    )
+    parser.add_argument(
+        "--minimum-publishable-observations",
+        type=int,
+        default=5,
+        help=(
+            "forwarded to the race, which sizes the replication shortlist by "
+            "solving for this minus one rounds; keep it in step with "
+            "--replication-rounds or the shortlist is sized for rounds that "
+            "never run"
+        ),
     )
     parser.add_argument(
         "--replication-rounds",
