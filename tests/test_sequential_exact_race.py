@@ -897,3 +897,81 @@ def test_the_prune_actually_uses_the_family_slate():
     assert "_keep_a_family_slate(" in body, (
         "_prune still truncates by rank alone"
     )
+
+
+def test_a_tranche_is_sized_to_the_window_it_will_finish_in():
+    # Epoch 25131's real numbers: 700 candidates, two GPUs, 6.0 GPU-seconds
+    # each, dispatched with 154 blocks left against a 207-block screen reserve.
+    # The old gate asked only whether there was room to START.
+    from nanobody_opt.sequential_exact_race import _affordable_tranche_size
+
+    full = _affordable_tranche_size(
+        700, remaining_blocks=154.0, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=2,
+    )
+    assert full < 700, "a 700-candidate fold does not fit in 154 blocks"
+    # It still screens a useful number rather than giving up.
+    assert full >= 500
+
+    # With the window the epoch actually had left after its reserve, the tranche
+    # shrinks hard instead of running 158 blocks past the end of it.
+    assert _affordable_tranche_size(
+        700, remaining_blocks=20.0, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=2,
+    ) == 67
+    # No window at all screens nothing; the bootstrap path floors this at one.
+    assert _affordable_tranche_size(
+        700, remaining_blocks=0.0, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=2,
+    ) == 0
+    # A window that cannot even pay the model load is not a window.
+    assert _affordable_tranche_size(
+        700, remaining_blocks=3.0, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=2,
+    ) == 0
+    # More GPUs buy proportionally more candidates in the same wall clock.
+    assert _affordable_tranche_size(
+        700, remaining_blocks=20.0, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=4,
+    ) == 134
+
+
+def test_the_screen_leaves_a_replication_window_it_did_not_used_to():
+    # Epoch 25131 in block arithmetic.  screen_reserve is the commitment reserve
+    # plus the replication reserve, so a tranche dispatched at the latest legal
+    # moment has a screening window of exactly zero -- everything still on the
+    # clock is reserved for replication and committing.
+    from nanobody_opt.sequential_exact_race import (
+        _affordable_tranche_size, _affordable_shortlist,
+    )
+    EPOCH, RESERVE, REPLICATION_RESERVE = 361, 55, 152
+    screen_reserve = RESERVE + REPLICATION_RESERVE
+    at_dispatch = float(screen_reserve)  # the latest start the reserve allows
+
+    # Old behaviour: dispatch all 700 anyway.  The fold runs 158 blocks past the
+    # point it should have stopped and eats the reserve it was supposed to
+    # protect, leaving the shortlist a window of zero.
+    old_fold = (39.0 + 6.0 * 700 / 2) / 12.0
+    assert old_fold > REPLICATION_RESERVE
+    old_remaining = max(at_dispatch - old_fold - RESERVE, 0.0)
+    assert old_remaining == 0.0
+    assert len(_affordable_shortlist(
+        [f"SEQ{index}" for index in range(300)],
+        rounds=12, minimum_observations=8, remaining_blocks=old_remaining,
+        load_seconds=39.0, seconds_per_observation=9.2, gpu_count=2,
+    )) == 1
+
+    # New behaviour: the screening window is zero, so no tranche is dispatched
+    # and the replication reserve survives intact.
+    assert _affordable_tranche_size(
+        700, remaining_blocks=at_dispatch - screen_reserve, load_seconds=39.0,
+        gpu_seconds_per_candidate=6.0, gpu_count=2,
+    ) == 0
+    new_remaining = at_dispatch - RESERVE
+    assert new_remaining == REPLICATION_RESERVE
+    shortlist = _affordable_shortlist(
+        [f"SEQ{index}" for index in range(300)],
+        rounds=12, minimum_observations=8, remaining_blocks=new_remaining,
+        load_seconds=39.0, seconds_per_observation=9.2, gpu_count=2,
+    )
+    assert len(shortlist) > 40, len(shortlist)

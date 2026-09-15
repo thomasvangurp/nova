@@ -480,6 +480,36 @@ def _drop_metric_outliers(
     return sorted(kept + unscored, key=lambda item: order.get(item, 10**9))
 
 
+def _affordable_tranche_size(
+    size: int,
+    *,
+    remaining_blocks: float,
+    load_seconds: float,
+    gpu_seconds_per_candidate: float,
+    gpu_count: int,
+    block_seconds: float = 12.0,
+) -> int:
+    """Largest screen tranche that still FINISHES inside the window.
+
+    The reserve check answers "is there room to start", which is not the
+    question.  A tranche runs for as long as it runs: epoch 25131 dispatched 700
+    candidates at block 154 of 361, folded for 1,899 seconds -- 158 blocks --
+    finished at block 312 and left 49, under the 55-block commitment reserve.
+    The replication shortlist was then sized against a window of zero, narrowed
+    to a single candidate, and none of the twelve configured rounds ran.  That
+    is the whole reason the score bank holds no within-epoch replicates.
+    """
+    if size < 1 or remaining_blocks <= 0 or gpu_seconds_per_candidate <= 0:
+        return 0
+    budget = remaining_blocks * block_seconds
+    if load_seconds >= budget:
+        return 0
+    width = int(
+        (budget - load_seconds) * max(gpu_count, 1) / gpu_seconds_per_candidate
+    )
+    return max(0, min(size, width))
+
+
 def _affordable_shortlist(
     shortlist: list[str],
     *,
@@ -1259,6 +1289,18 @@ def main() -> None:
         help="fraction of the alive set carried into the next stage",
     )
     parser.add_argument(
+        "--screen-gpu-seconds-per-candidate",
+        type=float,
+        default=6.0,
+        help=(
+            "GPU-seconds to fold one screened candidate, for sizing a tranche "
+            "against the window that will remain when it FINISHES.  Measured "
+            "5.43 on the fast adapter (1,899s for 700 candidates on two 4090s) "
+            "and rounded up: over-estimating costs a few screened candidates, "
+            "under-estimating costs the whole replication window"
+        ),
+    )
+    parser.add_argument(
         "--replication-load-seconds",
         type=float,
         default=39.0,
@@ -1430,7 +1472,7 @@ def main() -> None:
     tranche_index = 0
     timings_path = args.output_dir / "timings.jsonl"
 
-    def _dispatch_next_tranche() -> ScreenJob | None:
+    def _dispatch_next_tranche(minimum_tranche: int = 0) -> ScreenJob | None:
         """Start the next tranche's GPU work, or return None when none may run.
 
         Tranche composition depends only on the pending queue and how often each
@@ -1457,6 +1499,35 @@ def main() -> None:
                 flush=True,
             )
             return None
+        # Room to START is not room to FINISH.  Size the tranche to the window
+        # that will still exist when its fold completes, or the screen eats the
+        # replication window and every candidate is published on one
+        # observation -- see _affordable_tranche_size.
+        window = max(
+            _remaining_blocks(args.chain_state, args.epoch) - screen_reserve, 0.0
+        )
+        affordable = _affordable_tranche_size(
+            args.screen_tranche_size,
+            remaining_blocks=window,
+            load_seconds=args.replication_load_seconds,
+            gpu_seconds_per_candidate=args.screen_gpu_seconds_per_candidate,
+            gpu_count=len(gpus),
+        )
+        affordable = max(affordable, minimum_tranche)
+        if affordable < 1:
+            print(
+                "EXACT_SCREEN_WINDOW_TOO_SHORT "
+                f"remaining_blocks={window:.0f} screen_reserve={screen_reserve} "
+                f"tranche_size={args.screen_tranche_size}",
+                flush=True,
+            )
+            return None
+        if affordable < args.screen_tranche_size:
+            print(
+                f"EXACT_SCREEN_TRANCHE_NARROWED from={args.screen_tranche_size} "
+                f"to={affordable} remaining_blocks={window:.0f}",
+                flush=True,
+            )
         tranche_index += 1
         tranche_root = args.output_dir / "screen" / f"tranche_{tranche_index:02d}"
         source = tranche_root / "candidates.json"
@@ -1465,7 +1536,7 @@ def main() -> None:
             pending,
             candidate_metadata,
             screened_parent_counts,
-            args.screen_tranche_size,
+            affordable,
             source=source,
             completed=completed,
         )
@@ -1494,10 +1565,13 @@ def main() -> None:
         )
 
     def _dispatch_bootstrap_tranche() -> ScreenJob | None:
+        # The epoch has no observations at all.  One observation of something
+        # beats none of nothing, so this pass screens against the commitment
+        # reserve alone and never sizes itself down to nothing.
         saved = args.replication_reserve_blocks
         args.replication_reserve_blocks = 0
         try:
-            return _dispatch_next_tranche()
+            return _dispatch_next_tranche(minimum_tranche=1)
         finally:
             args.replication_reserve_blocks = saved
 
