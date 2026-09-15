@@ -509,3 +509,52 @@ def test_an_unannotated_candidate_falls_back_to_identity_alone():
     b = _variant(REAL, [(i, "G") for i in range(30, 50)])
     pool = _pool([(a, 0.3, 100.0), (b, 0.2, 110.0)])
     assert len(fleet.distinct_sequences(pool, 2, cdrs={})) == 2
+
+
+def test_the_crowd_is_honoured_and_never_costs_a_ticket():
+    """Uncrowded candidates are preferred, but the fleet still fills.
+
+    The validator dedupes against the field's top, so a ticket sitting on top of
+    someone else's submission is discarded and its registration wasted -- on
+    epoch 25138's committed fleet, 6 of 7 sat at or above 0.95 identity to the
+    previous epoch's top-50.  Preferring uncrowded candidates must not, however,
+    shrink the fleet: falling back to the crowded pool is better than leaving a
+    uid idle.
+    """
+    from nanobody_opt import fleet
+
+    base = "A" * 127
+    # Three candidates that ARE the crowd, and two that differ far enough.
+    crowded = [base, base[:-1] + "C", base[:-2] + "CC"]
+    clear_a = base[:10] + "CCCCCCCCCC" + base[20:]
+    clear_b = base[:10] + "DDDDDDDDDD" + base[20:]
+    crowd = [base]
+
+    roomy = fleet.uncrowded([*crowded, clear_a, clear_b], crowd)
+    assert clear_a in roomy and clear_b in roomy
+    assert base not in roomy, "a candidate identical to the crowd must be dropped"
+
+    # With no crowd supplied, nothing is filtered -- which is exactly the state
+    # the publisher was in before it started passing one.
+    assert fleet.uncrowded([*crowded, clear_a], []) == [*crowded, clear_a]
+
+
+def test_consensus_and_distinctness_are_compatible():
+    """Holding every settled position and still clearing dedupe is possible.
+
+    116 of 127 positions are settled, and the settled-site rule keeps us on
+    consensus there -- which is where the crowd is.  Distinctness therefore has
+    to come from the 11 unsettled positions, and it can: differing at 7 of them
+    puts identity at 0.945, below the 0.95 the validator dedupes on.
+    """
+    from nanobody_opt import fleet
+
+    length, unsettled = 127, 11
+    base = "A" * length
+    # Differ at 7 unsettled positions only; every other position is identical.
+    variant = "C" * 7 + base[7:]
+    identity = fleet.sequence_identity(base, variant)
+    assert identity == pytest.approx((length - 7) / length, abs=1e-9)
+    assert identity < fleet.FIELD_COLLISION_IDENTITY
+    # Six is not enough, which is why the margin matters.
+    assert fleet.sequence_identity(base, "C" * 6 + base[6:]) >= fleet.FIELD_COLLISION_IDENTITY

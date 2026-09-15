@@ -42,6 +42,8 @@ from nanobody_opt.pose_stability import (
 )
 
 
+#: How much of the field's top the validator dedupes against.
+CROWD_LIMIT = 50
 LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
 
 
@@ -209,6 +211,42 @@ def leaderboard_field(payload: Any, target: str) -> pd.DataFrame:
     return pd.DataFrame(by_hash.values(), columns=list(METRICS))
 
 
+def leaderboard_crowd(payload: Any, target: str, limit: int) -> list[str]:
+    """The best `limit` sequences of one epoch's field, best first.
+
+    The validator DEDUPES against the top of the field, so a ticket that sits
+    within the dedupe identity of one of these is discarded before it is scored
+    and the registration that carried it is wasted.  Measured on epoch 25138's
+    committed fleet, 6 of 7 tickets sat at or above 0.95 positional identity to
+    the previous epoch's top-50 -- which is why we commit seven and see two to
+    five scored.  Positional identity understates it: the validator aligns, and
+    an alignment can only find more.
+    """
+    scored: list[tuple[float, str]] = []
+    for item in (payload.get("data") or []) if isinstance(payload, Mapping) else []:
+        if not isinstance(item, Mapping):
+            continue
+        for nanobody in item.get("nanobodies") or []:
+            if not isinstance(nanobody, Mapping):
+                continue
+            if str(nanobody.get("protein_name") or target) != target:
+                continue
+            sequence = str(nanobody.get("sequence") or "").strip().upper()
+            score = nanobody.get("final_score")
+            if sequence and isinstance(score, (int, float)):
+                scored.append((float(score), sequence))
+    scored.sort()
+    seen: set[str] = set()
+    crowd: list[str] = []
+    for _, sequence in scored:
+        if sequence not in seen:
+            seen.add(sequence)
+            crowd.append(sequence)
+        if len(crowd) >= limit:
+            break
+    return crowd
+
+
 def fetch_leaderboard_fields(
     api_root: str,
     *,
@@ -216,9 +254,10 @@ def fetch_leaderboard_fields(
     target: str,
     count: int,
     scan_limit: int,
-) -> list[tuple[int, pd.DataFrame]]:
-    """Fetch recent complete, target-matching fields from the public API."""
+) -> tuple[list[tuple[int, pd.DataFrame]], list[str]]:
+    """Fetch recent fields, and the most recent field's top sequences."""
     fields: list[tuple[int, pd.DataFrame]] = []
+    crowd: list[str] = []
     root = api_root.rstrip("/")
     for epoch in range(before_epoch - 1, max(before_epoch - scan_limit - 1, 0), -1):
         url = f"{root}/api/competitions/leaderboard/{epoch}/nanobodies"
@@ -231,10 +270,15 @@ def fetch_leaderboard_fields(
         field = leaderboard_field(payload, target)
         if len(field) < 2:
             continue
+        if not crowd:
+            # The newest field we could read is the best available proxy for the
+            # one we are about to be judged against; everyone is mutating the
+            # same winners, so the crowd is stable epoch to epoch.
+            crowd = leaderboard_crowd(payload, target, CROWD_LIMIT)
         fields.append((epoch, field))
         if len(fields) >= count:
             break
-    return fields
+    return fields, crowd
 
 
 def main() -> None:
@@ -370,10 +414,11 @@ def main() -> None:
         raise SystemExit(f"archive lacks metrics: {sorted(missing)}")
 
     api_fields: list[tuple[int, pd.DataFrame]] = []
+    crowd_sequences: list[str] = []
     if args.api_field_count:
         if args.before_epoch is None:
             parser.error("--api-field-count requires --before-epoch")
-        api_fields = fetch_leaderboard_fields(
+        api_fields, crowd_sequences = fetch_leaderboard_fields(
             args.leaderboard_api_root,
             before_epoch=args.before_epoch,
             target=args.target,
@@ -751,6 +796,10 @@ def main() -> None:
             "qualification stress test"
         ),
         "reference": reference,
+        # The field the validator dedupes against.  Fleet selection must keep
+        # every committed ticket clear of this, or the ticket is discarded
+        # before it is scored and the registration that carried it is wasted.
+        "crowd": crowd_sequences,
         "excluded_sequence_count": len(excluded_sequences),
         "candidate_count": len(ranked),
         "sequences": [item["sequence"] for item in selected],
