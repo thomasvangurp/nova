@@ -193,14 +193,35 @@ class SlotPolicy:
     target: int = 12
     max_recycle_tao: float = 0.20
     #: Below this many held hotkeys, take any affordable price rather than wait
-    #: for a decay floor.  A forfeited epoch costs more than a dear registration:
-    #: the floor saves ~tau0.03, a missing ticket forfeits ~tau0.032 of expected
-    #: value every epoch, and there are ~20 epochs a day.
-    urgent_below: int = 3
-    #: Scaled with ``target`` so raising the fleet does not also raise the risk
-    #: taken per uid: the cap was tau1.0/day at a target of 7, i.e. tau0.143 per
-    #: uid per day, and 12 uids hold that same posture at tau1.71.
-    max_spend_tao_per_day: float = 1.71
+    #: for a decay floor.  ``None`` means the target: haggling is not rational
+    #: anywhere below a full fleet.
+    #:
+    #: The arithmetic is the policy's own. Waiting for the floor saves about
+    #: tau0.03 on a roughly tau0.10 registration. Every epoch spent one ticket
+    #: short forfeits ~tau0.032 of expected value, and there are ~20 epochs a
+    #: day. So waiting pays only while ``0.03 > k * 0.032`` for k tickets short
+    #: -- that is, only when short by less than one. At the old fixed 3 the
+    #: override engaged only when we were nearly wiped out, and the floor gate
+    #: refused 150 of 251 decisions in a day (60%) while the fleet sat at 6 of
+    #: 12. We were forgoing tickets worth ~tau0.64/day to save tau0.03.
+    #:
+    #: What actually bounds the spend is ``max_recycle_tao`` and
+    #: ``max_spend_tao_per_day``, which is the right place for it: a price
+    #: ceiling and a budget, not a haggle that never clears.
+    urgent_below: int | None = None
+    #: Sized to SUSTAIN the target against churn, not to buy it once.
+    #:
+    #: Subnet 68 is full at 64, so a uid is evictable the moment its immunity
+    #: lapses, and ours carry no incentive to protect them -- measured, they die
+    #: at almost exactly the 5000-block (16.7 h) immunity period. Holding N uids
+    #: therefore costs N * 24 * price / T per day: 12 * 24 * tau0.115 / 16.7 is
+    #: about tau1.98. The previous tau1.71 was scaled per-uid from a target of 7
+    #: and silently capped the fleet at ~10.3 however fast the gates allowed.
+    #:
+    #: tau2.10 leaves headroom above that without reaching the stagger's own
+    #: ceiling of 17.3 buys/day, so the schedule stays the binding constraint
+    #: rather than the wallet.
+    max_spend_tao_per_day: float = 2.10
     #: ``None`` means :func:`default_stagger_blocks` of the target.
     stagger_blocks: int | None = None
     #: How far back the decay floor looks.  Deliberately finite: a competitor
@@ -228,6 +249,13 @@ class SlotPolicy:
             raise ValueError("floor tolerance cannot be negative")
         if self.lookback_blocks < 1 or self.min_history_samples < 2:
             raise ValueError("the decay floor needs a real window to be measured in")
+
+    @property
+    def urgent_threshold(self) -> int:
+        """Hold count below which an affordable price beats a perfect one."""
+        if self.urgent_below is None:
+            return self.target
+        return max(0, self.urgent_below)
 
     @property
     def stagger(self) -> int:
@@ -409,7 +437,7 @@ def decide(
     if spent + state.recycle_tao > policy.max_spend_tao_per_day:
         return verdict(WAIT, REASON_BUDGET)
     # Below a working fleet, an affordable price beats a perfect one.
-    if state.registered < policy.urgent_below:
+    if state.registered < policy.urgent_threshold:
         return verdict(BUY, REASON_BUY_URGENT)
     if floor is None:
         return verdict(WAIT, REASON_NO_HISTORY)

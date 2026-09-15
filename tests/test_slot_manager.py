@@ -35,7 +35,20 @@ def decaying(start_block: int, blocks: int, price: float, decay: float | None = 
 
 #: Enough held hotkeys that the urgency path is not in play, so a test about the
 #: decay floor is actually testing the decay floor.
+# A FULL fleet, which is what makes haggling over the decay floor rational:
+# below the target an affordable price beats a perfect one, so the floor gates
+# are deliberately skipped there. Sized from the policy so raising the target
+# cannot leave these tests quietly exercising the urgent path instead of the
+# gate they name.
 HOLDING_A_FLEET = tuple(range(5))
+
+# The live policy skips the decay-floor gates below target -- measured, the price
+# is within tolerance of the floor only 4.7% of the time, so haggling for it is a
+# permanent refusal rather than a saving. The gates still work and are still
+# tested; they just need a policy that reaches them.
+def haggling_policy(**kw):
+    kw.setdefault("urgent_below", 0)
+    return sm.SlotPolicy(**kw)
 
 
 def state_at(history, *, regs=0, registered=HOLDING_A_FLEET, last=None):
@@ -82,11 +95,11 @@ def test_pure_decay_below_target_buys():
         state_at(history, regs=0, registered=(7, 12, 19, 24, 31)),
         history,
         [],
-        sm.SlotPolicy(),
+        haggling_policy(),
     )
     assert decision.action == sm.BUY
     assert decision.reason == sm.REASON_BUY
-    assert decision.detail["shortfall"] == sm.SlotPolicy().target - 5
+    assert decision.detail["shortfall"] == haggling_policy().target - 5
     # Under pure decay every sample projects to the same price, so the live
     # price sits exactly on its own floor.
     assert decision.detail["floor_ratio"] == pytest.approx(1.0, abs=1e-9)
@@ -133,13 +146,25 @@ def test_below_a_working_fleet_an_affordable_price_beats_a_perfect_one():
     )
     assert decision.action == sm.BUY
     assert decision.reason == sm.REASON_BUY_URGENT
-    # ...and the same spike is declined once the fleet is nearly complete.
-    patient = sm.decide(
+    # ...and one short of the target it is STILL bought. Haggling below a full
+    # fleet was measured to be a permanent refusal rather than a saving: the
+    # price sits within tolerance of the decay floor only 4.7% of the time, so
+    # the gate refused 150 of 251 decisions in a day while the fleet sat at 6 of
+    # 12. One ticket short forfeits ~tau0.032 an epoch, ~20 epochs a day, to
+    # save ~tau0.03 once.
+    nearly = sm.decide(
         state_at(spiked, registered=tuple(range(sm.SlotPolicy().target - 1))),
         spiked, [], sm.SlotPolicy()
     )
-    assert patient.action == sm.WAIT
-    assert patient.reason == sm.REASON_ABOVE_FLOOR
+    assert nearly.action == sm.BUY
+    assert nearly.reason == sm.REASON_BUY_URGENT
+    # At the target there is nothing to buy.
+    done = sm.decide(
+        state_at(spiked, registered=tuple(range(sm.SlotPolicy().target))),
+        spiked, [], sm.SlotPolicy()
+    )
+    assert done.action == sm.WAIT
+    assert done.reason == sm.REASON_TARGET_MET
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +185,7 @@ def spiked(start_block: int, spike_at: int, blocks: int, price: float, jump: flo
 
 def test_a_competitor_spike_blocks_the_buy():
     history = spiked(1_000_000, 40, 61, 0.135167)
-    decision = sm.decide(state_at(history, regs=1), history, [], sm.SlotPolicy())
+    decision = sm.decide(state_at(history, regs=1), history, [], haggling_policy())
     assert decision.action == sm.WAIT
     assert decision.reason == sm.REASON_ABOVE_FLOOR
     # The pre-spike samples are what expose it: the live price is a third above
@@ -170,7 +195,7 @@ def test_a_competitor_spike_blocks_the_buy():
 
 def test_a_spike_delays_us_but_does_not_lock_us_out():
     """The lookback window is finite on purpose, so the floor re-anchors."""
-    policy = sm.SlotPolicy(lookback_blocks=180)
+    policy = haggling_policy(lookback_blocks=180)
     history = spiked(1_000_000, 40, 400, 0.135167)
     blocked = sm.decide(
         state_at(history[:200], regs=1), history[:200], [], policy
@@ -186,12 +211,12 @@ def test_a_spike_delays_us_but_does_not_lock_us_out():
 
 def test_a_thin_window_refuses_to_guess_at_the_floor():
     history = decaying(1_000_000, 3, 0.12)
-    decision = sm.decide(state_at(history), history, [], sm.SlotPolicy())
+    decision = sm.decide(state_at(history), history, [], haggling_policy())
     assert decision.reason == sm.REASON_NO_HISTORY
     assert decision.detail["projected_floor_tao"] is None
     # Three samples five blocks apart is a poll burst, not a decay window.
     burst = [sm.PriceSample(1_000_000 + n * 2, 0.12) for n in range(3)]
-    assert sm.decide(state_at(burst), burst, [], sm.SlotPolicy()).reason == sm.REASON_NO_HISTORY
+    assert sm.decide(state_at(burst), burst, [], haggling_policy()).reason == sm.REASON_NO_HISTORY
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +230,7 @@ def test_budget_exhaustion_refuses_rather_than_overspends():
     spends = [
         sm.SpendRecord(now - 3600 * hour, 0.19) for hour in range(1, 6)
     ]  # tau0.95 inside the day
-    policy = sm.SlotPolicy(max_spend_tao_per_day=1.0)
+    policy = haggling_policy(max_spend_tao_per_day=1.0)
     decision = sm.decide(state_at(history), history, spends, policy, now=now)
     assert decision.action == sm.WAIT
     assert decision.reason == sm.REASON_BUDGET
@@ -218,7 +243,7 @@ def test_budget_exhaustion_refuses_rather_than_overspends():
 def test_the_recycle_ceiling_refuses_an_expensive_floor():
     """A price can be honestly at its floor and still be too expensive."""
     history = decaying(1_000_000, 61, 0.9)
-    policy = sm.SlotPolicy(max_recycle_tao=0.20)
+    policy = haggling_policy(max_recycle_tao=0.20)
     decision = sm.decide(state_at(history), history, [], policy)
     assert decision.action == sm.WAIT
     assert decision.reason == sm.REASON_CEILING
@@ -243,7 +268,7 @@ def test_one_registration_per_adjustment_interval_at_most():
         state_at(history, last=same_interval),
         history,
         [],
-        sm.SlotPolicy(stagger_blocks=0),
+        haggling_policy(stagger_blocks=0),
     )
     assert decision.reason == sm.REASON_OWN_INTERVAL
 
@@ -251,7 +276,7 @@ def test_one_registration_per_adjustment_interval_at_most():
 def test_the_stagger_window_holds_expiries_apart():
     history = decaying(1_000_000, 61, 0.12)
     block = history[-1].block
-    policy = sm.SlotPolicy()
+    policy = haggling_policy()
     assert policy.stagger == sm.default_stagger_blocks(policy.target)
     # Probe a block that is inside the stagger window but past the adjustment
     # interval, so the stagger guard is the one that answers. The window between
@@ -823,3 +848,53 @@ def test_the_deployed_target_matches_the_policy():
     spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
     assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"
     assert float(spend.group(1)) == sm.SlotPolicy().max_spend_tao_per_day
+
+
+def test_haggling_stops_below_a_full_fleet():
+    """
+    Waiting for the decay floor saves about tau0.03 on a tau0.10 registration,
+    while every epoch one ticket short forfeits ~tau0.032 and there are ~20
+    epochs a day. Waiting therefore pays only while short by less than one
+    ticket -- so the floor gates must not fire below target.
+
+    At the old fixed urgent_below=3 they fired constantly: 150 of 251 decisions
+    in a day were price_above_decay_floor while the fleet sat at 6 of 12.
+    """
+    policy = sm.SlotPolicy()
+    spiked_history = spiked(1_000_000, 40, 61, 0.135167)
+
+    # At target there is nothing to buy at all.
+    full = sm.decide(
+        state_at(spiked_history, registered=tuple(range(policy.target))),
+        spiked_history, [], policy,
+    )
+    assert full.action == sm.WAIT
+    assert full.reason == sm.REASON_TARGET_MET
+
+    # The floor gate still exists and still refuses a spike -- it is simply not
+    # reached by the live policy, which skips it below target.
+    haggler = sm.SlotPolicy(urgent_below=0)
+    gated = sm.decide(state_at(spiked_history), spiked_history, [], haggler)
+    assert gated.action == sm.WAIT
+    assert gated.reason == sm.REASON_ABOVE_FLOOR
+
+    # One ticket short, the same spike is bought instead.
+    short = sm.decide(
+        state_at(spiked_history, registered=tuple(range(policy.target - 1))),
+        spiked_history, [], policy,
+    )
+    assert short.action == sm.BUY
+    assert short.reason == sm.REASON_BUY_URGENT
+
+
+def test_the_price_ceiling_and_budget_still_bound_an_urgent_buy():
+    """
+    Skipping the floor gates does not mean buying at any price. The ceiling and
+    the rolling daily budget are what bound the spend, and they outrank urgency.
+    """
+    policy = sm.SlotPolicy()
+    dear = decaying(1_000_000, 61, policy.max_recycle_tao * 2)
+    decision = sm.decide(state_at(dear, registered=()), dear, [], policy)
+    assert decision.action == sm.WAIT
+    assert decision.reason == sm.REASON_CEILING
+
