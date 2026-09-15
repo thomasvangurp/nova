@@ -132,7 +132,11 @@ def test_publication_gates_are_not_restated_in_this_file():
     assert RANK_QUALIFICATION_ARGUMENTS == tuple(publication_gates.gate_arguments())
     arguments = list(RANK_QUALIFICATION_ARGUMENTS)
     # The relaxed values, which the hardcoded copy used to contradict for hours.
-    assert arguments[arguments.index("--minimum-observations") + 1] == "1"
+    # Read from the gate module, never restated here: a literal in this test is
+    # the same defect the test exists to catch, one file further out.
+    assert arguments[arguments.index("--minimum-observations") + 1] == (
+        publication_gates.gate_defaults()["--minimum-observations"]
+    )
     assert arguments[arguments.index("--maximum-p90-rank-sum") + 1] == "400"
     # ... and the integrity gates, which are never relaxed for score.
     assert arguments[arguments.index("--minimum-median-contact-jaccard") + 1] == "0.35"
@@ -260,8 +264,8 @@ def test_one_shot_exact_data_invalidates_provisional_but_not_strict_cache(tmp_pa
 
 
 def test_the_strict_eligibility_floor_comes_from_publication_gates(tmp_path):
-    # One observation is the floor today, so one new observation must invalidate
-    # the strict cache: the cache may never be more patient than the gate.
+    # Whatever the floor is, one new observation must invalidate the strict
+    # cache: the cache may never be more patient than the gate.
     first = tmp_path / "first.json"
     _write_exact(first, observation="first")
     _, before = _exact_bank_fingerprints((first,), TARGET)
@@ -270,7 +274,7 @@ def test_the_strict_eligibility_floor_comes_from_publication_gates(tmp_path):
 
     _, after = _exact_bank_fingerprints((first, second), TARGET)
 
-    assert int(publication_gates.gate_defaults()["--minimum-observations"]) == 1
+    assert int(publication_gates.gate_defaults()["--minimum-observations"]) >= 1
     assert after != before
 
 

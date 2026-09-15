@@ -253,7 +253,8 @@ def _exact_bank_fingerprints(
     expensive structural qualification pass can only change when a sequence
     with at least the strict minimum of independent observations changes.  This
     mirrors ``rank_exact._observations`` including its observation-id
-    deduplication and complete finite-metric requirement.
+    deduplication, its complete finite-metric requirement, and its relaxation of
+    the observation floor when no sequence reaches it.
     """
     required = set(validator_boltzgen_metrics())
     if minimum is None:
@@ -299,10 +300,17 @@ def _exact_bank_fingerprints(
     manifest_digest = _sha256_bytes(
         json.dumps(manifest, separators=(",", ":")).encode()
     )
+    # Ranking relaxes the observation floor one step at a time rather than
+    # publishing nothing, so the strict-eligible set has to relax with it.
+    # Holding this at the unrelaxed floor would empty the subset for a thin
+    # epoch, and an empty subset has a constant digest: the cache would stop
+    # noticing new evidence exactly while ranking was still selecting on it.
+    deepest = max((len(records) for records in observations.values()), default=1)
+    effective = max(1, min(minimum, deepest))
     strict_eligible = {
         sequence: records
         for sequence, records in sorted(observations.items())
-        if len(records) >= minimum
+        if len(records) >= effective
     }
     strict_digest = _sha256_bytes(
         json.dumps(
@@ -1629,6 +1637,16 @@ def _publish_once(args: argparse.Namespace) -> None:
                 flush=True,
             )
             assignments = fleet_module.assignments_from_artifact(previous)
+            # Skipping the provisional pass also skips the fleet plan that
+            # builds the commit context, but both re-commit paths below still
+            # need one -- without it this branch raises UnboundLocalError and
+            # an already-qualified epoch stops re-committing entirely.  The
+            # crew is the same chain view the planned fleet would have used;
+            # no spare is known here, and inventing one would revive a uid the
+            # earlier pass may have deliberately left out.
+            commit_context = CommitContext(
+                known_uids=frozenset(member.uid for member in crew),
+            )
         else:
             _run(_rank_command(
                 bgen_python=bgen_python,

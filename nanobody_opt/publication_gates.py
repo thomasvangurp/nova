@@ -46,10 +46,22 @@ QUALITY_GATES: dict[str, str] = {
 
 # Evidence requirements.  One observation of a fixed sequence lands about 34
 # leaderboard rank points from its own mean, so more observations buy a better
-# estimate -- but refusing to publish for want of the eighth observation trades a
-# possible win for a certain zero, so the floor is one.
+# estimate.  Refusing to publish for want of the eighth observation would trade a
+# possible win for a certain zero, so this is not a hard floor: ranking relaxes
+# it one observation at a time rather than publishing nothing.
+#
+# It is not one either.  A single pass is where our screen stops agreeing with
+# the validator at all -- measured Spearman by observation count was -0.184 at
+# one, +0.230 at two to three and +0.240 at four or more -- so selecting on a
+# one-observation estimate is selecting on noise.  Replaying 27 real epoch
+# fields with screen noise calibrated to the measured single-pass correlation,
+# the best true final_score of a twelve-ticket basket improved monotonically
+# with passes (72.4 -> 70.9 -> 68.9 -> 66.3 for k = 1, 2, 4, 8), and by three
+# times as much for a single-ticket epoch.  Four is where the measured
+# correlation plateaus; the race already targets eight and narrows the
+# shortlist rather than the observation count, so this floor is reachable.
 EVIDENCE_GATES: dict[str, str] = {
-    "--minimum-observations": "1",
+    "--minimum-observations": "4",
     "--minimum-structure-observations": "1",
 }
 

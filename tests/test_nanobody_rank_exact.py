@@ -276,7 +276,7 @@ def test_ranker_rejects_structurally_unstable_observations(tmp_path, monkeypatch
     try:
         rank_exact.main()
     except SystemExit as error:
-        assert "no complete exact candidates" in str(error)
+        assert "cleared qualification" in str(error)
     else:
         raise AssertionError("four good and four bad observations were accepted")
 
@@ -322,3 +322,81 @@ def test_no_per_metric_weighting_remains():
     assert not hasattr(rank_exact, "SELECTION_METRIC_WEIGHTS")
     assert not hasattr(rank_exact, "_compiled_selection_score")
 
+
+
+def _exact_bank(tmp_path, observations_by_sequence):
+    """An exact score bank holding N independent observations per sequence."""
+    depth = max(observations_by_sequence.values())
+    path = tmp_path / "exact.json"
+    path.write_text(json.dumps({
+        "target": "P20809",
+        "per_nanobody_components": {
+            str(index): {
+                sequence: {"P20809": _metrics(value)}
+                for value, (sequence, count) in enumerate(
+                    sorted(observations_by_sequence.items()), start=1
+                )
+                if index < count
+            }
+            for index in range(depth)
+        },
+    }))
+    return path
+
+
+def _rank(tmp_path, monkeypatch, exact, **overrides):
+    archive = tmp_path / "archive.csv"
+    pd.DataFrame([
+        {"sequence": f"ARCHIVE{index:02d}", **_metrics(index + 1)}
+        for index in range(60)
+    ]).to_csv(archive, index=False)
+    output = tmp_path / "ranking.json"
+    argv = [
+        "rank_exact.py",
+        "--exact", str(exact),
+        "--archive", str(archive),
+        "--target", "P20809",
+        "--output", str(output),
+        "--recent", "50",
+        "--field-size", "10",
+    ]
+    for flag, value in overrides.items():
+        argv += [flag, str(value)]
+    monkeypatch.setattr(sys, "argv", argv)
+    rank_exact.main()
+    return json.loads(output.read_text())
+
+
+def test_a_thin_candidate_loses_to_a_well_observed_one(tmp_path, monkeypatch):
+    # THIN has one observation and SOLID has four.  At the floor the thin
+    # candidate is not eligible at all, however good its single draw looked.
+    exact = _exact_bank(tmp_path, {"SOLID": 4, "THIN": 1})
+
+    payload = _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 4})
+
+    assert payload["sequences"] == ["SOLID"]
+    assert payload["observation_floor_applied"] == 4
+
+
+def test_a_thin_epoch_still_publishes_at_a_relaxed_floor(tmp_path, monkeypatch):
+    # Nothing reaches the floor.  Publishing nothing is the only outcome that
+    # certainly pays nothing, so the floor gives way rather than the epoch.
+    exact = _exact_bank(tmp_path, {"THIN": 1, "ALSOTHIN": 1})
+
+    payload = _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 4})
+
+    assert payload["candidate_count"] == 2
+    assert payload["minimum_observations"] == 4
+    assert payload["observation_floor_applied"] == 1
+
+
+def test_the_floor_gives_way_one_observation_at_a_time(tmp_path, monkeypatch):
+    # Three observations is the deepest evidence this epoch produced, so that is
+    # where the relaxation stops -- it does not fall straight to one and let a
+    # single-draw candidate back into the comparison.
+    exact = _exact_bank(tmp_path, {"DEEPEST": 3, "SHALLOW": 1})
+
+    payload = _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 8})
+
+    assert payload["sequences"] == ["DEEPEST"]
+    assert payload["observation_floor_applied"] == 3

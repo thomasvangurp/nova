@@ -26,9 +26,14 @@ def test_it_imports_with_no_site_packages():
     assert completed.returncode == 0, completed.stderr
 
 
-def test_evidence_floor_is_one_so_an_epoch_always_submits():
+def test_the_evidence_floor_is_deep_enough_to_carry_signal():
+    # A single pass is where our screen stops agreeing with the validator at all
+    # (measured Spearman -0.184 at one observation, +0.240 at four or more), so
+    # a floor of one selects on noise.  Ranking relaxes this floor rather than
+    # publishing nothing, so raising it costs no epoch -- see
+    # test_a_thin_epoch_still_publishes_at_a_relaxed_floor.
     gates = pg.gate_defaults()
-    assert gates["--minimum-observations"] == "1"
+    assert int(gates["--minimum-observations"]) >= 2
     assert gates["--minimum-structure-observations"] == "1"
 
 

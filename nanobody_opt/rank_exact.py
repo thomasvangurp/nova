@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from nanobody_opt import publication_gates
 from nanobody_opt.simulate_round import (
     METRICS,
     METRIC_CATEGORIES,
@@ -220,7 +221,15 @@ def main() -> None:
     parser.add_argument("--target", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--minimum-observations", type=int, default=1)
+    parser.add_argument(
+        "--minimum-observations",
+        type=int,
+        default=int(publication_gates.gate_defaults()["--minimum-observations"]),
+        help=(
+            "observations a candidate needs before it may be selected; relaxed "
+            "one at a time if no candidate reaches it, never below one"
+        ),
+    )
     parser.add_argument(
         "--competitive-score-threshold",
         type=float,
@@ -402,8 +411,6 @@ def main() -> None:
             normalized_sequence in historical_sequences
             or normalized_sequence in excluded_sequences
         ):
-            continue
-        if len(observations) < args.minimum_observations:
             continue
         category_matrix = [
             [
@@ -588,6 +595,27 @@ def main() -> None:
             "diffusion_sample_selection": selection_summary,
         })
 
+    # Selecting on a one-observation estimate is selecting on noise, but
+    # publishing nothing is the only outcome that certainly pays nothing.  Take
+    # the deepest evidence this epoch actually produced rather than either.
+    observation_floor = args.minimum_observations
+    if ranked:
+        # Relax only against evidence depth.  An empty list here means the
+        # qualification gates rejected everything, and walking the floor down
+        # would neither recover a candidate nor describe what happened.
+        deepest = max(item["observation_count"] for item in ranked)
+        observation_floor = max(1, min(observation_floor, deepest))
+        if observation_floor < args.minimum_observations:
+            print(
+                "EXACT_OBSERVATION_FLOOR_RELAXED "
+                f"from={args.minimum_observations} to={observation_floor}",
+                flush=True,
+            )
+        ranked = [
+            item for item in ranked
+            if item["observation_count"] >= observation_floor
+        ]
+
     if args.selection_order == "win-probability":
         # Only rank one pays and the validator draws once, so the target is the
         # chance of a winning draw, not the best average.  Spread is an asset:
@@ -614,7 +642,10 @@ def main() -> None:
         ))
     selected = ranked[: args.limit]
     if not selected:
-        raise SystemExit("no complete exact candidates met the observation requirement")
+        raise SystemExit(
+            "no complete exact candidate cleared qualification "
+            f"(observation floor {observation_floor})"
+        )
     payload = {
         "target": args.target,
         "exact_files": [str(path) for path in args.exact],
@@ -624,6 +655,7 @@ def main() -> None:
             for path in args.exact
         }),
         "minimum_observations": args.minimum_observations,
+        "observation_floor_applied": observation_floor,
         "qualification": {
             "competitive_score_threshold": args.competitive_score_threshold,
             "minimum_competitive_rate": args.minimum_competitive_rate,
