@@ -619,13 +619,26 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
     assert sm.decide(remembered, history, [], sm.SlotPolicy()).reason == (
         sm.REASON_OWN_INTERVAL
     )
-    # One interval back it is the stagger, not the quota, that holds us.  The
-    # stagger spreads immunity expiries; a fleet bought in a burst dies in a
-    # burst, which urgency cannot repair afterwards.
-    earlier = sm.read_chain_state(
-        chain, 68, OURS, log_last_block=same_interval - sm.ADJUSTMENT_INTERVAL
+    # Past the interval quota but still inside the stagger, it is the stagger
+    # that holds us.  It spreads immunity expiries; a fleet bought in a burst
+    # dies in a burst, which urgency cannot repair afterwards.  The window is
+    # derived, not assumed equal to the adjustment interval -- the stagger is
+    # sized for target + 1 precisely so the two do NOT coincide.
+    policy = sm.SlotPolicy()
+    inside = chain.get_current_block() - (policy.stagger - 10)
+    assert inside // sm.ADJUSTMENT_INTERVAL != (
+        chain.get_current_block() // sm.ADJUSTMENT_INTERVAL
+    ), (
+        "the quota must already be clear, or it would mask the stagger"
     )
-    assert sm.decide(earlier, history, [], sm.SlotPolicy()).reason == sm.REASON_STAGGER
+    earlier = sm.read_chain_state(chain, 68, OURS, log_last_block=inside)
+    assert sm.decide(earlier, history, [], policy).reason == sm.REASON_STAGGER
+    # And one block past the window, the stagger releases.
+    outside = sm.read_chain_state(
+        chain, 68, OURS,
+        log_last_block=chain.get_current_block() - policy.stagger - 1
+    )
+    assert sm.decide(outside, history, [], policy).reason != sm.REASON_STAGGER
 
 
 def test_urgency_overrides_the_decay_floor_and_nothing_else():
@@ -876,9 +889,14 @@ def test_the_cli_target_default_follows_the_policy():
 
 def test_the_stagger_keeps_renewals_in_separate_intervals_at_the_live_target():
     """
-    The fleet size is bounded by the renewal spacing, not by taste: two
-    immunity expiries inside one adjustment interval make us bid against
-    ourselves. 5000 // 13 is 384 and clears 360; 5000 // 14 is 357 and does not.
+    The fleet size is bounded by the renewal spacing, not by taste: two immunity
+    expiries inside one adjustment interval make us bid against ourselves.
+
+    The spacing is sized for target + 1 so the fleet has headroom against churn
+    -- spaced for target exactly, buying and dying run at the same rate and a
+    deficit can never be closed.  That costs one uid of ceiling: 5000 // 13 =
+    384 clears 360 so a target of 12 is feasible, while 5000 // 14 = 357 does
+    not, so 13 is not.
     """
     policy = sm.SlotPolicy()
     assert sm.default_stagger_blocks(policy.target) > sm.ADJUSTMENT_INTERVAL, (
@@ -886,8 +904,12 @@ def test_the_stagger_keeps_renewals_in_separate_intervals_at_the_live_target():
         f"{sm.default_stagger_blocks(policy.target)} blocks apart, inside the "
         f"{sm.ADJUSTMENT_INTERVAL}-block adjustment interval"
     )
-    assert sm.default_stagger_blocks(13) > sm.ADJUSTMENT_INTERVAL
-    assert sm.default_stagger_blocks(14) <= sm.ADJUSTMENT_INTERVAL
+    assert sm.default_stagger_blocks(12) > sm.ADJUSTMENT_INTERVAL
+    assert sm.default_stagger_blocks(13) <= sm.ADJUSTMENT_INTERVAL
+    # And the headroom is real: we may buy faster than uids die.
+    deaths_per_block = policy.target / sm.IMMUNITY_PERIOD
+    buys_per_block = 1.0 / sm.default_stagger_blocks(policy.target)
+    assert buys_per_block > deaths_per_block
 
 
 def test_the_deployed_target_matches_the_policy():
@@ -905,8 +927,10 @@ def test_the_deployed_target_matches_the_policy():
     # deployed literal is checked against the derivation rather than against a
     # second literal.  A budget that cannot sustain the target is how the fleet
     # was capped below it twice without any gate saying so.
+    # Exact, not approximate: a tolerance here lets the deployed number drift
+    # from the derivation it is supposed to BE.
     assert float(spend.group(1)) == pytest.approx(
-        sm.SlotPolicy().daily_budget_tao, abs=0.01
+        sm.SlotPolicy().daily_budget_tao, abs=1e-4
     )
     assert float(spend.group(1)) >= (
         sm.SlotPolicy().target * (24.0 / sm.IMMUNITY_HOURS)

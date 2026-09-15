@@ -636,10 +636,21 @@ def main() -> None:
     # the deepest evidence this epoch actually produced rather than either.
     observation_floor = args.minimum_observations
     if ranked:
-        # Relax only against evidence depth.  An empty list here means the
-        # qualification gates rejected everything, and walking the floor down
-        # would neither recover a candidate nor describe what happened.
-        deepest = max(item["observation_count"] for item in ranked)
+        # Relax against the depth of EVERY observed candidate, not only those
+        # that cleared qualification.  The publisher's strict-eligibility cache
+        # computes its own floor the same way, over all observations, because it
+        # cannot evaluate the gates -- so taking it post-gate here let the two
+        # disagree: when the deep candidates all failed, ranking dropped to a
+        # shallower floor the cache was not watching, and a change in the
+        # evidence ranking was actually using would not invalidate it.  Matching
+        # the cache's basis removes that by construction.  It costs nothing the
+        # relaxation was for: its purpose is a thin epoch that never reached the
+        # floor, and an epoch whose candidates all fail the gates publishes
+        # nothing under either basis.
+        deepest = max(
+            len(records)
+            for records in _observations(args.exact, args.target).values()
+        )
         observation_floor = max(1, min(observation_floor, deepest))
         if observation_floor < args.minimum_observations:
             print(

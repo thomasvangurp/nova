@@ -58,7 +58,7 @@
     slot_manager_network: finney
     slot_manager_decision_log: "{{ ansible_env.HOME }}/.nova/subnet68_slots.jsonl"
     slot_manager_max_recycle_tao: 0.20
-    slot_manager_max_spend_tao_per_day: 3.46
+    slot_manager_max_spend_tao_per_day: 3.4560
     slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
     # auto resolves to keychain on macOS and systemd on Linux, matching what the
     # host actually has; the agent makes the same choice by platform.

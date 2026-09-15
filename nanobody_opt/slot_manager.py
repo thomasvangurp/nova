@@ -147,13 +147,27 @@ def default_stagger_blocks(target: int) -> int:
     The spacing has to stay above :data:`ADJUSTMENT_INTERVAL`, or two renewals
     land in one adjustment interval and bid against each other.  That is what
     bounds the fleet: 5000 // 13 is 384 blocks and clears 360, while 5000 // 14
-    is 357 and does not.  At the default target of 12 the spacing is 416 blocks,
-    about 1.4 hours, which also lets one of our own +33% jumps decay before the
-    next buy.
+    is 357 and does not.
+
+    Spaced at ``immunity // target`` exactly, though, the fleet has NO headroom:
+    at a target of 12 that is 416 blocks while a uid dies every 5000/12 = 417,
+    so buying and dying run at the same rate and a deficit can never be closed
+    faster than churn re-opens it.  Sizing the spacing for one more uid than we
+    hold restores a margin -- 5000 // 13 = 384 against a death every 417 is
+    about 8% -- and still clears the adjustment interval.  The interval rule in
+    ``decide()`` independently refuses a second buy inside one adjustment
+    interval, so that protection does not rest on this spacing alone.
+
+    Headroom costs one uid of maximum fleet size, and that is the trade: spaced
+    for ``target`` the ceiling was 13 (5000 // 13 = 384 clears 360, 5000 // 14 =
+    357 does not); spaced for ``target + 1`` it is 12.  A twelfth uid we can
+    actually hold through churn is worth more than a thirteenth we cannot.
     """
     if target < 1:
         raise ValueError("target must be at least one hotkey")
-    return max(1, IMMUNITY_PERIOD // target)
+    # NOT clamped to the adjustment interval: falling below it is what says a
+    # target is infeasible, and clamping would hide that rather than prevent it.
+    return max(1, IMMUNITY_PERIOD // (target + 1))
 
 
 @dataclass(frozen=True)
