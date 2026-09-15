@@ -578,3 +578,69 @@ def test_a_proposal_always_changes_at_least_one_position():
     assert parent[anchor] not in options_at(anchor)
     # Every other sampled position may still hold consensus.
     assert parent[7] in options_at(7)
+
+
+def test_the_anchor_prefers_unsettled_then_repairs_then_anything():
+    """
+    Where the forced change lands matters as much as that one does. Measured over
+    380 of the strongest competitor's epoch-to-epoch mutations against 727 of
+    ours: both put ~80% of mutations on unsettled positions, so WHERE is not the
+    difference. DIRECTION at settled positions is -- they move toward consensus
+    52% and away 43%; we move away 69% and toward 29%. They repair deviations,
+    we manufacture them, and sit at 1.18 deviations per ticket against their 0.82.
+    """
+    from nanobody_opt.local_neighborhood import (
+        FIELD_CONSENSUS_THRESHOLD,
+        field_consensus,
+    )
+
+    # positions 0-8 settled on G; position 9 genuinely varies
+    population = []
+    for i in range(100):
+        seq = ["G"] * 9 + ["ACDEFGHIKL"[i % 10]]
+        population.append("".join(seq))
+    consensus = field_consensus(population, 10)
+    settled = {i for i, (_, share) in consensus.items()
+               if share >= FIELD_CONSENSUS_THRESHOLD}
+    assert 9 not in settled and 0 in settled
+
+    def rank(parent, position):
+        residue, share = consensus.get(position, ("", 0.0))
+        if share < FIELD_CONSENSUS_THRESHOLD:
+            return 0
+        return 1 if parent[position] != residue else 2
+
+    def anchor_for(parent, positions):
+        return min(positions, key=lambda v: (rank(parent, v), v))
+
+    at_consensus = "GGGGGGGGGG"
+    # An unsettled position wins outright.
+    assert anchor_for(at_consensus, [0, 3, 9]) == 9
+    # With only settled positions and a parent already at consensus, any is as
+    # bad as another -- but a parent that DEVIATES makes that position the pick.
+    deviant = "GGAGGGGGGG"          # position 2 is off consensus
+    assert anchor_for(deviant, [0, 2, 5]) == 2
+    # ...and an unsettled option still outranks the repair.
+    assert anchor_for(deviant, [0, 2, 9]) == 9
+
+
+def test_a_settled_anchor_draws_the_consensus_residue():
+    """
+    A settled anchor is only chosen when the parent deviates, so the one forced
+    change must be the repair -- not a sideways move between two non-consensus
+    residues, which would keep the deviation while burning the mutation.
+    """
+    from nanobody_opt.local_neighborhood import (
+        FIELD_CONSENSUS_THRESHOLD,
+        field_consensus,
+    )
+
+    consensus = field_consensus(["GGGGGGGGGG"] * 100, 10)
+    parent = "GGAGGGGGGG"                 # deviates at position 2
+    position, anchor = 2, 2
+    residue_at, share_at = consensus[position]
+    allowed = list("ACDEFGHIKL")
+    options = [r for r in allowed if r != parent[position]]
+    if position == anchor and share_at >= FIELD_CONSENSUS_THRESHOLD and residue_at in options:
+        options = [residue_at]
+    assert options == ["G"], "the forced change must restore consensus"

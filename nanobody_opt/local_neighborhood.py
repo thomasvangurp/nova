@@ -1610,7 +1610,31 @@ def main() -> None:
                 # The anchor keeps the candidate novel; every OTHER sampled
                 # position may still hold, which is what stops the one-way drift
                 # off consensus.
-                anchor = int(positions[0])
+                # Which position is forced to change matters as much as that one
+                # is. Measured over 380 of the strongest competitor's
+                # epoch-to-epoch mutations against 727 of ours: both of us put
+                # ~80% of mutations on unsettled positions, so WHERE to mutate is
+                # not the difference. The difference is DIRECTION at the settled
+                # ones -- they move toward consensus 52% of the time and away
+                # 43%, while we move away 69% and toward only 29%. They repair
+                # deviations; we manufacture them, and end up at 1.18 deviations
+                # per ticket against their 0.82 and the field's 0.97. Every extra
+                # deviation costs about 0.05-0.10 of field percentile.
+                #
+                # So the anchor prefers, in order:
+                #   1. an unsettled position, where novelty costs nothing;
+                #   2. a settled position where the PARENT ALREADY DEVIATES, so
+                #      the forced change is a correction toward consensus;
+                #   3. anything left, rather than fail to propose.
+                # Without this the anchor manufactures exactly the deviation the
+                # rest of this change exists to avoid.
+                def _anchor_rank(position: int) -> int:
+                    residue, share = consensus.get(position, ("", 0.0))
+                    if share < FIELD_CONSENSUS_THRESHOLD:
+                        return 0
+                    return 1 if parent[position] != residue else 2
+
+                anchor = int(min(positions, key=lambda value: (_anchor_rank(int(value)), int(value))))
                 for position_value in positions:
                     position = int(position_value)
                     # Everywhere else a mutation must change something, or the
@@ -1621,15 +1645,25 @@ def main() -> None:
                     # 81%. Leaving the parent residue on the table lets the
                     # weighted draw decline to displace it, while the prior still
                     # allows the deliberate single deviation the winners carry.
+                    residue_at, share_at = consensus.get(position, ("", 0.0))
                     settled_here = (
                         position != anchor
-                        and consensus.get(position, ("", 0.0))[1]
-                        >= FIELD_CONSENSUS_THRESHOLD
+                        and share_at >= FIELD_CONSENSUS_THRESHOLD
                     )
                     options = [
                         residue for residue in allowed[position]
                         if residue != parent[position] or settled_here
                     ]
+                    # A settled anchor is only ever chosen when the parent
+                    # deviates there, so restrict the draw to the repair when it
+                    # is available. Anything else would spend the one forced
+                    # change moving sideways between two non-consensus residues.
+                    if (
+                        position == anchor
+                        and share_at >= FIELD_CONSENSUS_THRESHOLD
+                        and residue_at in options
+                    ):
+                        options = [residue_at]
                     sequence[position] = _weighted_choice(
                         rng,
                         options,
