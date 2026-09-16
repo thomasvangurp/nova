@@ -1521,13 +1521,8 @@ def test_an_unverifiable_chain_read_does_not_earn_a_ledger_entry():
     assert _commitment_is_ours({}, assignment) is False
 
 
-def test_the_strict_upgrade_is_wired_into_the_deploy():
-    """The qualified stage only exists if the deploy asks for it.
-
-    Thirteen consecutive epochs published at stage=provisional -- the evidence
-    floor alone, no quality gate -- because --strict-qualification defaults off
-    and nothing passed it.
-    """
+def test_the_slow_strict_upgrade_is_not_enabled_in_the_deploy():
+    """A strict rank longer than an epoch must not delay the next fleet."""
     playbook = (
         Path(__file__).resolve().parents[1] / "ansible/nanobody_services.yml"
     )
@@ -1540,15 +1535,13 @@ def test_the_strict_upgrade_is_wired_into_the_deploy():
     argv = None
     for play in services:
         for task in play.get("tasks", []) + play.get("post_tasks", []):
-            command = task.get("ansible.builtin.command") or {}
-            candidate = command.get("argv") if isinstance(command, dict) else None
-            if candidate and any(
-                "publish_current_nanobody.py" in str(item) for item in candidate
-            ):
+            facts = task.get("ansible.builtin.set_fact") or {}
+            candidate = facts.get("nanobody_publisher_arguments")
+            if candidate:
                 argv = [str(item) for item in candidate]
     assert argv is not None, "no publisher launch found in the playbook"
-    assert "--strict-qualification" in argv, (
-        "without this the publisher stops at the provisional fleet forever"
+    assert "--strict-qualification" not in argv, (
+        "the measured 96.5-minute strict rank must stay off the live path"
     )
     assert "--strict-qualification-reserve-blocks" in argv, (
         "the strict rank costs about a third of an epoch; it must be gated on "

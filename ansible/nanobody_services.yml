@@ -656,15 +656,10 @@
           - "{{ nanobody_wallet_path }}"
           - --reserve-blocks
           - "{{ nanobody_reserve_blocks }}"
-          # The qualified stage.  With this off every epoch published at
-          # stage=provisional -- the evidence floor only, no quality gate at
-          # all.  It was cut from the live path when it ran BEFORE the commit
-          # and made fleets reach the chain late; the commit moved ahead of it,
-          # so what is left is an upgrade attempt on a fleet that is already
-          # on chain.  The reserve is what keeps it free: it will not start
-          # inside the last 220 blocks of an epoch, so it can never delay the
-          # next cycle.
-          - --strict-qualification
+          # Strict qualification currently takes longer than an epoch and can
+          # delay the next provisional fleet even though this epoch committed
+          # first. Keep the reserve configured for when the pass is fast enough
+          # to re-enable, but do not start it from the live publisher.
           - --strict-qualification-reserve-blocks
           - "{{ nanobody_strict_qualification_reserve_blocks | default(220) }}"
           # One commitment per uid, each signed by that uid's own hotkey. Without
