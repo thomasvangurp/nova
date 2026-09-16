@@ -62,6 +62,65 @@ def _chains(
         ) from error
 
 
+def _contact_sets(
+    target_residues: list[Any],
+    design_residues: list[Any],
+    cutoff_squared: float,
+) -> tuple[set[tuple[int, int]], set[int], set[int]]:
+    """Find residue contacts without a Python loop over every atom pair.
+
+    A retained complex has thousands of target atoms.  The original strict
+    ranker rebuilt every target residue's heavy-atom list for every nanobody
+    residue, then tested their Cartesian product in Python.  Pose qualification
+    calls this for every retained structure (and for both retained pose kinds),
+    making this one loop dominate a 96-minute rank.
+
+    Flatten the target once and let NumPy evaluate one design residue against
+    all target atoms at a time.  The contact definition is unchanged: a residue
+    pair is present when any heavy-atom distance is at most the cutoff.
+    """
+    target_coordinates: list[tuple[float, float, float]] = []
+    target_numbers: list[int] = []
+    for residue in target_residues:
+        number = int(residue.seqid.num)
+        for atom in _heavy_atoms(residue):
+            target_coordinates.append((atom.pos.x, atom.pos.y, atom.pos.z))
+            target_numbers.append(number)
+
+    if not target_coordinates:
+        return set(), set(), set()
+
+    target_xyz = np.asarray(target_coordinates, dtype=np.float64)
+    target_number_array = np.asarray(target_numbers, dtype=np.int64)
+    contacts: set[tuple[int, int]] = set()
+    contacted_target: set[int] = set()
+    contacted_design: set[int] = set()
+    for design_index, residue in enumerate(design_residues, start=1):
+        atoms = _heavy_atoms(residue)
+        if not atoms:
+            continue
+        design_xyz = np.asarray(
+            [(atom.pos.x, atom.pos.y, atom.pos.z) for atom in atoms],
+            dtype=np.float64,
+        )
+        delta = design_xyz[:, np.newaxis, :] - target_xyz[np.newaxis, :, :]
+        squared = (
+            delta[:, :, 0] ** 2
+            + delta[:, :, 1] ** 2
+            + delta[:, :, 2] ** 2
+        )
+        nearby_atoms = np.any(squared <= cutoff_squared, axis=0)
+        nearby_residues = set(target_number_array[nearby_atoms].tolist())
+        if not nearby_residues:
+            continue
+        contacted_design.add(design_index)
+        contacted_target.update(nearby_residues)
+        contacts.update(
+            (design_index, target_number) for target_number in nearby_residues
+        )
+    return contacts, contacted_target, contacted_design
+
+
 def structure_features(
     path: Path,
     *,
@@ -93,26 +152,9 @@ def structure_features(
         and (coordinate := _ca(residue)) is not None
     }
 
-    cutoff_squared = cutoff * cutoff
-    contacts: set[tuple[int, int]] = set()
-    contacted_target: set[int] = set()
-    contacted_design: set[int] = set()
-    for design_index, design_residue in enumerate(design_residues, start=1):
-        design_atoms = _heavy_atoms(design_residue)
-        for target_residue in target_residues:
-            target_atoms = _heavy_atoms(target_residue)
-            if any(
-                (design_atom.pos.x - target_atom.pos.x) ** 2
-                + (design_atom.pos.y - target_atom.pos.y) ** 2
-                + (design_atom.pos.z - target_atom.pos.z) ** 2
-                <= cutoff_squared
-                for design_atom in design_atoms
-                for target_atom in target_atoms
-            ):
-                target_number = int(target_residue.seqid.num)
-                contacts.add((design_index, target_number))
-                contacted_target.add(target_number)
-                contacted_design.add(design_index)
+    contacts, contacted_target, contacted_design = _contact_sets(
+        target_residues, design_residues, cutoff * cutoff
+    )
 
     occupancy = (
         len(contacted_target & epitope) / len(epitope) if epitope else 1.0

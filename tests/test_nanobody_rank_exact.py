@@ -470,6 +470,119 @@ def test_a_clean_candidate_that_cannot_win_does_not_displace_one_that_can():
     ]
 
 
+def _pose_order_candidate(sequence, score, observations=1, deviations=0):
+    scores = [float(score + index) for index in range(observations)]
+    return {
+        "sequence": sequence,
+        "settled_deviations": deviations,
+        "per_observation_median_rank_sum": scores,
+        "score_p90": max(scores),
+        "score_median": float(np.median(scores)),
+        "score_worst": max(scores),
+        "observation_competitive_rate": 1.0,
+        "competitive_rate": 1.0,
+    }
+
+
+def test_one_observation_pose_shortcut_preserves_the_exhaustive_selected_set():
+    candidates = [
+        _pose_order_candidate("A", 44, deviations=1),
+        _pose_order_candidate("B", 50),
+        _pose_order_candidate("C", 55),
+        _pose_order_candidate("D", 60),
+    ]
+    pose_survivors = {"A", "C", "D"}
+    threshold = 75.0
+    assert rank_exact._pose_order_is_subset_invariant(
+        candidates, "win-probability", threshold
+    )
+
+    exhaustive = rank_exact._order_candidates(
+        [item for item in candidates if item["sequence"] in pose_survivors],
+        "win-probability",
+        threshold,
+    )[:2]
+    preliminary = rank_exact._order_candidates(
+        candidates, "win-probability", threshold
+    )
+    accepted = []
+    for item in preliminary:
+        if item["sequence"] in pose_survivors:
+            accepted.append(item)
+        if len(accepted) == 2:
+            break
+    shortcut = rank_exact._order_candidates(
+        accepted, "win-probability", threshold
+    )
+
+    assert [item["sequence"] for item in shortcut] == [
+        item["sequence"] for item in exhaustive
+    ]
+
+
+def test_mixed_depth_win_probability_keeps_exhaustive_pose_evaluation():
+    candidates = [
+        _pose_order_candidate("ONE", 45, observations=1),
+        _pose_order_candidate("TWO", 46, observations=2),
+    ]
+    assert not rank_exact._pose_order_is_subset_invariant(
+        candidates, "win-probability", 75.0
+    )
+
+
+def test_strict_rank_defers_writer_pose_and_stops_safe_confidence_walk(
+    tmp_path, monkeypatch
+):
+    exact = _exact_bank(tmp_path, {"FIRST": 1, "SECOND": 1, "THIRD": 1})
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "protein_selection:\n"
+        "  nanobody:\n"
+        "    target: P20809\n"
+        "    structure_chain: A\n"
+        "    structure_binding_site: 1..3\n"
+    )
+
+    def retained_paths(_paths, _target, *, pose_kind="confidence"):
+        return {
+            sequence: [tmp_path / f"{pose_kind}-{sequence}.cif"]
+            for sequence in ("FIRST", "SECOND", "THIRD")
+        }
+
+    calls = []
+
+    def summarize(sequence, paths, **_kwargs):
+        calls.append((sequence, paths[0].name))
+        return {
+            "structure_observation_count": 1,
+            "contact_jaccard_median": 1.0,
+            "cdr3_rmsd_max_angstrom": 0.0,
+            "epitope_occupancy_min": 1.0,
+        }
+
+    monkeypatch.setattr(rank_exact, "exact_structure_paths", retained_paths)
+    monkeypatch.setattr(rank_exact, "exact_sample_selections", lambda *_: {})
+    monkeypatch.setattr(rank_exact, "summarize_sequence_structures", summarize)
+    payload = _rank(
+        tmp_path,
+        monkeypatch,
+        exact,
+        **{
+            "--pose-config": config,
+            "--minimum-structure-observations": 1,
+            "--selection-order": "win-probability",
+            "--limit": 1,
+        },
+    )
+
+    assert len(payload["sequences"]) == 1
+    confidence = [call for call in calls if call[1].startswith("confidence-")]
+    writer = [call for call in calls if call[1].startswith("writer-")]
+    assert len(confidence) == 1
+    assert len(writer) == 1
+    assert confidence[0][0] == writer[0][0] == payload["sequences"][0]
+
+
 def test_the_ranker_order_satisfies_the_publisher_invariant():
     """The two must agree, or every publication cycle dies on the assert."""
     from nanobody_opt import fleet

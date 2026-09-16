@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -31,6 +32,40 @@ def _feature(translation=0.0, cdr3_shift=0.0, contacts=None):
         "contacted_design": {design for design, _ in pairs},
         "epitope_occupancy": 0.5,
     }
+
+
+def _atom(x, y, z, element="C"):
+    return SimpleNamespace(
+        pos=SimpleNamespace(x=float(x), y=float(y), z=float(z)),
+        element=SimpleNamespace(name=element),
+    )
+
+
+class _Residue(list):
+    def __init__(self, number, atoms):
+        super().__init__(atoms)
+        self.seqid = SimpleNamespace(num=number)
+
+
+def test_vectorized_contacts_match_the_validator_distance_rule():
+    target = [
+        _Residue(11, [_atom(0, 0, 0), _atom(100, 100, 100, "H")]),
+        _Residue(12, [_atom(10, 0, 0)]),
+        _Residue(13, [_atom(20, 0, 0)]),
+    ]
+    design = [
+        _Residue(1, [_atom(3, 4, 0)]),       # exactly at the 5A cutoff from 11
+        _Residue(2, [_atom(10, 0, 5.001)]),  # just outside the cutoff from 12
+        _Residue(3, [_atom(14.9, 0, 0)]),    # contacts 12 but not 13
+    ]
+
+    contacts, target_hits, design_hits = pose_stability._contact_sets(
+        target, design, 25.0
+    )
+
+    assert contacts == {(1, 11), (3, 12)}
+    assert target_hits == {11, 12}
+    assert design_hits == {1, 3}
 
 
 def test_pose_summary_aligns_on_target_and_measures_contact_stability(

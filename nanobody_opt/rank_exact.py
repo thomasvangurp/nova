@@ -34,7 +34,11 @@ from nanobody_opt.simulate_round import (
     METRICS,
     METRIC_CATEGORIES,
 )
-from nanobody_opt.win_probability import rank_by_win_probability
+from nanobody_opt.win_probability import (
+    MINIMUM_SPREAD,
+    rank_by_win_probability,
+    win_probability,
+)
 from nanobody_opt.pose_stability import (
     exact_sample_selections,
     exact_structure_paths,
@@ -146,6 +150,77 @@ def win_probability_order_key(item: Mapping[str, Any]) -> tuple[int, int]:
     probability = item.get("win_probability")
     has_chance = probability is not None and float(probability) > 0.0
     return (0 if has_chance else 1, deviation_tier(item))
+
+
+def _order_candidates(
+    candidates: list[dict[str, Any]],
+    selection_order: str,
+    competitive_score_threshold: float,
+) -> list[dict[str, Any]]:
+    """Apply the one production ordering in a reusable, non-pose stage."""
+    ranked = list(candidates)
+    if selection_order == "win-probability":
+        ranked = rank_by_win_probability(ranked, competitive_score_threshold)
+        ranked.sort(key=win_probability_order_key)
+    elif selection_order == "p90":
+        ranked.sort(key=lambda item: (
+            deviation_tier(item),
+            item["score_p90"],
+            item["score_median"],
+            -item["observation_competitive_rate"],
+            -item["competitive_rate"],
+            item["score_worst"],
+            item["sequence"],
+        ))
+    else:
+        ranked.sort(key=lambda item: (
+            deviation_tier(item),
+            -item["observation_competitive_rate"],
+            -item["competitive_rate"],
+            item["score_p90"],
+            item["score_median"],
+            item["score_worst"],
+            item["sequence"],
+        ))
+    return ranked
+
+
+def _pose_order_is_subset_invariant(
+    candidates: list[dict[str, Any]],
+    selection_order: str,
+    competitive_score_threshold: float,
+) -> bool:
+    """Whether pose failures cannot reorder the unevaluated tail.
+
+    The p90 and competitive-rate orders contain no cohort statistic.  The win
+    estimator normally does: removing a pose failure changes its cohort mean
+    and pooled spread, so stopping after the first ``limit`` survivors would be
+    an ordering change.  There is one common live case we can prove safe.  When
+    every candidate has one observation, every candidate uses the same spread
+    floor and the same cohort-mean shrinkage; probability is strictly monotone
+    in its one score.  Requiring a positive probability even at the worst
+    possible survivor-cohort mean also keeps the ``has_chance`` tier invariant
+    instead of relying on floating-point underflow behavior.
+    """
+    if selection_order != "win-probability":
+        return True
+    score_rows = [
+        item.get("per_observation_median_rank_sum") or []
+        for item in candidates
+    ]
+    if not score_rows or any(len(scores) != 1 for scores in score_rows):
+        return False
+    worst_cohort_mean = max(float(scores[0]) for scores in score_rows)
+    return all(
+        win_probability(
+            [float(scores[0])],
+            competitive_score_threshold,
+            fallback_spread=MINIMUM_SPREAD,
+            spread=MINIMUM_SPREAD,
+            cohort_mean=worst_cohort_mean,
+        ) > 0.0
+        for scores in score_rows
+    )
 
 
 def settled_deviation_count(sequence: str, consensus: dict) -> int:
@@ -462,8 +537,9 @@ def main() -> None:
             args.exact, args.target, pose_kind="writer"
         )
         sample_selections = exact_sample_selections(args.exact, args.target)
+    observations_by_sequence = _observations(args.exact, args.target)
     ranked = []
-    for sequence, observations in _observations(args.exact, args.target).items():
+    for sequence, observations in observations_by_sequence.items():
         normalized_sequence = sequence.strip().upper()
         if (
             normalized_sequence in historical_sequences
@@ -564,50 +640,6 @@ def main() -> None:
             for category, ceiling in category_ceilings.items()
         ):
             continue
-        pose_summary: dict[str, Any] = {"structure_observation_count": 0}
-        writer_pose_summary: dict[str, Any] = {
-            "structure_observation_count": 0
-        }
-        if pose_challenge is not None:
-            pose_summary = summarize_sequence_structures(
-                normalized_sequence,
-                structure_paths.get(normalized_sequence, []),
-                target_chain=str(pose_challenge["structure_chain"]),
-                nanobody_chain="B",
-                epitope=residue_numbers(
-                    str(pose_challenge["structure_binding_site"])
-                ),
-            )
-            writer_pose_summary = summarize_sequence_structures(
-                normalized_sequence,
-                writer_structure_paths.get(normalized_sequence, []),
-                target_chain=str(pose_challenge["structure_chain"]),
-                nanobody_chain="B",
-                epitope=residue_numbers(
-                    str(pose_challenge["structure_binding_site"])
-                ),
-            )
-        if (
-            int(pose_summary["structure_observation_count"])
-            < args.minimum_structure_observations
-        ):
-            continue
-        if (
-            float(pose_summary.get("contact_jaccard_median", 0.0))
-            < args.minimum_median_contact_jaccard
-        ):
-            continue
-        if (
-            args.maximum_cdr3_rmsd is not None
-            and float(pose_summary.get("cdr3_rmsd_max_angstrom", math.inf))
-            > args.maximum_cdr3_rmsd
-        ):
-            continue
-        if (
-            float(pose_summary.get("epitope_occupancy_min", 0.0))
-            < args.minimum_epitope_occupancy
-        ):
-            continue
         selections = sample_selections.get(normalized_sequence, [])
         selection_summary = {
             "observation_count": len(selections),
@@ -651,8 +683,6 @@ def main() -> None:
             "metrics": aggregate,
             "metric_standard_errors": metric_standard_errors,
             "observations": observations,
-            "pose_stability": pose_summary,
-            "validator_writer_pose_stability": writer_pose_summary,
             "diffusion_sample_selection": selection_summary,
         })
 
@@ -674,7 +704,7 @@ def main() -> None:
         # nothing under either basis.
         deepest = max(
             len(records)
-            for records in _observations(args.exact, args.target).values()
+            for records in observations_by_sequence.values()
         )
         observation_floor = max(1, min(observation_floor, deepest))
         if observation_floor < args.minimum_observations:
@@ -688,52 +718,102 @@ def main() -> None:
             if item["observation_count"] >= observation_floor
         ]
 
-    # Settled-site breakage outranks the screen, and this is the one place the
-    # decision is actually made: proposal ordering only decides what gets
-    # SCREENED.  The evidence is lopsided -- our screened metrics agree with the
-    # validator at r=0.19, while a settled deviation is measured at ~14 rank
-    # points across 1,427 live tickets.  It is a coarse integer key, so within a
-    # tier the screen still does all the ordering; it only stops us spending a
-    # uid on a molecule that breaks something when one that does not is
-    # available, which measurement says it is for ~27% of what we generate.
-    if args.selection_order == "win-probability":
-        # Only rank one pays and the validator draws once, so the target is the
-        # chance of a winning draw, not the best average.  Spread is an asset:
-        # epoch 25062 was won by a molecule that drew 85 rank points better than
-        # its own average and ranked 13th of 46 on averaged quality.
-        ranked = rank_by_win_probability(ranked, args.competitive_score_threshold)
-        # Stable, so the win-probability order survives inside a tier.  The
-        # zero key comes FIRST because the deviation rule is about choosing
-        # between molecules that can win, not about preferring a clean loser:
-        # a candidate with no chance of a winning draw must never be promoted
-        # over one that has a chance, however many settled sites it breaks.
-        ranked.sort(key=win_probability_order_key)
-    elif args.selection_order == "p90":
-        ranked.sort(key=lambda item: (
-            deviation_tier(item),
-            item["score_p90"],
-            item["score_median"],
-            -item["observation_competitive_rate"],
-            -item["competitive_rate"],
-            item["score_worst"],
-            item["sequence"],
-        ))
+    # Pose stability dominates strict runtime.  Order the cheap scalar evidence
+    # first, then walk that order.  Early stopping is used only where removing a
+    # pose failure provably cannot change the order; mixed-depth win-probability
+    # pools retain the exhaustive behavior and therefore the exact old result.
+    preliminary = _order_candidates(
+        ranked, args.selection_order, args.competitive_score_threshold
+    )
+    pose_early_stop = (
+        pose_challenge is not None
+        and _pose_order_is_subset_invariant(
+            preliminary,
+            args.selection_order,
+            args.competitive_score_threshold,
+        )
+    )
+    if pose_challenge is not None:
+        pose_survivors: list[dict[str, Any]] = []
+        target_chain = str(pose_challenge["structure_chain"])
+        epitope = residue_numbers(str(pose_challenge["structure_binding_site"]))
+        for item in preliminary:
+            sequence = str(item["sequence"])
+            pose_summary = summarize_sequence_structures(
+                sequence,
+                structure_paths.get(sequence, []),
+                target_chain=target_chain,
+                nanobody_chain="B",
+                epitope=epitope,
+            )
+            if (
+                int(pose_summary["structure_observation_count"])
+                < args.minimum_structure_observations
+            ):
+                continue
+            if (
+                float(pose_summary.get("contact_jaccard_median", 0.0))
+                < args.minimum_median_contact_jaccard
+            ):
+                continue
+            if (
+                args.maximum_cdr3_rmsd is not None
+                and float(pose_summary.get("cdr3_rmsd_max_angstrom", math.inf))
+                > args.maximum_cdr3_rmsd
+            ):
+                continue
+            if (
+                float(pose_summary.get("epitope_occupancy_min", 0.0))
+                < args.minimum_epitope_occupancy
+            ):
+                continue
+            accepted = dict(item)
+            accepted["pose_stability"] = pose_summary
+            pose_survivors.append(accepted)
+            if pose_early_stop and len(pose_survivors) >= args.limit:
+                break
+        ranked = pose_survivors
     else:
-        ranked.sort(key=lambda item: (
-            deviation_tier(item),
-            -item["observation_competitive_rate"],
-            -item["competitive_rate"],
-            item["score_p90"],
-            item["score_median"],
-            item["score_worst"],
-            item["sequence"],
-        ))
+        ranked = [
+            {**item, "pose_stability": {"structure_observation_count": 0}}
+            for item in preliminary
+        ]
+
+    # Recompute cohort-normalized win-probability fields on the actual pose
+    # survivors.  In exhaustive mode this is byte-for-byte the old cohort; in
+    # guarded early-stop mode the proof above guarantees the selected order.
+    ranked = _order_candidates(
+        ranked, args.selection_order, args.competitive_score_threshold
+    )
     selected = ranked[: args.limit]
     if not selected:
         raise SystemExit(
             "no complete exact candidate cleared qualification "
             f"(observation floor {observation_floor})"
         )
+
+    # The validator-writer pose is audit-only: no qualification or ordering
+    # gate reads it.  Computing it for every rejected candidate doubled pose
+    # work.  Attach it only to the selected records that are actually emitted.
+    if pose_challenge is not None:
+        target_chain = str(pose_challenge["structure_chain"])
+        epitope = residue_numbers(str(pose_challenge["structure_binding_site"]))
+        for item in selected:
+            sequence = str(item["sequence"])
+            item["validator_writer_pose_stability"] = (
+                summarize_sequence_structures(
+                    sequence,
+                    writer_structure_paths.get(sequence, []),
+                    target_chain=target_chain,
+                    nanobody_chain="B",
+                    epitope=epitope,
+                )
+            )
+    else:
+        for item in selected:
+            item["validator_writer_pose_stability"] = {
+                "structure_observation_count": 0
+            }
     payload = {
         "target": args.target,
         "exact_files": [str(path) for path in args.exact],
