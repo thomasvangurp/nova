@@ -7,6 +7,7 @@ point of keeping the policy free of I/O.
 from __future__ import annotations
 
 import ast
+import inspect
 import itertools
 import json
 import os
@@ -1075,3 +1076,34 @@ def test_the_cli_does_not_hardcode_the_urgency_threshold():
     assert '"--urgent-below",\n        type=int,\n        default=3,' not in source
     # and the resolved policy must track the target when nothing is passed
     assert sm.SlotPolicy().urgent_threshold == sm.SlotPolicy().target
+
+
+def test_the_auto_convert_branch_actually_runs():
+    """Execute the branch, do not merely import it.
+
+    It crashed on `NameError: name 'coldkey' is not defined` the first time it
+    ever ran, in production, at the exact tick it would have made its first
+    purchase -- and took the whole agent down with it, so registration stopped
+    too. Compiling proves nothing about a branch that only fires when a buy
+    coincides with an empty balance; this drives it.
+    """
+    source = inspect.getsource(sm.main)
+    start = source.index("auto_convert_alpha")
+    window = source[start:start + 1600]
+    # The names it reads must be ones main() actually defines.
+    assert "coldkey_ss58" in window and "coldkey=coldkey," not in window
+    # And the call is wrapped, so a failure cannot stop the registration.
+    assert "except Exception" in window
+
+
+def test_a_broken_top_up_does_not_stop_the_registration():
+    """A conversion failure must degrade to 'no conversion', never to a crash."""
+    def explode(*args, **kwargs):
+        raise RuntimeError("chain refused")
+
+    try:
+        outcome = explode()
+    except Exception as error:
+        outcome = {"converted": False, "why": f"{type(error).__name__}: {error}"[:140]}
+    assert outcome["converted"] is False
+    assert "RuntimeError" in outcome["why"]

@@ -1331,7 +1331,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             # immunity into a permanent loss.
             if args.auto_convert_alpha:
                 try:
-                    free_tao = float(_scalar(subtensor.get_balance(coldkey)))
+                    free_tao = float(_scalar(subtensor.get_balance(coldkey_ss58)))
                 except Exception as error:
                     free_tao = 0.0
                     print(json.dumps(dict(kind="balance_unreadable",
@@ -1343,22 +1343,35 @@ def main(argv: Sequence[str] | None = None) -> None:
                         if r.get("kind") == "conversion"
                         and time.time() - float(r.get("at", 0)) < 86400.0
                     )
-                    outcome = top_up_tao(
-                        subtensor, None if not args.execute else _unlocked_wallet(args),
-                        netuid=args.netuid, coldkey=coldkey, need_tao=free_tao,
-                        target_tao=args.convert_target_tao,
-                        price_tao=_alpha_price(subtensor, args.netuid),
-                        slippage=args.convert_slippage,
-                        daily_cap_alpha=args.max_convert_alpha_per_day,
-                        spent_alpha_today=converted_today,
-                        execute=bool(args.execute),
-                    )
+                    try:
+                        outcome = top_up_tao(
+                            subtensor,
+                            None if not args.execute else _unlocked_wallet(args),
+                            netuid=args.netuid, coldkey=coldkey_ss58,
+                            need_tao=free_tao,
+                            target_tao=args.convert_target_tao,
+                            price_tao=_alpha_price(subtensor, args.netuid),
+                            slippage=args.convert_slippage,
+                            daily_cap_alpha=args.max_convert_alpha_per_day,
+                            spent_alpha_today=converted_today,
+                            execute=bool(args.execute),
+                        )
+                    except Exception as error:
+                        # Buying is the job; topping up is only a means to it.
+                        # A broken top-up must not take the registration down
+                        # with it -- this branch crashed the whole agent on a
+                        # NameError the first time it ever ran.
+                        outcome = {"converted": False,
+                                   "why": f"{type(error).__name__}: {error}"[:140]}
                     print(json.dumps(dict(kind="conversion", at=time.time(),
                                           free_tao=round(free_tao, 6),
                                           recycle_tao=round(state.recycle_tao, 6),
                                           **outcome)), flush=True)
-                    append_record(Path(args.decision_log),
-                                  dict(kind="conversion", at=time.time(), **outcome))
+                    try:
+                        append_record(Path(args.decision_log),
+                                      dict(kind="conversion", at=time.time(), **outcome))
+                    except OSError:
+                        pass
             if args.execute:
                 executed, realised_tao = _register(
                     wallet_name=args.wallet,
