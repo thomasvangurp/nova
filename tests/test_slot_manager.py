@@ -864,13 +864,87 @@ def test_a_position_below_the_floor_is_reported_but_not_actionable():
     assert report["commands"] == []
 
 
-def test_the_agent_never_executes_the_conversion_itself():
-    """The agent reports and computes; the signature stays with the operator."""
+def test_the_conversion_is_off_unless_asked_for():
+    """The agent may now convert, but only when explicitly switched on.
+
+    This replaces a test that forbade `unstake(` outright. That rule was
+    correct until it wasn't: registration recycles free TAO, so alpha cannot
+    buy a slot, and a wallet holding 975 alpha and 0.0256 TAO lost four uids
+    in nine epochs because every expiring immunity was unreplaceable. The
+    boundary is now bounded rather than absolute, and these are the bounds.
+    """
     import inspect
 
     source = inspect.getsource(sm)
-    for forbidden in ("unstake(", "remove_stake(", "swap_stake(", "sell("):
+    # Still forbidden: anything that could move the position wholesale.
+    for forbidden in ("remove_stake(", "swap_stake(", "sell("):
         assert forbidden not in source, f"slot_manager can execute {forbidden}"
+    assert "def top_up_tao" in source
+    assert "--auto-convert-alpha" in source
+
+
+def test_the_conversion_will_not_run_without_the_flag():
+    completed = subprocess.run(
+        [sys.executable, "-m", "nanobody_opt.slot_manager", "--help"],
+        capture_output=True, text=True, check=True,
+    )
+    for flag in ("--auto-convert-alpha", "--convert-target-tao",
+                 "--convert-slippage", "--max-convert-alpha-per-day"):
+        assert flag in completed.stdout
+
+
+def test_a_dry_run_plans_the_conversion_but_moves_nothing():
+    # execute=False must never reach the chain, exactly as a dry-run
+    # registration never does.
+    class Chain:
+        def get_stake_info_for_coldkey(self, coldkey):
+            class E:
+                netuid, stake, hotkey_ss58 = 68, 900.0, "5Hxxxx"
+            return [E()]
+
+        def unstake(self, **kwargs):
+            raise AssertionError("dry run must not unstake")
+
+    out = sm.top_up_tao(Chain(), None, netuid=68, coldkey="5Ek", need_tao=0.02,
+                        target_tao=1.0, price_tao=0.0216, slippage=0.005,
+                        daily_cap_alpha=250.0, spent_alpha_today=0.0,
+                        execute=False)
+    assert out["converted"] is False and out["why"] == "dry run"
+    assert out["planned_alpha"] > 0
+    assert out["limit_price"] < 0.0216
+
+
+def test_the_conversion_stops_at_the_daily_cap():
+    class Chain:
+        def get_stake_info_for_coldkey(self, coldkey):
+            class E:
+                netuid, stake, hotkey_ss58 = 68, 900.0, "5Hxxxx"
+            return [E()]
+
+    out = sm.top_up_tao(Chain(), None, netuid=68, coldkey="5Ek", need_tao=0.0,
+                        target_tao=1.0, price_tao=0.0216, slippage=0.005,
+                        daily_cap_alpha=250.0, spent_alpha_today=250.0,
+                        execute=True)
+    assert out["converted"] is False
+    assert out["why"] == "daily conversion cap reached"
+
+
+def test_it_converts_only_the_shortfall_not_the_position():
+    # 900 alpha held, but a 1 TAO target at 0.0216 needs ~46 alpha. Selling
+    # the treasury to buy one slot is the failure this bound exists to stop.
+    class Chain:
+        def get_stake_info_for_coldkey(self, coldkey):
+            class E:
+                netuid, stake, hotkey_ss58 = 68, 900.0, "5Hxxxx"
+            return [E()]
+
+    out = sm.top_up_tao(Chain(), None, netuid=68, coldkey="5Ek", need_tao=0.0,
+                        target_tao=1.0, price_tao=0.0216, slippage=0.005,
+                        daily_cap_alpha=250.0, spent_alpha_today=0.0,
+                        execute=False)
+    assert out["planned_alpha"] < 50
+    assert sum(leg["alpha"] for leg in out["plan"]) == pytest.approx(
+        out["planned_alpha"], abs=1e-6)
 
 
 def test_the_cli_target_default_follows_the_policy():

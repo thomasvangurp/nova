@@ -716,6 +716,110 @@ def treasury_report(
     return report
 
 
+def top_up_tao(
+    subtensor: Any, wallet: Any, *, netuid: int, coldkey: str,
+    need_tao: float, target_tao: float, price_tao: float,
+    slippage: float, daily_cap_alpha: float, spent_alpha_today: float,
+    execute: bool,
+) -> dict[str, Any]:
+    """Convert the least alpha that covers the shortfall, and no more.
+
+    ``alpha_holdings`` above states the opposite rule: report the position, let
+    the operator move it, because an unattended process holding the coldkey
+    should not be able to move the treasury on its own. That rule cost us the
+    fleet. Registration recycles free TAO -- the SDK's own docstring is
+    "Registers the wallet to chain by recycling TAO" and it checks
+    get_balance() -- so alpha cannot pay for a slot. We sat at 0.0256 TAO
+    against a 0.1774 TAO price while holding 975 alpha, and went 12 uids to 8
+    because every expiring immunity was unreplaceable.
+
+    The boundary is therefore narrowed rather than removed. This converts only
+    up to ``target_tao``, only when free TAO cannot buy one slot, never more
+    than ``daily_cap_alpha`` in a rolling day, and always with a limit price --
+    so the worst unattended outcome is a bounded, logged, slippage-capped sale,
+    not an open wallet.
+    """
+    if price_tao <= 0:
+        return {"converted": False, "why": "no alpha price"}
+    shortfall = max(0.0, target_tao - need_tao)
+    if shortfall <= 0:
+        return {"converted": False, "why": "free tao already covers the target"}
+    wanted_alpha = shortfall / price_tao
+    room = max(0.0, daily_cap_alpha - spent_alpha_today)
+    if room <= 0:
+        return {"converted": False, "why": "daily conversion cap reached",
+                "cap_alpha": daily_cap_alpha, "spent_alpha_today": spent_alpha_today}
+    alpha = min(wanted_alpha, room)
+
+    holdings = alpha_holdings(subtensor, netuid, coldkey)["holdings"]
+    if not holdings:
+        return {"converted": False, "why": "no alpha on this subnet"}
+
+    plan = []
+    remaining = alpha
+    for item in holdings:                       # largest position first
+        if remaining <= 0:
+            break
+        take = min(remaining, float(item["alpha"]))
+        if take > 0:
+            plan.append({"hotkey": item["hotkey"], "alpha": take})
+            remaining -= take
+    if not plan:
+        return {"converted": False, "why": "position too small to draw on"}
+
+    result = {"converted": False, "planned_alpha": round(alpha, 6),
+              "expected_tao": round(alpha * price_tao, 6),
+              "limit_price": round(price_tao * (1.0 - slippage), 8),
+              "plan": plan, "execute": execute}
+    if not execute:
+        result["why"] = "dry run"
+        return result
+
+    import bittensor as _bt
+    moved = 0.0
+    for leg in plan:
+        try:
+            response = subtensor.unstake(
+                wallet=wallet, netuid=netuid, hotkey_ss58=leg["hotkey"],
+                amount=_bt.Balance.from_tao(leg["alpha"]).set_unit(netuid),
+                # A thin book must not fill the whole position at a price
+                # nobody intended; partial is better than a bad fill.
+                safe_unstaking=True, rate_tolerance=slippage,
+                allow_partial_stake=True,
+                wait_for_inclusion=True, wait_for_finalization=True,
+            )
+            if getattr(response, "success", bool(response)):
+                moved += leg["alpha"]
+            else:
+                result.setdefault("failures", []).append(
+                    {"hotkey": leg["hotkey"][:8], "error": str(
+                        getattr(response, "error_message", "refused"))[:120]})
+        except Exception as error:               # never fatal: registration is
+            result.setdefault("failures", []).append(  # the caller's job, not ours
+                {"hotkey": leg["hotkey"][:8],
+                 "error": f"{type(error).__name__}: {error}"[:120]})
+    result["converted"] = moved > 0
+    result["alpha_converted"] = round(moved, 6)
+    return result
+
+
+def _alpha_price(subtensor: Any, netuid: int) -> float:
+    """Tao per alpha for this subnet, or 0.0 when the SDK will not say."""
+    try:
+        return float(_scalar(subtensor.subnet(netuid=netuid).price))
+    except Exception:
+        return 0.0
+
+
+def _unlocked_wallet(args: argparse.Namespace) -> Any:
+    """A coldkey-unlocked wallet, via the same credential path as registration."""
+    bittensor = _import_bittensor()
+    factory = getattr(bittensor, "Wallet", None) or bittensor.wallet
+    wallet = factory(name=args.wallet)
+    _unlock_coldkey(wallet, args.keychain_service_env, args.credential_source)
+    return wallet
+
+
 def _registrations_this_interval(subtensor: Any, netuid: int) -> int:
     raw = _scalar(subtensor.query_subtensor("RegistrationsThisInterval", params=[netuid]))
     return int(raw)
@@ -1112,6 +1216,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="append-only audit trail; also the agent's price and spend memory",
     )
     parser.add_argument("--max-recycle-tao", type=float, default=0.20)
+    parser.add_argument("--auto-convert-alpha", action="store_true",
+                        help="when free TAO cannot buy a slot, unstake the "
+                             "minimum alpha that covers it. Registration "
+                             "recycles TAO, so alpha alone cannot register; "
+                             "without this an empty balance makes every "
+                             "expiring immunity a permanent loss.")
+    parser.add_argument("--convert-target-tao", type=float, default=1.0,
+                        help="top the free balance up to this many TAO, no "
+                             "more. Small on purpose: an unattended process "
+                             "should hold hours of runway, not the treasury.")
+    parser.add_argument("--convert-slippage", type=float, default=0.005,
+                        help="limit-price tolerance for the unstake, so a "
+                             "thin book cannot fill at a price nobody meant.")
+    parser.add_argument("--max-convert-alpha-per-day", type=float, default=250.0,
+                        help="rolling-24h ceiling on alpha converted.")
+
     parser.add_argument(
         "--max-spend-tao-per-day",
         type=float,
@@ -1206,6 +1326,39 @@ def main(argv: Sequence[str] | None = None) -> None:
         realised_tao: float | None = None
         if decision.is_buy:
             hotkey = next_hotkey_name(_hotkey_names(args.wallet), args.hotkey_prefix)
+            # Registration recycles FREE TAO. Holding alpha is not holding the
+            # means to register, and an empty balance turns every expiring
+            # immunity into a permanent loss.
+            if args.auto_convert_alpha:
+                try:
+                    free_tao = float(_scalar(subtensor.get_balance(coldkey)))
+                except Exception as error:
+                    free_tao = 0.0
+                    print(json.dumps(dict(kind="balance_unreadable",
+                                          error=str(error)[:100])), flush=True)
+                if free_tao < state.recycle_tao:
+                    converted_today = sum(
+                        float(r.get("alpha_converted") or 0.0)
+                        for r in records
+                        if r.get("kind") == "conversion"
+                        and time.time() - float(r.get("at", 0)) < 86400.0
+                    )
+                    outcome = top_up_tao(
+                        subtensor, None if not args.execute else _unlocked_wallet(args),
+                        netuid=args.netuid, coldkey=coldkey, need_tao=free_tao,
+                        target_tao=args.convert_target_tao,
+                        price_tao=_alpha_price(subtensor, args.netuid),
+                        slippage=args.convert_slippage,
+                        daily_cap_alpha=args.max_convert_alpha_per_day,
+                        spent_alpha_today=converted_today,
+                        execute=bool(args.execute),
+                    )
+                    print(json.dumps(dict(kind="conversion", at=time.time(),
+                                          free_tao=round(free_tao, 6),
+                                          recycle_tao=round(state.recycle_tao, 6),
+                                          **outcome)), flush=True)
+                    append_record(Path(args.decision_log),
+                                  dict(kind="conversion", at=time.time(), **outcome))
             if args.execute:
                 executed, realised_tao = _register(
                     wallet_name=args.wallet,
