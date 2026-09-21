@@ -198,3 +198,28 @@ def test_the_ledger_source_has_no_self_call():
     fragment = body[start:start + 400]
     assert "handled.add(epoch)" in fragment
     assert fragment.count("remember(epoch)") == 0
+
+
+def test_the_crew_is_published_on_an_uncovered_epoch(monkeypatch, tmp_path):
+    # Four epochs in five draw a reaction we hold no bank for. The crew still
+    # changes on those epochs -- slots are bought and lost continuously -- so
+    # a crew published only alongside a molecule release goes stale for hours.
+    copied = []
+    monkeypatch.setattr(loop, "ROOT", tmp_path)
+    release = tmp_path / "release"; release.mkdir()
+    (release / "crew.json").write_text("[]")
+    monkeypatch.setattr(loop.subprocess, "run",
+                        lambda argv, **kw: copied.append(argv[-1]))
+    loop.publish(type("A", (), {"on_submit_host": True})(), ["crew.json"])
+    assert copied == ["/opt/nova-submit/crew.json"]
+
+
+def test_publishing_a_missing_file_is_reported_not_silent(monkeypatch, tmp_path):
+    monkeypatch.setattr(loop, "ROOT", tmp_path)
+    (tmp_path / "release").mkdir()
+    said = []
+    monkeypatch.setattr(loop, "say", lambda **f: said.append(f))
+    monkeypatch.setattr(loop.subprocess, "run",
+                        lambda *a, **k: pytest.fail("must not copy a missing file"))
+    loop.publish(type("A", (), {"on_submit_host": True})(), ["compound_fleet.json"])
+    assert said and said[0]["event"] == "publish_missing"

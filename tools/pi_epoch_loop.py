@@ -256,6 +256,20 @@ def main() -> int:
     return 0
 
 
+def publish(a, names) -> None:
+    """Put the epoch's inputs where the submit host reads them."""
+    for name in names:
+        src = ROOT / ("release" if a.on_submit_host else "data/release") / name
+        if not src.is_file():
+            say(event="publish_missing", name=name)
+            continue
+        if a.on_submit_host:
+            subprocess.run(["cp", str(src), f"/opt/nova-submit/{name}"], timeout=120)
+        else:
+            subprocess.run(["rsync", "-t", "-e", "ssh -o BatchMode=yes", str(src),
+                            f"thomasg@100.64.243.65:/opt/nova-submit/{name}"], timeout=300)
+
+
 def handle_epoch(a, view, epoch, block, end, covered, state):
     if True:
         producer_stopped = state["producer_stopped"]
@@ -278,17 +292,16 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 if line.startswith("{"):
                     say(**json.loads(line))
             have_molecules = made.returncode == 0
-            if have_molecules:
-                for name in ("compound_fleet.json", "crew.json"):
-                    src = ROOT / ("release" if a.on_submit_host else "data/release") / name
-                    if a.on_submit_host:
-                        subprocess.run(["cp", str(src), f"/opt/nova-submit/{name}"], timeout=120)
-                    else:
-                        subprocess.run(["rsync", "-t", "-e", "ssh -o BatchMode=yes", str(src),
-                                        f"thomasg@100.64.243.65:/opt/nova-submit/{name}"],
-                                       timeout=300)
         else:
             say(event="reaction_not_covered", reaction=view["reaction"])
+
+        # crew.json is the LIVE metagraph view and must be published EVERY
+        # epoch. Publishing it only alongside a molecule release meant that on
+        # the four-in-five epochs drawing an uncovered reaction, pi_submit
+        # planned against whatever crew the last covered epoch left behind: a
+        # slot registered since then would not submit until the next reaction-3
+        # draw, and the slot manager is buying slots back continuously.
+        publish(a, ["crew.json"] + (["compound_fleet.json"] if have_molecules else []))
 
         # Wait for the producer to publish THIS epoch's sequences.
         #
