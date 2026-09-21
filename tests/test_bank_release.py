@@ -331,3 +331,47 @@ def test_an_unparseable_molecule_is_refused_not_admitted():
     except ImportError:
         import pytest; pytest.skip("rdkit not installed here")
     assert mod.too_close_to_history(["not-a-smiles"], []) == {0: 1.0}
+
+
+def _gate_module():
+    import importlib.util, sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("br_refresh", root / "tools/bank_release.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["br_refresh"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_failed_refresh_keeps_the_cached_archive(tmp_path):
+    # A network blip must cost a slightly stale filter, never the epoch.
+    mod = _gate_module()
+    archive = tmp_path / "arch.csv"
+    archive.write_text("SMILES\nCCO\n")
+    status = mod.refresh_archive(archive, url="http://127.0.0.1:1/nope.csv", timeout=2)
+    assert status["refreshed"] is False
+    assert status["using_cached"] is True
+    assert archive.read_text() == "SMILES\nCCO\n"      # untouched
+    assert not (tmp_path / "arch.csv.download").exists()
+
+
+def test_a_truncated_download_does_not_replace_a_good_archive(tmp_path, monkeypatch):
+    # An error page or half a file must not overwrite the archive: that would
+    # DISABLE the gate rather than fail, which is the worst outcome.
+    mod = _gate_module()
+    archive = tmp_path / "arch.csv"
+    archive.write_text("SMILES\n" + "\n".join(["CCO"] * 5000) + "\n")
+    before = archive.read_text()
+
+    class FakeResponse:
+        def read(self, *a): return b""
+        def __enter__(self): return io.BytesIO(b"SMILES\nCCO\n")
+        def __exit__(self, *a): return False
+
+    import io, urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    status = mod.refresh_archive(archive, url="http://example/x.csv")
+    assert status["refreshed"] is False
+    assert "truncated" in status["why"]
+    assert archive.read_text() == before

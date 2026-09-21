@@ -73,6 +73,45 @@ HISTORY_RADIUS = 2
 HISTORY_BITS = 2048
 
 
+def refresh_archive(archive: Path, url: str = HISTORY_DATASET,
+                    timeout: int = 150) -> dict:
+    """Re-download the submission archive, keeping the cached copy on failure.
+
+    The archive grows every epoch, because it is everyone's submissions. A
+    frozen copy silently loosens our filter over time: a molecule that sits at
+    0.49 today goes over 0.5 the moment someone else submits near it, and we
+    are back to a whole-fleet zero with no error anywhere.
+
+    Never fatal. A network blip must cost us a slightly stale filter, not the
+    epoch -- so every failure path returns the cached file.
+    """
+    import shutil
+    import urllib.request
+
+    previous = archive.stat().st_size if archive.is_file() else 0
+    scratch = archive.with_suffix(archive.suffix + '.download')
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            with scratch.open('wb') as handle:
+                shutil.copyfileobj(response, handle)
+        # Validate BEFORE replacing: a truncated or error-page download that
+        # overwrites a good archive would disable the gate rather than fail.
+        import pandas as pd
+        frame = pd.read_csv(scratch, usecols=['SMILES'])
+        rows = len(frame)
+        if rows < 1000 or scratch.stat().st_size < previous * 0.9:
+            scratch.unlink(missing_ok=True)
+            return dict(refreshed=False, why='downloaded archive looks truncated',
+                        rows=rows, kept_bytes=previous)
+        scratch.replace(archive)
+        return dict(refreshed=True, rows=rows, bytes=archive.stat().st_size,
+                    grew_by=archive.stat().st_size - previous)
+    except Exception as error:
+        scratch.unlink(missing_ok=True)
+        return dict(refreshed=False, why=f'{type(error).__name__}: {error}'[:120],
+                    using_cached=archive.is_file(), kept_bytes=previous)
+
+
 def historical_fingerprints(archive: Path, cache: Path | None = None):
     """Morgan fingerprints for every molecule ever submitted for this target.
 
@@ -179,6 +218,13 @@ def main() -> int:
                              'The validator refuses any molecule within '
                              '0.5 Tanimoto of it, and one such molecule voids '
                              'the entire submission.')
+    parser.add_argument('--refresh-archive', action='store_true', default=True,
+                        help='re-download the archive before filtering. It '
+                             'grows every epoch, and a frozen copy loosens the '
+                             'gate silently.')
+    parser.add_argument('--no-refresh-archive', dest='refresh_archive',
+                        action='store_false',
+                        help='use the cached archive as-is (tests, offline).')
     parser.add_argument('--no-archive', dest='archive', action='store_const',
                         const='', help='skip the historical diversity check. '
                                        'The validator does not skip it.')
@@ -229,6 +275,13 @@ def main() -> int:
                   f'{HISTORY_DATASET} or pass --no-archive to skip the check '
                   f'(the validator will not skip it).', file=sys.stderr)
             return 1
+        if arguments.refresh_archive:
+            status = refresh_archive(archive)
+            print(json.dumps(dict(event='archive_refresh', **status)), file=sys.stderr)
+            if not status.get('refreshed') and not archive.is_file():
+                print('no archive and refresh failed; refusing to select',
+                      file=sys.stderr)
+                return 1
         history = historical_fingerprints(archive, Path(str(archive) + '.fps'))
         flagged = too_close_to_history([r[1] for r in rows], history)
         kept = [r for index, r in enumerate(rows) if index not in flagged]

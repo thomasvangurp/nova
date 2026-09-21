@@ -229,6 +229,10 @@ def main() -> int:
             wait = max(20, min(300, (refresh_at - block) * 12 * 0.6))
             say(event="waiting", epoch=epoch, block=block,
                 refresh_at=refresh_at, sleep=round(wait))
+            try:
+                warm_archive(a, epoch, state)
+            except Exception as error:
+                say(event="archive_warm_failed", err=str(error)[:140])
             time.sleep(wait)
             continue
 
@@ -254,6 +258,29 @@ def main() -> int:
         continue
 
     return 0
+
+
+def warm_archive(a, epoch: int, state: dict) -> None:
+    """Refresh the submission archive and rebuild its fingerprints, early.
+
+    Refreshing at release time would charge a grown archive's 54s rebuild to
+    the commit window, where the producer slack is under two minutes. There is
+    an hour of waiting before that window; spend it here instead.
+    """
+    if state.get("warmed") == epoch or not a.on_submit_host:
+        return
+    state["warmed"] = epoch
+    code, lines = stream(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python -c "
+                             "\"import sys; sys.path.insert(0,'tools'); "
+                             "from pathlib import Path; import json; "
+                             "import bank_release as b; "
+                             "s=b.refresh_archive(Path('P40261_molecules.csv')); "
+                             "n=len(b.historical_fingerprints(Path('P40261_molecules.csv'), "
+                             "Path('P40261_molecules.csv.fps'))); "
+                             "print(json.dumps(dict(event='archive_warm', fingerprints=n, **s)))\"",
+                         timeout=600)
+    if code:
+        say(event="archive_warm_failed", rc=code, tail=(lines[-1][:140] if lines else ""))
 
 
 def publish(a, names) -> None:
