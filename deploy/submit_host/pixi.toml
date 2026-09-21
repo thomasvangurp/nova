@@ -1,0 +1,53 @@
+# The submit host's environment: the Raspberry Pi that holds the hotkeys.
+#
+# Separate from deploy/slot_host on purpose, for the reason that manifest gives
+# about itself -- the workspace root declares linux-64 only, and the purchaser's
+# lock must not be forced to re-solve for anything added here.
+#
+# It differs from slot_host in exactly one way that matters: it DOES need the
+# timelock, because this host encrypts the submission rather than only reading
+# the chain. slot_host's manifest says "the timelock wheels are cp310-only and
+# there is no reason to hunt for an arm64 build of something unused". That was
+# true of the purchaser; it is not true here, and the arm64 build now exists:
+# timelock_wasm_wrapper 0.0.2 built for cp311/aarch64 from commit 3461a7c9d1,
+# the commit PyPI cut its x86_64 wheel from.
+#
+# The VERSION IS THE CONTRACT. The validator decrypts with the published 0.0.2
+# wheel. A wrapper built from main (0.3.0) compiles, imports, and produces
+# plausible ciphertext that 0.0.2 cannot deserialize -- a submission that scores
+# zero with no error on our side. Pin the wheel; never float it.
+#
+# Lock it ON the Pi (`pixi install` there), never from the macOS controller.
+[workspace]
+name = "nova-submit-host"
+channels = ["conda-forge"]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+python = "3.11.*"
+pip = "*"
+# The release is cut HERE now, not on the controller: a writer that depends on
+# a laptop being awake is not a writer. rdkit is what the allocator needs for
+# the AtomPair entropy gate, and conda-forge publishes it for linux-aarch64.
+rdkit = "2024.09.*"
+numpy = "*"
+pandas = "*"
+scikit-learn = "*"
+joblib = "*"
+
+[pypi-dependencies]
+bittensor = "==10.4.1"
+async-substrate-interface = "==2.0.4"
+# btdr.py imports these directly; utils/files.py needs requests and dotenv to
+# upload the ciphertext blob before the path goes on chain.
+cryptography = "*"
+requests = "*"
+python-dotenv = "*"
+# The locally built aarch64 wheel. Not on PyPI: only cp310/x86_64 is published.
+timelock_wasm_wrapper = { path = "./wheels/timelock_wasm_wrapper-0.0.2-cp311-cp311-manylinux_2_34_aarch64.whl" }
+timelock = "==0.0.1.dev0"
+
+[tasks]
+# The deploy gate runs this: it proves the submission stack imports AND that the
+# wrapper is the version the validator can read, before any timer is armed.
+check = "python -c \"import importlib.metadata as m, bittensor, timelock; assert m.version('timelock_wasm_wrapper')=='0.0.2', m.version('timelock_wasm_wrapper'); print('SUBMIT_HOST_OK', bittensor.__version__, m.version('timelock_wasm_wrapper'))\""

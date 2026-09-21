@@ -27,7 +27,11 @@ files=("$HOTKEYS/$PREFIX"*)
 
 # Discover the box the same way the Ansible inventory does: by label, so a
 # rotated SSH port is never mistaken for an absent host.
-read -r host port <<<"$("$VASTAI" show instances --raw 2>/dev/null | python3 -c "
+# Every match, not the first: during a producer handover the outgoing and
+# incoming rentals both carry the label for a while, and `break` would put 186
+# hotkeys on whichever one vast.ai happened to list first. Keys on the wrong
+# rental is a far worse outcome than a sync that refuses to run.
+matched="$("$VASTAI" show instances --raw 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.loads(sys.stdin.read())
@@ -36,8 +40,13 @@ except Exception:
 for item in data:
     if item.get('label') == '$LABEL' and item.get('actual_status') == 'running':
         print(item.get('ssh_host'), item.get('ssh_port'))
-        break
 ")" || true
+
+if [ "$(printf '%s\n' "$matched" | grep -c '[^[:space:]]')" -gt 1 ]; then
+  echo "more than one running instance is labelled $LABEL; refusing to guess which one gets the hotkeys" >&2
+  exit 1
+fi
+read -r host port <<<"$matched"
 
 if [ -z "${host:-}" ] || [ -z "${port:-}" ]; then
   # No box rented is the normal state between runs, not an error: the purchaser

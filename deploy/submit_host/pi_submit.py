@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Commit every uid from the host that holds the hotkeys.
+
+Why this exists: the commitment is ONE message per uid, `molecules|sequence`,
+so whoever writes it must have both halves. Until now that forced a master and
+a slave -- one producer had to hand its plaintext to the other, or read it back
+out of GitHub, which is impossible because the blob is drand timelock
+ciphertext sealed until its reveal round.
+
+Here the two producers stay independent and neither is the master:
+
+    production (GPU box)  --  nanobody_result.json  --.
+                                                       >--  this host  --> chain
+    bank box              --  compound_fleet.json  ---'
+
+Both inputs are plaintext, both are pulled, and the host that signs is the one
+that already custodies the keys -- so no keyfile has to live on a rental at all.
+It runs here rather than on a GPU box because `timelock_wasm_wrapper` publishes
+only a cp310/x86_64 wheel; the aarch64 build in ./wheels is what makes this
+possible, and it must stay pinned to 0.0.2 because the validator decrypts with
+that version.
+
+Commits are placed one per block inside the end-of-epoch reserve: the chain
+accepts one extrinsic per block per key, and the reserve is the only part of
+the epoch where the producers have stopped rewriting their artifacts.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "utils"))
+
+NULL = "~"
+
+
+
+def pull_producer(vastai: str, label: str, remote: str, destination: Path) -> None:
+    """Fetch the nanobody half from whichever box currently carries the label.
+
+    Deliberately not a stored host:port. The producer is moving to a bigger
+    rental, and vast.ai rotates ports on restart; resolving the label each run
+    means a rehomed producer needs no change here at all.
+    """
+    raw = subprocess.run([vastai, "show", "instances", "--raw"],
+                         capture_output=True, text=True, timeout=120)
+    if raw.returncode:
+        raise SystemExit(f"vastai failed: {raw.stderr.strip()[:200]}")
+    try:
+        instances = json.loads(raw.stdout)
+    except ValueError:
+        raise SystemExit("vastai did not return JSON")
+    if isinstance(instances, dict):
+        instances = instances.get("instances", [])
+    matches = [i for i in instances
+               if str(i.get("label") or "") == label
+               and str(i.get("actual_status") or "") == "running"]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one running instance labelled {label!r}, found {len(matches)}")
+    host, port = matches[0].get("ssh_host"), matches[0].get("ssh_port")
+    if not host or not port:
+        raise SystemExit(f"instance {matches[0].get('id')} has no resolvable ssh endpoint")
+    done = subprocess.run(
+        ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+         "-P", str(port), f"root@{host}:{remote}", str(destination)],
+        capture_output=True, text=True, timeout=300)
+    if done.returncode:
+        raise SystemExit(f"pull from {label} failed: {done.stderr.strip()[:200]}")
+    print(json.dumps(dict(event="pulled", label=label, port=port,
+                          bytes=destination.stat().st_size)), flush=True)
+
+
+def _load(path: Path) -> dict:
+    with path.open() as handle:
+        return json.load(handle)
+
+
+def sequences_by_uid(artifact: dict, epoch: int,
+                     allow_stale: bool = False) -> dict[int, str]:
+    """The nanobody half. A stale artifact is refused, not silently reused.
+
+    Its epoch is checked because the producer rewrites it every epoch and a
+    commit carrying last epoch's sequence is a wasted slot, not a near miss.
+
+    But refusing used to abort the WHOLE commit, molecules included, and once
+    the Pi became the sole writer that turned a late producer into an empty
+    epoch -- five of them between 25243 and 25247. So the caller may allow a
+    stale artifact once it has waited as long as the window permits: last
+    epoch's sequence is a worse submission than this epoch's, and a far better
+    one than nothing.
+    """
+    stale = int(artifact.get("epoch", -1)) != epoch
+    if stale and not allow_stale:
+        raise SystemExit(
+            f"nanobody artifact is for epoch {artifact.get('epoch')}, not {epoch}")
+    if stale:
+        print(json.dumps(dict(event="stale_nanobody", have=artifact.get("epoch"),
+                              want=epoch)), flush=True)
+    out = {}
+    for entry in artifact.get("submissions") or []:
+        sequence = str(entry.get("sequence") or "").strip()
+        if sequence:
+            out[int(entry["uid"])] = sequence
+    return out
+
+
+def molecules_by_uid(artifact, epoch: int, reaction: int) -> dict[int, str]:
+    """The compound half, already bound to uids by the fleet allocator.
+
+    Absent or not matching this epoch's reaction is NORMAL, not an error: the
+    validator draws the reaction uniformly from five and a bank covers one at a
+    time, so four epochs in five there are legitimately no molecules to send.
+    Exiting here would take the NANOBODY down with them -- the track we
+    actually place in -- so the compound half is simply empty and every uid
+    still commits its sequence.
+    """
+    if artifact is None:
+        return {}
+    if int(artifact.get("epoch", -1)) != epoch:
+        print(json.dumps(dict(event="no_molecules", why="epoch",
+                              have=artifact.get("epoch"), want=epoch)), flush=True)
+        return {}
+    if int(artifact.get("reaction", -1)) != reaction:
+        print(json.dumps(dict(event="no_molecules", why="reaction",
+                              have=artifact.get("reaction"), want=reaction)), flush=True)
+        return {}
+    out = {}
+    for entry in artifact.get("submissions") or []:
+        names = [str(m["name"]) for m in entry.get("molecules") or []]
+        if names:
+            out[int(entry["uid"])] = ",".join(names)
+    return out
+
+
+def plan(crew, molecules, sequences):
+    """One row per uid, with whichever halves are actually available.
+
+    A uid with neither half is dropped rather than committed as "~|~", which
+    scores nothing and still spends the commitment slot.
+    """
+    rows = []
+    for uid, hotkey in crew:
+        mols = molecules.get(uid, "")
+        seq = sequences.get(uid, "")
+        if not mols and not seq:
+            continue
+        if not seq:
+            # The VALIDATOR accepts "molecules|~" -- its parser returns 20
+            # molecules and 0 sequences -- but commit_submission's own
+            # validate_plaintext demands a real sequence and rejects it. Until
+            # that over-strictness is relaxed on the signing path (deliberately,
+            # not under time pressure), such a uid is skipped and said so,
+            # rather than sent to a driver that will refuse it.
+            print(json.dumps(dict(event="skipped_no_sequence", uid=uid)), flush=True)
+            continue
+        rows.append(dict(uid=uid, hotkey=hotkey,
+                         plaintext=f"{mols or NULL}|{seq}",
+                         has_molecules=bool(mols), has_sequence=True))
+    return rows
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--allow-stale-nanobody", action="store_true",
+                        help="commit even if the producer has not refreshed for "
+                             "this epoch. Only for the last safe block: prefer "
+                             "fresh, but never commit nothing")
+    parser.add_argument("--reaction", type=int, required=True, choices=[1, 2, 3, 4, 5])
+    parser.add_argument("--crew", default=str(HERE / "crew.json"))
+    parser.add_argument("--nanobody", default=str(HERE / "nanobody_result.json"))
+    # The producer is resolved by LABEL at run time, never by a written-down
+    # endpoint: vast.ai rotates the ssh port on every restart, and the producer
+    # itself moves between boxes (it is being rehomed to an 8-GPU rental). A
+    # label survives both; an endpoint in a config file is a latent outage that
+    # looks exactly like a dead box.
+    parser.add_argument("--producer-label", default="nova-nanobody-pixi")
+    parser.add_argument("--producer-path", default="/root/artifacts/nanobody_result.json")
+    parser.add_argument("--vastai", default="/opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/vastai")
+    parser.add_argument("--pull", action="store_true",
+                        help="fetch the nanobody artifact from the producer first")
+    parser.add_argument("--pull-only", action="store_true",
+                        help="fetch the artifact and stop. The cutover driver "
+                             "verifies the pull BEFORE it stops production, and "
+                             "it must do that by running this program rather "
+                             "than exec()ing part of it: module level here uses "
+                             "__file__, which does not exist under exec, and "
+                             "that failed on the first real cutover.")
+    parser.add_argument("--fleet", default=str(HERE / "compound_fleet.json"))
+    parser.add_argument("--wallet-name", default="mining_ops")
+    parser.add_argument("--wallet-path", default=str(Path.home() / ".bittensor/wallets"))
+    parser.add_argument("--netuid", type=int, default=68)
+    parser.add_argument("--network", default="finney")
+    parser.add_argument("--python", default=str(HERE / ".pixi/envs/default/bin/python"))
+    parser.add_argument("--github-owner", default="thomasvangurp")
+    parser.add_argument("--github-repo", default="nova-sn68-submissions")
+    parser.add_argument("--github-branch", default="main")
+    # Read off the live chain, not guessed: our existing commitments are
+    # "<owner>/<repo>/main/data/results/<hash>.txt". Left unset, load_github_path
+    # sees None rather than "" and builds ".../main/None/<hash>.txt" -- a chain
+    # pointer to a blob that does not exist, which strands the uid for the whole
+    # commitment window with no error at commit time.
+    parser.add_argument("--github-path", default="data/results")
+    parser.add_argument("--deploy-key", default=str(Path.home() / ".ssh/nova_deploy"))
+    parser.add_argument("--dry-run", action="store_true")
+    arguments = parser.parse_args(argv)
+
+    if arguments.pull or arguments.pull_only:
+        pull_producer(arguments.vastai, arguments.producer_label,
+                      arguments.producer_path, Path(arguments.nanobody))
+        if arguments.pull_only:
+            return 0
+    crew = [(int(u), str(h)) for u, h in _load(Path(arguments.crew))]
+    sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
+                                 allow_stale=arguments.allow_stale_nanobody)
+    fleet_path = Path(arguments.fleet)
+    molecules = molecules_by_uid(
+        _load(fleet_path) if fleet_path.is_file() else None,
+        arguments.epoch, arguments.reaction)
+    rows = plan(crew, molecules, sequences)
+    print(json.dumps(dict(event="plan", epoch=arguments.epoch,
+                          reaction=arguments.reaction, crew=len(crew),
+                          with_molecules=sum(r["has_molecules"] for r in rows),
+                          with_sequence=sum(r["has_sequence"] for r in rows),
+                          committing=len(rows))), flush=True)
+
+    # Validate every plaintext BEFORE committing any of them: a malformed
+    # message discovered at uid 9 has already spent eight commitment slots.
+    from nanobody_opt.commit_submission import validate_plaintext
+    # validate_plaintext insists on a real sequence, but the VALIDATOR does not:
+    # its own parse_decrypted_submission accepts "molecules|~" and returns 20
+    # molecules with 0 sequences. A uid holding molecules but no qualifying
+    # nanobody -- a freshly registered slot, say -- should still compete on the
+    # compound track. So the molecule half is validated against the local guard
+    # using a placeholder sequence, and the real "molecules|~" is what commits.
+    PLACEHOLDER = "K" * 120
+    for row in rows:
+        probe = row["plaintext"]
+        if not row["has_sequence"]:
+            probe = f'{probe.split("|", 1)[0]}|{PLACEHOLDER}'
+        try:
+            validate_plaintext(probe)
+        except Exception as error:
+            print(json.dumps(dict(event="invalid", uid=row["uid"],
+                                  error=str(error)[:160])), file=sys.stderr)
+            return 2
+    print(json.dumps(dict(event="validated", uids=[r["uid"] for r in rows])), flush=True)
+
+    failures = 0
+    for row in rows:
+        command = [arguments.python, "-m", "nanobody_opt.commit_submission",
+                   "--uid", str(row["uid"]), "--hotkey", row["hotkey"],
+                   "--plaintext", row["plaintext"],
+                   "--wallet-name", arguments.wallet_name,
+                   "--wallet-path", arguments.wallet_path,
+                   "--netuid", str(arguments.netuid),
+                   "--network", arguments.network]
+        if arguments.dry_run:
+            command.append("--dry-run")
+        import os
+        environment = dict(os.environ,
+                           GITHUB_REPO_OWNER=arguments.github_owner,
+                           GITHUB_REPO_NAME=arguments.github_repo,
+                           GITHUB_REPO_BRANCH=arguments.github_branch,
+                           GITHUB_REPO_PATH=arguments.github_path,
+                           NOVA_DEPLOY_KEY=arguments.deploy_key,
+                           # Push the blob with the deploy key rather than the
+                           # GitHub API. The API path needs GITHUB_TOKEN, which
+                           # this host has no business holding; the deploy key
+                           # was generated here, never left, and is already
+                           # verified against the repo. Without this every
+                           # commit dies on "Github environment variables not
+                           # set" AFTER the timelock encryption succeeded --
+                           # invisible to --dry-run, which returns before the
+                           # upload.
+                           NOVA_GIT_PUSH="1",
+                           # The push clones into NOVA_GIT_WORKDIR, which
+                           # defaults to /root/.nova_submissions. This host runs
+                           # as an ordinary user and has no /root.
+                           NOVA_GIT_WORKDIR=str(HERE / ".git_work"))
+        done = subprocess.run(command, cwd=str(HERE), capture_output=True,
+                              text=True, env=environment)
+        tail = (done.stdout or done.stderr).strip().splitlines()
+        print(json.dumps(dict(event="commit", uid=row["uid"], rc=done.returncode,
+                              molecules=row["has_molecules"],
+                              sequence=row["has_sequence"],
+                              last=tail[-1][:160] if tail else "")), flush=True)
+        if done.returncode:
+            failures += 1
+    print(json.dumps(dict(event="done", committed=len(rows) - failures,
+                          failed=failures)), flush=True)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

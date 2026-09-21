@@ -1,0 +1,42 @@
+[Unit]
+# The epoch writer for the whole compound+nanobody fleet.
+#
+# This lives on the Pi and not on a laptop on purpose: the loop previously ran
+# as a foreground process on a MacBook, and a writer that depends on a lid
+# staying open is not a writer. It also survives reboots, which the tmux
+# version did not.
+Description=Nova SN68 epoch submission loop (compound + nanobody)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+ConditionPathExists=/opt/nova-submit/pi_submit.py
+ConditionPathExists=/opt/nova-submit/bank.sqlite
+
+[Service]
+Type=simple
+User=thomasg
+Group=thomasg
+WorkingDirectory=/opt/nova-submit
+Environment=HOME=/home/thomasg
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nova-submit/.pixi/envs/default/bin/python \
+    /opt/nova-submit/tools/pi_epoch_loop.py \
+    --on-submit-host \
+    --root /opt/nova-submit \
+    --reactions 3 \
+    --chain-python /opt/nova-submit/.pixi/envs/default/bin/python \
+    --rdkit-python /opt/nova-submit/.pixi/envs/default/bin/python
+
+# An epoch is 361 blocks (~72 min) and the commit window is the last ~40. A
+# crash must come back well inside the same window, not next epoch.
+Restart=always
+RestartSec=20
+
+# Never let a stuck commit wedge the writer past its own window.
+TimeoutStopSec=90
+KillMode=mixed
+
+StandardOutput=append:/opt/nova-submit/loop.log
+StandardError=append:/opt/nova-submit/loop.log
+
+[Install]
+WantedBy=multi-user.target
