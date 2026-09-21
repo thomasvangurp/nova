@@ -57,10 +57,10 @@ def test_uids_without_a_sequence_are_dropped_not_committed_blank():
 
 
 def test_the_commit_reserve_leaves_room_before_the_blackout():
-    # The validator stops reading at end-16. Committing must start earlier than
-    # that, with enough blocks left to place one extrinsic per uid per block.
-    assert loop.COMMIT_RESERVE > 16
-    assert loop.COMMIT_RESERVE - 16 >= len("123456789")
+    # The validator stops reading at end-16. Committing must begin early enough
+    # that the LAST uid still lands before that, not just the first.
+    assert loop.BLACKOUT_BLOCKS == 16
+    assert loop.commit_reserve(9) > loop.BLACKOUT_BLOCKS
 
 
 def test_local_dispatch_does_not_pass_the_ssh_only_flag(monkeypatch):
@@ -153,3 +153,19 @@ def test_a_missing_or_corrupt_ledger_is_not_fatal(tmp_path):
         except Exception:
             handled = set()
         assert isinstance(handled, set)
+
+
+def test_the_reserve_grows_with_the_fleet():
+    # A fixed reserve is wrong in both directions: too small and the tail
+    # commits into the blackout, too large and we abandon a producer we still
+    # had time to wait for.
+    assert loop.commit_reserve(10) == 16 + 50
+    assert loop.commit_reserve(12) > loop.commit_reserve(10)
+    assert loop.commit_reserve(0) == loop.commit_reserve(1)
+
+
+def test_the_reserve_matches_what_25248_actually_did():
+    # Verified on-chain: ten uids, first at 69 blocks left, last at 26, and the
+    # validator's cutoff is 16. The reserve must cover that run.
+    assert loop.commit_reserve(10) <= 69
+    assert loop.commit_reserve(10) >= 26

@@ -30,8 +30,21 @@ PI = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "thomasg@100.64.2
 PROD = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
         "-i", "/Users/tvgdeena/.ssh/id_ed25519", "-p", "15470", "root@ssh2.vast.ai"]
 EPOCH_LENGTH = 361
-# Validator blackout starts at end-16; leave nine blocks to place the commits.
-COMMIT_RESERVE = 25
+# The validator stops reading at end-16.
+BLACKOUT_BLOCKS = 16
+# Measured on-chain at 25248: ten uids committed 5 blocks apart, 69 blocks left
+# down to 26. Almost all of it is set_commitment waiting for the extrinsic.
+BLOCKS_PER_UID = 5
+
+
+def commit_reserve(uids: int) -> int:
+    """How many blocks the commit run itself needs, plus the blackout.
+
+    A fixed reserve was wrong in both directions: too small and the tail
+    commits into the blackout, too large and we stop waiting for a producer we
+    still had time for. It depends on how many uids there are, so compute it.
+    """
+    return BLACKOUT_BLOCKS + BLOCKS_PER_UID * max(1, uids)
 
 
 def say(**f):
@@ -280,7 +293,10 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         # empty epochs, 25243 through 25247. Wait to the last safe block
         # instead, and if the producer still has not moved, commit what we have
         # rather than nothing.
-        deadline = time.time() + max(0, end - COMMIT_RESERVE - block) * 12
+        reserve = commit_reserve(len(view["crew"]))
+        deadline = time.time() + max(0, end - reserve - block) * 12
+        say(event="wait_budget", uids=len(view["crew"]), reserve=reserve,
+            blocks_to_wait=max(0, end - reserve - block))
         stale_ok = False
         while time.time() < deadline:
             seen = (producer_epoch_here(a, epoch, view["reaction"])
