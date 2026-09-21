@@ -31,6 +31,77 @@ ARCHIVE_URL = (
 )
 
 
+#: How many previous epochs seed the timing fit. Enough that the very first
+#: plan of an epoch has real replication rows to fit; short enough that a
+#: genuine change in cost is reflected within an epoch or two.
+BUDGET_SEED_EPOCHS = 3
+
+
+def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> dict:
+    if args.budget_mode != "adaptive" or not args.replication_rounds:
+        return {"replication_reserve_blocks": args.replication_reserve_blocks,
+                "confirmation_candidates": args.finalists}
+    from nanobody_opt.compute_budget import TimingModel, confirmation_plan
+
+    # SEED FROM RECENT EPOCHS, not this one alone. Replication rows only
+    # exist after confirmation has run, but the width that governs
+    # confirmation is decided at iteration 1 -- so with this epoch's records
+    # alone the fitted model sees zero replication rounds every time and
+    # falls back to the raw CLI defaults. Measured on the live box:
+    # iterations 1-3 carry 0 replication records, so the fit had never once
+    # run in the decision it exists for. The previous epochs supply ~119.
+    #
+    # Oldest first: the fit keeps the most recent window, so this epoch's
+    # rows must come last and displace older ones as they arrive.
+    epoch = int(state["epoch"])
+    live_root = producer_root.parent.parent
+    roots = [live_root / f"epoch{past}" / "producer"
+             for past in range(epoch - BUDGET_SEED_EPOCHS, epoch)]
+    records = []
+    for root in [*roots, producer_root]:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("iteration_[0-9][0-9]/race/timings.jsonl")):
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    model = TimingModel(args.budget_load_seconds, args.budget_gpu_seconds,
+                        args.budget_cpu_guard_seconds).fit_from_measurements(
+                            records, len(args.gpus.split(",")))
+    # The run prunes between stages, so the plan must price it that way or it
+    # reserves blocks it will never spend.
+    plan = confirmation_plan(epoch_length=int(state["epoch_length"]),
+                             commitment_blocks=_handoff_reserve(args),
+                             rounds=args.replication_rounds,
+                             maximum_candidates=args.finalists,
+                             gpus=len(args.gpus.split(",")), model=model,
+                             time_share=args.confirmation_time_share,
+                             rounds_per_stage=args.replication_rounds_per_stage,
+                             keep_fraction=args.replication_keep_fraction)
+    _atomic_json(producer_root / "budget.json", {"epoch": int(state["epoch"]),
+                 "commitment_reserve_blocks": args.reserve_blocks,
+                 "publication_prepare_blocks": args.publication_prepare_blocks, **plan})
+    return plan
+
+
+def _closing(args: argparse.Namespace, state: dict, producer_root: Path) -> bool:
+    remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
+    plan = _budget_plan(args, state, producer_root)
+    return remaining <= _handoff_reserve(args) + plan["replication_reserve_blocks"]
+
+
+def _handoff_reserve(args: argparse.Namespace) -> int:
+    return args.reserve_blocks + (args.publication_prepare_blocks if args.budget_mode == "adaptive" else 0)
+
+
 def visible_gpu_ids() -> str:
     """The GPU ids this machine actually has, as the scorer's comma list.
 
@@ -205,6 +276,7 @@ def _run_iteration(
     state: dict[str, Any],
     iteration: int,
 ) -> None:
+    preparation_started = time.monotonic()
     epoch = int(state["epoch"])
     target = str(state["nanobody_target"])
     config, archive, target = _prepare_epoch(
@@ -216,6 +288,46 @@ def _run_iteration(
     iteration_root = producer_root / f"iteration_{iteration:02d}"
     if (iteration_root / "race/complete.json").is_file():
         return
+    from nanobody_opt.consensus_trial import write_immutable
+    write_immutable(iteration_root / "scientific_configuration.json", {
+        "epoch": epoch, "iteration": iteration,
+        "parameters": {key: getattr(args, key, None) for key in (
+            "selection_metric_policy", "consensus_ranking_policy",
+            "settled_deviation_policy", "minimum_selection_observations",
+            "parent_limit", "neighbor_parent_limit", "proposal_limit",
+            "candidate_limit", "screen_tranche_size", "finalists",
+            "replication_rounds", "replication_rounds_per_stage",
+            "replication_keep_fraction", "minimum_publishable_observations",
+            "qualification_observations", "basin_core_limit",
+            "basin_parent_limit", "basin_fraction", "basin_evidence_fraction",
+            "public_neighbourhood_distance", "scout_iterations",
+            "exploit_basin_fraction", "exploit_basin_core_limit",
+            "screen_predict_batch_size", "budget_mode", "confirmation_time_share",
+            "publication_prepare_blocks", "reserve_blocks",
+        )},
+    })
+    preparations = [json.loads(p.read_text())["seconds"] for p in
+                    sorted(producer_root.glob("iteration_[0-9][0-9]/producer_preparation.json"))[-2:]]
+    preparation_guard = max(preparations, default=60.0) * 1.15
+    plan = _budget_plan(args, state, producer_root)
+    remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
+    confirmation_due = (
+        remaining * 12 <= (_handoff_reserve(args) + plan["replication_reserve_blocks"]) * 12 + preparation_guard
+    )
+    if args.budget_mode == "adaptive" and args.replication_rounds and confirmation_due:
+        retained = [p for p in sorted(producer_root.glob("iteration_[0-9][0-9]/layer2.json"))
+                    if (d := json.loads(p.read_text())).get("candidates") or d.get("sequences")]
+        exact = list(producer_root.glob("iteration_[0-9][0-9]/race/**/exact_all.json"))
+        if retained and exact:
+            _atomic_json(iteration_root / "replication_only.json", {
+                "epoch": epoch, "layer2_source": str(retained[-1].relative_to(producer_root)),
+                "reason": "remaining time is reserved for confirmation",
+            })
+            _run_race(args=args, state=state, iteration=iteration,
+                      config=config, archive=archive, target=target,
+                      producer_root=producer_root, iteration_root=iteration_root,
+                      layer2=retained[-1], force_confirmation=True)
+            return
     winner_priors = producer_root / "winner_priors.json"
     if not winner_priors.is_file():
         _run([
@@ -389,6 +501,17 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
+    _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
+    _run_race(args=args, state=state, iteration=iteration,
+              config=config, archive=archive, target=target,
+              producer_root=producer_root, iteration_root=iteration_root,
+              layer2=layer2)
+
+
+def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
+              config: Path, archive: Path, target: str, producer_root: Path,
+              iteration_root: Path, layer2: Path, force_confirmation: bool = False) -> None:
+    epoch = int(state["epoch"])
     # Generate-score-regenerate: every iteration screens a fresh generation
     # steered by the observations the previous ones wrote to the mutation
     # database.  Replication is spent once, in the iteration that opens inside
@@ -419,7 +542,8 @@ def _run_iteration(
     # per-tranche repeats.  The closing generation therefore starts with the
     # whole reserve intact, which is what makes room for enough rounds to reach
     # the observation count strict qualification requires.
-    closing = remaining_blocks <= args.replication_reserve_blocks + args.reserve_blocks
+    plan = _budget_plan(args, state, producer_root)
+    closing = force_confirmation or remaining_blocks <= plan["replication_reserve_blocks"] + _handoff_reserve(args)
     replication_rounds = args.replication_rounds if closing else 0
     print(
         f"PRODUCER_GENERATION iteration={iteration} "
@@ -439,14 +563,14 @@ def _run_iteration(
         "--ledger", str(args.ledger),
         "--mutation-database", str(args.mutation_database),
         "--chain-state", str(args.chain_state),
-        "--reserve-blocks", str(args.reserve_blocks),
+        "--reserve-blocks", str(_handoff_reserve(args)),
         "--gpus", args.gpus,
         "--scorer", str(args.exact_scorer),
         "--candidate-limit", str(args.candidate_limit),
         "--screen-tranche-size", str(args.screen_tranche_size),
         "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
         "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
-        "--finalists", str(args.finalists),
+        "--finalists", str(plan["confirmation_candidates"] or 1),
         "--challenger-p90-margin", str(args.challenger_p90_margin),
         "--basin-shrinkage-strength", str(args.basin_shrinkage_strength),
         "--minimum-basin-samples", str(args.minimum_basin_samples),
@@ -457,11 +581,27 @@ def _run_iteration(
         "--minimum-publishable-observations", str(args.minimum_publishable_observations),
         "--replication-rounds", str(replication_rounds),
         "--pooled-exact-root", str(producer_root),
-        "--replication-reserve-blocks", str(args.replication_reserve_blocks),
+        "--replication-reserve-blocks", str(plan["replication_reserve_blocks"]),
         "--replication-rounds-per-stage", str(args.replication_rounds_per_stage),
         "--replication-keep-fraction", str(args.replication_keep_fraction),
         "--strict-gates", str(args.strict_gates or ""),
+        "--selection-metric-policy", getattr(args, "selection_metric_policy", "plain"),
+        "--consensus-ranking-policy", getattr(args, "consensus_ranking_policy", "tier"),
     ]
+    if getattr(args, "minimum_selection_observations", None) is not None:
+        race_command.extend(["--minimum-selection-observations", str(args.minimum_selection_observations)])
+    if args.budget_mode == "adaptive":
+        race_command.extend([
+            "--carry-pending-candidates", "--maximum-screen-tranches", "1",
+            "--replication-load-seconds", str(plan["load_seconds"]),
+            "--replication-seconds-per-observation", str(plan["gpu_seconds_per_candidate"]),
+            "--screen-gpu-seconds-per-candidate", str(plan["gpu_seconds_per_candidate"]),
+            "--replication-finish-guard-seconds", "30",
+            "--adaptive-finish-guard",
+            "--maximum-current-epoch-observations", str(args.replication_rounds + 1),
+        ])
+        if force_confirmation:
+            race_command.append("--replication-only")
     if args.layer2_igblast_only:
         # The pool was screened on IgBLAST alone, so the shortlist must earn
         # full Layer-2 evidence before anything can be published.
@@ -554,6 +694,18 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selection-metric-policy", choices=("plain", "historical-drivers"),
+                        default="plain", help="forwarded to screen and confirmation ranking")
+    parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
+    parser.add_argument("--minimum-selection-observations", type=int)
+    parser.add_argument("--budget-mode", choices=("static", "adaptive"), default="static")
+    parser.add_argument("--confirmation-time-share", type=float, default=.25,
+                        help="fraction of the usable epoch reserved for repeat folds; CPU and commitments have separate guards")
+    parser.add_argument("--budget-load-seconds", type=float, default=45.0)
+    parser.add_argument("--budget-gpu-seconds", type=float, default=7.5)
+    parser.add_argument("--budget-cpu-guard-seconds", type=float, default=120.0)
+    parser.add_argument("--publication-prepare-blocks", type=int, default=0,
+                        help="adaptive mode stops GPU work before the publisher's preparation window")
     parser.add_argument("--runtime-root", type=Path, default=Path("/root"))
     parser.add_argument(
         "--chain-state",
@@ -811,6 +963,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if not 0 < args.confirmation_time_share < 1:
+        raise SystemExit("--confirmation-time-share must be between zero and one")
+    if min(args.budget_load_seconds, args.budget_gpu_seconds, args.budget_cpu_guard_seconds) <= 0:
+        raise SystemExit("budget timing bounds must be positive")
+    if args.publication_prepare_blocks < 0:
+        raise SystemExit("publication preparation guard must be nonnegative")
     if not args.gpus:
         # Resolved here rather than as an argparse default so --help stays
         # importable without torch, which the deploy gate depends on.
@@ -818,18 +976,25 @@ def main() -> None:
     completed_iterations: dict[int, int] = {}
     #: Epochs whose neighbourhood is used up; generation stops, replication continues.
     exhausted_epochs: set[int] = set()
+    finished_epochs: set[int] = set()
     while True:
         try:
             state = _chain_state(args.chain_state, args.maximum_chain_state_age)
             epoch = int(state["epoch"])
             offset = int(state["block"]) % int(state["epoch_length"])
-            if offset >= int(state["epoch_length"]) - args.reserve_blocks:
+            if epoch in finished_epochs:
+                print(f"PRODUCER_CONFIRMATION_FINISHED epoch={epoch} offset={offset}; waiting", flush=True)
+            elif offset >= int(state["epoch_length"]) - _handoff_reserve(args):
                 print(
                     f"PRODUCER_RESERVE epoch={epoch} offset={offset}; waiting",
                     flush=True,
                 )
             else:
-                if epoch in exhausted_epochs:
+                producer_root = args.runtime_root / "live" / f"epoch{epoch}" / "producer"
+                if epoch in exhausted_epochs and not (
+                    args.budget_mode == "adaptive" and args.replication_rounds
+                    and _closing(args, state, producer_root)
+                ):
                     # The neighbourhood is used up for this epoch. Generating
                     # again would exclude everything already proposed and come
                     # back empty, which is how this span was spent at 0% GPU
@@ -843,9 +1008,12 @@ def main() -> None:
                         "generation complete, leaving the epoch to replication",
                         flush=True,
                     )
-                    time.sleep(args.poll_seconds)
+                    time.sleep(args.poll_interval)
                     continue
-                iteration = completed_iterations.get(epoch, 0) + 1
+                retained_iterations = [int(path.name.split("_")[-1])
+                    for path in producer_root.glob("iteration_[0-9]*")
+                    if path.is_dir() and path.name.split("_")[-1].isdigit()]
+                iteration = max([completed_iterations.get(epoch, 0), *retained_iterations]) + 1
                 print(
                     f"PRODUCER_ITERATION epoch={epoch} offset={offset} "
                     f"iteration={iteration}",
@@ -870,6 +1038,12 @@ def main() -> None:
                         exhausted_epochs.add(epoch)
                 else:
                     completed_iterations[epoch] = iteration
+                    root = producer_root / f"iteration_{iteration:02d}"
+                    complete = root / "race/complete.json"
+                    if args.budget_mode == "adaptive" and (root / "replication_only.json").exists() and complete.exists():
+                        done = json.loads(complete.read_text())
+                        if not done.get("screened") and not done.get("replication_rounds_completed"):
+                            finished_epochs.add(epoch)
             if args.once:
                 return
         except Exception as error:

@@ -52,6 +52,11 @@ from nanobody_opt.diffusion_sample_selection import (  # noqa: E402
     EXPECTED_DIFFUSION_SAMPLES,
 )
 
+try:
+    from nanobody_opt import scorer_daemon as _scorer_daemon
+except Exception:                       # the adapter must run without it
+    _scorer_daemon = None
+
 DEFAULT_CONFIG_PATH = Path("/root/artifacts/nanobody_fast_scorer.json")
 DEFAULT_SCORER = Path("/root/fastscore/release/fast_score_batch.py")
 
@@ -187,6 +192,28 @@ def main() -> None:
         settings.get("scorer_sha256"),
     )
     command = build_command(args, settings)
+
+    # A warm daemon holds the BoltzGen import, the template library and the
+    # analysis pool across waves, so the ~33 s of fixed setup in the measured
+    # "32.9 + 1.02*candidates" is paid once for the process instead of once
+    # per wave. `command` here is fast_score_batch's own argv, so the daemon
+    # runs the same shards, the same chunk composition and the same merge --
+    # the metric is unchanged, and a daemon fault falls back to this very
+    # subprocess rather than losing the wave.
+    if _scorer_daemon is not None and _scorer_daemon.ENABLED:
+        try:
+            if _scorer_daemon.available():
+                _scorer_daemon.score(_scorer_daemon.job_from_command(command))
+                raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as error:
+            print(
+                "FAST_SCORER_DAEMON_FALLBACK "
+                f"error={type(error).__name__}: {error}",
+                flush=True,
+            )
+
     completed = subprocess.run(command)
     raise SystemExit(completed.returncode)
 

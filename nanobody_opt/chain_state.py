@@ -83,8 +83,22 @@ def build_payload(
     miner_uid: int,
     neurons: Sequence[Mapping[str, Any]],
     now: float,
+    roster_block: int | None = None,
 ) -> dict[str, Any]:
-    """Assemble the exported view, or refuse if the roster is empty."""
+    """Assemble the exported view, or refuse if the roster is empty.
+
+    `roster_block` is the block the NEURON ROWS were synced at, which is not
+    the same as `block`. Conflating them hid a five-day outage: the miner
+    re-synced its metagraph only when `block % epoch_length == 0`, a
+    condition the loop stepped over every time, so the rows stayed frozen at
+    process start while `block` advanced every iteration. The file looked
+    fresh by every check anyone made, and the publisher kept assigning
+    sequences to a uid that had been re-registered to another coldkey --
+    two of eight slots discarded each epoch with nothing in any log.
+
+    Recording it separately is what makes that visible: a consumer can now
+    ask how old the ROSTER is, not merely how old the file is.
+    """
     if epoch_length <= 0:
         raise ValueError(f"epoch_length must be positive: {epoch_length}")
     rows = [dict(row) for row in neurons]
@@ -99,6 +113,7 @@ def build_payload(
         "nanobody_target": normalise_target(nanobody_target),
         "miner_uid": int(miner_uid),
         "neurons": rows,
+        "roster_block": int(block if roster_block is None else roster_block),
         "updated_at_unix": float(now),
     }
 

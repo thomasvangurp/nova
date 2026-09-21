@@ -122,6 +122,45 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _wave_command(
+    *,
+    scorer: Path,
+    wave_input: Path,
+    config: Path,
+    target: str,
+    gpus: str,
+    shards_per_gpu: int,
+    predict_batch_size: int,
+    output_dir: Path,
+    out: Path,
+    capture_structures: bool,
+) -> list[str]:
+    """The scorer argv for one wave.
+
+    Extracted so the daemon job builder can be tested against the command
+    that actually runs. The previous test built a command by hand and so
+    agreed with a job builder that was wired to the wrong CLI entirely.
+    """
+    command = [
+        sys.executable,
+        str(scorer),
+        "--sequences", str(wave_input),
+        "--config", str(config),
+        "--target", target,
+        "--gpus", gpus,
+        "--shards-per-gpu", str(shards_per_gpu),
+        "--batch-size", str(predict_batch_size),
+        "--work-root", str(output_dir / "work"),
+        "--out", str(out),
+    ]
+    if capture_structures:
+        command.extend([
+            "--structure-dir", str(output_dir / "structures"),
+            "--require-structures",
+        ])
+    return command
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sequences", required=True, type=Path)
@@ -220,32 +259,22 @@ def main() -> None:
                 temporary_output.unlink()
             except FileNotFoundError:
                 pass
-            command = [
-                sys.executable,
-                str(scorer),
-                "--sequences",
-                str(wave_input),
-                "--config",
-                str(args.config),
-                "--target",
-                args.target,
-                "--gpus",
-                args.gpus,
-                "--shards-per-gpu",
-                str(args.shards_per_gpu),
-                "--batch-size",
-                str(args.predict_batch_size),
-                "--work-root",
-                str(args.output_dir / "work"),
-                "--out",
-                str(temporary_output),
-            ]
-            if args.capture_structures:
-                command.extend([
-                    "--structure-dir",
-                    str(args.output_dir / "structures"),
-                    "--require-structures",
-                ])
+            command = _wave_command(
+                scorer=scorer,
+                wave_input=wave_input,
+                config=args.config,
+                target=args.target,
+                gpus=args.gpus,
+                shards_per_gpu=args.shards_per_gpu,
+                predict_batch_size=args.predict_batch_size,
+                output_dir=args.output_dir,
+                out=temporary_output,
+                capture_structures=args.capture_structures,
+            )
+            # The daemon is NOT hooked here either. `command` runs the fast
+            # adapter, whose flags are --work-root/--structure-dir; the
+            # scorer's own are --shard-root/--capture-structures. The hook
+            # belongs where the scorer argv finally exists: in the adapter.
             subprocess.run(command, check=True)
             payload = _validated_wave(
                 temporary_output,

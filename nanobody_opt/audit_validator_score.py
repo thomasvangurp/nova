@@ -128,6 +128,37 @@ def replay_validator_score(
         },
         "audited_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if checkpoint is not None and isinstance(checkpoint.get("submissions"), list):
+        entries = [entry for entry in checkpoint["submissions"] if entry.get("hotkey") == hotkey]
+        if len(entries) != 1:
+            raise ValueError("expected one receipt for the audited hotkey")
+        entry = entries[0]
+        sequence_matches = str(entry.get("sequence", "")).upper() == mine_sequence
+        if not sequence_matches:
+            raise ValueError("snapshot sequence does not match the validator sequence")
+        nested = entry.get("checkpoint") or None
+        if nested and nested.get("sequences") != [mine_sequence]:
+            raise ValueError("nested checkpoint describes a different sequence")
+        audit["snapshot_comparison"] = {
+            "epoch_matches": checkpoint.get("epoch") == epoch,
+            "target_matches": checkpoint.get("target") == resolved_target,
+            "sequence_matches": sequence_matches,
+            "checkpoint_available": nested is not None,
+        }
+        if mine[0].get("uid") is not None:
+            audit["snapshot_comparison"]["uid_matches"] = entry.get("uid") == mine[0]["uid"]
+        audit["prediction_at_commit"] = entry.get("prediction_at_commit")
+        if nested and audit["prediction_at_commit"] is None:
+            selection = nested.get("selection") or {}
+            if selection.get("win_probability") is not None:
+                audit["prediction_at_commit"] = {
+                    "event": "rank_sum_below_fixed_threshold",
+                    "probability": selection.get("win_probability"),
+                    "threshold": selection.get("competitive_score_threshold"),
+                    "reference": selection.get("reference"),
+                    "observation_count": (nested.get("exact") or {}).get("observation_count"),
+                }
+        checkpoint = nested
     if checkpoint is not None:
         local_metrics = checkpoint.get("exact", {}).get("metrics", {})
         checkpoint_sequence = str((checkpoint.get("sequences") or [""])[0]).upper()

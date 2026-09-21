@@ -40,6 +40,13 @@ from nanobody_opt.metric_outliers import (
 # refusing, so this module keeps no copy of its own.
 STRICT_RANK_GATES = publication_gates.gate_defaults()
 
+try:  # package import when run as -m nanobody_opt.sequential_exact_race
+    from nanobody_opt import round_parallelism as _round_parallelism
+    from nanobody_opt import scorer_daemon as _scorer_daemon
+except ImportError:  # direct script execution
+    import round_parallelism as _round_parallelism
+    import scorer_daemon as _scorer_daemon
+
 
 def visible_gpu_ids() -> str:
     """The GPU ids this machine actually has, as the scorer's comma list.
@@ -103,6 +110,10 @@ def _candidate_records(path: Path) -> list[dict[str, Any]]:
     items = payload if isinstance(payload, list) else (
         payload.get("candidates") or payload.get("sequences") or []
     )
+    return _ordered_candidate_records(items)
+
+
+def _ordered_candidate_records(items: list) -> list[dict[str, Any]]:
     if items and all(isinstance(item, dict) for item in items):
         items = sorted(items, key=lambda item: (
             0 if item.get("screen_priority") is not None else 1,
@@ -126,6 +137,19 @@ def _candidate_records(path: Path) -> list[dict[str, Any]]:
             records.append(record)
             seen.add(normalized)
     return records
+
+
+def _carry_pending_records(local: list[dict], pooled_root: Path | None,
+                          output_dir: Path, target: str) -> list[dict]:
+    """Keep unscored proposals; only a complete exact vector consumes a case."""
+    if pooled_root is None:
+        return local
+    from nanobody_opt.rank_exact import _observations
+    records = list(local)
+    for path in sorted(pooled_root.glob("iteration_[0-9][0-9]/layer2.json")):
+        records.extend(_candidate_records(path))
+    scored = set(_observations(_pooled_exact_paths([], pooled_root, output_dir), target))
+    return [r for r in _ordered_candidate_records(records) if r["sequence"] not in scored]
 
 
 def _candidate_sequences(path: Path, limit: int) -> list[str]:
@@ -618,6 +642,8 @@ def _run_replication_rounds(
     rounds_per_stage: int = 0,
     keep_fraction: float = 1.0,
     rerank: Any = None,
+    finish_model: Any = None,
+    finish_guard_seconds: float = 0.0,
 ) -> int:
     """Re-observe one shortlist as whole rounds of independent observations.
 
@@ -650,6 +676,25 @@ def _run_replication_rounds(
                 for item in json.loads(source.read_text()).get("sequences", [])
             ] or alive
         stage_rounds = min(rounds_per_stage or rounds, rounds - completed)
+        # A round costs a model load whether it scores sixty candidates or
+        # two, and a shortlist smaller than the shard count leaves shards
+        # idle. When the shortlist cannot fill the box, run several rounds at
+        # once on disjoint GPU groups: rounds are independent, and each keeps
+        # its own invocation and predict composition, so the metric is
+        # untouched. See round_parallelism for the measurements.
+        groups = _round_parallelism.plan(
+            alive=len(alive), gpus=gpus, rounds_left=stage_rounds)
+        if len(groups) > 1:
+            done = _run_rounds_concurrently(
+                groups=groups, source=source, config=config, target=target,
+                root=root, first_index=completed + 1, alive=alive,
+                scorer=scorer, predict_batch_size=predict_batch_size,
+                timings=timings, stage=stage, all_gpus=gpus,
+                chain_state=chain_state, epoch=epoch,
+                reserve_blocks=reserve_blocks)
+            completed += done
+            if done:
+                continue
         for _ in range(stage_rounds):
             index = completed + 1
             already = root / "rounds" / f"round_{index:02d}" / "exact_all.json"
@@ -665,6 +710,11 @@ def _run_replication_rounds(
                     flush=True,
                 )
                 return completed
+            if finish_model is not None:
+                usable = max(_remaining_blocks(chain_state, epoch) - reserve_blocks, 0) * 12.0
+                if finish_model.round_seconds(len(alive), len(gpus)) + finish_guard_seconds > usable:
+                    print(f"EXACT_REPLICATION_FINISH_GUARD rounds={completed}/{rounds}", flush=True)
+                    return completed
             started = time.monotonic()
             _run_screen(
                 source=source,
@@ -685,6 +735,8 @@ def _run_replication_rounds(
                     "round": index,
                     "stage": stage,
                     "shortlist": len(alive),
+                    "candidates": len(alive),
+                    "gpu_count": len(gpus),
                     "seconds": round(seconds, 1),
                 },
             )
@@ -733,8 +785,20 @@ def _rank_command(
     ledger: Path | None,
     strict: bool,
     strict_gate_overrides: dict[str, Any] | None = None,
+    selection_metric_policy: str = "plain",
+    consensus_ranking_policy: str = "tier",
+    minimum_selection_observations: int | None = None,
+    observation_history: Path | None = None,
 ) -> list[str]:
-    command = [sys.executable, "-m", "nanobody_opt.rank_exact"]
+    command = [sys.executable, "-m", "nanobody_opt.rank_exact",
+               "--selection-metric-policy", selection_metric_policy,
+               "--consensus-ranking-policy", consensus_ranking_policy]
+    # Earlier-epoch folds are still valid evidence: the challenge is identical
+    # across epochs, and the database holds ~40 observations per sequence
+    # where this epoch produced one. Out of sample over 22 epochs this lifts
+    # agreement with the validator from +0.165 to +0.365.
+    if observation_history is not None:
+        command.extend(["--observation-history", str(observation_history)])
     for path in exact:
         command.extend(["--exact", str(path)])
     command.extend([
@@ -762,6 +826,8 @@ def _rank_command(
         command.extend(["--selection-order", "win-probability"])
     else:
         command.extend(["--selection-order", "p90"])
+        if minimum_selection_observations is not None:
+            command.extend(["--minimum-observations", str(minimum_selection_observations)])
     return command
 
 
@@ -897,6 +963,93 @@ def _start_screen(
     )
 
 
+
+def _run_rounds_concurrently(
+    *, groups, source, config, target, root, first_index, alive, scorer,
+    predict_batch_size, timings, stage, all_gpus, chain_state, epoch,
+    reserve_blocks,
+):
+    """Run one round per GPU group at the same time. Returns rounds completed.
+
+    Each round is an ordinary scorer invocation into its own round directory,
+    so nothing about isolation, shard layout or predict composition changes --
+    only which GPUs each invocation is given. A group that fails leaves its
+    round uncounted rather than poisoning the wave; the sequential path then
+    retries it.
+    """
+    import concurrent.futures
+
+    launched = []
+    for offset, group in enumerate(groups):
+        index = first_index + offset
+        output = root / "rounds" / f"round_{index:02d}"
+        if (output / "exact_all.json").is_file():
+            continue
+        if not _chain_allows_work(chain_state, epoch, reserve_blocks):
+            break
+        launched.append((index, group, output))
+    if len(launched) < 2:
+        return 0
+
+    started = time.monotonic()
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(launched)) as pool:
+        futures = {
+            pool.submit(
+                _run_screen, source=source, config=config, target=target,
+                output_dir=output, gpus=group, candidate_limit=len(alive),
+                scorer=scorer, predict_batch_size=predict_batch_size,
+            ): index
+            for index, group, output in launched
+        }
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            try:
+                future.result()
+                results[index] = True
+            except Exception as error:   # one bad group must not lose the wave
+                print(
+                    f"EXACT_REPLICATION_PARALLEL_ROUND_FAILED round={index} "
+                    f"error={type(error).__name__}", flush=True)
+                results[index] = False
+    seconds = time.monotonic() - started
+
+    done = sum(1 for ok in results.values() if ok)
+    _append_timing(
+        timings,
+        {
+            "phase": "replication_round_parallel",
+            "stage": stage,
+            "rounds": done,
+            "concurrency": len(launched),
+            "shortlist": len(alive),
+            "candidates": len(alive),
+            "gpu_count": len(all_gpus),
+            "seconds": round(seconds, 1),
+        },
+    )
+    print(
+        f"EXACT_REPLICATION_PARALLEL rounds={done}/{len(launched)} "
+        f"alive={len(alive)} groups={len(launched)} seconds={seconds:.0f}",
+        flush=True)
+    # Completed rounds must be a prefix: the sequential loop counts by index.
+    ordered = sorted(results)
+    prefix = 0
+    for index in ordered:
+        if results[index]:
+            prefix += 1
+        else:
+            break
+    return prefix
+
+
+
+def _daemon_job(*, command: list[str], output_dir: Path) -> dict:
+    """Thin wrapper over the canonical builder in scorer_daemon."""
+    return _scorer_daemon.job_from_command(
+        command, observation_id=output_dir.name)
+
+
 def _run_screen(
     *,
     source: Path,
@@ -918,8 +1071,19 @@ def _run_screen(
         scorer=scorer,
         predict_batch_size=predict_batch_size,
     )
-    if command is not None:
-        subprocess.run(command, check=True)
+    if command is None:
+        return output_dir / "exact_all.json"
+    # Prefer a warm daemon. It holds the imports, the model, the rotamer
+    # library and the analysis pool across rounds, which is 33 s of the
+    # measured 32.9 + 1.02*candidates per round. Each round is still its own
+    # _worker call into its own output directory, so shard isolation and
+    # predict composition -- and therefore the metric -- are unchanged.
+    # The daemon is NOT hooked here. `command` runs score_boltzgen_waves,
+    # which has no --out and no --batch-size, so the job builder rejected it
+    # and every round fell back to a subprocess -- silently, because the
+    # fallback is deliberately quiet. The hook lives in the wave loop, on the
+    # inner scorer argv that actually does the work.
+    subprocess.run(command, check=True)
     return output_dir / "exact_all.json"
 
 
@@ -1001,6 +1165,8 @@ def _try_strict_rank(
     output: Path,
     ledger: Path | None,
     strict_gate_overrides: dict[str, Any] | None = None,
+    selection_metric_policy: str = "plain",
+    consensus_ranking_policy: str = "tier",
 ) -> bool:
     try:
         subprocess.run(
@@ -1014,6 +1180,8 @@ def _try_strict_rank(
                 ledger=ledger,
                 strict=True,
                 strict_gate_overrides=strict_gate_overrides,
+                selection_metric_policy=selection_metric_policy,
+                consensus_ranking_policy=consensus_ranking_policy,
             ),
             check=True,
         )
@@ -1180,6 +1348,18 @@ def _store_ranking(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selection-metric-policy", choices=("plain", "historical-drivers", "measured-signal", "iptm-lead"),
+                        default="plain")
+    parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
+    parser.add_argument("--minimum-selection-observations", type=int)
+    parser.add_argument("--carry-pending-candidates", action="store_true")
+    parser.add_argument("--maximum-screen-tranches", type=int, default=0,
+                        help="zero keeps the legacy limit; one lets the producer regenerate after each observation wave")
+    parser.add_argument("--adaptive-finish-guard", action="store_true")
+    parser.add_argument("--replication-only", action="store_true")
+    parser.add_argument("--replication-finish-guard-seconds", type=float, default=0.0)
+    parser.add_argument("--maximum-current-epoch-observations", type=int, default=0,
+                        help="zero preserves legacy repeats; positive values move confirmation to candidates not yet confirmed this epoch")
     parser.add_argument("--layer2", required=True, type=Path)
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
@@ -1427,6 +1607,8 @@ def main() -> None:
         parser.error("--pipeline-depth must be 0 or 1")
     if args.replication_rounds < 0:
         parser.error("--replication-rounds cannot be negative")
+    if args.maximum_screen_tranches < 0 or args.replication_finish_guard_seconds < 0 or args.maximum_current_epoch_observations < 0:
+        parser.error("screen tranche limit and finish guard cannot be negative")
     if args.replication_reserve_blocks < 0:
         parser.error("--replication-reserve-blocks cannot be negative")
     if args.replication_rounds_per_stage < 0:
@@ -1451,7 +1633,14 @@ def main() -> None:
             f"{json.dumps(strict_gate_overrides, sort_keys=True)}",
             flush=True,
         )
-    candidate_records = _candidate_records(args.layer2)[: args.candidate_limit]
+    candidate_records = _candidate_records(args.layer2)
+    if args.carry_pending_candidates:
+        candidate_records = _carry_pending_records(candidate_records, args.pooled_exact_root,
+                                                  args.output_dir, args.target)
+    # Confirmation can use the complete scored pool even when no pending case remains.
+    if not candidate_records and args.replication_rounds:
+        candidate_records = _candidate_records(args.layer2)
+    candidate_records = candidate_records[: args.candidate_limit]
     sequences = [str(record["sequence"]) for record in candidate_records]
     candidate_metadata = {
         str(record["sequence"]): record for record in candidate_records
@@ -1492,6 +1681,10 @@ def main() -> None:
         candidates a fully serial run would have selected.
         """
         nonlocal tranche_index
+        if args.replication_only:
+            return None
+        if args.maximum_screen_tranches and tranche_index >= args.maximum_screen_tranches:
+            return None
         if not pending:
             return None
         # The replication reserve must hold on EVERY generation, not only the
@@ -1623,6 +1816,10 @@ def main() -> None:
                 output=screen_ranking,
                 ledger=args.ledger,
                 strict=False,
+                selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
+                consensus_ranking_policy=args.consensus_ranking_policy,
+                minimum_selection_observations=args.minimum_selection_observations,
+                observation_history=args.mutation_database,
             ),
             check=True,
         )
@@ -1780,6 +1977,8 @@ def main() -> None:
             ledger=args.ledger,
             pooled_root=args.pooled_exact_root,
             strict_gate_overrides=strict_gate_overrides,
+            selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
+            consensus_ranking_policy=args.consensus_ranking_policy,
         ):
             _store_ranking(
                 args.mutation_database,
@@ -1805,6 +2004,13 @@ def main() -> None:
         pooled_for_ranking = _pooled_exact_paths(
             [], args.pooled_exact_root, args.output_dir
         )
+        already_confirmed = set()
+        if args.maximum_current_epoch_observations:
+            from nanobody_opt.rank_exact import _observations
+            already_confirmed = {
+                sequence for sequence, observations in _observations(pooled_for_ranking, args.target).items()
+                if len(observations) >= args.maximum_current_epoch_observations
+            }
         if not screen_ranking.is_file() and pooled_for_ranking:
             # The closing iteration may screen nothing at all: it opens inside
             # the replication window on purpose.  Rank the epoch's pooled
@@ -1819,6 +2025,10 @@ def main() -> None:
                     output=screen_ranking,
                     ledger=args.ledger,
                     strict=False,
+                    selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
+                    consensus_ranking_policy=args.consensus_ranking_policy,
+                    minimum_selection_observations=args.minimum_selection_observations,
+                    observation_history=args.mutation_database,
                 ),
                 check=True,
             )
@@ -1835,7 +2045,7 @@ def main() -> None:
                 minimum_samples=args.minimum_basin_samples,
             )
         replication_shortlist = _replication_shortlist(
-            screen_ranking, exclude=set(repeated_finalists), limit=args.finalists
+            screen_ranking, exclude=set(repeated_finalists) | already_confirmed, limit=args.finalists
         )
         replication_shortlist = _drop_metric_outliers(
             replication_shortlist,
@@ -1857,12 +2067,25 @@ def main() -> None:
             gpu_count=len(gpus),
         )
         if args.layer2_gate_command:
+            gate_started = time.monotonic()
             replication_shortlist = _layer2_gate(
                 replication_shortlist,
                 command=shlex.split(args.layer2_gate_command),
                 root=args.output_dir,
                 target=args.target,
             )
+            _append_timing(timings_path, {"phase": "layer2_gate", "seconds": round(time.monotonic() - gate_started, 1)})
+        finish_model = None
+        if args.adaptive_finish_guard:
+            from nanobody_opt.compute_budget import TimingModel
+            finish_model = TimingModel(args.replication_load_seconds, args.replication_seconds_per_observation, 0)
+            # TNP consumes time after initial sizing: use the clock again before folding.
+            usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
+            while replication_shortlist and (
+                args.replication_rounds * finish_model.round_seconds(len(replication_shortlist), len(gpus))
+                + args.replication_finish_guard_seconds > usable
+            ):
+                replication_shortlist.pop()
         def _prune(alive: list[str], keep: int) -> list[str]:
             """Keep the best of the alive set on all observations so far.
 
@@ -1885,6 +2108,10 @@ def main() -> None:
                         output=ranking,
                         ledger=args.ledger,
                         strict=False,
+                        selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
+                        consensus_ranking_policy=args.consensus_ranking_policy,
+                        minimum_selection_observations=args.minimum_selection_observations,
+                        observation_history=args.mutation_database,
                     ),
                     check=True,
                 )
@@ -1915,6 +2142,8 @@ def main() -> None:
             rounds_per_stage=args.replication_rounds_per_stage,
             keep_fraction=args.replication_keep_fraction,
             rerank=_prune,
+            finish_model=finish_model,
+            finish_guard_seconds=args.replication_finish_guard_seconds,
         )
         observations = replication_rounds_completed + 1
         if observations < args.minimum_publishable_observations:
@@ -1937,6 +2166,8 @@ def main() -> None:
                 ledger=args.ledger,
                 pooled_root=args.pooled_exact_root,
                 strict_gate_overrides=strict_gate_overrides,
+                selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
+                consensus_ranking_policy=args.consensus_ranking_policy,
             ):
                 _store_ranking(
                     args.mutation_database,

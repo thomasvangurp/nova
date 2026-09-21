@@ -385,6 +385,10 @@ def main() -> None:
             # chosen for a uid is its chance of a winning draw, not its average.
             "win_probability": winner.get("win_probability"),
             "selection_order": ranking.get("selection_order"),
+            "consensus_ranking_policy": ranking.get("consensus_ranking_policy", "tier"),
+            "selection_metric_policy": ranking.get("selection_metric_policy", "plain"),
+            "selection_metric_weights": ranking.get("selection_metric_weights"),
+            "prediction_event": "selection_rank_sum_below_fixed_threshold",
             "score_semantics": (
                 "published raw metrics are the arithmetic mean of independent "
                 "local observations, matching validator score sharing; the current "
