@@ -414,3 +414,27 @@ def test_the_rescore_filters_before_spending_the_gpu():
     assert "overfetch" in body
     # The gate must come BEFORE the shortlist is cut, or it saves nothing.
     assert body.index("refused_by_validator") < body.index("rows = candidates[:arguments.shortlist]")
+
+
+def test_the_builder_refuses_invalid_molecules_before_scoring_them():
+    """Never PROPOSE what the validator will refuse.
+
+    23% of the 58,754-molecule bank can never be submitted, and it is worst
+    exactly where we select: 35% of the top 500 survives against 83% of the
+    tail, because high scores come from scaffolds everyone already submitted.
+    Each refused molecule is GPU time spent on something unshippable.
+    """
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_builder.py").read_text()
+    assert "load_validator_gate" in body
+    assert "refused_by_validator" in body
+    # The gate must precede scoring, or it saves no compute at all.
+    assert body.index("refused_by_validator([c.smiles for c in batch]") < \
+           body.index("scored_records = score_with_nim(batch)")
+
+
+def test_the_builder_still_runs_without_the_archive():
+    # A builder box without the CSV must degrade, not refuse: release and
+    # pre-flight remain the backstops.
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_builder.py").read_text()
+    assert "validator_gate_absent" in body
+    assert "if validator_gate is not None:" in body
