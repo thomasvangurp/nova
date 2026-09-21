@@ -209,6 +209,80 @@ def _push_via_deploy_key(filename: str, encoded_content: str) -> bool:
     return False
 
 
+def push_submissions(items) -> bool:
+    """Publish MANY encrypted submissions in one clone, one commit, one push.
+
+    `items` is a sequence of (filename, base64 content) as encoded_payload
+    returns them.
+
+    Ordering note: the single-uid driver uploads AFTER the chain accepts the
+    commitment, so a blob never exists without a pointer to it. Batching
+    inverts that -- every blob is pushed before any commitment is set -- and
+    that is deliberate. The old order's risk is an unreferenced blob, which is
+    an encrypted file nobody reads. The inverted order's risk is a commitment
+    pointing at a blob that never arrives, which strands that uid for the whole
+    window. With one push covering the whole fleet, a failure here means we
+    simply do not commit, instead of stranding every uid at once.
+    """
+    items = [(str(name), str(body)) for name, body in items]
+    if not items:
+        return True
+    owner = os.environ.get("GITHUB_REPO_OWNER")
+    repo = os.environ.get("GITHUB_REPO_NAME")
+    branch = os.environ.get("GITHUB_REPO_BRANCH")
+    repo_path = os.environ.get("GITHUB_REPO_PATH", "")
+    deploy_key = os.environ.get("NOVA_DEPLOY_KEY")
+    work_root = Path(os.environ.get("NOVA_GIT_WORKDIR", "/root/.nova_submissions"))
+    if not owner or not repo or not branch or not deploy_key:
+        raise ValueError("SSH GitHub deployment variables are not set")
+    if not Path(deploy_key).is_file():
+        raise ValueError(f"GitHub deploy key does not exist: {deploy_key}")
+    relative_dir = Path(repo_path)
+    if relative_dir.is_absolute() or ".." in relative_dir.parts:
+        raise ValueError(f"GITHUB_REPO_PATH must stay inside the repository: {repo_path!r}")
+    for name, _ in items:
+        if not name or name != Path(name).name:
+            raise ValueError(f"invalid submission filename: {name!r}")
+
+    remote = f"git@github.com:{owner}/{repo}.git"
+    env = _git_environment(str(deploy_key))
+    work_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    for attempt in range(2):
+        checkout = None
+        try:
+            checkout = _shared_checkout(remote, branch, work_root, env)
+            if checkout is None:
+                continue
+            changed = []
+            for name, body in items:
+                destination = checkout / relative_dir / f"{name}.txt"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                content = base64.b64decode(body, validate=True)
+                if destination.is_file() and destination.read_bytes() == content:
+                    continue
+                destination.write_bytes(content)
+                changed.append(destination.relative_to(checkout).as_posix())
+            if not changed:
+                return True
+            _git(["git", "add", "--"] + changed, checkout, env)
+            _git(["git", "commit", "--quiet", "-m",
+                  f"Encrypted responses ({len(changed)})"], checkout, env)
+            _git(["git", "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"],
+                 checkout, env)
+            return True
+        except subprocess.CalledProcessError as exc:
+            # A racing push from anywhere makes this non-fast-forward. Throw the
+            # checkout away so the retry re-clones rather than trying to repair.
+            if checkout is not None:
+                shutil.rmtree(checkout, ignore_errors=True)
+            if attempt:
+                bt.logging.error(
+                    "Batch push failed after retry: "
+                    f"{exc.stderr.strip() or exc.stdout.strip()}")
+    return False
+
+
 def upload_file_to_github(filename: str, encoded_content: str):
     if os.environ.get("NOVA_GIT_PUSH", "0") == "1":
         return _push_via_deploy_key(filename, encoded_content)

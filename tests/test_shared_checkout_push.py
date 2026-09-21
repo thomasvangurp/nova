@@ -109,3 +109,61 @@ def test_rewriting_identical_content_is_a_no_op(tmp_path):
     after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout,
                            capture_output=True, text=True, env=ENV).stdout
     assert before == after
+
+
+import base64
+
+
+def _configure(tmp_path, remote, monkeypatch):
+    monkeypatch.setenv("GITHUB_REPO_OWNER", "o")
+    monkeypatch.setenv("GITHUB_REPO_NAME", "r")
+    monkeypatch.setenv("GITHUB_REPO_BRANCH", "main")
+    monkeypatch.setenv("GITHUB_REPO_PATH", "data/results")
+    key = tmp_path / "key"; key.write_text("not-a-real-key"); key.chmod(0o600)
+    monkeypatch.setenv("NOVA_DEPLOY_KEY", str(key))
+    monkeypatch.setenv("NOVA_GIT_WORKDIR", str(tmp_path / "work"))
+    # The remote is derived from owner/repo, so point that derivation at the
+    # local bare repo instead of github.com.
+    monkeypatch.setattr(files, "_git_environment", lambda k: ENV)
+    return remote
+
+
+def test_ten_submissions_cost_one_push(tmp_path, monkeypatch):
+    remote = _remote(tmp_path)
+    _configure(tmp_path, remote, monkeypatch)
+    real_git = files._git
+    pushes = []
+
+    def counting_git(command, cwd, env):
+        if command[:2] == ["git", "push"]:
+            pushes.append(1)
+        return real_git(command, cwd, env)
+
+    monkeypatch.setattr(files, "_git", counting_git)
+    original = files._shared_checkout
+    monkeypatch.setattr(files, "_shared_checkout",
+                        lambda _ignored, b, w, e: original(remote, b, w, e))
+    items = [(f"blob{i:02d}", base64.b64encode(f"payload {i}".encode()).decode())
+             for i in range(10)]
+    assert files.push_submissions(items)
+    # One push for the whole fleet is the entire point: ten cost ten before.
+    assert sum(pushes) == 1
+    verify = tmp_path / "verify"
+    subprocess.run(["git", "clone", "--quiet", remote, str(verify)], check=True, env=ENV)
+    for i in range(10):
+        assert (verify / f"data/results/blob{i:02d}.txt").read_bytes() == f"payload {i}".encode()
+
+
+def test_an_empty_batch_is_a_no_op(tmp_path, monkeypatch):
+    remote = _remote(tmp_path)
+    _configure(tmp_path, remote, monkeypatch)
+    monkeypatch.setattr(files, "_shared_checkout",
+                        lambda _r, b, w, e: pytest.fail("must not clone for nothing"))
+    assert files.push_submissions([]) is True
+
+
+def test_a_filename_with_a_path_separator_is_refused(tmp_path, monkeypatch):
+    remote = _remote(tmp_path)
+    _configure(tmp_path, remote, monkeypatch)
+    with pytest.raises(ValueError):
+        files.push_submissions([("../escape", base64.b64encode(b"x").decode())])

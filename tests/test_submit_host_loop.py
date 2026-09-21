@@ -223,3 +223,21 @@ def test_publishing_a_missing_file_is_reported_not_silent(monkeypatch, tmp_path)
                         lambda *a, **k: pytest.fail("must not copy a missing file"))
     loop.publish(type("A", (), {"on_submit_host": True})(), ["compound_fleet.json"])
     assert said and said[0]["event"] == "publish_missing"
+
+
+def test_the_parallel_path_is_the_default_and_serial_is_opt_in():
+    # The serial path costs ~41s per uid and runs a ten-uid fleet past the
+    # validator's cutoff. It stays reachable as a fallback, not as the default.
+    parser_text = (ROOT / "deploy/submit_host/pi_submit.py").read_text()
+    assert '"--serial", action="store_true"' in parser_text
+    assert "if arguments.rehearse or (not arguments.serial" in parser_text
+
+
+def test_a_failed_batch_push_commits_nothing():
+    # The batch pushes every blob before any commitment is set, inverting the
+    # single-uid driver's order. That is only safe if a push failure stops the
+    # commits: otherwise every uid points at a blob that never arrived.
+    body = (ROOT / "deploy/submit_host/pi_submit.py").read_text()
+    start = body.index("if not push_submissions(")
+    fragment = body[start:start + 400]
+    assert "return 0, len(live), []" in fragment
