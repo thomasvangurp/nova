@@ -284,8 +284,10 @@ def test_one_registration_per_adjustment_interval_at_most():
         state_at(history, last=same_interval),
         history,
         [],
-        haggling_policy(stagger_blocks=0),
+        haggling_policy(stagger_blocks=0, rush_below_target=False),
     )
+    # Like the stagger, this quota only bites below target, so it is asserted
+    # under the policy that keeps pacing. rush_below_target=True waives both.
     assert decision.reason == sm.REASON_OWN_INTERVAL
 
 
@@ -300,8 +302,13 @@ def test_the_stagger_window_holds_expiries_apart():
     # assuming a fixed margin.
     assert policy.stagger > sm.ADJUSTMENT_INTERVAL
     probe = (policy.stagger + sm.ADJUSTMENT_INTERVAL) // 2
+    # The spacing rule only ever bites BELOW target -- at target `decide`
+    # answers target_met before reaching it -- so rush_below_target=True
+    # disables it outright rather than conditioning it. This asserts the rule
+    # itself still works, under the policy that keeps it.
+    patient = replace(policy, rush_below_target=False)
     inside = sm.decide(
-        state_at(history, last=block - probe), history, [], policy
+        state_at(history, last=block - probe), history, [], patient
     )
     assert inside.reason == sm.REASON_STAGGER
     outside = sm.decide(
@@ -613,13 +620,13 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
     remembered = sm.read_chain_state(chain, 68, OURS, log_last_block=same_interval)
     assert remembered.registered == 0
     assert remembered.last_registration_block == same_interval
-    # A hotkey we bought and then had pruned still blocks a same-interval rebuy:
-    # the interval quota was spent even though nothing survived to show for it.
-    # This wait is BOUNDED -- one adjustment interval -- and it stops us bidding
-    # the burn price up against ourselves, so urgency does not override it.
-    assert sm.decide(remembered, history, [], sm.SlotPolicy()).reason == (
-        sm.REASON_OWN_INTERVAL
-    )
+    # A hotkey we bought and then had pruned spent the interval quota even
+    # though nothing survived. That used to block a same-interval rebuy on the
+    # grounds that the wait is bounded and stops us bidding the burn price up
+    # against ourselves. It no longer does while we are SHORT of target: with
+    # zero registered, pacing protects nothing and the deficit cannot close.
+    # The price ceiling remains the brake against bidding ourselves up.
+    assert sm.decide(remembered, history, [], sm.SlotPolicy()).action == sm.BUY
     # Past the interval quota but still inside the stagger, it is the stagger
     # that holds us.  It spreads immunity expiries; a fleet bought in a burst
     # dies in a burst, which urgency cannot repair afterwards.  The window is
@@ -633,7 +640,9 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
         "the quota must already be clear, or it would mask the stagger"
     )
     earlier = sm.read_chain_state(chain, 68, OURS, log_last_block=inside)
-    assert sm.decide(earlier, history, [], policy).reason == sm.REASON_STAGGER
+    assert sm.decide(
+        earlier, history, [], replace(policy, rush_below_target=False)
+    ).reason == sm.REASON_STAGGER
     # And one block past the window, the stagger releases.
     outside = sm.read_chain_state(
         chain, 68, OURS,
@@ -1107,3 +1116,55 @@ def test_a_broken_top_up_does_not_stop_the_registration():
         outcome = {"converted": False, "why": f"{type(error).__name__}: {error}"[:140]}
     assert outcome["converted"] is False
     assert "RuntimeError" in outcome["why"]
+
+
+def test_the_stagger_yields_while_below_target():
+    """Below target the spacing caps recovery below the rate of churn.
+
+    Measured 2026-09-21: the fleet sat at 7/12 for an hour, buying one and
+    losing one, because the 384-block spacing allows ~18.8 buys/day against
+    ~18.6 losses/day. A deficit opened by an empty wallet could not be closed
+    at all. A clustered expiry is a problem to have later; not reaching the
+    target is a problem now.
+    """
+    history = decaying(1_000_000, 61, 0.12)
+    policy = sm.SlotPolicy()
+    just_bought = history[-1].block - 10          # deep inside the stagger
+    short = sm.decide(
+        state_at(history, registered=tuple(range(policy.target - 5)), last=just_bought),
+        history, [], policy)
+    assert short.action == sm.BUY
+    assert short.reason != sm.REASON_STAGGER
+
+
+def test_the_stagger_still_applies_once_the_fleet_is_full():
+    history = decaying(1_000_000, 61, 0.12)
+    policy = sm.SlotPolicy()
+    just_bought = history[-1].block - 10
+    full = sm.decide(
+        state_at(history, registered=tuple(range(policy.target)), last=just_bought),
+        history, [], policy)
+    assert full.action == sm.WAIT
+
+
+def test_rushing_never_overrides_the_price_ceiling():
+    """"Rush" must mean ignore the SPACING, never ignore the price."""
+    expensive = decaying(1_000_000, 61, 0.42)
+    policy = sm.SlotPolicy()
+    decision = sm.decide(
+        state_at(expensive, registered=(), last=expensive[-1].block - 10),
+        expensive, [], policy)
+    assert decision.action == sm.WAIT
+    assert decision.reason == sm.REASON_CEILING
+
+
+def test_rushing_can_be_switched_off():
+    # Probe past the interval quota so the STAGGER is the rule that answers;
+    # otherwise own-interval masks it and the test proves nothing.
+    history = decaying(1_000_000, 61, 0.12)
+    policy = sm.SlotPolicy(rush_below_target=False)
+    probe = (policy.stagger + sm.ADJUSTMENT_INTERVAL) // 2
+    decision = sm.decide(
+        state_at(history, registered=(1, 2), last=history[-1].block - probe),
+        history, [], policy)
+    assert decision.reason == sm.REASON_STAGGER

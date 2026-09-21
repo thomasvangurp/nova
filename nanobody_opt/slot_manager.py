@@ -224,6 +224,10 @@ class SlotPolicy:
     #: holds 12 commits at the observed ~2.3 blocks per uid.
     target: int = 12
     max_recycle_tao: float = 0.20
+    #: Ignore the purchase spacing while BELOW target, so a deficit can be
+    #: closed faster than churn re-opens it.  The price ceiling still applies,
+    #: so "rush" never means "buy at any price".
+    rush_below_target: bool = True
     #: Below this many held hotkeys, take any affordable price rather than wait
     #: for a decay floor.  ``None`` means the target: haggling is not rational
     #: anywhere below a full fleet.
@@ -483,14 +487,28 @@ def decide(
     if spent + state.recycle_tao > policy.daily_budget_tao:
         return verdict(WAIT, REASON_BUDGET)
     # PACING outranks urgency, because both pacing rules are BOUNDED waits and
-    # each one protects something urgency cannot buy back.
+    # each one protects something urgency cannot buy back -- EXCEPT below
+    # target, where the thing they protect is a fleet we do not have.
+    #
+    # Both rules pace at ~one buy per adjustment interval (360 blocks) or
+    # stagger (384), which is ~18.8/day against a measured ~18.6 losses/day.
+    # That is a knife-edge when full and a trap when short: on 2026-09-21 the
+    # fleet sat at 7/12 for an hour, buying one and losing one, unable to close
+    # a deficit an empty wallet had opened. Below target both yield.
+    #
+    # What does NOT yield is the price ceiling above, which is checked first
+    # and refuses absolutely. Rushing means ignoring the SPACING, never the
+    # price -- the burn does rise with registrations in an interval, and the
+    # ceiling is what stops us bidding ourselves into a spike.
     #
     # One registration per adjustment interval: the burn price rises with
     # registrations in an interval, so buying back-to-back bids the price up
     # against ourselves, and the ceiling is the only other brake.  The wait is
     # at most one interval.
+    paced = state.registered >= policy.target or not policy.rush_below_target
     if (
-        state.last_registration_block is not None
+        paced
+        and state.last_registration_block is not None
         and state.last_registration_block // ADJUSTMENT_INTERVAL == state.interval
     ):
         return verdict(WAIT, REASON_OWN_INTERVAL)
@@ -498,7 +516,15 @@ def decide(
     # evictable in a burst: uids die at almost exactly the 5000-block (16.7 h)
     # immunity period, so twelve bought together is a synchronised churn cliff
     # every 16.7 h, which no amount of urgency later repairs.
-    if blocks_since_ours is not None and blocks_since_ours < policy.stagger:
+    #
+    # BUT it only protects a fleet we actually have.  Below target the spacing
+    # caps recovery at one uid per 384 blocks while the field prunes us on its
+    # own schedule, so a deficit opened by an empty wallet could not be closed
+    # at all: measured 2026-09-21, the fleet sat at 7/12 for an hour, buying
+    # one and losing one.  A clustered expiry is a problem to have LATER; not
+    # reaching the target is a problem now, and the price ceiling above is
+    # still enforced, so this never buys into a spike.
+    if paced and blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
     # Urgency outranks only the DECAY FLOOR, which is the gate that refuses
     # without bound.  Measured, the price sat within tolerance of the floor in
