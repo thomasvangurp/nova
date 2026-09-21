@@ -41,6 +41,30 @@ def say(**f):
 LOCAL = ["bash", "-lc"]
 
 
+def stream(where, command, timeout=900):
+    """Run a command and echo its stdout as it arrives.
+
+    `run` captures, so a twelve-minute commit run showed nothing at all until
+    it was over -- no way to tell a slow epoch from a wedged one while it still
+    mattered. The commits are the one step worth watching live.
+    """
+    argv = where + ([command] if where is LOCAL else ["-n", command])
+    child = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    try:
+        for line in child.stdout:
+            line = line.rstrip()
+            if line:
+                lines.append(line)
+                print(line, flush=True)
+        child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        raise
+    return child.returncode, lines
+
+
 def run(where, command, timeout=240):
     """Run on a host. `where` of LOCAL means here -- no ssh, no -n.
 
@@ -152,7 +176,26 @@ def main() -> int:
     say(event="start", covered=sorted(covered), dry_run=a.dry_run)
 
     state = {"producer_stopped": False}
-    handled: set[int] = set()
+
+    # Which epochs are already done, on DISK.
+    #
+    # Restart=always makes restarts routine, and an in-memory set meant a
+    # restart inside a commit window re-ran the whole epoch: ten uids
+    # re-committed, each with a LATER block_submitted, which is the validator's
+    # first tiebreak. Surviving a restart is the entire point of the unit.
+    ledger = ROOT / "handled_epochs.json"
+    try:
+        handled = {int(e) for e in json.loads(ledger.read_text())}
+    except Exception:
+        handled = set()
+    say(event="resumed", already_handled=sorted(handled)[-4:])
+
+    def remember(epoch: int) -> None:
+        remember(epoch)
+        try:
+            ledger.write_text(json.dumps(sorted(handled)[-200:]))
+        except OSError as error:
+            say(event="ledger_write_failed", err=str(error)[:120])
     while True:
         if a.epochs and len(handled) >= a.epochs:
             say(event="done", handled=sorted(handled)); return 0
@@ -189,7 +232,7 @@ def main() -> int:
             # committed nothing at all -- the rollback only covers a failed
             # commit, not the process going away between epochs.
             say(event="epoch_error", epoch=epoch, err=f"{type(error).__name__}: {error}"[:200])
-        handled.add(epoch)
+        remember(epoch)
         continue
 
     return 0
@@ -274,12 +317,11 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         else:
             start_command = None
 
-        commit = run(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
-                         f"--epoch {epoch} --reaction {view['reaction']}"
-                         + (" --allow-stale-nanobody" if stale_ok else ""), timeout=900)
-        for line in (commit.stdout or "").strip().splitlines():
-            print(line, flush=True)
-        say(event="committed", epoch=epoch, rc=commit.returncode, molecules=have_molecules)
+        code, _ = stream(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
+                             f"--epoch {epoch} --reaction {view['reaction']}"
+                             + (" --allow-stale-nanobody" if stale_ok else ""), timeout=900)
+        commit = type("R", (), {"returncode": code})()
+        say(event="committed", epoch=epoch, rc=code, molecules=have_molecules)
 
         if commit.returncode and start_command:
             import shlex

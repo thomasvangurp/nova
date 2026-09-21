@@ -140,7 +140,21 @@ def molecules_by_uid(artifact, epoch: int, reaction: int) -> dict[int, str]:
     return out
 
 
-def plan(crew, molecules, sequences):
+def blocks_left(epoch: int, network: str, epoch_length: int = 361):
+    """Blocks until this epoch ends, or None if the chain cannot be read.
+
+    Returning None rather than 0 matters: 0 would read as "blackout, stop", and
+    a transient RPC hiccup must not silently cancel the remaining commits.
+    """
+    try:
+        import bittensor
+        block = bittensor.Subtensor(network=network).get_current_block()
+        return (epoch + 1) * epoch_length - block
+    except Exception:
+        return None
+
+
+def plan(crew, molecules, sequences, value=None):
     """One row per uid, with whichever halves are actually available.
 
     A uid with neither half is dropped rather than committed as "~|~", which
@@ -164,6 +178,13 @@ def plan(crew, molecules, sequences):
         rows.append(dict(uid=uid, hotkey=hotkey,
                          plaintext=f"{mols or NULL}|{seq}",
                          has_molecules=bool(mols), has_sequence=True))
+    # Best first. Commits are serial and the epoch can run out before the list
+    # does, so crew order decides which uids get dropped -- and crew order is
+    # arbitrary. If anything is going to be lost to the blackout, it must be
+    # the least valuable portfolio, not whichever uid happens to sort last.
+    value = value or {}
+    rows.sort(key=lambda r: (-float(value.get(r["uid"], 0.0)),
+                             -r["has_molecules"], r["uid"]))
     return rows
 
 
@@ -210,6 +231,9 @@ def main(argv=None) -> int:
     # commitment window with no error at commit time.
     parser.add_argument("--github-path", default="data/results")
     parser.add_argument("--deploy-key", default=str(Path.home() / ".ssh/nova_deploy"))
+    parser.add_argument("--blackout-blocks", type=int, default=16,
+                        help="stop committing with this many blocks left: the "
+                             "validator stops reading before the epoch ends")
     parser.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args(argv)
 
@@ -225,7 +249,16 @@ def main(argv=None) -> int:
     molecules = molecules_by_uid(
         _load(fleet_path) if fleet_path.is_file() else None,
         arguments.epoch, arguments.reaction)
-    rows = plan(crew, molecules, sequences)
+
+    fleet_artifact = _load(fleet_path) if fleet_path.is_file() else None
+    value = {}
+    if isinstance(fleet_artifact, dict):
+        for entry in fleet_artifact.get("submissions") or []:
+            try:
+                value[int(entry["uid"])] = float(entry.get("selection_score") or 0.0)
+            except (TypeError, ValueError, KeyError):
+                pass
+    rows = plan(crew, molecules, sequences, value)
     print(json.dumps(dict(event="plan", epoch=arguments.epoch,
                           reaction=arguments.reaction, crew=len(crew),
                           with_molecules=sum(r["has_molecules"] for r in rows),
@@ -254,8 +287,22 @@ def main(argv=None) -> int:
             return 2
     print(json.dumps(dict(event="validated", uids=[r["uid"] for r in rows])), flush=True)
 
+    # The validator reads commitments up to `current_block - no_submission_blocks`,
+    # so anything signed in the last ~16 blocks of the epoch is on-chain and
+    # invisible. Commits take ~73s each (measured at 25242: 731s for ten uids),
+    # which is six blocks apiece -- twelve uids cannot fit between the
+    # producer's refresh at end-75 and that cutoff. Without this check the
+    # overrun is completely silent: every extrinsic succeeds and the tail is
+    # simply never scored.
     failures = 0
-    for row in rows:
+    dropped = []
+    for index, row in enumerate(rows):
+        left = blocks_left(arguments.epoch, arguments.network)
+        if left is not None and left <= arguments.blackout_blocks:
+            dropped = [r["uid"] for r in rows[index:]]
+            print(json.dumps(dict(event="blackout_stop", blocks_left=left,
+                                  committed=index, dropped=dropped)), flush=True)
+            break
         command = [arguments.python, "-m", "nanobody_opt.commit_submission",
                    "--uid", str(row["uid"]), "--hotkey", row["hotkey"],
                    "--plaintext", row["plaintext"],
@@ -295,8 +342,13 @@ def main(argv=None) -> int:
                               last=tail[-1][:160] if tail else "")), flush=True)
         if done.returncode:
             failures += 1
-    print(json.dumps(dict(event="done", committed=len(rows) - failures,
-                          failed=failures)), flush=True)
+    # "committed" counts what the VALIDATOR can read, not what the chain
+    # accepted. Reporting len(rows) here is how 25242 got recorded as ten
+    # clean commits when most of the tail had already fallen past the cutoff.
+    attempted = len(rows) - len(dropped)
+    print(json.dumps(dict(event="done", committed=attempted - failures,
+                          failed=failures, dropped_to_blackout=len(dropped),
+                          dropped_uids=dropped)), flush=True)
     return 1 if failures else 0
 
 

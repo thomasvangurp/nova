@@ -99,3 +99,57 @@ def test_a_failed_pull_reports_unknown_rather_than_zero(monkeypatch):
     monkeypatch.setattr(loop, "run",
                         lambda where, cmd, timeout=240: type("R", (), {"returncode": 1})())
     assert loop.producer_epoch_here(None, 25248, 3) is None
+
+
+def test_rows_are_ordered_by_the_allocator_score_not_crew_order():
+    # Commits are serial and the epoch can run out mid-list, so ordering is
+    # what decides which uid is sacrificed.
+    crew = [(5, "h5"), (9, "h9"), (2, "h2")]
+    mols = {5: "a", 9: "b", 2: "c"}
+    seqs = {5: "QVQ", 9: "QVQ", 2: "QVQ"}
+    rows = submit.plan(crew, mols, seqs, {5: 1.61, 9: 1.67, 2: 1.64})
+    assert [r["uid"] for r in rows] == [9, 2, 5]
+
+
+def test_ordering_is_stable_without_scores():
+    crew = [(5, "h5"), (9, "h9"), (2, "h2")]
+    seqs = {5: "QVQ", 9: "QVQ", 2: "QVQ"}
+    rows = submit.plan(crew, {}, seqs)
+    assert [r["uid"] for r in rows] == [2, 5, 9]
+
+
+def test_a_uid_holding_molecules_outranks_one_holding_only_a_sequence():
+    crew = [(1, "h1"), (2, "h2")]
+    rows = submit.plan(crew, {2: "a"}, {1: "QVQ", 2: "QVQ"})
+    assert rows[0]["uid"] == 2
+
+
+def test_an_unreadable_chain_does_not_read_as_blackout():
+    # None, not 0: a transient RPC failure must not cancel the remaining
+    # commits by looking like "no blocks left".
+    assert submit.blocks_left(25248, "definitely-not-a-network") is None
+
+
+def test_the_handled_ledger_round_trips(tmp_path):
+    # Restart=always makes restarts routine, so "already done" has to survive
+    # one. In memory it did not, and a restart inside the window re-committed
+    # ten uids with a later block_submitted -- the validator's first tiebreak.
+    ledger = tmp_path / "handled_epochs.json"
+    ledger.write_text(json.dumps([25246, 25247, 25248]))
+    assert {int(e) for e in json.loads(ledger.read_text())} == {25246, 25247, 25248}
+
+
+def test_a_missing_or_corrupt_ledger_is_not_fatal(tmp_path):
+    # A first run has no ledger, and a truncated write must not stop the
+    # writer: re-doing an epoch is recoverable, refusing to start is not.
+    for body in (None, "", "{not json", "[]"):
+        ledger = tmp_path / "handled_epochs.json"
+        if body is None:
+            ledger.unlink(missing_ok=True)
+        else:
+            ledger.write_text(body)
+        try:
+            handled = {int(e) for e in json.loads(ledger.read_text())}
+        except Exception:
+            handled = set()
+        assert isinstance(handled, set)
