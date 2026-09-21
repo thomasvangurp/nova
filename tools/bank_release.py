@@ -146,6 +146,95 @@ def historical_fingerprints(archive: Path, cache: Path | None = None):
     return fingerprints
 
 
+VALIDATOR_TREE = Path("/opt/nova-submit/nova_validator")
+
+
+def validator_helpers(tree: Path = VALIDATOR_TREE):
+    """The validator's OWN per-molecule checks, or None if its tree is absent.
+
+    Imported rather than reimplemented. Every rule I re-derived from logs this
+    week drifted from the real one -- the similarity threshold alone was read
+    as 0.7, then 0.6, and is 0.5 -- so the rules that decide what we ship come
+    from their code.
+    """
+    if not (tree / "neurons/validator/molecule_validity.py").is_file():
+        return None
+    import sys
+    import types
+    if str(tree) not in sys.path:
+        sys.path.insert(0, str(tree))
+    for _ in range(12):
+        try:
+            from utils import (get_heavy_atom_count, contains_atom_type,
+                               is_boltz_safe_smiles)
+            break
+        except ModuleNotFoundError as missing:
+            if missing.name.startswith(("utils", "neurons")):
+                return None
+            parts = missing.name.split(".")
+            for depth in range(1, len(parts) + 1):
+                dotted = ".".join(parts[:depth])
+                if dotted not in sys.modules:
+                    stub = types.ModuleType(dotted)
+                    stub.__path__ = []
+                    stub.__getattr__ = lambda attr: type(attr, (), {})
+                    sys.modules[dotted] = stub
+    else:
+        return None
+    import yaml
+    config = yaml.safe_load((tree / "config/config.yaml").read_text())
+    return dict(heavy=get_heavy_atom_count, banned=contains_atom_type,
+                boltz=is_boltz_safe_smiles,
+                requirements=config["molecule_requirements"])
+
+
+def refused_by_validator(smiles_list, fingerprints, helpers=None):
+    """Every reason the validator would refuse a molecule, not just similarity.
+
+    Applied at SELECTION, not only as a pre-flight. A pre-flight that fails
+    closed protects us from shipping junk but costs the whole epoch; filtering
+    here means selection never picks the molecule in the first place. Measured
+    on this bank: 1 of 394 rescored molecules fails BRENK, so the pre-flight
+    tripwire was one unlucky draw away from an empty epoch.
+    """
+    from rdkit import Chem, DataStructs
+    from rdkit.Chem import Descriptors, FilterCatalog, rdFingerprintGenerator
+
+    generator = rdFingerprintGenerator.GetMorganGenerator(
+        radius=HISTORY_RADIUS, fpSize=HISTORY_BITS)
+    brenk = None
+    if helpers:
+        params = FilterCatalog.FilterCatalogParams()
+        params.AddCatalog(FilterCatalog.FilterCatalogParams.FilterCatalogs.BRENK)
+        brenk = FilterCatalog.FilterCatalog(params)
+        wanted = helpers["requirements"]
+
+    flagged = {}
+    for index, smiles in enumerate(smiles_list):
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is None:
+            flagged[index] = "unparseable"
+            continue
+        if helpers:
+            if helpers["heavy"](smiles) < wanted["min_heavy_atoms"]:
+                flagged[index] = "heavy_atoms"; continue
+            if brenk.HasMatch(molecule):
+                flagged[index] = "brenk"; continue
+            if helpers["banned"](molecule, wanted["banned_atom_types"]):
+                flagged[index] = "banned_atom"; continue
+            bonds = int(Descriptors.NumRotatableBonds(molecule))
+            if bonds < wanted["min_rotatable_bonds"] or bonds > wanted["max_rotatable_bonds"]:
+                flagged[index] = "rotatable_bonds"; continue
+            safe, _why = helpers["boltz"](smiles)
+            if not safe:
+                flagged[index] = "boltz_unsafe"; continue
+        worst = max(DataStructs.BulkTanimotoSimilarity(
+            generator.GetFingerprint(molecule), fingerprints), default=0.0)
+        if worst >= MAX_SIMILARITY_TO_HISTORICAL:
+            flagged[index] = f"similarity {worst:.3f}"
+    return flagged
+
+
 def too_close_to_history(smiles_list, fingerprints):
     """Indices of molecules the validator would refuse, and how close they are.
 
@@ -283,12 +372,22 @@ def main() -> int:
                       file=sys.stderr)
                 return 1
         history = historical_fingerprints(archive, Path(str(archive) + '.fps'))
-        flagged = too_close_to_history([r[1] for r in rows], history)
+        helpers = validator_helpers()
+        if helpers is None:
+            print(json.dumps(dict(event="validator_tree_absent",
+                                  why="similarity only; the pre-flight is the "
+                                      "backstop for the other gates")),
+                  file=sys.stderr)
+        flagged = refused_by_validator([r[1] for r in rows], history, helpers)
         kept = [r for index, r in enumerate(rows) if index not in flagged]
         print(json.dumps(dict(event='history_filter', archive_rows=len(history),
                               considered=len(rows), refused=len(flagged),
                               kept=len(kept), threshold=MAX_SIMILARITY_TO_HISTORICAL,
-                              worst_refused=round(max(flagged.values()), 3) if flagged else None)),
+                              reasons={reason.split()[0]: sum(
+                                  1 for v in flagged.values()
+                                  if str(v).split()[0] == reason.split()[0])
+                                  for reason in map(str, set(flagged.values()))},
+                              all_gates=helpers is not None)),
               file=sys.stderr)
         rows = kept
 

@@ -375,3 +375,42 @@ def test_a_truncated_download_does_not_replace_a_good_archive(tmp_path, monkeypa
     assert status["refreshed"] is False
     assert "truncated" in status["why"]
     assert archive.read_text() == before
+
+
+def test_every_validator_gate_runs_at_selection_not_only_preflight():
+    """Selection must refuse what the validator refuses, for ALL its rules.
+
+    A pre-flight that fails closed protects us from shipping junk but costs the
+    whole epoch. Measured on the live bank, 1 of 394 rescored molecules fails
+    BRENK -- one unlucky draw from an empty epoch. Selection now applies heavy
+    atoms, BRENK, banned atoms, rotatable bonds, Boltz safety and similarity.
+    """
+    mod = _gate_module()
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_release.py").read_text()
+    start = body.index("def refused_by_validator")
+    fragment = body[start:body.index("def too_close_to_history")]
+    for gate in ("min_heavy_atoms", "HasMatch", "banned_atom_types",
+                 "NumRotatableBonds", "boltz", "MAX_SIMILARITY_TO_HISTORICAL"):
+        assert gate in fragment, f"selection does not apply {gate}"
+
+
+def test_selection_degrades_to_similarity_when_the_validator_tree_is_absent():
+    # The extra gates need the cloned validator. Without it we still apply the
+    # similarity filter and say so, rather than refusing to release at all --
+    # the pre-flight remains the backstop.
+    mod = _gate_module()
+    assert mod.validator_helpers(Path("/nonexistent/validator")) is None
+    try:
+        from rdkit import Chem  # noqa: F401
+    except ImportError:
+        import pytest; pytest.skip("rdkit not installed here")
+    assert mod.refused_by_validator(["CCO"], [], None) == {}
+
+
+def test_the_rescore_filters_before_spending_the_gpu():
+    """63% of the last rescore was spent on molecules that cannot ship."""
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_rescore.py").read_text()
+    assert "refused_by_validator" in body
+    assert "overfetch" in body
+    # The gate must come BEFORE the shortlist is cut, or it saves nothing.
+    assert body.index("refused_by_validator") < body.index("rows = candidates[:arguments.shortlist]")
