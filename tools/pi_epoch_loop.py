@@ -204,11 +204,16 @@ def main() -> int:
     say(event="resumed", already_handled=sorted(handled)[-4:])
 
     def remember(epoch: int) -> None:
-        remember(epoch)
+        handled.add(epoch)
         try:
-            ledger.write_text(json.dumps(sorted(handled)[-200:]))
+            # Write via a temporary file: a torn ledger reads as empty, and an
+            # empty ledger means re-committing every epoch it forgot.
+            scratch = ledger.with_suffix(".tmp")
+            scratch.write_text(json.dumps(sorted(handled)[-200:]))
+            scratch.replace(ledger)
         except OSError as error:
             say(event="ledger_write_failed", err=str(error)[:120])
+
     while True:
         if a.epochs and len(handled) >= a.epochs:
             say(event="done", handled=sorted(handled)); return 0

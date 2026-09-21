@@ -169,3 +169,32 @@ def test_the_reserve_matches_what_25248_actually_did():
     # validator's cutoff is 16. The reserve must cover that run.
     assert loop.commit_reserve(10) <= 69
     assert loop.commit_reserve(10) >= 26
+
+
+def test_remembering_an_epoch_terminates(tmp_path):
+    # It did not. A blanket string replace rewrote `handled.add(epoch)` inside
+    # remember() into a call to itself, so the loop committed 25249 and then
+    # died of RecursionError before recording it -- and Restart=always brought
+    # it straight back into the same open window to commit all ten again.
+    import json as _json
+    ledger = tmp_path / "handled_epochs.json"
+    handled = set()
+
+    def remember(epoch):
+        handled.add(epoch)
+        scratch = ledger.with_suffix(".tmp")
+        scratch.write_text(_json.dumps(sorted(handled)[-200:]))
+        scratch.replace(ledger)
+
+    remember(25249)
+    remember(25250)
+    assert _json.loads(ledger.read_text()) == [25249, 25250]
+
+
+def test_the_ledger_source_has_no_self_call():
+    # Cheap guard against the exact edit that caused it.
+    body = (ROOT / "tools/pi_epoch_loop.py").read_text()
+    start = body.index("def remember(")
+    fragment = body[start:start + 400]
+    assert "handled.add(epoch)" in fragment
+    assert fragment.count("remember(epoch)") == 0
