@@ -43,6 +43,12 @@ def main() -> int:
                              "defaults this to /root/bank, which is the BANK "
                              "box path and does not exist on the submit host; "
                              "without it every molecule we send is refused.")
+    parser.add_argument("--preflight", action="store_true", default=True,
+                        help="run the validator's own molecule_validity against "
+                             "the allocation and refuse to ship if any uid "
+                             "would be skipped.")
+    parser.add_argument("--no-preflight", dest="preflight", action="store_false",
+                        help="skip the validator pre-flight (tests only).")
     parser.add_argument("--core", type=int, default=16,
                         help="shared core size; 16 measured best for P(win) at this pool size")
     parser.add_argument("--entropy", type=float, default=0.25,
@@ -99,6 +105,24 @@ print(json.dumps(dict(event="allocated", uids=len(subs), epoch=art["epoch"],
     for line in done.stdout.strip().splitlines():
         if line.startswith("{"):
             print(line)
+    # Pre-flight against the validator's OWN gate before this can be committed.
+    # Every check we do ourselves is a reimplementation that can drift; this
+    # runs neurons/validator/molecule_validity.py and believes its answer. At
+    # 25248 ten uids were skipped for a single molecule and nothing told us
+    # until the leaderboard did, hours later.
+    if arguments.preflight:
+        checked = subprocess.run(
+            [arguments.python, str(ROOT / "tools/gate_oracle.py"), str(fleet)],
+            capture_output=True, text=True, timeout=900)
+        for line in checked.stdout.strip().splitlines():
+            if line.startswith("{"):
+                print(line)
+        if checked.returncode:
+            print(json.dumps(dict(event="preflight_failed",
+                                  err=(checked.stdout or checked.stderr).strip()[-200:])))
+            return 1
+        print(json.dumps(dict(event="preflight_ok")))
+
     if not marker.is_file():
         print(json.dumps(dict(event="no_marker", path=str(marker))))
         return 1

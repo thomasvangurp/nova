@@ -267,3 +267,29 @@ def test_a_pointer_without_a_repository_is_recognisably_wrong():
     bad = "data/results/abc.txt"
     assert good.count("/") >= 4 and not good.startswith("data/")
     assert bad.count("/") < 4
+
+
+def test_the_release_preflights_against_the_validators_own_gate():
+    """Our checks are reimplementations and can drift; the validator's cannot.
+
+    At 25248 every uid was skipped for one molecule and nothing said so until
+    the leaderboard did, hours later. make_fleet now runs
+    neurons/validator/molecule_validity.py over the finished allocation and
+    refuses to ship when any uid would be skipped.
+    """
+    body = (ROOT / "tools/make_fleet.py").read_text()
+    assert "gate_oracle.py" in body
+    assert '"--no-preflight"' in body
+    start = body.index("if arguments.preflight:")
+    fragment = body[start:start + 900]
+    # Fail CLOSED: a pre-flight that cannot run must stop the release, not
+    # wave it through. Verified live when the oracle path was wrong.
+    assert "return 1" in fragment
+
+
+def test_the_oracle_exits_non_zero_when_a_uid_would_be_skipped():
+    body = (ROOT / "tools/gate_oracle.py").read_text()
+    assert "sys.exit(0 if would_score and would_score == len(uid_to_data) else 1)" in body
+    # It must call the validator's function, not reimplement the rules.
+    assert "validate_molecules_and_calculate_entropy" in body
+    assert "molecule_validity" in body
