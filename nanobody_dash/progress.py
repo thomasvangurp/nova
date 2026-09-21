@@ -1,0 +1,131 @@
+"""Our progress over time, and the same measures for our competitors.
+
+Aggregate rates hide the only thing that matters: whether we are getting
+better.  Everything here is a trailing window so a single lucky epoch cannot
+move the line, and the same window is applied to rivals so the comparison is
+like-for-like.
+"""
+from __future__ import annotations
+
+import sqlite3
+import statistics as st
+from pathlib import Path
+
+import plotly.graph_objects as go
+
+PAPER = "#0e1117"
+CARD = "#161a23"
+INK = "#e6e9ef"
+MUTED = "#8b93a7"
+OURS = "#4fc3f7"
+WIN = "#66d9a6"
+WARN = "#ff9f6b"
+BAD = "#ef5f6b"
+NET = "#ffd166"
+RIVALS = ("#b388ff", "#ff8fab", "#7ee8fa")
+LAYOUT = dict(paper_bgcolor=PAPER, plot_bgcolor=CARD, font=dict(color=INK, size=13),
+              margin=dict(l=70, r=66, t=28, b=46), hovermode="x unified",
+              legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0,
+                          bgcolor="rgba(0,0,0,0)"))
+
+
+def _by_coldkey(data):
+    out = {}
+    for e in data["entries"]:
+        out.setdefault(e["coldkey"], {}).setdefault(e["epoch"], []).append(e)
+    return out
+
+
+def rolling_rates(per_epoch, epochs, window=20):
+    """Trailing win-per-entry, top10-per-entry and fleet size."""
+    wins, tens, fleet = [], [], []
+    for i, _ in enumerate(epochs):
+        chunk = epochs[max(0, i - window + 1):i + 1]
+        rows = [r for e in chunk for r in per_epoch.get(e, [])]
+        sizes = [len(per_epoch[e]) for e in chunk if per_epoch.get(e)]
+        if not rows:
+            wins.append(None); tens.append(None); fleet.append(None); continue
+        wins.append(100 * sum(1 for r in rows if r["rank"] == 1) / len(rows))
+        tens.append(100 * sum(1 for r in rows if r["rank"] <= 10) / len(rows))
+        fleet.append(st.median(sizes) if sizes else None)
+    return wins, tens, fleet
+
+
+def fig_our_progress(data, database: Path | None = None, window: int = 20) -> go.Figure:
+    """Our win rate, top-10 rate and fleet size, with deploys marked."""
+    epochs = sorted(data["epochs"])
+    mine = {e: rows for e, rows in data["by_epoch"].items()}
+    wins, tens, fleet = rolling_rates(mine, epochs, window)
+
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=epochs, y=tens, name=f"top-10 per entry % ({window}ep)",
+                                line=dict(color=OURS, width=2.4)))
+    figure.add_trace(go.Scatter(x=epochs, y=wins, name=f"wins per entry % ({window}ep)",
+                                line=dict(color=WIN, width=2.4)))
+    figure.add_trace(go.Scatter(x=epochs, y=fleet, name="fleet size (median)",
+                                yaxis="y2", line=dict(color=WARN, width=1.6, dash="dot")))
+    if database is not None and Path(database).is_file():
+        connection = sqlite3.connect(database)
+        counts: dict[int, int] = {}
+        for (epoch,) in connection.execute(
+                "SELECT epoch FROM deploys WHERE epoch IS NOT NULL"):
+            counts[epoch] = counts.get(epoch, 0) + 1
+        if counts:
+            figure.add_trace(go.Bar(
+                x=sorted(counts), y=[counts[e] for e in sorted(counts)],
+                name="code changes", yaxis="y3", marker_color=NET, opacity=0.5,
+                hovertemplate="%{y} commits<extra></extra>"))
+    layout = dict(LAYOUT)
+    layout["yaxis2"] = dict(title="fleet size", overlaying="y", side="right",
+                            rangemode="tozero", gridcolor="rgba(0,0,0,0)")
+    layout["yaxis3"] = dict(overlaying="y", side="right", range=[0, 40],
+                            showticklabels=False, gridcolor="rgba(0,0,0,0)")
+    figure.update_layout(**layout)
+    figure.update_yaxes(title="percent of entries", gridcolor="#242a36", rangemode="tozero")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+def fig_rates_vs_rivals(data, top: int = 3, window: int = 30) -> go.Figure:
+    """Our top-10 rate against the strongest rivals, same trailing window."""
+    grouped = _by_coldkey(data)
+    ranked = sorted(grouped.items(),
+                    key=lambda kv: -sum(1 for rows in kv[1].values()
+                                        for r in rows if r["rank"] == 1))
+    epochs = sorted(data["epochs"])
+    figure = go.Figure()
+    _, tens, _ = rolling_rates(data["by_epoch"], epochs, window)
+    figure.add_trace(go.Scatter(x=epochs, y=tens, name="US",
+                                line=dict(color=WIN, width=3)))
+    shown = 0
+    for coldkey, per_epoch in ranked:
+        if coldkey == data.get("coldkey") or shown >= top:
+            continue
+        _, rival_tens, _ = rolling_rates(per_epoch, epochs, window)
+        figure.add_trace(go.Scatter(
+            x=epochs, y=rival_tens, name=coldkey[:8] + "...",
+            line=dict(color=RIVALS[shown % len(RIVALS)], width=1.6)))
+        shown += 1
+    figure.update_layout(**LAYOUT)
+    figure.update_yaxes(title=f"top-10 per entry % ({window}-epoch)",
+                        gridcolor="#242a36", rangemode="tozero")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+def competitor_table(rows) -> str:
+    """The competitor numbers as an actual table, sorted by wins per entry."""
+    rows = sorted(rows, key=lambda r: -r["win_per_entry"])
+    head = ("<tr><th>coldkey</th><th>fleet</th><th>entries</th><th>epochs</th>"
+            "<th>wins</th><th>win / entry</th><th>top-10 / entry</th>"
+            "<th>best score</th></tr>")
+    body = []
+    for r in rows:
+        cls = ' class="us"' if r["ours"] else ""
+        body.append(
+            f"<tr{cls}><td>{r['label']}</td><td>{r['fleet']:.0f}</td>"
+            f"<td>{r['entries']}</td><td>{r['epochs']}</td><td>{r['wins']}</td>"
+            f"<td>{r['win_per_entry']:.2f}%</td>"
+            f"<td>{r['top10_per_entry']:.1f}%</td><td>{r['best']:.0f}</td></tr>")
+    return ('<table class="grid"><thead>' + head + "</thead><tbody>"
+            + "".join(body) + "</tbody></table>")

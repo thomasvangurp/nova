@@ -193,6 +193,8 @@ def residue_prior_weights(
     length: int,
     *,
     follow_field: bool = True,
+    our_sequences: list[str] | None = None,
+    minimum_winner_support: int = 3,
 ) -> list[dict[str, float]]:
     """Return per-residue/position weights: winner enrichment, plus the field.
 
@@ -206,23 +208,48 @@ def residue_prior_weights(
 
     ``follow_field`` multiplies in the field's own composition so a settled
     residue is preferred on its own merits, not only when winners over-use it.
+
+    ``our_sequences`` replaces the DENOMINATOR with what we ourselves fielded.
+    Measured over 189 epochs, the field denominator is the wrong reference: it
+    contains us, so our own habits partly cancel out of the correction, and a
+    residue that winners and the field both favour scores ~1.0 and gets no pull
+    at all. Positions 113, 115, 121 and 123 are exactly that case -- they carry
+    100, 71, 121 and 115 win appearances and we under-use every one of them.
+    Against our own distribution those same residues pull properly.
+
+    ``minimum_winner_support`` is an ASYMMETRIC floor: a residue may only be
+    promoted above 1.0 once at least this many winners actually carry it at this
+    position. Demotion is never gated. Without it the ratio amplifies rare
+    residues through the +1 smoothing -- 126 Q->H scored a 4.11 pull on ZERO
+    win appearances while the top miners use it 14x less than we do, which is
+    where our over-use of positions 0, 125 and 126 came from.
     """
     if not background_sequences or not winner_sequences:
         return [defaultdict(lambda: 1.0) for _ in range(length)]
     amino_acids = sorted(gates.ALLOWED_AAS)
+    reference = [s for s in (our_sequences or []) if len(s) == length]
     priors: list[dict[str, float]] = []
     for position in range(length):
         background = Counter(sequence[position] for sequence in background_sequences)
         winners = Counter(sequence[position] for sequence in winner_sequences)
+        # The denominator is what we want to be pulled AWAY from: our own
+        # fielded mix when we have it, the field otherwise.
+        ours = Counter(sequence[position] for sequence in reference) if reference \
+            else background
+        ours_total = len(reference) if reference else len(background_sequences)
         position_weights = {}
         for residue in amino_acids:
             winner_probability = (winners[residue] + 1) / (
                 len(winner_sequences) + len(amino_acids)
             )
-            background_probability = (background[residue] + 1) / (
-                len(background_sequences) + len(amino_acids)
+            reference_probability = (ours[residue] + 1) / (
+                ours_total + len(amino_acids)
             )
-            enrichment = winner_probability / background_probability
+            enrichment = winner_probability / reference_probability
+            if winners[residue] < minimum_winner_support:
+                # Not enough winners carry it to justify promotion; it may still
+                # be demoted, which costs nothing if we are wrong.
+                enrichment = min(enrichment, 1.0)
             if follow_field:
                 # The field's own frequency, normalised so an average residue
                 # scores 1.0 and the term only tilts, never rescales.
