@@ -38,6 +38,11 @@ def main() -> int:
                         help="directory holding compound_miner; on the submit "
                              "host it sits beside the tools, not in a sibling "
                              "worktree")
+    parser.add_argument("--archive", default="/opt/nova-submit/P40261_molecules.csv",
+                        help="Metanova/Submission-Archive CSV. bank_release "
+                             "defaults this to /root/bank, which is the BANK "
+                             "box path and does not exist on the submit host; "
+                             "without it every molecule we send is refused.")
     parser.add_argument("--core", type=int, default=16,
                         help="shared core size; 16 measured best for P(win) at this pool size")
     parser.add_argument("--entropy", type=float, default=0.25,
@@ -56,6 +61,7 @@ def main() -> int:
         [arguments.python, str(ROOT / "tools/bank_release.py"),
          "--bank", arguments.bank, "--reaction", str(arguments.reaction),
          "--epoch", str(arguments.epoch), "--fleet", str(len(crew)),
+         "--archive", arguments.archive,
          "--output", str(out / "result_rxn{reaction}.json"),
          "--complete", str(out / f"epoch{arguments.epoch}_rxn{{reaction}}_complete.json")],
         capture_output=True, text=True, timeout=900)
