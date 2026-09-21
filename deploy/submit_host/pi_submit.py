@@ -183,7 +183,15 @@ def commit_batch(rows, arguments, environment) -> tuple[int, int, list]:
 
     block = subtensor.get_current_block()
     timelock = QuicknetBittensorDrandTimelock()
-    github_path = arguments.github_path or load_github_path()
+    # ALWAYS load_github_path(). `arguments.github_path` is the bare
+    # "data/results" that goes into GITHUB_REPO_PATH, and it is truthy, so
+    # `args.github_path or load_github_path()` -- copied from the single-uid
+    # driver, where that argument defaults to None -- silently skipped the
+    # fallback and committed a pointer with no owner/repo/branch. The blobs
+    # were pushed, the extrinsics landed in-window, and the validator dropped
+    # every uid because it could not resolve the path. Absent from the
+    # leaderboard entirely, which is how 25251 was lost.
+    github_path = load_github_path()
     for row in live:
         filename, encoded = encoded_payload(row["plaintext"], int(row["uid"]),
                                             block, timelock)

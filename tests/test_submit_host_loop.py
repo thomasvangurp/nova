@@ -241,3 +241,29 @@ def test_a_failed_batch_push_commits_nothing():
     start = body.index("if not push_submissions(")
     fragment = body[start:start + 400]
     assert "return 0, len(live), []" in fragment
+
+
+def test_the_commitment_pointer_carries_owner_repo_and_branch():
+    """A bare "data/results/x.txt" is unresolvable and loses the epoch silently.
+
+    The parallel path copied `args.github_path or load_github_path()` from the
+    single-uid driver, where that argument defaults to None. Here it defaults
+    to "data/results" -- truthy -- so the fallback never ran and every uid at
+    25251 committed a pointer with no repository in it. Blobs pushed,
+    extrinsics in-window, and the validator dropped all eight: absent from the
+    leaderboard rather than skipped, which looked like a scoring failure
+    instead of a broken path.
+    """
+    body = (ROOT / "deploy/submit_host/pi_submit.py").read_text()
+    start = body.index("def commit_batch")
+    fragment = body[start:body.index("def blocks_left")]
+    assert "github_path = load_github_path()" in fragment
+    assert "arguments.github_path or load_github_path()" not in fragment
+
+
+def test_a_pointer_without_a_repository_is_recognisably_wrong():
+    # The shape the validator needs: owner/repo/branch/<path>/<hash>.txt
+    good = "thomasvangurp/nova-sn68-submissions/main/data/results/abc.txt"
+    bad = "data/results/abc.txt"
+    assert good.count("/") >= 4 and not good.startswith("data/")
+    assert bad.count("/") < 4
