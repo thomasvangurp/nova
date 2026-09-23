@@ -51,6 +51,12 @@
     # probably will not appear. Raise this again when scored-per-held is close
     # to one, not before.
     slot_manager_minimum_hotkeys: 12
+    # Keep twelve as the working fleet, but use a cheap thirteenth registration
+    # as a one-slot churn buffer.  A clean 2026-09-22 replay put the best
+    # observed threshold at tau0.175: total spend stayed essentially flat while
+    # time below twelve fell 44%.  This is a cap, not a permanent target.
+    slot_manager_reserve_hotkeys: 1
+    slot_manager_reserve_max_recycle_tao: 0.175
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
     slot_manager_hotkey_prefix: nova68-slot
@@ -154,6 +160,10 @@
           - "{{ slot_manager_hotkey_prefix }}"
           - --minimum-hotkeys
           - "{{ slot_manager_minimum_hotkeys }}"
+          - --reserve-hotkeys
+          - "{{ slot_manager_reserve_hotkeys }}"
+          - --reserve-max-recycle-tao
+          - "{{ slot_manager_reserve_max_recycle_tao }}"
           - --decision-log
           - "{{ slot_manager_decision_log }}"
           - --max-recycle-tao

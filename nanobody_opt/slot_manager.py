@@ -127,7 +127,9 @@ WAIT = "wait"
 # Reason codes.  Every skip records one, so the log says why we did not buy.
 REASON_BUY = "below_target_at_decay_floor"
 REASON_BUY_URGENT = "below_target_and_short_of_a_fleet"
+REASON_BUY_RESERVE = "opportunistic_reserve_at_trough"
 REASON_TARGET_MET = "target_met"
+REASON_RESERVE_PRICE = "reserve_price_above_threshold"
 REASON_OWN_INTERVAL = "already_registered_this_interval"
 REASON_STAGGER = "inside_stagger_window"
 REASON_NO_HISTORY = "insufficient_price_history"
@@ -223,6 +225,16 @@ class SlotPolicy:
     #: ``fleet.MAXIMUM_FLEET_IDENTITY``, and the 55-block commitment reserve
     #: holds 12 commits at the observed ~2.3 blocks per uid.
     target: int = 12
+    #: Optional buffer above the working target.  This is deliberately not a
+    #: larger permanent target: while holding ``target`` we may pre-buy at most
+    #: this many cheap registrations, then consume that reserve when churn
+    #: removes a uid.  Zero preserves the historical policy.
+    reserve_slots: int = 0
+    #: A reserve is only valuable when it is cheaper than the urgent
+    #: replacement it avoids.  The 2026-09-22 replay found tau0.175 to be the
+    #: best observed cut: one extra purchase, essentially unchanged total
+    #: spend, and 44% less time below the twelve-ticket working fleet.
+    reserve_max_recycle_tao: float = 0.175
     max_recycle_tao: float = 0.20
     #: Ignore the purchase spacing while BELOW target, so a deficit can be
     #: closed faster than churn re-opens it.  The price ceiling still applies,
@@ -289,6 +301,14 @@ class SlotPolicy:
     def __post_init__(self) -> None:
         if self.target < 1:
             raise ValueError("target must be at least one hotkey")
+        if self.reserve_slots < 0:
+            raise ValueError("reserve slots cannot be negative")
+        if self.reserve_max_recycle_tao <= 0:
+            raise ValueError("reserve recycle ceiling must be positive")
+        if self.reserve_max_recycle_tao > self.max_recycle_tao:
+            raise ValueError(
+                "reserve recycle ceiling cannot exceed the hard ceiling"
+            )
         if self.max_recycle_tao <= 0:
             raise ValueError("recycle ceiling must be positive")
         if self.max_spend_tao_per_day is not None and self.max_spend_tao_per_day <= 0:
@@ -313,6 +333,11 @@ class SlotPolicy:
         if self.urgent_below is None:
             return self.target
         return max(0, self.urgent_below)
+
+    @property
+    def maximum_registered(self) -> int:
+        """Hard holding cap including the optional opportunistic reserve."""
+        return self.target + self.reserve_slots
 
     @property
     def stagger(self) -> int:
@@ -445,6 +470,7 @@ def decide(
     """
     now = time.time() if now is None else now
     shortfall = policy.target - state.registered
+    reserve_mode = policy.target <= state.registered < policy.maximum_registered
     floor = projected_floor_tao(history, state.block, policy)
     spent = spend_in_window(spends, now)
     blocks_since_ours = (
@@ -461,6 +487,10 @@ def decide(
         "registered": state.registered,
         "registered_uids": list(state.registered_uids),
         "target": policy.target,
+        "reserve_slots": policy.reserve_slots,
+        "maximum_registered": policy.maximum_registered,
+        "reserve_max_recycle_tao": policy.reserve_max_recycle_tao,
+        "reserve_mode": reserve_mode,
         "shortfall": shortfall,
         "projected_floor_tao": floor,
         "floor_ratio": (
@@ -479,13 +509,18 @@ def decide(
     def verdict(action: str, reason: str) -> Decision:
         return Decision(action=action, reason=reason, detail=detail)
 
-    if shortfall <= 0:
+    if state.registered >= policy.maximum_registered:
         return verdict(WAIT, REASON_TARGET_MET)
     # Hard rails first: both refuse absolutely and cannot be traded away.
     if state.recycle_tao > policy.max_recycle_tao:
         return verdict(WAIT, REASON_CEILING)
     if spent + state.recycle_tao > policy.daily_budget_tao:
         return verdict(WAIT, REASON_BUDGET)
+    # At the working target, never chase a reserve.  It is bought only at the
+    # empirically useful trough price; below target the normal urgent policy
+    # still restores the working fleet up to the independent hard ceiling.
+    if reserve_mode and state.recycle_tao > policy.reserve_max_recycle_tao:
+        return verdict(WAIT, REASON_RESERVE_PRICE)
     # PACING outranks urgency, because both pacing rules are BOUNDED waits and
     # each one protects something urgency cannot buy back -- EXCEPT below
     # target, where the thing they protect is a fleet we do not have.
@@ -526,6 +561,8 @@ def decide(
     # still enforced, so this never buys into a spike.
     if paced and blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
+    if reserve_mode:
+        return verdict(BUY, REASON_BUY_RESERVE)
     # Urgency outranks only the DECAY FLOOR, which is the gate that refuses
     # without bound.  Measured, the price sat within tolerance of the floor in
     # 4.7% of decisions and the gate refused 150 of 251 in a day while the fleet
@@ -602,7 +639,17 @@ def executed_spends(records: Iterable[dict[str, Any]]) -> list[SpendRecord]:
             spends.append(
                 SpendRecord(
                     timestamp=float(record["time"]),
-                    recycle_tao=float(record["recycle_tao"]),
+                    # Historical records overwrote ``recycle_tao`` with the
+                    # price observed AFTER registration.  BurnIncreaseMult
+                    # makes that the price of the next slot, not what this one
+                    # cost.  ``decision_recycle_tao`` is the pre-registration
+                    # quote and is therefore the defensible spend value for
+                    # both those legacy rows and corrected new rows.
+                    recycle_tao=float(
+                        record.get("decision_recycle_tao")
+                        if record.get("decision_recycle_tao") is not None
+                        else record["recycle_tao"]
+                    ),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -1072,13 +1119,9 @@ def _register(
 ) -> tuple[bool, float | None]:
     """Create the hotkey if needed and burn-register it.
 
-    Only ``--execute-registrations`` reaches this function, and nothing in the
-    test suite does.  The SDK spellings below (``Wallet``/``wallet``,
-    ``Subtensor``/``subtensor``, ``Keyfile.decrypt``) have *not* been exercised
-    against a live node from this checkout -- there is no GPU host and
-    ``bittensor`` is not importable on this machine -- so the first live run
-    should be a single ``--execute-registrations`` invocation watched by hand,
-    not an unattended ``--interval`` loop.
+    Only ``--execute-registrations`` reaches this function in production.  Unit
+    tests inject the SDK boundary so the charged-price semantics are exercised
+    without a wallet, credential, network call, or live registration.
     """
     bittensor = _import_bittensor()
     wallet_factory = getattr(bittensor, "Wallet", None) or bittensor.wallet
@@ -1111,21 +1154,21 @@ def _register(
             wait_for_finalization=True,
         )
     )
-    # What the ledger records decides the daily budget, so it must be what we
-    # PAID, not what we expected to pay.  The price at the block the extrinsic
-    # landed in is the closest observable; fall back to the pre-flight read.
-    realised: float | None = price_before
-    if registered:
-        try:
-            realised = _recycle_tao(subtensor, netuid)
-        except Exception:  # noqa: BLE001 - a failed read must not lose the buy
-            realised = price_before
-    return registered, realised
+    # The registration consumes the current Burn.  Reading Burn afterwards is
+    # NOT a receipt: the successful registration has already multiplied it for
+    # the next buyer.  That post-read was about 1.25x the pre-flight quote and
+    # made the rolling budget falsely reject affordable registrations.  The
+    # immediately pre-extrinsic value is the closest observable cost exposed by
+    # this SDK call, and unlike the post-registration value it has the correct
+    # economic meaning.
+    return registered, price_before if registered else None
 
 
 def _policy_from_args(args: argparse.Namespace) -> SlotPolicy:
     return SlotPolicy(
         target=args.target,
+        reserve_slots=args.reserve_slots,
+        reserve_max_recycle_tao=args.reserve_max_recycle_tao,
         urgent_below=args.urgent_below,
         max_recycle_tao=args.max_recycle_tao,
         max_spend_tao_per_day=args.max_spend_tao_per_day,
@@ -1234,6 +1277,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             "registrations to hold on subnet 68 "
             f"(default: {SlotPolicy().target})"
         ),
+    )
+    parser.add_argument(
+        "--reserve-hotkeys",
+        dest="reserve_slots",
+        type=int,
+        default=SlotPolicy().reserve_slots,
+        help="maximum cheap buffer registrations above the working target "
+        f"(default: {SlotPolicy().reserve_slots})",
+    )
+    parser.add_argument(
+        "--reserve-max-recycle-tao",
+        type=float,
+        default=SlotPolicy().reserve_max_recycle_tao,
+        help="buy an optional reserve only at or below this price "
+        f"(default: {SlotPolicy().reserve_max_recycle_tao})",
     )
     parser.add_argument(
         "--decision-log",
@@ -1408,11 +1466,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                     credential_source=args.credential_source,
                     maximum_recycle_tao=policy.max_recycle_tao,
                 )
-        # The budget counts what the ledger says we spent, so an executed buy
-        # records the realised price rather than the decision-time estimate.
+        # The budget counts the immediately pre-extrinsic Burn returned by
+        # _register.  Keep the earlier quote for audit, but never substitute the
+        # post-registration Burn: that is the next buyer's price.
         spend_detail = dict(decision.detail)
         if executed and realised_tao is not None:
-            spend_detail["decision_recycle_tao"] = spend_detail.get("recycle_tao")
+            spend_detail["quoted_recycle_tao"] = spend_detail.get("recycle_tao")
+            spend_detail["decision_recycle_tao"] = realised_tao
             spend_detail["recycle_tao"] = realised_tao
         append_record(
             args.decision_log,

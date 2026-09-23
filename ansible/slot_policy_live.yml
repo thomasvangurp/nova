@@ -1,0 +1,220 @@
+---
+# Bounded live deployment of the subnet-68 purchase policy.
+#
+# The full slots.yml play also installs hotkey delivery and backup services and
+# synchronizes the entire repository with --delete.  A policy-only rollout must
+# not replace unrelated live files or runtime data, so this play copies exactly
+# the decision module, verifies the already-locked Pi Pixi environment, renders
+# the purchase unit, and proves one timer-driven live decision.
+- name: Deploy the opportunistic subnet-68 slot policy on the Pi
+  hosts: slot_manager
+  gather_facts: true
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    slot_manager_remote_repo: /opt/nova-nanobody
+    slot_manager_module: "{{ slot_manager_remote_repo }}/nanobody_opt/slot_manager.py"
+    slot_manager_workspace: "{{ slot_manager_remote_repo }}/deploy/slot_host"
+    slot_manager_pixi: "{{ ansible_env.HOME }}/.pixi/bin/pixi"
+    slot_manager_python: "{{ slot_manager_workspace }}/.pixi/envs/default/bin/python"
+    slot_manager_service: nova-slot-manager
+    slot_manager_timer: nova-slot-manager.timer
+    slot_manager_user: "{{ ansible_user_id }}"
+    slot_manager_home: "{{ ansible_env.HOME }}"
+    slot_manager_decision_log: "{{ ansible_env.HOME }}/.nova/subnet68_slots.jsonl"
+    slot_manager_credential_name: nova-coldkey-password
+    slot_manager_credential_path: /etc/nova/coldkey-password.cred
+    slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
+    slot_manager_execute: true
+    slot_manager_netuid: 68
+    slot_manager_network: finney
+    slot_manager_wallet: mining_ops
+    slot_manager_hotkey_prefix: nova68-slot
+    slot_manager_minimum_hotkeys: 12
+    slot_manager_reserve_hotkeys: 1
+    slot_manager_reserve_max_recycle_tao: 0.175
+    slot_manager_max_recycle_tao: 0.20
+    slot_manager_max_spend_tao_per_day: 3.4560
+    slot_manager_lookback_blocks: 180
+    slot_manager_credential_source: auto
+    slot_manager_exec: >-
+      {{ slot_manager_python }} -m nanobody_opt.slot_manager
+      --netuid {{ slot_manager_netuid }}
+      --network {{ slot_manager_network }}
+      --wallet {{ slot_manager_wallet }}
+      --hotkey-prefix {{ slot_manager_hotkey_prefix }}
+      --minimum-hotkeys {{ slot_manager_minimum_hotkeys }}
+      --reserve-hotkeys {{ slot_manager_reserve_hotkeys }}
+      --reserve-max-recycle-tao {{ slot_manager_reserve_max_recycle_tao }}
+      --decision-log {{ slot_manager_decision_log }}
+      --max-recycle-tao {{ slot_manager_max_recycle_tao }}
+      --max-spend-tao-per-day {{ slot_manager_max_spend_tao_per_day }}
+      --keychain-service-env {{ slot_manager_keychain_service_env }}
+      --credential-source {{ slot_manager_credential_source }}
+      --lookback-blocks {{ slot_manager_lookback_blocks }}
+      --interval 0 --execute-registrations
+
+  tasks:
+    - name: Require the Linux purchase host
+      ansible.builtin.assert:
+        that: ansible_system == 'Linux'
+
+    - name: Require the encrypted credential without reading it
+      become: true
+      ansible.builtin.stat:
+        path: "{{ slot_manager_credential_path }}"
+        get_checksum: false
+      register: slot_manager_credential
+
+    - name: Refuse a live unit without its host-bound credential
+      ansible.builtin.assert:
+        that: slot_manager_credential.stat.exists
+        fail_msg: >-
+          The host-bound encrypted credential is absent; the live unit was not
+          changed and no registration was attempted.
+
+    - name: Require the Pi Pixi executable
+      ansible.builtin.stat:
+        path: "{{ slot_manager_pixi }}"
+        get_checksum: false
+      register: slot_manager_pixi_stat
+
+    - name: Refuse an unmanaged Python environment
+      ansible.builtin.assert:
+        that:
+          - slot_manager_pixi_stat.stat.exists
+          - slot_manager_pixi_stat.stat.xusr
+
+    - name: Verify the locked Pi environment is current
+      ansible.builtin.command:
+        argv: ["{{ slot_manager_pixi }}", install, --locked]
+        chdir: "{{ slot_manager_workspace }}"
+      environment:
+        PIXI_COLOR: never
+      register: slot_manager_pixi_install
+      changed_when: >-
+        'Nothing to do' not in
+        (slot_manager_pixi_install.stdout ~ slot_manager_pixi_install.stderr)
+
+    - name: Deploy only the tested policy module
+      become: true
+      ansible.builtin.copy:
+        src: "{{ repo }}/nanobody_opt/slot_manager.py"
+        dest: "{{ slot_manager_module }}"
+        owner: "{{ slot_manager_user }}"
+        group: "{{ slot_manager_user }}"
+        mode: "0644"
+        backup: true
+      register: slot_manager_source
+
+    - name: Verify the deployed module and its reserve interface
+      ansible.builtin.command:
+        argv:
+          - "{{ slot_manager_python }}"
+          - -m
+          - nanobody_opt.slot_manager
+          - --help
+        chdir: "{{ slot_manager_remote_repo }}"
+      register: slot_manager_help
+      changed_when: false
+      failed_when: >-
+        slot_manager_help.rc != 0
+        or '--reserve-hotkeys' not in slot_manager_help.stdout
+        or '--reserve-max-recycle-tao' not in slot_manager_help.stdout
+
+    - name: Verify the chain stack in the locked Pixi environment
+      ansible.builtin.command:
+        argv: ["{{ slot_manager_pixi }}", run, --locked, check]
+        chdir: "{{ slot_manager_workspace }}"
+      environment:
+        PIXI_COLOR: never
+      register: slot_manager_chain_check
+      changed_when: false
+      failed_when: >-
+        slot_manager_chain_check.rc != 0
+        or 'SLOT_HOST_OK' not in slot_manager_chain_check.stdout
+
+    - name: Install the LIVE purchase unit
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-slot-manager.service.j2
+        dest: "/etc/systemd/system/{{ slot_manager_service }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      vars:
+        slot_manager_repo: "{{ slot_manager_remote_repo }}"
+      register: slot_manager_unit
+
+    - name: Arm the live timer with the new unit
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ slot_manager_timer }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Prove one live policy check now
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, start, --wait, "{{ slot_manager_service }}.service"]
+      changed_when: true
+
+    - name: Read only allowlisted fields from the newest decision
+      ansible.builtin.command:
+        argv:
+          - "{{ slot_manager_python }}"
+          - -c
+          - >-
+            import json, pathlib;
+            p = pathlib.Path.home() / '.nova/subnet68_slots.jsonl';
+            r = json.loads(p.read_text().splitlines()[-1]);
+            keep = ('time','epoch','block','registered','target','reserve_slots',
+            'maximum_registered','reserve_max_recycle_tao','recycle_tao',
+            'executed','dry_run','reason','spent_tao_last_day',
+            'max_spend_tao_per_day');
+            print(json.dumps({k:r.get(k) for k in keep}, sort_keys=True))
+      register: slot_manager_last_decision
+      changed_when: false
+
+    - name: Require proof that the live reserve policy executed
+      ansible.builtin.assert:
+        that:
+          - (slot_manager_last_decision.stdout | from_json).dry_run == false
+          - (slot_manager_last_decision.stdout | from_json).target == 12
+          - (slot_manager_last_decision.stdout | from_json).reserve_slots == 1
+          - (slot_manager_last_decision.stdout | from_json).maximum_registered == 13
+          - (slot_manager_last_decision.stdout | from_json).reserve_max_recycle_tao == 0.175
+          - (slot_manager_last_decision.stdout | from_json).max_spend_tao_per_day == 3.456
+        fail_msg: >-
+          The immediate unit run did not append a decision carrying the live
+          one-slot reserve policy; inspect the unit before allowing another tick.
+        success_msg: "{{ slot_manager_last_decision.stdout }}"
+
+    - name: Confirm the timer is active, enabled, and scheduled
+      become: true
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ slot_manager_timer }}"
+          - --property=ActiveState
+          - --property=UnitFileState
+          - --property=NextElapseUSecMonotonic
+      register: slot_manager_schedule
+      changed_when: false
+      failed_when: >-
+        'ActiveState=active' not in slot_manager_schedule.stdout
+        or 'UnitFileState=enabled' not in slot_manager_schedule.stdout
+        or slot_manager_schedule.stdout is
+           search('NextElapseUSecMonotonic=(infinity|0)?(\n|$)')
+
+    - name: Report the live policy state
+      ansible.builtin.debug:
+        msg:
+          decision: "{{ slot_manager_last_decision.stdout | from_json }}"
+          timer: "{{ slot_manager_schedule.stdout_lines }}"
+          source_changed: "{{ slot_manager_source.changed }}"
+          unit_changed: "{{ slot_manager_unit.changed }}"

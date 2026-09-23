@@ -276,6 +276,64 @@ def test_target_already_met_is_a_no_op():
     assert decision.detail["shortfall"] == 0
 
 
+def test_a_cheap_single_reserve_is_bought_without_raising_the_working_target():
+    policy = sm.SlotPolicy(reserve_slots=1, reserve_max_recycle_tao=0.175)
+    history = decaying(1_000_000, 61, 0.17)
+    full_working_fleet = tuple(range(policy.target))
+
+    decision = sm.decide(
+        state_at(history, registered=full_working_fleet, last=None),
+        history, [], policy,
+    )
+
+    assert decision.action == sm.BUY
+    assert decision.reason == sm.REASON_BUY_RESERVE
+    assert decision.detail["target"] == 12
+    assert decision.detail["maximum_registered"] == 13
+    assert decision.detail["reserve_mode"] is True
+
+
+def test_a_reserve_waits_above_its_trough_price_and_stops_at_one():
+    policy = sm.SlotPolicy(reserve_slots=1, reserve_max_recycle_tao=0.175)
+    dear = decaying(
+        1_000_000, 61, 0.18 / sm.DECAY_PER_BLOCK**60
+    )  # live/final price is exactly tau0.18
+    twelve = tuple(range(policy.target))
+    thirteen = tuple(range(policy.maximum_registered))
+
+    above = sm.decide(state_at(dear, registered=twelve), dear, [], policy)
+    assert above.action == sm.WAIT
+    assert above.reason == sm.REASON_RESERVE_PRICE
+
+    cheap = decaying(1_000_000, 61, 0.16)
+    capped = sm.decide(state_at(cheap, registered=thirteen), cheap, [], policy)
+    assert capped.action == sm.WAIT
+    assert capped.reason == sm.REASON_TARGET_MET
+
+
+def test_the_reserve_obeys_pacing_and_the_existing_daily_budget():
+    policy = sm.SlotPolicy(
+        reserve_slots=1, reserve_max_recycle_tao=0.175,
+        max_spend_tao_per_day=0.20,
+    )
+    history = decaying(1_000_000, 61, 0.17)
+    block = history[-1].block
+    twelve = tuple(range(policy.target))
+
+    paced = sm.decide(
+        state_at(history, registered=twelve, last=block - 10),
+        history, [], policy,
+    )
+    assert paced.reason in {sm.REASON_OWN_INTERVAL, sm.REASON_STAGGER}
+
+    spent = [sm.SpendRecord(time.time() - 60, 0.06)]
+    budgeted = sm.decide(
+        state_at(history, registered=twelve, last=None),
+        history, spent, policy,
+    )
+    assert budgeted.reason == sm.REASON_BUDGET
+
+
 def test_one_registration_per_adjustment_interval_at_most():
     history = decaying(1_000_000, 61, 0.12)
     block = history[-1].block
@@ -330,6 +388,54 @@ def test_nine_staggered_buys_spread_immunity_expiries_over_the_window():
 # ---------------------------------------------------------------------------
 # The log is the audit trail and the agent's memory.
 # ---------------------------------------------------------------------------
+
+
+def test_legacy_post_registration_price_does_not_inflate_the_spend_window():
+    records = [{
+        "time": 100.0,
+        "action": sm.BUY,
+        "executed": True,
+        "recycle_tao": 0.21875,          # next-slot price after a 1.25x jump
+        "decision_recycle_tao": 0.175,  # price before this registration
+    }]
+
+    spends = sm.executed_spends(records)
+
+    assert len(spends) == 1
+    assert spends[0].recycle_tao == pytest.approx(0.175)
+
+
+def test_register_returns_the_pre_extrinsic_burn_not_the_inflated_next_price(
+    monkeypatch,
+):
+    class Chain:
+        def burned_register(self, **kwargs):
+            return True
+
+    chain = Chain()
+    fake_bittensor = type("BT", (), {
+        "Wallet": staticmethod(lambda **kwargs: object()),
+        "Subtensor": staticmethod(lambda **kwargs: chain),
+    })
+    reads = []
+
+    monkeypatch.setattr(sm, "_import_bittensor", lambda: fake_bittensor)
+    monkeypatch.setattr(sm, "_hotkey_names", lambda wallet: ["slot-1"])
+    monkeypatch.setattr(sm, "_unlock_coldkey", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sm, "_recycle_tao",
+        lambda subtensor, netuid: reads.append((subtensor, netuid)) or 0.175,
+    )
+
+    registered, cost = sm._register(
+        wallet_name="wallet", hotkey_name="slot-1", netuid=68,
+        network="finney", keychain_service_env="SECRET_LOCATOR_ONLY",
+        maximum_recycle_tao=0.20,
+    )
+
+    assert registered is True
+    assert cost == pytest.approx(0.175)
+    assert len(reads) == 1, "a post-registration Burn read is the next price, not cost"
 
 
 def test_the_log_round_trips_history_budget_and_last_purchase(tmp_path):
@@ -496,8 +602,10 @@ def test_help_works_with_no_keychain_wallet_or_chain():
     """The deploy gate runs this before stopping anything; bittensor is absent."""
     completed = _cli("--help")
     assert completed.returncode == 0, completed.stderr
-    for flag in ("--minimum-hotkeys", "--interval", "--execute-registrations",
-                 "--max-recycle-tao", "--max-spend-tao-per-day", "--decision-log"):
+    for flag in ("--minimum-hotkeys", "--reserve-hotkeys",
+                 "--reserve-max-recycle-tao", "--interval",
+                 "--execute-registrations", "--max-recycle-tao",
+                 "--max-spend-tao-per-day", "--decision-log"):
         assert flag in completed.stdout, flag
     assert f"default: {sm.SlotPolicy().target}" in completed.stdout
     # Nothing was imported, unlocked or connected to in order to answer it.
@@ -1004,6 +1112,13 @@ def test_the_deployed_target_matches_the_policy():
     deployed = re.search(r"slot_manager_minimum_hotkeys:\s*(\d+)", slots)
     assert deployed, "slots.yml no longer sets slot_manager_minimum_hotkeys"
     assert int(deployed.group(1)) == sm.SlotPolicy().target
+
+    reserve = re.search(r"slot_manager_reserve_hotkeys:\s*(\d+)", slots)
+    reserve_price = re.search(
+        r"slot_manager_reserve_max_recycle_tao:\s*([0-9.]+)", slots
+    )
+    assert reserve and int(reserve.group(1)) == 1
+    assert reserve_price and float(reserve_price.group(1)) == pytest.approx(0.175)
 
     spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
     assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"
