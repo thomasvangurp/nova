@@ -53,6 +53,10 @@
       --keychain-service-env {{ slot_manager_keychain_service_env }}
       --credential-source {{ slot_manager_credential_source }}
       --lookback-blocks {{ slot_manager_lookback_blocks }}
+      --auto-convert-alpha
+      --convert-target-tao 1.0
+      --convert-slippage 0.005
+      --max-convert-alpha-per-day 250
       --interval 0 --execute-registrations
 
   tasks:
@@ -147,6 +151,13 @@
       vars:
         slot_manager_repo: "{{ slot_manager_remote_repo }}"
       register: slot_manager_unit
+
+    - name: Remove the legacy drop-in that replaces the canonical ExecStart
+      become: true
+      ansible.builtin.file:
+        path: >-
+          /etc/systemd/system/{{ slot_manager_service }}.service.d/auto-convert.conf
+        state: absent
 
     - name: Arm the live timer with the new unit
       become: true

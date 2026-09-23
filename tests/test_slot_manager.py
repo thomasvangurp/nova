@@ -1119,6 +1119,11 @@ def test_the_deployed_target_matches_the_policy():
     )
     assert reserve and int(reserve.group(1)) == 1
     assert reserve_price and float(reserve_price.group(1)) == pytest.approx(0.175)
+    # Auto-conversion belongs in the same canonical ExecStart.  A hand-written
+    # systemd drop-in once replaced it wholesale and silently removed new policy
+    # flags even though the rendered base unit was correct.
+    assert "--auto-convert-alpha" in slots
+    assert "auto-convert.conf" in slots and "state: absent" in slots
 
     spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
     assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"

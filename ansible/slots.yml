@@ -176,6 +176,13 @@
           - "{{ slot_manager_credential_source }}"
           - --lookback-blocks
           - "{{ slot_manager_lookback_blocks }}"
+          - --auto-convert-alpha
+          - --convert-target-tao
+          - "1.0"
+          - --convert-slippage
+          - "0.005"
+          - --max-convert-alpha-per-day
+          - "250"
           - --interval
           # Linux is timer-driven, so each run evaluates once and exits; the
           # decision log carries the price history between runs. macOS keeps the
@@ -442,6 +449,14 @@
           {{ (slot_manager_launcher + slot_manager_arguments
               + slot_manager_spend_arguments) | join(' ') }}
       register: slot_manager_unit
+
+    - name: Remove the legacy ExecStart-replacing conversion drop-in (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ slot_manager_service }}.service.d/auto-convert.conf"
+        state: absent
+
 
     - name: Install the slot purchase timer (Linux)
       become: true
