@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Check the SN68 nanobody production instance every minute
+
+[Timer]
+Unit={{ producer_guard_service }}.service
+OnBootSec=30s
+OnUnitActiveSec=60s
+Persistent=true
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

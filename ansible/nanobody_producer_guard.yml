@@ -1,0 +1,130 @@
+---
+# Focused recovery deploy for the Pi.  The full slots play synchronizes the
+# whole committed repository; this play intentionally installs only the two
+# production-availability fixes so unrelated worktree changes cannot reach the
+# machine during an incident.
+- name: Deploy the nanobody producer availability guard
+  hosts: slot_manager
+  gather_facts: true
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    slot_manager_user: "{{ ansible_user_id }}"
+    slot_manager_home: "{{ ansible_env.HOME }}"
+    slot_host_workspace: /opt/nova-nanobody/deploy/slot_host
+    slot_manager_python: /opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/python
+    hotkey_sync_vastai: /opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/vastai
+    hotkey_sync_vast_label: nova-nanobody-pixi
+    producer_guard_service: nova-nanobody-producer-guard
+    producer_guard_script: "{{ slot_host_workspace }}/ensure_vast_running.py"
+    producer_guard_disable_marker: "{{ slot_manager_home }}/.nova/producer-autostart.disabled"
+
+  tasks:
+    - name: Locate the Pi Vast API key without reading it
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop:
+        - "{{ slot_manager_home }}/.config/vastai/vast_api_key"
+        - "{{ slot_manager_home }}/.vast_api_key"
+      register: vast_key_locations
+
+    - name: Require a persistent Vast API credential locator on Pi
+      ansible.builtin.assert:
+        that:
+          - vast_key_locations.results | selectattr('stat.exists') | list | length > 0
+        fail_msg: >-
+          Pi has no Vast API credential locator; recovery cannot control the
+          production instance.
+
+    - name: Restrict the existing Vast API credential file
+      ansible.builtin.file:
+        path: "{{ item.item }}"
+        mode: "0600"
+      loop: "{{ vast_key_locations.results }}"
+      when: item.stat.exists
+      no_log: true
+
+    - name: Install the producer guard implementation
+      ansible.builtin.copy:
+        src: "{{ repo }}/deploy/slot_host/ensure_vast_running.py"
+        dest: "{{ producer_guard_script }}"
+        owner: "{{ slot_manager_user }}"
+        group: "{{ slot_manager_user }}"
+        mode: "0755"
+
+    - name: Install the cached-pool submit fallback
+      ansible.builtin.copy:
+        src: "{{ repo }}/tools/pi_epoch_loop.py"
+        dest: /opt/nova-submit/tools/pi_epoch_loop.py
+        owner: "{{ slot_manager_user }}"
+        group: "{{ slot_manager_user }}"
+        mode: "0755"
+      register: submit_loop_source
+
+    - name: Compile both deployed Python entrypoints
+      ansible.builtin.command:
+        argv:
+          - "{{ slot_manager_python }}"
+          - -m
+          - py_compile
+          - "{{ producer_guard_script }}"
+          - /opt/nova-submit/tools/pi_epoch_loop.py
+      changed_when: false
+
+    - name: Install the producer guard service
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-nanobody-producer-guard.service.j2
+        dest: "/etc/systemd/system/{{ producer_guard_service }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the producer guard timer
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-nanobody-producer-guard.timer.j2
+        dest: "/etc/systemd/system/{{ producer_guard_service }}.timer"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Arm the producer guard
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ producer_guard_service }}.timer"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Prove the guard against the live production label
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, start, --wait, "{{ producer_guard_service }}.service"]
+      changed_when: true
+
+    - name: Restart the submit loop onto the cached-pool fallback
+      become: true
+      ansible.builtin.systemd_service:
+        name: nova-submit-loop.service
+        state: restarted
+      when: submit_loop_source.changed
+
+    - name: Require both schedules to be live
+      become: true
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ item }}"
+          - --property=ActiveState
+          - --property=SubState
+      loop:
+        - "{{ producer_guard_service }}.timer"
+        - nova-submit-loop.service
+      register: production_units
+      changed_when: false
+      failed_when: >-
+        'ActiveState=active' not in production_units.stdout

@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Keep the SN68 nanobody production instance running
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ slot_manager_user }}
+Group={{ slot_manager_user }}
+Environment=HOME={{ slot_manager_home }}
+WorkingDirectory={{ slot_host_workspace }}
+ExecStart={{ slot_manager_python }} {{ producer_guard_script }} \
+    --vastai {{ hotkey_sync_vastai }} \
+    --label {{ hotkey_sync_vast_label }} \
+    --disable-marker {{ producer_guard_disable_marker }}
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
