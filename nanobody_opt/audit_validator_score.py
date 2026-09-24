@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 import pandas as pd
 
@@ -216,8 +217,24 @@ def main() -> None:
         f"{args.epoch}/nanobodies"
     )
     request = Request(url, headers={"User-Agent": "nova-nanobody-auditor/1"})
-    with urlopen(request, timeout=30) as response:  # noqa: S310
-        payload = json.load(response)
+    try:
+        with urlopen(request, timeout=30) as response:  # noqa: S310
+            payload = json.load(response)
+    except HTTPError as error:
+        print(
+            "VALIDATOR_SCORE_NOT_READY "
+            f"{args.epoch} {args.hotkey}: leaderboard API HTTP {error.code}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except URLError as error:
+        print(
+            "VALIDATOR_SCORE_NOT_READY "
+            f"{args.epoch} {args.hotkey}: leaderboard API unreachable "
+            f"({error.reason})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     checkpoint = json.loads(args.checkpoint.read_text()) if args.checkpoint else None
     audit = replay_validator_score(
         payload,
