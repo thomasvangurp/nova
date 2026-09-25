@@ -165,6 +165,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reactions", default="3",
                         help="comma-separated reactions we hold a rescored bank for")
+    parser.add_argument("--minimum-compound-score", type=float, default=1.53,
+                        help="withhold a compound release below this top-20 exact-"
+                             "score sum -- a submitted molecule becomes public "
+                             "immediately whether it wins or not, so releasing "
+                             "below the field's current parity permanently burns "
+                             "that chemistry for a near-zero win chance. The "
+                             "nanobody half always commits regardless.")
     parser.add_argument("--chain-python", required=True)
     parser.add_argument("--rdkit-python", required=True)
     parser.add_argument("--epochs", type=int, default=0, help="0 = run forever")
@@ -297,6 +304,47 @@ def publish(a, names) -> None:
                             f"thomasg@100.64.243.65:/opt/nova-submit/{name}"], timeout=300)
 
 
+def refresh_crew_for_commit(a, view, epoch: int, crew_path: Path) -> dict:
+    """Replace the pre-pull roster with the last possible chain snapshot.
+
+    Pulling used to take long enough for a UID to turn over between the
+    window-open metagraph and ``commit_batch``: the epoch-25296 rehearsal
+    planned 13 but the ownership check could still send only 12. The artifact
+    pool is UID-independent, so refresh the roster after the pull and let the
+    Pi bind sequences to the actual final crew.
+    """
+    try:
+        fresh = chain(a.chain_python)
+    except Exception as error:
+        say(event="crew_refresh_failed", err=str(error)[:160])
+        return view
+    if int(fresh["epoch"]) != int(epoch):
+        say(event="crew_refresh_rolled", wanted=epoch, have=fresh["epoch"])
+        return view
+    before = len(view["crew"])
+    view = dict(view, crew=fresh["crew"], block=fresh["block"])
+    crew_path.write_text(json.dumps(view["crew"]))
+    publish(a, ["crew.json"])
+    say(event="crew_refreshed", epoch=epoch, before=before, after=len(view["crew"]))
+    return view
+
+
+def cached_nanobody_available(a) -> bool:
+    """Whether the submit host still has a non-empty verified artifact.
+
+    A producer outage must not turn into an empty epoch.  ``pi_submit`` already
+    knows how to rebind a stale UID-independent sequence pool to the live crew;
+    this probe only decides whether there is a local pool for that fallback.
+    It deliberately does not parse or print the artifact here -- the normal
+    submission preflight remains the authority on its contents.
+    """
+    if a.on_submit_host:
+        return (ROOT / "nanobody_result.json").is_file() \
+            and (ROOT / "nanobody_result.json").stat().st_size > 0
+    cached = run(PI, "test -s /opt/nova-submit/nanobody_result.json", timeout=30)
+    return cached.returncode == 0
+
+
 def handle_epoch(a, view, epoch, block, end, covered, state):
     if True:
         producer_stopped = state["producer_stopped"]
@@ -310,7 +358,8 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
             made = subprocess.run(
                 [sys.executable, str(ROOT / "tools/make_fleet.py"),
                  "--epoch", str(epoch), "--reaction", str(view["reaction"]),
-                 "--crew", str(crew_path), "--python", a.rdkit_python]
+                 "--crew", str(crew_path), "--python", a.rdkit_python,
+                 "--minimum-score", str(a.minimum_compound_score)]
                 + (["--bank", str(ROOT / "bank.sqlite"),
                     "--out", str(ROOT / "release"),
                     "--fleet-tree", str(ROOT)] if a.on_submit_host else []),
@@ -357,9 +406,27 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         pull = run(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
                        f"--epoch {epoch} --reaction {view['reaction']} --pull-only", timeout=300)
         if pull.returncode:
-            say(event="skip_epoch", why="pull failed; producer untouched")
-            return
-        say(event="pulled")
+            if stale_ok and cached_nanobody_available(a):
+                # This is exactly the last-resort path described above: the
+                # producer is unavailable, but a previously validated ranked
+                # pool is still much better than submitting nothing.  The
+                # final pi_submit invocation receives --allow-stale-nanobody,
+                # rebinds that pool to the fresh crew, and runs every ordinary
+                # plaintext and validator-gate preflight before committing.
+                say(event="cached_nanobody_fallback", epoch=epoch,
+                    why="fresh pull failed; using last verified sequence pool")
+            else:
+                say(event="skip_epoch", why="pull failed and no verified cache exists")
+                return
+        else:
+            say(event="pulled")
+
+        # The initial roster preceded a provider lookup and an artifact pull.
+        # Refresh after both, immediately before planning, so a recycled UID is
+        # replaced in the fleet rather than merely dropped by the later
+        # ownership check. Slot purchases are frozen around this window too,
+        # but other miners can still churn the subnet.
+        view = refresh_crew_for_commit(a, view, epoch, crew_path)
 
         if a.dry_run:
             say(event="dry_run_stop", epoch=epoch, molecules=have_molecules)

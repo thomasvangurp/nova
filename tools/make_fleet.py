@@ -54,6 +54,12 @@ def main() -> int:
     parser.add_argument("--entropy", type=float, default=0.25,
                         help="the real gate. Do not pad it against MACCS numbers: "
                              "on AtomPair these sets read 0.36+, never near the floor")
+    parser.add_argument("--minimum-score", type=float, default=None,
+                        help="withhold the release (nanobody still commits; only "
+                             "the molecules half is skipped) unless the top-count "
+                             "exact-score sum reaches this. Forwarded to "
+                             "bank_release.py's --baseline. Unset means no floor "
+                             "(bank_release.py's own default, 0.0).")
     arguments = parser.parse_args()
 
     out = Path(arguments.out)
@@ -63,17 +69,26 @@ def main() -> int:
     fleet = out / "compound_fleet.json"
 
     crew = json.loads(Path(arguments.crew).read_text())
-    made = subprocess.run(
-        [arguments.python, str(ROOT / "tools/bank_release.py"),
-         "--bank", arguments.bank, "--reaction", str(arguments.reaction),
-         "--epoch", str(arguments.epoch), "--fleet", str(len(crew)),
-         "--archive", arguments.archive,
-         "--output", str(out / "result_rxn{reaction}.json"),
-         "--complete", str(out / f"epoch{arguments.epoch}_rxn{{reaction}}_complete.json")],
-        capture_output=True, text=True, timeout=900)
+    release_args = [
+        arguments.python, str(ROOT / "tools/bank_release.py"),
+        "--bank", arguments.bank, "--reaction", str(arguments.reaction),
+        "--epoch", str(arguments.epoch), "--fleet", str(len(crew)),
+        "--archive", arguments.archive,
+        "--output", str(out / "result_rxn{reaction}.json"),
+        "--complete", str(out / f"epoch{arguments.epoch}_rxn{{reaction}}_complete.json"),
+    ]
+    if arguments.minimum_score is not None:
+        release_args += ["--baseline", str(arguments.minimum_score)]
+    made = subprocess.run(release_args, capture_output=True, text=True, timeout=900)
     if made.returncode:
-        print(json.dumps(dict(event="release_failed",
-                              err=(made.stdout or made.stderr).strip()[-200:])))
+        # A below-baseline pool is NOT an error: bank_release.py returns 1 and
+        # this propagates the same way as "reaction not covered" -- have_molecules
+        # stays false, the crew's nanobody still commits, and this epoch is
+        # simply not one we win the compound track on. Distinguish that from a
+        # real failure only in what gets logged.
+        tail = (made.stdout or made.stderr).strip()[-200:]
+        event = "release_below_baseline" if "does not beat baseline" in tail else "release_failed"
+        print(json.dumps(dict(event=event, err=tail)))
         return 1
     print(json.dumps(dict(event="release", line=made.stdout.strip().splitlines()[-1][:180])))
 
