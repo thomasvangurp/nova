@@ -166,12 +166,22 @@ def main() -> int:
     parser.add_argument("--reactions", default="3",
                         help="comma-separated reactions we hold a rescored bank for")
     parser.add_argument("--minimum-compound-score", type=float, default=1.53,
-                        help="withhold a compound release below this top-20 exact-"
-                             "score sum -- a submitted molecule becomes public "
-                             "immediately whether it wins or not, so releasing "
-                             "below the field's current parity permanently burns "
-                             "that chemistry for a near-zero win chance. The "
-                             "nanobody half always commits regardless.")
+                        help="fallback withholding threshold for a reaction not "
+                             "named in --minimum-compound-score-map. A submitted "
+                             "molecule becomes public immediately whether it wins "
+                             "or not, so releasing below the field's current "
+                             "parity permanently burns that chemistry for a "
+                             "near-zero win chance. The nanobody half always "
+                             "commits regardless.")
+    parser.add_argument("--minimum-compound-score-map", default="",
+                        help="per-reaction override as reaction:score,reaction:score "
+                             "-- each reaction's competitive field differs (median "
+                             "winning submission_score across 38-45 tracked epochs: "
+                             "rxn1 1.62, rxn2 1.93, rxn3 1.56, rxn4 1.83, rxn5 1.93), "
+                             "so one global threshold either wastes chemistry on "
+                             "easy reactions or submits certain losses on hard ones. "
+                             "A reaction not listed here falls back to "
+                             "--minimum-compound-score.")
     parser.add_argument("--chain-python", required=True)
     parser.add_argument("--rdkit-python", required=True)
     parser.add_argument("--epochs", type=int, default=0, help="0 = run forever")
@@ -193,7 +203,17 @@ def main() -> int:
     if a.root:
         ROOT = Path(a.root)
     covered = {int(x) for x in a.reactions.split(",") if x.strip()}
-    say(event="start", covered=sorted(covered), dry_run=a.dry_run)
+    score_floor = {}
+    for pair in a.minimum_compound_score_map.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        reaction_key, _, value = pair.partition(":")
+        score_floor[int(reaction_key)] = float(value)
+    a.score_floor = score_floor  # attached so handle_epoch() can read it via `a`
+    say(event="start", covered=sorted(covered), dry_run=a.dry_run,
+        score_floor={**{r: a.minimum_compound_score for r in covered - score_floor.keys()},
+                    **score_floor})
 
     state = {"producer_stopped": False}
 
@@ -355,11 +375,12 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         # molecules only when we actually hold a rescored bank for this reaction
         have_molecules = False
         if view["reaction"] in covered:
+            floor = a.score_floor.get(view["reaction"], a.minimum_compound_score)
             made = subprocess.run(
                 [sys.executable, str(ROOT / "tools/make_fleet.py"),
                  "--epoch", str(epoch), "--reaction", str(view["reaction"]),
                  "--crew", str(crew_path), "--python", a.rdkit_python,
-                 "--minimum-score", str(a.minimum_compound_score)]
+                 "--minimum-score", str(floor)]
                 + (["--bank", str(ROOT / "bank.sqlite"),
                     "--out", str(ROOT / "release"),
                     "--fleet-tree", str(ROOT)] if a.on_submit_host else []),
