@@ -36,6 +36,22 @@ BLACKOUT_BLOCKS = 16
 # down to 26. Almost all of it is set_commitment waiting for the extrinsic.
 BLOCKS_PER_UID = 5
 
+# The window-open margin below (WINDOW_OPEN_BLOCKS) has to leave real slack
+# for the producer-wait after commit_reserve() is subtracted, but crew size
+# is not cheaply known until the cold, expensive chain() call that only runs
+# AFTER the window opens (block_now() is deliberately cheap and crew-blind,
+# to avoid paying for a full metagraph read every 30s while merely waiting).
+# So the margin is sized against a generously assumed max crew instead of
+# the crew this epoch actually has.
+#
+# This bit for real at crew=13: reserve=16+5*13=81 blocks, versus a window
+# that opened at end-75 -- NEGATIVE slack, so the producer-wait deadline
+# clamped to zero and every single epoch fell back to a stale nanobody
+# artifact, silently, for 50+ epochs (last real producer_ready was 25292).
+# The nanobody entry-win rate visibly collapsed over exactly that window.
+ASSUMED_MAX_CREW = 20
+MIN_PRODUCER_WAIT_BLOCKS = 20
+
 
 def commit_reserve(uids: int) -> int:
     """How many blocks the commit run itself needs, plus the blackout.
@@ -251,7 +267,7 @@ def main() -> int:
         epoch, block, end = tick["epoch"], tick["block"], tick["end"]
         if epoch in handled:
             time.sleep(30); continue
-        refresh_at = end - 75
+        refresh_at = end - commit_reserve(ASSUMED_MAX_CREW) - MIN_PRODUCER_WAIT_BLOCKS
         if block < refresh_at:
             wait = max(20, min(300, (refresh_at - block) * 12 * 0.6))
             say(event="waiting", epoch=epoch, block=block,
