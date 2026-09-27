@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,11 @@ SAFE_SLOT_FIELDS = {
     "time", "epoch", "block", "registered", "registered_uids", "target",
     "recycle_tao", "decision_recycle_tao", "executed", "reason", "hotkey",
 }
+# Money data (balances, flows, TAO price, AWS/Vast spend) is daily-granular.
+# Collecting it every 60s exhausts the Taostats API quota (HTTP 429) and buys
+# nothing.  Run the money collectors at most hourly.
+MONEY_REFRESH_SECONDS = 3600
+MONEY_MARKER = ROOT / "data" / "money_refresh.marker"
 
 
 def sync_slot_snapshot() -> int:
@@ -68,6 +74,18 @@ def sync_slot_snapshot() -> int:
     os.chmod(SLOT_SNAPSHOT_NEXT, 0o600)
     os.replace(SLOT_SNAPSHOT_NEXT, SLOT_SNAPSHOT)
     return len(clean)
+
+
+def _should_refresh_money() -> bool:
+    try:
+        return time.time() - MONEY_MARKER.stat().st_mtime >= MONEY_REFRESH_SECONDS
+    except OSError:
+        return True
+
+
+def _touch_money_marker() -> None:
+    MONEY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    MONEY_MARKER.write_text(str(int(time.time())) + "\n")
 
 
 def refresh_money_sources() -> dict[str, bool]:
@@ -134,8 +152,13 @@ def main() -> int:
             cwd=ROOT,
             check=True,
         )
-        money_status = refresh_money_sources()
-        funding_target = publish_infrastructure_funding_target()
+        if _should_refresh_money():
+            money_status = refresh_money_sources()
+            funding_target = publish_infrastructure_funding_target()
+            _touch_money_marker()
+        else:
+            money_status = {"economics": "skipped", "infrastructure": "skipped"}
+            funding_target = "skipped"
         subprocess.run(
             [sys.executable, "-m", "nanobody_dash.build", "--out", str(NEXT)],
             cwd=ROOT,
