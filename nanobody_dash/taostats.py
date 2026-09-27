@@ -23,6 +23,10 @@ KEYCHAIN_SERVICE = "taostats"
 #: A browser-shaped User-Agent is required before the key is even checked.
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# Free tier allows 5 calls/minute.  Space requests at least this far apart so
+# the ~5 back-to-back collector calls in one refresh can never burst past it.
+MIN_REQUEST_INTERVAL = 20.0
+_last_request_at = 0.0
 
 
 class TaostatsError(RuntimeError):
@@ -50,7 +54,13 @@ def get(path: str, params: dict | None = None, *, key: str | None = None,
     ``key`` is passed in so a caller fetching many pages unlocks the Keychain
     once instead of once per request.
     """
+    global _last_request_at
     key = key or _api_key()
+    now = time.time()
+    wait = MIN_REQUEST_INTERVAL - (now - _last_request_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_at = time.time()
     query = ""
     if params:
         query = "?" + urllib.parse.urlencode(params)
