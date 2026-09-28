@@ -814,7 +814,7 @@ def main() -> int:
     burn = money.registration_burn(connection, 8)
     pnl = money.subnet_pnl(connection, tao_usd, burn)
     pnl_history = money.subnet_pnl_history(connection, tao_usd)
-    money_history = money.daily_money_history(connection, pnl_history, tao_usd)
+    money_history = money.daily_money_history(connection, tao_usd)
     infrastructure_history = money.infrastructure_cost_history(connection)
     split = {}
     if arguments.vast.is_file():

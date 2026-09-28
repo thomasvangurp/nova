@@ -112,13 +112,11 @@ def subnet_pnl_history(connection: sqlite3.Connection,
                 elif action == "DELEGATE" and not transfer:
                     bought += alpha
             earned_alpha = (a1 - a0) + sold - bought
-            # SN68's balance-to-balance alpha oscillates because the slot
-            # manager recycles its own registrations: evicting a lapsed uid
-            # returns that uid's stake to free TAO and the re-burn moves it
-            # back.  That is a change of asset, not a mining loss, so a
-            # negative daily delta is not negative revenue -- revenue is the
-            # emission, which cannot go below zero.
-            earned_alpha = max(0.0, earned_alpha)
+            # This is the alpha-stake delta (a "stake" view, not the headline):
+            # SN68's stake oscillates because the slot manager recycles its own
+            # registrations (an evicted uid's stake returns to free TAO).  The
+            # portfolio (free + staked) is the real income and lives in
+            # daily_money_history.
             gross_tao = earned_alpha * price / elapsed_days
             # The registration burn is a real TAO cost of holding the slots
             # (the TAO leaves the coldkey), so it is subtracted from net.
@@ -142,43 +140,53 @@ def subnet_pnl_history(connection: sqlite3.Connection,
     return sorted(out, key=lambda row: (row["day"], row["netuid"]))
 
 
-def daily_money_history(connection: sqlite3.Connection, subnet_history: list[dict],
-                        tao_usd: float) -> list[dict]:
-    """Daily revenue, infrastructure, net and portfolio value."""
-    by_day: dict[str, dict] = {}
-    for row in subnet_history:
-        day = row["day"]
-        bucket = by_day.setdefault(day, dict(
-            day=day, gross_tao=0.0, registration_tao=0.0,
-            infra_usd=0.0, infrastructure={}, holding_tao=0.0, free_tao=0.0,
-        ))
-        bucket["gross_tao"] += row["gross_tao_per_day"]
-        bucket["registration_tao"] += row["registration_tao_per_day"]
-        bucket["holding_tao"] += row["holding_tao"]
-        bucket["free_tao"] = max(bucket["free_tao"], row["free_tao"])
+def daily_money_history(connection: sqlite3.Connection, tao_usd: float) -> list[dict]:
+    """Daily portfolio (free + staked) change, the headline net income.
+
+    The per-subnet alpha stake oscillates because the slot manager recycles its
+    own registrations (alpha <-> free TAO); that is a change of asset, not
+    income, and it cancels when free + staked are summed.  The portfolio delta
+    is therefore the genuine daily income: it nets the registration burn (a
+    free-TAO outflow) against the emission, so it cannot read as a fake
+    burn-down.
+    """
+    rows = connection.execute(
+        "SELECT block, netuid, alpha, alpha_price_tao, free_tao FROM balances "
+        "ORDER BY block"
+    ).fetchall()
+    by_block: dict[int, dict[str, float]] = {}
+    for block, netuid, alpha, price, free in rows:
+        bucket = by_block.setdefault(int(block), {"free": 0.0, "staked": 0.0})
+        bucket["free"] = float(free or 0.0)
+        bucket["staked"] += float(alpha or 0.0) * float(price or 0.0)
+    blocks = sorted(by_block)
+    block_time = _block_clock(connection)
+    out: list[dict] = []
+    for before, after in zip(blocks, blocks[1:]):
+        elapsed = (after - before) / 7200.0
+        if elapsed <= 0:
+            continue
+        prev = by_block[before]
+        cur = by_block[after]
+        delta = (cur["free"] + cur["staked"]) - (prev["free"] + prev["staked"])
+        out.append({
+            "day": block_time(after).date().isoformat(),
+            "gross_tao": delta / elapsed,
+            "holding_tao": cur["staked"],
+            "free_tao": cur["free"],
+            "portfolio_tao": cur["free"] + cur["staked"],
+            "infra_usd": 0.0, "infrastructure": {},
+        })
+    by_day = {row["day"]: row for row in out}
     for day, item, usd in connection.execute(
         "SELECT day, item, COALESCE(usd, 0) FROM costs ORDER BY day, item"
     ):
-        if day not in by_day:
-            continue
-        amount = float(usd or 0)
-        by_day[day]["infra_usd"] += amount
-        by_day[day]["infrastructure"][str(item)] = amount
-    out = []
-    for day in sorted(by_day):
-        row = by_day[day]
-        gross_usd = row["gross_tao"] * tao_usd
-        registration_usd = row["registration_tao"] * tao_usd
-        # Registration burn and infrastructure are real costs paid out of
-        # mining revenue, so net revenue is mining revenue minus both.
-        net_usd = gross_usd - registration_usd - row["infra_usd"]
-        out.append(dict(
-            **row,
-            gross_usd=gross_usd,
-            registration_usd=registration_usd,
-            net_usd=net_usd,
-            portfolio_tao=row["holding_tao"] + row["free_tao"],
-        ))
+        if day in by_day:
+            by_day[day]["infra_usd"] += float(usd or 0)
+            by_day[day]["infrastructure"][str(item)] = float(usd or 0)
+    for row in out:
+        row["gross_usd"] = row["gross_tao"] * tao_usd
+        row["net_usd"] = row["gross_usd"]
     return out
 
 
@@ -232,11 +240,8 @@ def subnet_pnl(connection: sqlite3.Connection, tao_usd: float,
         days = max((b1 - b0) / 7200.0, 1e-6)
         f = flows.get(netuid, dict(bought=0.0, sold=0.0, sold_tao=0.0))
         earned_alpha = (a1 - a0) + f["sold"] - f["bought"]
-        # A negative balance-to-balance delta on SN68 is the slot manager
-        # recycling its own registrations (stake -> free TAO -> re-burn), a
-        # change of asset rather than a mining loss.  Revenue is the emission
-        # and cannot be negative.
-        earned_alpha = max(0.0, earned_alpha)
+        # This is the alpha-stake delta (a "stake" view, not the headline): a
+        # negative SN68 delta is the recycle churn, not a mining loss.
         tao_day = earned_alpha * (p1 or 0.0) / days
         out.append(dict(
             netuid=netuid, name=SUBNET_NAMES.get(netuid, f"SN{netuid}"),

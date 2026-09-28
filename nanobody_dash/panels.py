@@ -109,25 +109,19 @@ def fig_subnet_pnl_history(rows) -> go.Figure:
 
 
 def fig_money_history(rows) -> go.Figure:
-    """Daily revenue and costs in USD, plus the end-of-day TAO portfolio."""
+    """Daily portfolio (free + staked) change, the headline net income."""
     if not rows:
         return _empty("No daily money history recorded yet")
     days = [row["day"] for row in rows]
     figure = go.Figure()
     figure.add_trace(go.Bar(
-        x=days, y=[row["gross_usd"] for row in rows],
-        name="mining revenue", marker_color=WIN,
-        hovertemplate="%{x}<br>revenue $%{y:,.2f}<extra></extra>",
+        x=days, y=[row["net_usd"] for row in rows],
+        name="net TAO/day", marker_color=WIN,
+        hovertemplate="%{x}<br>net $%{y:,.2f}<extra></extra>",
     ))
-    figure.add_trace(go.Bar(
-        x=days, y=[-row["registration_usd"] for row in rows],
-        name="registration burn", marker_color=BAD,
-        hovertemplate="%{x}<br>registration $%{customdata:,.2f}<extra></extra>",
-        customdata=[row["registration_usd"] for row in rows],
-    ))
-    # Keep the P&L readable: provider/service detail belongs in the dedicated
-    # infrastructure panels.  Registration and total infrastructure are the
-    # two cost lines against revenue.
+    # Infrastructure is shown for context; it is already netted into the
+    # portfolio via the free-TAO transfers that fund it, so it is not
+    # subtracted a second time here.
     infrastructure = [sum(
         float(value or 0)
         for value in (row.get("infrastructure") or {}).values()
@@ -141,12 +135,6 @@ def fig_money_history(rows) -> go.Figure:
             ),
             customdata=infrastructure,
         ))
-    figure.add_trace(go.Scatter(
-        x=days, y=[row["net_usd"] for row in rows], name="net USD/day",
-        mode="lines+markers", line=dict(color=NET, width=2.4),
-        marker=dict(size=8, line=dict(color=PAPER, width=1)),
-        hovertemplate="%{x}<br>net $%{y:,.2f}<extra></extra>",
-    ))
     figure.add_trace(go.Scatter(
         x=days, y=[row["portfolio_tao"] for row in rows],
         name="portfolio TAO", yaxis="y2", mode="lines+markers",

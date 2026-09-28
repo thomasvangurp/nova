@@ -204,45 +204,20 @@ def _money_connection():
     return connection
 
 
-def test_daily_money_history_uses_interval_local_flows_and_costs():
+def test_daily_money_history_uses_portfolio_delta():
     connection = _money_connection()
-    # Exactly one day apart: alpha rises by two, but one was purchased, so only
-    # one alpha is earned. At tau0.5/alpha that is tau0.5 gross.
+    # alpha rises 10 -> 12 at price 0.5 with free TAO constant 1.0, so the
+    # portfolio (free + staked) rises 6.0 -> 7.0 = +1.0 TAO/day.
     connection.executemany(
         "INSERT INTO balances VALUES (?,?,?,?,?,?)",
         [(100, 68, 10.0, 0.5, 1.0, 1.0),
          (7300, 68, 12.0, 0.5, 1.0, 2.0)],
     )
-    connection.execute(
-        "INSERT INTO delegations "
-        "(id,timestamp,block,netuid,action,alpha,tao,alpha_price_tao,is_transfer) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        ("d1", "2026-09-02T00:00:00Z", 5000, 68, "DELEGATE", 1.0,
-         0.5, 0.5, 0),
-    )
-    connection.execute(
-        "INSERT INTO slots VALUES (?,?,?,?,?)",
-        (1_788_307_200.0, 6000, 0.125, 0.1, 1),
-    )
-
-    history = money.subnet_pnl_history(connection, tao_usd=10.0)
-    assert len(history) == 1
-    assert history[0]["gross_tao_per_day"] == 0.5
-    assert history[0]["registration_tao_per_day"] == 0.1
-    # Registration burn is a real cost, so net is gross minus the burn (0.4).
-    assert history[0]["net_tao_per_day"] == 0.4
-
-    connection.execute(
-        "INSERT INTO costs VALUES (?,?,?,?)",
-        (history[0]["day"], "vast.ai", 2.0, "invoiced"),
-    )
-    daily = money.daily_money_history(connection, history, tao_usd=10.0)
-    assert daily[0]["gross_usd"] == 5.0
-    assert daily[0]["registration_usd"] == 1.0
-    assert daily[0]["infra_usd"] == 2.0
-    assert daily[0]["infrastructure"] == {"vast.ai": 2.0}
-    # Net USD is mining revenue minus registration and infrastructure (2.0).
-    assert daily[0]["net_usd"] == 2.0
+    daily = money.daily_money_history(connection, tao_usd=10.0)
+    assert len(daily) == 1
+    assert daily[0]["gross_tao"] == 1.0
+    assert daily[0]["gross_usd"] == 10.0
+    assert daily[0]["net_usd"] == 10.0
     assert daily[0]["portfolio_tao"] == 7.0
 
 
