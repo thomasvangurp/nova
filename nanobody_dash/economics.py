@@ -431,40 +431,6 @@ def collect_current_balances_chain(connection: sqlite3.Connection,
     return len(rows)
 
 
-def collect_delegations_from_slots(connection: sqlite3.Connection) -> int:
-    """Reconstruct UNDELEGATE rows from the slot log's recycle_tao.
-
-    The chain exposes the current stake but not the delegate/undelegate history,
-    and the slot manager's deregistrations are the alpha we sell to recycle
-    registration TAO.  Rebuilding them here restores the buy/sell split so the
-    daily revenue is mining rewards, not the net balance delta (which reads as a
-    loss every time we recycle).  SN68-only; the slot log carries no netuid.
-    """
-    prices = {
-        netuid: price for netuid, price in connection.execute(
-            "SELECT netuid, alpha_price_tao FROM balances WHERE "
-            "(netuid, sampled_at) IN (SELECT netuid, MAX(sampled_at) FROM balances GROUP BY netuid)")
-    }
-    price = prices.get(68, 0.0)
-    rows = []
-    for block, t, recycle in connection.execute(
-        "SELECT block, time, COALESCE(decision_recycle_tao, recycle_tao) FROM slots "
-        "WHERE executed = 1 AND block IS NOT NULL"):
-        if recycle is None or float(recycle) <= 0:
-            continue
-        alpha = float(recycle) / price if price else 0.0
-        ts = (dt.datetime.fromtimestamp(float(t), dt.timezone.utc).isoformat()
-              if t else "")
-        rows.append((f"slot-recycle-{block}-{t}", ts, block, 68, "UNDELEGATE",
-                     alpha, float(recycle), price, 0))
-    connection.executemany(
-        "INSERT OR REPLACE INTO delegations "
-        "(id, timestamp, block, netuid, action, alpha, tao, alpha_price_tao, is_transfer) "
-        "VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    connection.commit()
-    return len(rows)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path("data/nanobody_dash.sqlite"))
@@ -473,8 +439,8 @@ def main() -> int:
     arguments = parser.parse_args()
     connection = connect(arguments.database)
     report = dict(
-        delegations=collect_delegations_from_slots(connection),
-        transfers=0,
+        delegations=collect_delegations(connection, arguments.coldkey),
+        transfers=collect_transfers(connection, arguments.coldkey),
         balances=collect_current_balances_chain(connection))
     for label, query in (("netuids", "SELECT DISTINCT netuid FROM delegations"),
                          ("rows", "SELECT COUNT(*) FROM delegations")):
