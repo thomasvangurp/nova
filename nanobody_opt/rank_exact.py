@@ -672,12 +672,12 @@ def main() -> None:
     parser.add_argument("--win-objective", choices=("confidence", "full"), default="confidence",
                         help="metrics the fresh-draw win probability ranks on; gates and "
                              "diagnostics keep the full ten-metric rank sum")
-    parser.add_argument("--maximum-public-edits", type=int, default=2,
+    parser.add_argument("--maximum-public-edits", type=int, default=0,
                         help="keep candidates within this many edits of a recent public "
                              "sequence (and not identical to one); 0 disables")
     parser.add_argument("--public-parent-window", type=int, default=600,
                         help="most recent archive rows that count as public parents")
-    parser.add_argument("--liability-quantile", type=float, default=0.9,
+    parser.add_argument("--liability-quantile", type=float, default=0.0,
                         help="drop candidates whose mean liability score is above this "
                              "quantile of the candidate pool; 0 disables")
     parser.add_argument("--minimum-constrained-pool", type=int, default=40,
