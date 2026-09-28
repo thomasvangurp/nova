@@ -40,6 +40,41 @@ sys.path.insert(0, str(HERE / "utils"))
 NULL = "~"
 
 
+def producer_endpoints(instance: dict) -> list[tuple[str, str, int]]:
+    """Direct SSH first, provider proxy second, with no written-down address."""
+    endpoints: list[tuple[str, str, int]] = []
+    public_ip = str(instance.get("public_ipaddr") or "").strip()
+    ports = instance.get("ports") or {}
+    direct_port = None
+    if isinstance(ports, dict):
+        for mapping in ports.get("22/tcp") or []:
+            if not isinstance(mapping, dict):
+                continue
+            try:
+                direct_port = int(mapping.get("HostPort"))
+            except (TypeError, ValueError):
+                continue
+            if direct_port > 0:
+                break
+    if direct_port is None:
+        try:
+            direct_port = int(instance.get("direct_port_start"))
+        except (TypeError, ValueError):
+            direct_port = None
+    if public_ip and direct_port and direct_port > 0:
+        endpoints.append(("direct", public_ip, direct_port))
+    proxy_host = str(instance.get("ssh_host") or "").strip()
+    try:
+        proxy_port = int(instance.get("ssh_port"))
+    except (TypeError, ValueError):
+        proxy_port = None
+    if proxy_host and proxy_port and proxy_port > 0:
+        proxy = ("proxy", proxy_host, proxy_port)
+        if (proxy_host, proxy_port) not in {(host, port) for _, host, port in endpoints}:
+            endpoints.append(proxy)
+    return endpoints
+
+
 
 def pull_producer(vastai: str, label: str, remote: str, destination: Path) -> None:
     """Fetch the nanobody half from whichever box currently carries the label.
@@ -64,17 +99,27 @@ def pull_producer(vastai: str, label: str, remote: str, destination: Path) -> No
     if len(matches) != 1:
         raise SystemExit(
             f"expected exactly one running instance labelled {label!r}, found {len(matches)}")
-    host, port = matches[0].get("ssh_host"), matches[0].get("ssh_port")
-    if not host or not port:
+    endpoints = producer_endpoints(matches[0])
+    if not endpoints:
         raise SystemExit(f"instance {matches[0].get('id')} has no resolvable ssh endpoint")
-    done = subprocess.run(
-        ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-         "-P", str(port), f"root@{host}:{remote}", str(destination)],
-        capture_output=True, text=True, timeout=300)
-    if done.returncode:
-        raise SystemExit(f"pull from {label} failed: {done.stderr.strip()[:200]}")
+    failures = []
+    route = host = ""
+    port = 0
+    for route, host, port in endpoints:
+        done = subprocess.run(
+            ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+             "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+             "-P", str(port), f"root@{host}:{remote}", str(destination)],
+            capture_output=True, text=True, timeout=300)
+        if done.returncode == 0:
+            break
+        failures.append(f"{route}:rc={done.returncode}")
+    else:
+        raise SystemExit(
+            f"pull from {label} failed on " + ", ".join(failures)
+        )
     print(json.dumps(dict(event="pulled", label=label, port=port,
+                          route=route,
                           bytes=destination.stat().st_size)), flush=True)
 
 
@@ -84,7 +129,8 @@ def _load(path: Path) -> dict:
 
 
 def sequences_by_uid(artifact: dict, epoch: int,
-                     allow_stale: bool = False) -> dict[int, str]:
+                     allow_stale: bool = False,
+                     crew=None) -> dict[int, str]:
     """The nanobody half. A stale artifact is refused, not silently reused.
 
     Its epoch is checked because the producer rewrites it every epoch and a
@@ -105,11 +151,73 @@ def sequences_by_uid(artifact: dict, epoch: int,
         print(json.dumps(dict(event="stale_nanobody", have=artifact.get("epoch"),
                               want=epoch)), flush=True)
     out = {}
+    pool = []
+
+    # New artifacts carry an explicitly UID-independent pool.  The GPU host
+    # does not own registrations and therefore cannot authoritatively bind a
+    # sequence to a uid: the Pi may have bought a replacement since the
+    # producer's last chain snapshot.  Keep accepting the old per-uid shape so
+    # a rolling deploy remains safe, but treat every distinct sequence in it as
+    # a pool entry too.
+    for item in artifact.get("sequence_pool") or []:
+        sequence = str(
+            item.get("sequence") if isinstance(item, dict) else item
+        ).strip().upper()
+        if sequence and sequence not in pool:
+            pool.append(sequence)
     for entry in artifact.get("submissions") or []:
-        sequence = str(entry.get("sequence") or "").strip()
+        sequence = str(entry.get("sequence") or "").strip().upper()
         if sequence:
             out[int(entry["uid"])] = sequence
-    return out
+            if sequence not in pool:
+                pool.append(sequence)
+
+    if crew is None:
+        return out
+
+    # Preserve an assignment when that uid is still ours, then deterministically
+    # fill every newly acquired/recycled uid from the unused ranked pool.  This
+    # is the ownership boundary: only the submit host's fresh crew snapshot is
+    # allowed to decide which uid carries which sequence.
+    allocated = {}
+    used = set()
+    for uid, _hotkey in crew:
+        sequence = out.get(int(uid))
+        if sequence and sequence not in used:
+            allocated[int(uid)] = sequence
+            used.add(sequence)
+    # Fill with the best pool entry that is NOT a validator duplicate of a
+    # sequence already allocated: the validator keeps one of any pair at or
+    # above 0.95 identity, so a near-copy scores nothing. Epoch 25400 filled
+    # five uids in pool order with 0.976-0.984 copies. Only when no distinct
+    # entry is left does a uid take a near-copy, so every uid still commits.
+    for uid, _hotkey in crew:
+        uid = int(uid)
+        if uid in allocated:
+            continue
+        remaining = [sequence for sequence in pool if sequence not in used]
+        if not remaining:
+            break
+        taken = list(allocated.values())
+        sequence = next(
+            (candidate for candidate in remaining
+             if all(_identity(candidate, other) < DUPLICATE_IDENTITY
+                    for other in taken)),
+            remaining[0])
+        allocated[uid] = sequence
+        used.add(sequence)
+    return allocated
+
+
+#: The validator's pairwise duplicate line (nanobody_opt.fleet).
+DUPLICATE_IDENTITY = 0.95
+
+
+def _identity(left: str, right: str) -> float:
+    """Position identity over the longer sequence, as the fleet dedupe uses."""
+    if not left or not right:
+        return 0.0
+    return sum(1 for a, b in zip(left, right) if a == b) / max(len(left), len(right))
 
 
 def molecules_by_uid(artifact, epoch: int, reaction: int) -> dict[int, str]:
@@ -389,7 +497,8 @@ def main(argv=None) -> int:
             return 0
     crew = [(int(u), str(h)) for u, h in _load(Path(arguments.crew))]
     sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
-                                 allow_stale=arguments.allow_stale_nanobody)
+                                 allow_stale=arguments.allow_stale_nanobody,
+                                 crew=crew)
     fleet_path = Path(arguments.fleet)
     molecules = molecules_by_uid(
         _load(fleet_path) if fleet_path.is_file() else None,
@@ -404,11 +513,13 @@ def main(argv=None) -> int:
             except (TypeError, ValueError, KeyError):
                 pass
     rows = plan(crew, molecules, sequences, value)
+    missing_sequence_uids = sorted(uid for uid, _ in crew if uid not in sequences)
     print(json.dumps(dict(event="plan", epoch=arguments.epoch,
                           reaction=arguments.reaction, crew=len(crew),
                           with_molecules=sum(r["has_molecules"] for r in rows),
                           with_sequence=sum(r["has_sequence"] for r in rows),
-                          committing=len(rows))), flush=True)
+                          committing=len(rows),
+                          missing_sequence_uids=missing_sequence_uids)), flush=True)
 
     # Validate every plaintext BEFORE committing any of them: a malformed
     # message discovered at uid 9 has already spent eight commitment slots.

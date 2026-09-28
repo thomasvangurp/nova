@@ -10,6 +10,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,21 @@ def test_a_stale_artifact_is_usable_when_the_caller_allows_it():
     assert got == {1: "QVQ1", 2: "QVQ2"}
 
 
+def test_submit_host_detects_a_nonempty_cached_nanobody(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "ROOT", tmp_path)
+    artifact = tmp_path / "nanobody_result.json"
+    artifact.write_text('{"epoch": 1, "sequence_pool": ["QVQ"]}')
+
+    assert loop.cached_nanobody_available(SimpleNamespace(on_submit_host=True))
+
+
+def test_submit_host_rejects_an_empty_cached_nanobody(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "ROOT", tmp_path)
+    (tmp_path / "nanobody_result.json").touch()
+
+    assert not loop.cached_nanobody_available(SimpleNamespace(on_submit_host=True))
+
+
 def test_a_fresh_artifact_needs_no_permission():
     assert submit.sequences_by_uid(_artifact(25247), 25247) == {1: "QVQ1", 2: "QVQ2"}
 
@@ -54,6 +70,88 @@ def test_uids_without_a_sequence_are_dropped_not_committed_blank():
                                           dict(uid=2, sequence="QVQ2"),
                                           dict(uid=3)])
     assert submit.sequences_by_uid(artifact, 7) == {2: "QVQ2"}
+
+
+def test_the_pi_rebinds_a_ranked_pool_to_its_fresh_crew():
+    artifact = dict(
+        epoch=7,
+        sequence_pool=["QVQ1", "QVQ2", "QVQ3"],
+        submissions=[
+            dict(uid=1, sequence="QVQ1"),
+            dict(uid=2, sequence="QVQ2"),
+            dict(uid=3, sequence="QVQ3"),
+        ],
+    )
+    # uid 2 survived, while 4 and 5 were bought after the producer's snapshot.
+    got = submit.sequences_by_uid(
+        artifact, 7, crew=[(2, "h2"), (4, "h4"), (5, "h5")]
+    )
+    assert got == {2: "QVQ2", 4: "QVQ1", 5: "QVQ3"}
+    assert len(set(got.values())) == 3
+
+
+def test_the_pi_skips_validator_duplicates_when_filling_from_the_pool():
+    base = "A" * 40
+    near = base[:-1] + "C"            # 0.975 identical to base: a validator duplicate
+    distinct = "C" * 20 + "A" * 20    # 0.5 identical: a real second ticket
+    artifact = dict(epoch=7, sequence_pool=[base, near, distinct],
+                    submissions=[dict(uid=1, sequence=base)])
+    got = submit.sequences_by_uid(artifact, 7, crew=[(1, "h1"), (2, "h2"), (3, "h3")])
+    assert got[1] == base
+    assert got[2] == distinct          # the near-copy is passed over first
+    assert got[3] == near              # and still used rather than leaving uid 3 empty
+
+
+def test_producer_pull_prefers_direct_ssh_and_keeps_proxy_fallback():
+    endpoints = submit.producer_endpoints({
+        "public_ipaddr": "203.0.113.4",
+        "ports": {"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "61170"}]},
+        "ssh_host": "ssh2.vast.ai",
+        "ssh_port": 15470,
+    })
+
+    assert endpoints == [
+        ("direct", "203.0.113.4", 61170),
+        ("proxy", "ssh2.vast.ai", 15470),
+    ]
+
+
+def test_pi_refreshes_the_crew_after_artifact_pull(tmp_path, monkeypatch):
+    crew_path = tmp_path / "crew.json"
+    published = []
+    monkeypatch.setattr(
+        loop,
+        "chain",
+        lambda _python: {
+            "epoch": 7,
+            "block": 700,
+            "crew": [[2, "h2"], [4, "h4"], [5, "h5"]],
+        },
+    )
+    monkeypatch.setattr(loop, "publish", lambda _a, names: published.extend(names))
+    original = {"epoch": 7, "block": 690, "crew": [[1, "h1"], [2, "h2"]]}
+
+    refreshed = loop.refresh_crew_for_commit(
+        SimpleNamespace(chain_python="python"), original, 7, crew_path
+    )
+
+    assert refreshed["crew"] == [[2, "h2"], [4, "h4"], [5, "h5"]]
+    assert json.loads(crew_path.read_text()) == refreshed["crew"]
+    assert published == ["crew.json"]
+
+
+def test_old_uid_bound_artifacts_are_also_treated_as_a_pool():
+    artifact = _artifact(7, uids=(1, 2, 3))
+    got = submit.sequences_by_uid(
+        artifact, 7, crew=[(7, "h7"), (8, "h8"), (9, "h9")]
+    )
+    assert got == {7: "QVQ1", 8: "QVQ2", 9: "QVQ3"}
+
+
+def test_production_publisher_prepares_a_churn_resistant_pool():
+    from tools.publish_current_nanobody import _parser
+
+    assert _parser().parse_args([]).minimum_sequence_pool_size == 16
 
 
 def test_the_commit_reserve_leaves_room_before_the_blackout():
