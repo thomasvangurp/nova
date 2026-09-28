@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html as html_lib
 import json
 import sqlite3
 import statistics as st
@@ -19,6 +20,7 @@ import plotly.graph_objects as go
 
 from . import BLOCK_SECONDS, DEFAULT_COLDKEY, EPOCH_LENGTH
 from . import progress
+from .outcomes import annotate_field_beating_entries, is_entry_win
 
 _DATABASE = None
 
@@ -49,6 +51,7 @@ def load(database: Path, coldkey: str) -> dict:
               connection.execute("SELECT * FROM epochs ORDER BY epoch")}
     entries = [dict(r) for r in
                connection.execute("SELECT * FROM entries ORDER BY epoch, rank")]
+    annotate_field_beating_entries(entries)
     slots = [dict(r) for r in connection.execute("SELECT * FROM slots ORDER BY time")]
     ours = [e for e in entries if e["coldkey"] == coldkey]
 
@@ -61,11 +64,16 @@ def load(database: Path, coldkey: str) -> dict:
     for e in ours:
         by_epoch.setdefault(e["epoch"], []).append(e)
 
+    # The fleet figure and headline compare validator scoring with the roster
+    # that survived to the end of the epoch.  A median hides late churn: epoch
+    # 25293 was at 12 for most polls, lost uid 24 before validation, and scored
+    # 11; reporting the median as "12 held on chain" made a real slot loss look
+    # like a commitment failure.  ``slots`` is ordered by time, so overwrite to
+    # retain the final observation for each epoch.
     registered: dict[int, int] = {}
     for s in slots:
         if s["epoch"] is not None and s["registered"] is not None:
-            registered.setdefault(s["epoch"], []).append(s["registered"])
-    registered = {k: int(st.median(v)) for k, v in registered.items()}
+            registered[s["epoch"]] = int(s["registered"])
 
     return dict(epochs=epochs, entries=entries, ours=ours, slots=slots,
                 by_epoch=by_epoch, first_seen=first_seen, registered=registered)
@@ -78,6 +86,19 @@ def _rolling(values, window=9):
         chunk = [v for v in values[max(0, i - window + 1):i + 1] if v is not None]
         out.append(st.median(chunk) if chunk else None)
     return out
+
+
+def _exact_epoch_axis(figure: go.Figure) -> go.Figure:
+    """Never abbreviate epoch identifiers as values such as ``25.22k``.
+
+    Plotly treats epochs as continuous numbers, which is useful for zooming but
+    applies SI-prefix formatting by default.  Apply this at render time so it
+    also covers figures built in ``progress`` and any future epoch figure.
+    """
+    for axis in figure.select_xaxes():
+        if getattr(getattr(axis, "title", None), "text", None) == "epoch":
+            axis.update(tickformat="d", exponentformat="none", showexponent="none")
+    return figure
 
 
 def fig_scores(data, recent: int = 60) -> go.Figure:
@@ -168,7 +189,17 @@ def fig_fleet(data) -> go.Figure:
 
 
 def fig_ages(data) -> go.Figure:
-    newest = max(data["epochs"])
+    scored_epochs = [e for e in sorted(data["epochs"]) if data["by_epoch"].get(e)]
+    if not scored_epochs:
+        figure = go.Figure()
+        figure.update_layout(**LAYOUT)
+        figure.add_annotation(text="No scored fleet cohort is available",
+                              xref="paper", yref="paper", x=0.5, y=0.5,
+                              showarrow=False, font=dict(color=MUTED))
+        return figure
+    # A missed public round is an operational failure, not evidence that every
+    # hotkey disappeared.  Use the most recent cohort that actually scored.
+    newest = scored_epochs[-1]
     live = {e["hotkey"]: e for e in data["by_epoch"].get(newest, [])}
     lifespans = []
     for hotkey, start in data["first_seen"].items():
@@ -185,6 +216,10 @@ def fig_ages(data) -> go.Figure:
     figure.add_vline(x=typical, line=dict(color=MUTED, dash="dash"),
                      annotation_text=f"typical lifespan {typical:.0f} epochs",
                      annotation_font_color=MUTED)
+    figure.add_annotation(text=f"latest scored cohort: epoch {newest}",
+                          xref="paper", yref="paper", x=1, y=1.08,
+                          xanchor="right", showarrow=False,
+                          font=dict(color=MUTED, size=11))
     figure.update_layout(**LAYOUT)
     figure.update_xaxes(title="epochs since first seen", gridcolor="#242a36")
     figure.update_yaxes(gridcolor="#242a36")
@@ -199,43 +234,53 @@ def fig_wins(data) -> go.Figure:
     for e in order:
         mine = data["by_epoch"].get(e) or []
         won = bool(mine) and min(m["rank"] for m in mine) == 1
-        flags.append(1 if won else 0)
+        # Missing rounds belong in fleet reliability, not the molecule-quality
+        # denominator.  Preserve the x-axis gap while excluding it from the
+        # trailing scored-epoch rate.
+        flags.append((1 if won else 0) if mine else None)
         total += won
         cumulative.append(total)
     for i in range(len(order)):
         lo = max(0, i - 19)
-        window = flags[lo:i + 1]
-        rate.append(100 * sum(window) / len(window))
+        window = [flag for flag in flags[lo:i + 1] if flag is not None]
+        rate.append(100 * sum(window) / len(window) if window else None)
     figure = go.Figure()
-    figure.add_trace(go.Scatter(x=order, y=cumulative, name="cumulative wins",
+    figure.add_trace(go.Scatter(x=order, y=cumulative, name="cumulative winning epochs",
                                 line=dict(color=WIN, width=2), yaxis="y"))
-    figure.add_trace(go.Scatter(x=order, y=rate, name="win rate, 20-epoch rolling %",
+    figure.add_trace(go.Scatter(x=order, y=rate,
+                                name="winning-epoch rate, 20 scored epochs rolling %",
                                 line=dict(color=OURS, width=2, dash="dot"), yaxis="y2"))
     layout = dict(LAYOUT)
-    layout["yaxis2"] = dict(title="win rate %", overlaying="y", side="right",
+    layout["yaxis2"] = dict(title="winning epochs %", overlaying="y", side="right",
                             gridcolor="rgba(0,0,0,0)")
     figure.update_layout(**layout)
-    figure.update_yaxes(title="cumulative wins", gridcolor="#242a36")
+    figure.update_yaxes(title="cumulative winning epochs", gridcolor="#242a36")
     figure.update_xaxes(title="epoch", gridcolor="#242a36")
     return figure
 
 
 def competitor_stats(data, top: int = 12):
-    """Per coldkey: fleet size, entries, wins, and win rate PER ENTRY.
+    """Per coldkey: fleet size, field-beating entries, and rates per entry.
 
-    Raw win counts reward whoever runs the most uids, so they say nothing about
-    whether a competitor is good or merely large.  Wins per entry separates the
-    two, and fleet size is carried alongside so the trade-off is visible.
+    ``wins`` deliberately counts every entry that beats the best rival entry,
+    rather than rank-one rows.  A separate ``winning_epochs`` field preserves
+    the fleet-level measure that is capped at one success per epoch.
     """
+    annotate_field_beating_entries(data["entries"])
     per_epoch, stats = {}, {}
     for e in data["entries"]:
         coldkey = e["coldkey"]
         bucket = per_epoch.setdefault(coldkey, {})
         bucket[e["epoch"]] = bucket.get(e["epoch"], 0) + 1
-        row = stats.setdefault(coldkey, dict(entries=0, wins=0, top10=0, scores=[]))
+        row = stats.setdefault(
+            coldkey,
+            dict(entries=0, wins=0, top10=0, scores=[], winning_epochs=set()),
+        )
         row["entries"] += 1
-        row["wins"] += e["rank"] == 1
+        row["wins"] += is_entry_win(e)
         row["top10"] += e["rank"] <= 10
+        if e["rank"] == 1:
+            row["winning_epochs"].add(e["epoch"])
         row["scores"].append(e["score"])
     rows = []
     for coldkey, row in stats.items():
@@ -245,9 +290,13 @@ def competitor_stats(data, top: int = 12):
             label=("US" if coldkey == data.get("coldkey") else coldkey[:8] + "..."),
             epochs=len(per_epoch[coldkey]), entries=row["entries"], wins=row["wins"],
             fleet=st.median(sizes), top10=row["top10"],
+            winning_epochs=len(row["winning_epochs"]),
             win_per_entry=100 * row["wins"] / row["entries"],
             top10_per_entry=100 * row["top10"] / row["entries"],
             best=min(row["scores"])))
+    # Select established competitors by total entry wins, then let each view
+    # order that stable cohort by the rate it displays.  Sorting the candidate
+    # set by rate would fill the table with one-off 1/1 and 2/2 coldkeys.
     rows.sort(key=lambda r: (-r["wins"], -r["win_per_entry"]))
     keep = rows[:top]
     if not any(r["ours"] for r in keep):
@@ -258,7 +307,7 @@ def competitor_stats(data, top: int = 12):
 
 
 def fig_competitor_efficiency(data, top: int = 12) -> go.Figure:
-    """Fleet size against wins per entry; bubble area is total entries."""
+    """Fleet size against field-beating entries; bubble area is total entries."""
     rows = competitor_stats(data, top)
     figure = go.Figure()
     figure.add_trace(go.Scatter(
@@ -270,16 +319,23 @@ def fig_competitor_efficiency(data, top: int = 12) -> go.Figure:
                     color=[WIN if r["ours"] else OURS for r in rows],
                     opacity=[0.95 if r["ours"] else 0.45 for r in rows],
                     line=dict(width=[2 if r["ours"] else 0 for r in rows], color=INK)),
-        customdata=[[r["entries"], r["wins"], r["epochs"], r["best"]] for r in rows],
-        hovertemplate=("fleet %{x:.0f} uids<br>%{y:.2f}% wins per entry"
-                       "<br>%{customdata[1]} wins in %{customdata[0]} entries"
+        customdata=[[r["entries"], r["wins"], r["epochs"], r["best"],
+                     r["winning_epochs"]] for r in rows],
+        hovertemplate=("fleet %{x:.0f} uids<br>%{y:.2f}% field-beating entries"
+                       "<br>%{customdata[1]} entry wins in %{customdata[0]} entries"
+                       "<br>%{customdata[4]} winning epochs"
                        "<br>active %{customdata[2]} epochs"
                        "<br>best score %{customdata[3]:.0f}<extra></extra>"),
         showlegend=False))
-    figure.update_layout(**LAYOUT)
+    layout = dict(LAYOUT)
+    # Unified-x hover is actively unhelpful for a sparse bubble chart: the
+    # cursor can be on a named point while Plotly searches a different x slice.
+    layout["hovermode"] = "closest"
+    layout["hoverdistance"] = -1
+    figure.update_layout(**layout)
     figure.update_xaxes(title="median fleet size (uids submitting per epoch)",
                         gridcolor="#242a36")
-    figure.update_yaxes(title="wins per entry (%)", gridcolor="#242a36")
+    figure.update_yaxes(title="field-beating entries (%)", gridcolor="#242a36")
     return figure
 
 
@@ -289,7 +345,8 @@ def fig_competitors(data, top: int = 12) -> go.Figure:
     names = [r["label"] for r in rows]
     figure = go.Figure()
     figure.add_trace(go.Bar(
-        x=names, y=[r["win_per_entry"] for r in rows], name="wins per entry %",
+        x=names, y=[r["win_per_entry"] for r in rows],
+        name="field-beating entries %",
         marker_color=[WIN if r["ours"] else OURS for r in rows],
         text=[str(r["wins"]) + "w" for r in rows], textposition="outside"))
     figure.add_trace(go.Bar(
@@ -314,25 +371,94 @@ def fig_slots(data) -> go.Figure:
         return go.Figure(layout=dict(title="No slot purchases recorded", **LAYOUT))
     daily: dict[str, list] = {}
     for b in buys:
-        day = dt.datetime.fromtimestamp(b["time"], dt.timezone.utc).strftime("%m-%d")
-        daily.setdefault(day, []).append(b["decision_recycle_tao"] or 0)
+        day = dt.datetime.fromtimestamp(
+            b["time"], dt.timezone.utc
+        ).date().isoformat()
+        price = b.get("decision_recycle_tao")
+        if price is None:
+            price = b.get("recycle_tao")
+        if price is not None:
+            daily.setdefault(day, []).append(float(price))
     days = sorted(daily)
     figure = go.Figure()
-    figure.add_trace(go.Bar(x=days, y=[sum(daily[d]) for d in days],
-                            name="TAO spent", marker_color=OURS))
+    counts = [len(daily[d]) for d in days]
+    figure.add_trace(go.Bar(
+        x=days, y=[sum(daily[d]) for d in days],
+        name="TAO spent", marker_color=OURS,
+        text=[f"{count} uid" if count == 1 else f"{count} uids" for count in counts],
+        textposition="outside", customdata=counts,
+        hovertemplate=("%{x}<br>spent %{y:.4f} TAO"
+                       "<br>%{customdata} registrations<extra></extra>"),
+    ))
     figure.add_trace(go.Scatter(x=days, y=[st.median(daily[d]) for d in days],
                                 name="median price per uid", yaxis="y2",
-                                line=dict(color=WARN, width=2)))
-    figure.add_trace(go.Scatter(x=days, y=[len(daily[d]) for d in days],
-                                name="uids bought", yaxis="y3",
-                                line=dict(color=MUTED, width=1, dash="dot")))
+                                mode="lines+markers",
+                                line=dict(color=WARN, width=2),
+                                hovertemplate=("%{x}<br>median %{y:.4f} TAO/uid"
+                                               "<extra></extra>")))
     layout = dict(LAYOUT)
     layout["yaxis2"] = dict(title="TAO / uid", overlaying="y", side="right",
                             gridcolor="rgba(0,0,0,0)")
-    layout["yaxis3"] = dict(overlaying="y", side="right", position=0.97,
-                            showticklabels=False, gridcolor="rgba(0,0,0,0)")
+    layout["yaxis"] = dict(title="TAO spent per day", gridcolor="#242a36",
+                           rangemode="tozero")
+    layout["hovermode"] = "x unified"
     figure.update_layout(**layout)
-    figure.update_yaxes(title="TAO per day", gridcolor="#242a36")
+    figure.update_xaxes(title="day (UTC)", type="date", gridcolor="#242a36")
+    return figure
+
+
+def fig_slot_history(data) -> go.Figure:
+    """Every observed recycle price, purchase, and held-fleet count over time."""
+    rows = [s for s in data["slots"]
+            if s.get("time") is not None and s.get("recycle_tao") is not None]
+    if not rows:
+        figure = go.Figure()
+        figure.update_layout(**LAYOUT)
+        figure.add_annotation(text="No slot-price observations recorded",
+                              xref="paper", yref="paper", x=0.5, y=0.5,
+                              showarrow=False, font=dict(color=MUTED))
+        return figure
+    rows.sort(key=lambda row: row["time"])
+    when = [dt.datetime.fromtimestamp(row["time"], dt.timezone.utc) for row in rows]
+    custom = [[row.get("epoch"), row.get("registered"), row.get("reason") or ""]
+              for row in rows]
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(
+        x=when, y=[row["recycle_tao"] for row in rows], name="recycle price",
+        mode="lines", line=dict(color=OURS, width=1.4), customdata=custom,
+        hovertemplate=("%{x|%Y-%m-%d %H:%M UTC}<br>epoch %{customdata[0]}"
+                       "<br>price %{y:.6f} TAO<br>%{customdata[2]}<extra></extra>")))
+    buys = [(stamp, row) for stamp, row in zip(when, rows) if row.get("executed")]
+    if buys:
+        figure.add_trace(go.Scatter(
+            x=[stamp for stamp, _ in buys],
+            y=[row.get("decision_recycle_tao") or row["recycle_tao"]
+               for _, row in buys],
+            name="purchased", mode="markers",
+            marker=dict(color=WIN, size=10, symbol="diamond",
+                        line=dict(color=INK, width=1)),
+            customdata=[[row.get("epoch"), row.get("registered")]
+                        for _, row in buys],
+            hovertemplate=("PURCHASE · %{x|%Y-%m-%d %H:%M UTC}"
+                           "<br>epoch %{customdata[0]}<br>price %{y:.6f} TAO"
+                           "<br>fleet before purchase %{customdata[1]}<extra></extra>")))
+    fleet_rows = [(stamp, row) for stamp, row in zip(when, rows)
+                  if row.get("registered") is not None]
+    figure.add_trace(go.Scatter(
+        x=[stamp for stamp, _ in fleet_rows],
+        y=[row["registered"] for _, row in fleet_rows],
+        name="hotkeys held", mode="lines", line_shape="hv", yaxis="y2",
+        line=dict(color=WARN, width=1.5),
+        hovertemplate="held %{y:.0f}<extra></extra>"))
+    layout = dict(LAYOUT)
+    layout["hovermode"] = "closest"
+    layout["yaxis"] = dict(title="registration recycle price (TAO)",
+                           gridcolor="#242a36")
+    layout["yaxis2"] = dict(title="hotkeys held", overlaying="y", side="right",
+                            rangemode="tozero", gridcolor="rgba(0,0,0,0)",
+                            tickformat="d")
+    figure.update_layout(**layout)
+    figure.update_xaxes(title="time (UTC)", gridcolor="#242a36")
     return figure
 
 
@@ -342,27 +468,145 @@ def headline(data) -> list[tuple[str, str, str]]:
     ours_epochs = [e for e in order if data["by_epoch"].get(e)]
     wins = sum(1 for e in ours_epochs if min(m["rank"] for m in data["by_epoch"][e]) == 1)
     entries = len(data["ours"])
+    entry_wins = sum(is_entry_win(e) for e in data["ours"])
     top10 = sum(1 for e in data["ours"] if e["rank"] <= 10)
     latest = data["by_epoch"].get(newest) or []
     held = data["registered"].get(newest)
-    recent = [e for e in ours_epochs if e > newest - 20]
-    recent_wins = sum(1 for e in recent
-                      if min(m["rank"] for m in data["by_epoch"][e]) == 1)
+    current_held = data.get("current_held")
+    if held is not None and current_held is not None and held != current_held:
+        held_note = f"{held} at epoch close · {current_held} now"
+    elif current_held is not None:
+        held_note = f"{current_held} held now"
+    elif held is not None:
+        held_note = f"{held} held at epoch close"
+    else:
+        held_note = "held: unknown"
     return [
         ("latest epoch", str(newest), f"field of {data['epochs'][newest]['field_size']}"),
-        ("uids scoring", str(len(latest)),
-         f"{held} held on chain" if held else "held: unknown"),
+        ("uids scoring", str(len(latest)), held_note),
         ("best this epoch", f"{min((m['score'] for m in latest), default=0):.0f}",
          f"winner {data['epochs'][newest]['winner']:.0f}"),
-        ("wins", str(wins), f"{100*wins/max(len(ours_epochs),1):.0f}% of {len(ours_epochs)} epochs"),
-        ("wins, last 20", str(recent_wins), f"{100*recent_wins/max(len(recent),1):.0f}%"),
+        ("winning epochs", str(wins),
+         f"{100*wins/max(len(ours_epochs),1):.0f}% of {len(ours_epochs)} scored epochs"),
+        ("field-beating entries", f"{100*entry_wins/max(entries,1):.1f}%",
+         f"{entry_wins} of {entries} entries"),
         ("top-10 per entry", f"{100*top10/max(entries,1):.0f}%", f"{top10} of {entries} entries"),
     ]
+
+
+def selector_replay_table(
+    result: Path = Path(
+        "analysis/nanobody-gap/monte-carlo-20260921/selector_results.json"
+    ),
+) -> str:
+    """Render the held-out arbitrary-molecule selector comparison."""
+    if not result.is_file():
+        return '<p class="note">Selector replay artifact is not available.</p>'
+    payload = json.loads(result.read_text())
+    labels = {
+        "target-iptm-only": "target ipTM only (shadow)",
+        "fresh-draw-win-probability": "fresh-draw probability (selected)",
+        "confidence-only": "confidence only (shadow)",
+        "validator-plain": "plain aggregate (old)",
+        "design-iiptm-only": "design ipTM only (shadow)",
+    }
+    rows = []
+    for item in payload.get("summary", []):
+        policy = str(item["policy"])
+        decisions = int(item["held_out_decisions"])
+        winner_picks = round(float(item["oracle_pick_rate"]) * decisions)
+        css = ' class="us"' if policy == "fresh-draw-win-probability" else ""
+        rows.append(
+            "<tr%s><td>%s</td><td>%d/%d</td><td>%.1f%%</td>"
+            "<td>%.1f</td><td>%.1f</td></tr>"
+            % (
+                css,
+                labels.get(policy, policy),
+                winner_picks,
+                decisions,
+                100 * float(item["oracle_pick_rate"]),
+                float(item["mean_regret"]),
+                float(item["median_regret"]),
+            )
+        )
+    return (
+        '<table class="grid"><thead><tr><th>selector</th><th>winner picks</th>'
+        '<th>pick rate</th><th>mean regret</th><th>median regret</th></tr></thead>'
+        '<tbody>%s</tbody></table>' % "".join(rows)
+    )
+
+
+def easynano_status_table(
+    experiment_path: Path = Path("analysis/easynano-p20809/experiment.json"),
+    status_path: Path = Path("analysis/easynano-p20809/dashboard_status.json"),
+    summary_path: Path = Path(
+        "analysis/easynano-p20809/results/artifacts/monte_carlo_summary.json"
+    ),
+) -> str:
+    """Render the isolated P20809 basin-search experiment without host details."""
+    if not experiment_path.is_file():
+        return '<p class="note">P20809 EasyNano experiment is not configured.</p>'
+    experiment = json.loads(experiment_path.read_text())
+    target = experiment["target"]
+    config = experiment["easynano"]
+    anchors = experiment["anchors"]
+    status = json.loads(status_path.read_text()) if status_path.is_file() else {}
+
+    def safe(value) -> str:
+        return html_lib.escape(str(value), quote=True)
+
+    def compact(values: list[int]) -> str:
+        runs = []
+        start = previous = values[0]
+        for value in values[1:]:
+            if value != previous + 1:
+                runs.append(str(start) if start == previous else f"{start}–{previous}")
+                start = value
+            previous = value
+        runs.append(str(start) if start == previous else f"{start}–{previous}")
+        return ", ".join(runs)
+
+    expected = len(anchors) * len(config["seeds"])
+    rows = [
+        ("target", f"{target['accession']} / {target['structure']} chain {target['chain']}",
+         f"{target['canonical_residue_range'][0]}–{target['canonical_residue_range'][1]}"),
+        ("configured epitope", compact(target["configured_epitope_residue_ids"]),
+         "canonical PDB residue IDs"),
+        ("EasyNano epitope", compact(target["easynano_epitope_token_indices"]),
+         "zero-based chain-token indices"),
+        ("basin anchors", "ours 36 vs 5EvpaL11 35",
+         f"epochs {anchors[0]['epoch']} and {anchors[1]['epoch']}"),
+        ("search", f"seeds {', '.join(map(str, config['seeds']))}; {config['steps']} steps",
+         f"{expected} isolated design runs"),
+        ("status", status.get("stage", "configured"),
+         f"{status.get('completed_runs', 0)}/{expected} runs complete; production untouched"),
+    ]
+    if summary_path.is_file():
+        summary = json.loads(summary_path.read_text())
+        for comparison in summary.get("comparisons", []):
+            rows.append((
+                f"{comparison['cohort']} best",
+                f"mean ipTM {comparison['anchor_mean_iptm']:.3f} → "
+                f"{comparison['best_mutated_mean_iptm']:.3f}",
+                f"Δ {comparison['mean_iptm_change']:+.3f}; "
+                f"Hamming {comparison['best_mutated_hamming']}; shared seeds 0–2",
+            ))
+    body = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % tuple(map(safe, row))
+        for row in rows
+    )
+    return (
+        '<table class="grid"><thead><tr><th>item</th><th>value</th><th>scope</th>'
+        '</tr></thead><tbody>%s</tbody></table>' % body
+    )
 
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The collector rebuilds this static document in the background.  An open
+     tab otherwise keeps the old DOM forever even after index.html changes. -->
+<meta http-equiv="refresh" content="60">
 <title>Nanobody Tracker</title>
 <style>
  :root {{ color-scheme: dark; }}
@@ -421,8 +665,16 @@ PAGE = """<!doctype html>
     // Plotly sizes to a hidden container as 0-wide, so every plot in the tab
     // being revealed has to be told to resize once it is actually visible.
     if (window.Plotly) {{
-      document.querySelectorAll('section.on .js-plotly-plot').forEach(function (g) {{
-        window.Plotly.Plots.resize(g);
+      // The newly revealed tab has not completed layout synchronously.  A
+      // resize in this same call can still see a zero-width hidden container,
+      // leaving later money plots blank.  Wait for two paint frames, then size
+      // every plot against its visible panel.
+      window.requestAnimationFrame(function () {{
+        window.requestAnimationFrame(function () {{
+          document.querySelectorAll('section.on .js-plotly-plot').forEach(function (g) {{
+            window.Plotly.Plots.resize(g);
+          }});
+        }});
       }});
     }}
     if (location.hash.slice(1) !== name) history.replaceState(null, '', '#' + name);
@@ -440,29 +692,43 @@ PAGE = """<!doctype html>
 
 TABS = [
     ("progress", "Our progress", [
-        ("Are we getting better?", "Trailing 20-epoch win rate and top-10 rate per entry, with fleet size on the right axis. Amber bars are code changes, so a step in the lines can be attributed to a deploy.", "progress"),
+        ("Are we getting better?", "Trailing 20-epoch field-beating-entry rate and top-10 rate per entry, with fleet size on the right axis. An entry wins when it beats the best molecule from every rival coldkey.", "progress"),
         ("Us against the strongest rivals", "Top-10 per entry on a 30-epoch trailing window. This is the measure we are losing on.", "vsrivals"),
     ]),
     ("performance", "Performance", [
         ("Score per epoch", "Our best entry against the winner, the top-10 cut and the field median. Lower is better.", "scores"),
         ("Our score distribution", "Every uid we scored, last 40 epochs. The green line is the winning score.", "distribution"),
-        ("Wins over time", "Cumulative wins and the 20-epoch rolling win rate.", "wins"),
+        ("Winning epochs over time", "Fleet-level epoch wins, capped at one per epoch and kept separate from field-beating entries. Missed rounds remain an operational gap.", "wins"),
     ]),
     ("fleet", "Fleet", [
-        ("Paid for vs actually scored", "Red bars are uids we held and paid for that submitted nothing that epoch.", "fleet"),
+        (
+            "Selector Monte Carlo",
+            "96 molecules, including 72 graph-unseen variants; 12 independent "
+            "passes and 144 leave-one-pass-out basin decisions. Fresh-draw "
+            "probability keeps the validator's unweighted ten-metric objective. "
+            "Single-metric rows are shadow comparisons, not deployment choices.",
+            "selector_replay",
+        ),
+        ("Fleet purchases and recycle price", "Every price observation and purchase, with the number of registered hotkeys on the right axis.", "slot_history"),
+        ("Paid for vs actually scored", "Red bars are paid-for uids that submitted nothing. This is fleet reliability only and is excluded from molecule-quality rates.", "fleet"),
         ("Hotkey age and expected expiry", "Immunity is 5000 blocks; measured median lifespan is 17 epochs.", "expiry"),
         ("Current fleet age", "Ordered by first appearance on the leaderboard.", "ages"),
     ]),
     ("competition", "Competition", [
-        ("Efficiency vs fleet size", "Wins per entry against how many uids each coldkey runs. Bubble area is total entries; big fleets win more in total, this shows who wins more per ticket.", "efficiency"),
-        ("Competitor table", "Every number for the top competitors. Sorted by wins per entry; our row is highlighted.", "table"),
-        ("Rates and fleet size", "Wins and top-10 placements as a percentage of entries, with median fleet size on the right axis.", "competitors"),
+        ("Efficiency vs fleet size", "Field-beating entries against fleet size. If one miner owns positions #1 and #2 ahead of every rival, both entries count as wins.", "efficiency"),
+        ("Competitor table", "Entry wins count every molecule beating the best rival molecule; winning epochs remain a separate fleet-level column.", "table"),
+        ("Rates and fleet size", "Field-beating and top-10 entries as a percentage of submissions, with median fleet size on the right axis.", "competitors"),
     ]),
     ("money", "Money", [
-        ("Yield per subnet", "Alpha earned, valued at the current price, less the registration burn that subnet pays for.", "pnl"),
+        ("Yield per subnet", "Daily balance-to-balance yield by subnet. Alpha purchases and sales are removed; SN68 registration burn is included.", "pnl_history"),
+        ("Cloud cost tracking", "AWS Bills accrued cost is kept separate from the forward Cost Explorer projection. SN2 operating economics exclude explicitly identified one-time migration traffic; Vast runtime is split into SN68 production, research and unattributed spend.", "cloud_costs"),
+        ("AWS charge breakdown", "Cost Explorer charges grouped into the same operational categories as AWS Bills, with billed and recurring amounts kept separate. Transfer usage is collected from the API in GB.", "aws_cost_breakdown"),
+        ("Infrastructure charges per day", "Daily operational cloud charges by provider and cost category. The one-time Ohio migration is retained in the AWS bill reconciliation but excluded here and from net operating economics.", "cloud_daily"),
+        ("Money history", "Daily mining revenue, registration burn, total infrastructure spend, and net result. Provider and service detail is kept in the infrastructure panels above; TAO revenue is valued at the current TAO price.", "money_history"),
+        ("Current yield rate", "Whole-window daily rate by subnet, retained as the current summary beside the daily history.", "pnl"),
         ("Infrastructure against revenue", "vast.ai burn per project versus what that project earns. Compound is an investment that has not paid off yet.", "infra"),
-        ("Projection", "Cumulative TAO at the current rate, and at a 12-entry fleet.", "projection"),
-        ("Slot purchases", "Daily spend, unit price and count.", "slots"),
+        ("Projection", "Forward cumulative TAO at the current net rate, and at a 12-entry fleet.", "projection"),
+        ("Slot purchases", "Every purchase grouped by UTC day: actual spend, median unit price and registration count.", "slots"),
     ]),
 ]
 
@@ -472,9 +738,11 @@ def render(data, out: Path, extra=None) -> Path:
     builders = dict(
         scores=lambda: fig_scores(data), distribution=lambda: fig_distribution(data),
         wins=lambda: fig_wins(data), fleet=lambda: fig_fleet(data),
+        slot_history=lambda: fig_slot_history(data),
         ages=lambda: fig_ages(data), competitors=lambda: fig_competitors(data),
         efficiency=lambda: fig_competitor_efficiency(data),
         table=lambda: progress.competitor_table(competitor_stats(data)),
+        selector_replay=selector_replay_table,
         progress=lambda: progress.fig_our_progress(data, _DATABASE),
         vsrivals=lambda: progress.fig_rates_vs_rivals(data),
         slots=lambda: fig_slots(data))
@@ -493,6 +761,7 @@ def render(data, out: Path, extra=None) -> Path:
             if isinstance(made, str):          # a table, not a figure
                 html = made
             else:
+                _exact_epoch_axis(made)
                 html = made.to_html(
                     full_html=False,
                     include_plotlyjs=("inline" if first else False),
@@ -539,35 +808,43 @@ def main() -> int:
         print(json.dumps(dict(error="no epochs collected; run nanobody_dash.collect")))
         return 1
 
-    tao_usd = arguments.tao_usd
-    if tao_usd is None:
-        try:
-            from .taostats import _api_key, get
-            body = get("price/latest/v1", {"asset": "tao"}, key=_api_key())
-            tao_usd = float((body.get("data") or [{}])[0].get("price"))
-        except Exception:
-            tao_usd = 0.0
-
-    from . import money, panels
+    from . import economics, money, panels
     connection = sqlite3.connect(arguments.database)
+    tao_usd = economics.resolve_tao_usd(connection, arguments.tao_usd)
     burn = money.registration_burn(connection, 8)
     pnl = money.subnet_pnl(connection, tao_usd, burn)
+    pnl_history = money.subnet_pnl_history(connection, tao_usd)
+    money_history = money.daily_money_history(connection, pnl_history, tao_usd)
+    infrastructure_history = money.infrastructure_cost_history(connection)
     split = {}
     if arguments.vast.is_file():
         split = json.loads(arguments.vast.read_text())
+    cloud_state_path = Path("data/cloud_costs.json")
+    cloud_state = json.loads(cloud_state_path.read_text()) \
+        if cloud_state_path.is_file() else {}
     # revenue is attributed to the project that produced it, not the subnet:
     # the nanobody box earns SN68, the compound boxes have earned nothing yet
-    revenue = {"nanobody": next((r["net_usd_per_day"] for r in pnl
-                                 if r["netuid"] == 68), 0.0),
-               "compound": 0.0, "blueprint": 0.0, "unattributed": 0.0}
+    revenue = {"sn68-prod": next((r["net_usd_per_day"] for r in pnl
+                                  if r["netuid"] == 68), 0.0),
+               "research": 0.0, "unattributed": 0.0}
     net_tao = sum(r["net_tao_per_day"] for r in pnl)
     vast_tao = sum(v["usd_per_day"] for v in split.values()) / tao_usd if tao_usd else 0
     entries = len(data["by_epoch"].get(max(data["epochs"]), []))
 
+    current_held = next((slot["registered"] for slot in reversed(data["slots"])
+                         if slot.get("registered") is not None), None)
+    data["current_held"] = current_held
     extra = dict(
         pnl=lambda: panels.fig_subnet_pnl(pnl, tao_usd),
+        pnl_history=lambda: panels.fig_subnet_pnl_history(pnl_history),
+        cloud_costs=lambda: panels.fig_cloud_costs(cloud_state),
+        aws_cost_breakdown=lambda: panels.fig_aws_cost_breakdown(cloud_state),
+        cloud_daily=lambda: panels.fig_infrastructure_cost_history(
+            infrastructure_history),
+        money_history=lambda: panels.fig_money_history(money_history),
         infra=lambda: panels.fig_infra(split, revenue),
-        expiry=lambda: panels.fig_hotkey_expiry(arguments.hotkeys),
+        expiry=lambda: panels.fig_hotkey_expiry(arguments.hotkeys,
+                                                current_total=current_held),
         projection=lambda: panels.fig_projection(net_tao - vast_tao, tao_usd,
                                                  0.21, entries))
     out = render(data, arguments.out, extra=extra)
