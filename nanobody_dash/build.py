@@ -693,7 +693,7 @@ PAGE = """<!doctype html>
 TABS = [
     ("progress", "Our progress", [
         ("Are we getting better?", "Trailing 20-epoch field-beating-entry rate and top-10 rate per entry, with fleet size on the right axis. An entry wins when it beats the best molecule from every rival coldkey.", "progress"),
-        ("Us against the strongest rivals", "Top-10 per entry on a 30-epoch trailing window. This is the measure we are losing on.", "vsrivals"),
+        ("Us against the strongest rivals", "Top-10 per entry on a 30-epoch trailing window. Rivals are the four best on this rate over the last 60 epochs (at least 60 entries); a window with under 20 entries is left blank.", "vsrivals"),
     ]),
     ("performance", "Performance", [
         ("Score per epoch", "Our best entry against the winner, the top-10 cut and the field median. Lower is better.", "scores"),

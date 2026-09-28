@@ -543,3 +543,37 @@ def test_pi_snapshot_is_allowlisted_and_atomically_saved(tmp_path, monkeypatch):
 def test_easynano_panel_is_not_rendered():
     assert all(name != "easynano_status"
                for _, _, entries in build.TABS for _, _, name in entries)
+
+
+def _rival_entries(coldkey, epochs, per_epoch, top10_every):
+    rows = []
+    for i, epoch in enumerate(epochs):
+        for j in range(per_epoch):
+            rank = 5 if (i * per_epoch + j) % top10_every == 0 else 30
+            rows.append({"epoch": epoch, "coldkey": coldkey, "rank": rank, "score": rank})
+    return rows
+
+
+def test_strongest_rivals_rank_by_recent_top10_rate_not_volume_or_history():
+    from nanobody_dash import progress
+    epochs = list(range(1, 101))
+    recent = epochs[-60:]
+    entries = (
+        _rival_entries("US", epochs, 12, 7)
+        + _rival_entries("VOLUME", recent, 10, 5)      # many slots, 20% top-10
+        + _rival_entries("EFFICIENT", recent, 2, 2)    # 2 slots, 50% top-10
+        + _rival_entries("QUIT", epochs[:30], 5, 1)    # 100% top-10, then left
+        + _rival_entries("TINY", recent[:20], 1, 1)    # 100% but too few entries
+    )
+    data = {"entries": entries, "epochs": epochs, "coldkey": "US"}
+    assert progress.strongest_rivals(data, top=4) == ["EFFICIENT", "VOLUME"]
+
+
+def test_rolling_rates_leave_a_gap_when_the_window_drains():
+    from nanobody_dash import progress
+    epochs = list(range(1, 61))
+    per_epoch = {e: [{"rank": 3, "score": 3}] for e in range(1, 31)}
+    _, tens, _ = progress.rolling_rates(per_epoch, epochs, window=30, min_entries=20)
+    assert tens[29] == 100.0          # 30 entries in the window: a real rate
+    assert tens[45] is None           # 15 old entries left: a gap, not 100%
+    assert tens[-1] is None

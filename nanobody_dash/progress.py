@@ -13,7 +13,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
-from .outcomes import annotate_field_beating_entries, is_entry_win
+from .outcomes import is_entry_win
 
 PAPER = "#0e1117"
 CARD = "#161a23"
@@ -24,7 +24,7 @@ WIN = "#66d9a6"
 WARN = "#ff9f6b"
 BAD = "#ef5f6b"
 NET = "#ffd166"
-RIVALS = ("#b388ff", "#ff8fab", "#7ee8fa")
+RIVALS = ("#b388ff", "#ff8fab", "#7ee8fa", "#ffd166")
 LAYOUT = dict(paper_bgcolor=PAPER, plot_bgcolor=CARD, font=dict(color=INK, size=13),
               margin=dict(l=70, r=66, t=28, b=46), hovermode="x unified",
               legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0,
@@ -94,35 +94,43 @@ def fig_our_progress(data, database: Path | None = None, window: int = 20) -> go
     return figure
 
 
-def fig_rates_vs_rivals(data, top: int = 3, window: int = 30,
-                        min_entries: int = 20, recent: int = 60) -> go.Figure:
-    """Our top-10 rate against the strongest rivals, same trailing window.
+def strongest_rivals(data, top: int = 4, recent: int = 60,
+                     min_recent_entries: int = 60) -> list[str]:
+    """Rivals with the best top-10 per entry over the last ``recent`` epochs.
 
-    Rivals are chosen by entry wins over the last ``recent`` epochs, not all
-    time: an all-time ranking keeps plotting a miner that stopped submitting
-    long ago (5Fq7TBKW left at 25293 and still held a slot).
+    Selected on the same rate the chart plots, over a recent window, among
+    coldkeys that submitted at least ``min_recent_entries`` in it.  Counting
+    wins instead favoured fleet size and hid 2-slot 5GhREcsK (37% top-10 per
+    entry); an all-time window kept 5Fq7TBKW long after it quit at 25293.
     """
-    annotate_field_beating_entries(data["entries"])
-    grouped = _by_coldkey(data)
     epochs = sorted(data["epochs"])
     cutoff = epochs[-recent] if len(epochs) >= recent else epochs[0]
-    ranked = sorted(grouped.items(),
-                    key=lambda kv: -sum(1 for epoch, rows in kv[1].items()
-                                        if epoch >= cutoff
-                                        for r in rows if is_entry_win(r)))
+    tally: dict[str, list[int]] = {}
+    for e in data["entries"]:
+        if e["epoch"] < cutoff or e["coldkey"] == data.get("coldkey"):
+            continue
+        row = tally.setdefault(e["coldkey"], [0, 0])
+        row[0] += 1
+        row[1] += e["rank"] <= 10
+    eligible = [(ck, t / n) for ck, (n, t) in tally.items() if n >= min_recent_entries]
+    eligible.sort(key=lambda kv: (-kv[1], kv[0]))
+    return [ck for ck, _ in eligible[:top]]
+
+
+def fig_rates_vs_rivals(data, top: int = 4, window: int = 30,
+                        min_entries: int = 20, recent: int = 60) -> go.Figure:
+    """Our top-10 rate against the strongest rivals, same trailing window."""
+    grouped = _by_coldkey(data)
+    epochs = sorted(data["epochs"])
     figure = go.Figure()
     _, tens, _ = rolling_rates(data["by_epoch"], epochs, window, min_entries)
     figure.add_trace(go.Scatter(x=epochs, y=tens, name="US",
                                 line=dict(color=WIN, width=3)))
-    shown = 0
-    for coldkey, per_epoch in ranked:
-        if coldkey == data.get("coldkey") or shown >= top:
-            continue
-        _, rival_tens, _ = rolling_rates(per_epoch, epochs, window, min_entries)
+    for shown, coldkey in enumerate(strongest_rivals(data, top, recent)):
+        _, rival_tens, _ = rolling_rates(grouped[coldkey], epochs, window, min_entries)
         figure.add_trace(go.Scatter(
             x=epochs, y=rival_tens, name=coldkey[:8] + "...",
             line=dict(color=RIVALS[shown % len(RIVALS)], width=1.6)))
-        shown += 1
     figure.update_layout(**LAYOUT)
     figure.update_yaxes(title=f"top-10 per entry % ({window}-epoch)",
                         gridcolor="#242a36", rangemode="tozero")
