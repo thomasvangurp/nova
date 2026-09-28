@@ -827,7 +827,7 @@ def main() -> int:
     revenue = {"sn68-prod": next((r["net_usd_per_day"] for r in pnl
                                   if r["netuid"] == 68), 0.0),
                "research": 0.0, "unattributed": 0.0}
-    net_tao = sum(r["net_tao_per_day"] for r in pnl)
+    net_tao = money.portfolio_tao_per_day(connection)
     vast_tao = sum(v["usd_per_day"] for v in split.values()) / tao_usd if tao_usd else 0
     entries = len(data["by_epoch"].get(max(data["epochs"]), []))
 
