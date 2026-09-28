@@ -129,9 +129,13 @@ def publish_infrastructure_funding_target() -> bool:
             target, host=SLOT_HOST, user=SLOT_USER,
             remote_path=FUNDING_REMOTE_PATH,
         )
-    except (OSError, ValueError, json.JSONDecodeError, RuntimeError):
+    except Exception as exc:
         # Funding fails closed.  Dashboard refresh and mining do not depend on
-        # a payment instruction reaching the Pi.
+        # a payment instruction reaching the Pi.  Catch everything: a narrow
+        # tuple let a TypeError (money.daily_money_history signature change)
+        # abort every refresh before the build, freezing the dashboard.  Only
+        # the exception class is logged, never its message.
+        print(f"funding target skipped: {type(exc).__name__}", file=sys.stderr)
         return False
     finally:
         connection.close()
