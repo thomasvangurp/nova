@@ -1348,8 +1348,12 @@ def _store_ranking(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--selection-metric-policy", choices=("plain", "historical-drivers", "measured-signal", "iptm-lead"),
-                        default="plain")
+    parser.add_argument(
+        "--selection-metric-policy",
+        choices=("plain",),
+        default="plain",
+        help="compatibility flag; ranking uses the validator's plain dense-rank sum",
+    )
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
     parser.add_argument("--carry-pending-candidates", action="store_true")
@@ -2081,17 +2085,23 @@ def main() -> None:
             finish_model = TimingModel(args.replication_load_seconds, args.replication_seconds_per_observation, 0)
             # TNP consumes time after initial sizing: use the clock again before folding.
             usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
+            # Price the run the loop actually executes (it prunes between
+            # stages), as confirmation_plan does. The flat rounds*width form
+            # cut 96 finalists to ~51 at 20 rounds on 8 GPUs. The per-round
+            # guard inside _run_replication_rounds still stops on overrun.
             while replication_shortlist and (
-                args.replication_rounds * finish_model.round_seconds(len(replication_shortlist), len(gpus))
+                finish_model.staged_seconds(
+                    rounds=args.replication_rounds,
+                    candidates=len(replication_shortlist),
+                    gpus=len(gpus),
+                    rounds_per_stage=args.replication_rounds_per_stage,
+                    keep_fraction=args.replication_keep_fraction,
+                )
                 + args.replication_finish_guard_seconds > usable
             ):
                 replication_shortlist.pop()
         def _prune(alive: list[str], keep: int) -> list[str]:
-            """Keep the best of the alive set on all observations so far.
-
-            Pruning on pooled evidence is the whole point: a candidate dropped
-            here has been measured several times, not guessed at from one draw.
-            """
+            """Keep the best of the alive set on all pooled observations."""
             ranking = args.output_dir / "rounds" / "stage_ranking.json"
             try:
                 subprocess.run(
