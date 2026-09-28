@@ -5,6 +5,15 @@ from dataclasses import dataclass
 import math
 
 
+def _ran_on(row: dict, default: int) -> int:
+    """GPU count a timing record was measured on, else the current count."""
+    try:
+        count = int(row.get("gpu_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return count if count > 0 else default
+
+
 @dataclass(frozen=True)
 class TimingModel:
     load_seconds: float = 45.0
@@ -93,7 +102,10 @@ class TimingModel:
             n = row.get("candidates", row.get("shortlist", 0))
             seconds = row.get("scoring_seconds", row.get("seconds", 0))
             if row.get("phase") in phases and n and seconds:
-                rows.append((math.ceil(n / gpus), float(seconds)))
+                # A round's cost follows the GPU count it RAN on. Seed epochs
+                # from a 4-GPU box divided by 8 doubled the per-candidate
+                # estimate after the 8x migration (9.37 vs 5.5 measured).
+                rows.append((math.ceil(n / _ran_on(row, gpus)), float(seconds)))
         rows = rows[-window:]
         if len(rows) < minimum_samples:
             # NOT a max over whatever happens to exist. Early in an epoch --
@@ -191,9 +203,10 @@ class TimingModel:
             n = row.get("candidates", row.get("shortlist", 0))
             seconds = row.get("scoring_seconds", row.get("seconds", 0))
             if row.get("phase") in phases and n and seconds:
-                if n <= gpus:
+                ran_on = _ran_on(row, gpus)
+                if n <= ran_on:
                     load = max(load, 1.15 * seconds)
-                gpu = max(gpu, 1.15 * max(seconds - load, 0) / math.ceil(n / gpus))
+                gpu = max(gpu, 1.15 * max(seconds - load, 0) / math.ceil(n / ran_on))
             if row.get("phase") in {"layer2_gate", "producer_preparation"} and seconds:
                 cpu = max(cpu, 1.15 * seconds)
         return TimingModel(load, gpu, cpu)
