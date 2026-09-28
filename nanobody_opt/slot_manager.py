@@ -128,6 +128,7 @@ WAIT = "wait"
 REASON_BUY = "below_target_at_decay_floor"
 REASON_BUY_URGENT = "below_target_and_short_of_a_fleet"
 REASON_BUY_RESERVE = "opportunistic_reserve_at_trough"
+REASON_BUY_RENEWAL = "immunity_expiry_at_risk"
 REASON_TARGET_MET = "target_met"
 REASON_RESERVE_PRICE = "reserve_price_above_threshold"
 REASON_OWN_INTERVAL = "already_registered_this_interval"
@@ -136,6 +137,7 @@ REASON_NO_HISTORY = "insufficient_price_history"
 REASON_ABOVE_FLOOR = "price_above_decay_floor"
 REASON_CEILING = "price_above_recycle_ceiling"
 REASON_BUDGET = "daily_budget_would_be_exceeded"
+REASON_SUBMISSION_FREEZE = "validator_submission_window"
 
 
 def default_stagger_blocks(target: int) -> int:
@@ -192,6 +194,10 @@ class ChainState:
     #: metagraph's ``block_at_registration`` for our uids, unioned with our own
     #: decision log.  ``None`` when we hold nothing and have bought nothing.
     last_registration_block: int | None = None
+    #: Oldest registration we still own.  Unlike ``last_registration_block``
+    #: this deliberately excludes the decision log: it answers whether a live
+    #: uid is about to lose immunity, not when we last attempted a purchase.
+    oldest_registration_block: int | None = None
 
     @property
     def registered(self) -> int:
@@ -235,6 +241,17 @@ class SlotPolicy:
     #: best observed cut: one extra purchase, essentially unchanged total
     #: spend, and 44% less time below the twelve-ticket working fleet.
     reserve_max_recycle_tao: float = 0.175
+    #: Renew a working-fleet uid before it can be pruned during the next
+    #: validator epoch.  A normal cheap reserve may wait for a trough; a uid
+    #: inside this window may not, because losing one submission costs more
+    #: than the difference between the reserve and hard price ceilings.
+    renewal_lead_blocks: int = EPOCH_LENGTH
+    #: Do not mutate our roster while the submit host is taking its final
+    #: metagraph snapshot, pulling the ranked pool and committing the fleet.
+    #: A registration during that interval can evict one of the UIDs in the
+    #: just-built plan; this happened during the epoch-25296 rehearsal (13
+    #: planned, 12 still owned by the fresh ownership check).
+    submission_freeze_blocks: int = 90
     max_recycle_tao: float = 0.20
     #: Ignore the purchase spacing while BELOW target, so a deficit can be
     #: closed faster than churn re-opens it.  The price ceiling still applies,
@@ -308,6 +325,12 @@ class SlotPolicy:
         if self.reserve_max_recycle_tao > self.max_recycle_tao:
             raise ValueError(
                 "reserve recycle ceiling cannot exceed the hard ceiling"
+            )
+        if self.renewal_lead_blocks < 0:
+            raise ValueError("renewal lead blocks cannot be negative")
+        if not 0 <= self.submission_freeze_blocks < EPOCH_LENGTH:
+            raise ValueError(
+                "submission freeze must be between zero and one epoch"
             )
         if self.max_recycle_tao <= 0:
             raise ValueError("recycle ceiling must be positive")
@@ -471,6 +494,19 @@ def decide(
     now = time.time() if now is None else now
     shortfall = policy.target - state.registered
     reserve_mode = policy.target <= state.registered < policy.maximum_registered
+    oldest_age = (
+        None
+        if state.oldest_registration_block is None
+        else state.block - state.oldest_registration_block
+    )
+    immunity_remaining = (
+        None if oldest_age is None else IMMUNITY_PERIOD - oldest_age
+    )
+    renewal_due = bool(
+        reserve_mode
+        and immunity_remaining is not None
+        and immunity_remaining <= policy.renewal_lead_blocks
+    )
     floor = projected_floor_tao(history, state.block, policy)
     spent = spend_in_window(spends, now)
     blocks_since_ours = (
@@ -491,6 +527,13 @@ def decide(
         "maximum_registered": policy.maximum_registered,
         "reserve_max_recycle_tao": policy.reserve_max_recycle_tao,
         "reserve_mode": reserve_mode,
+        "oldest_registration_block": state.oldest_registration_block,
+        "oldest_registration_age_blocks": oldest_age,
+        "oldest_immunity_remaining_blocks": immunity_remaining,
+        "renewal_lead_blocks": policy.renewal_lead_blocks,
+        "renewal_due": renewal_due,
+        "blocks_until_epoch_end": EPOCH_LENGTH - (state.block % EPOCH_LENGTH),
+        "submission_freeze_blocks": policy.submission_freeze_blocks,
         "shortfall": shortfall,
         "projected_floor_tao": floor,
         "floor_ratio": (
@@ -511,6 +554,15 @@ def decide(
 
     if state.registered >= policy.maximum_registered:
         return verdict(WAIT, REASON_TARGET_MET)
+    # The Pi snapshots its crew and begins artifact pull at end-75. Freeze one
+    # timer interval earlier so a slot purchase cannot replace a UID between
+    # that snapshot and commit_batch's ownership check. Other miners may still
+    # churn the field; this prevents us from causing the race ourselves.
+    if (
+        policy.submission_freeze_blocks
+        and detail["blocks_until_epoch_end"] <= policy.submission_freeze_blocks
+    ):
+        return verdict(WAIT, REASON_SUBMISSION_FREEZE)
     # Hard rails first: both refuse absolutely and cannot be traded away.
     if state.recycle_tao > policy.max_recycle_tao:
         return verdict(WAIT, REASON_CEILING)
@@ -519,8 +571,22 @@ def decide(
     # At the working target, never chase a reserve.  It is bought only at the
     # empirically useful trough price; below target the normal urgent policy
     # still restores the working fleet up to the independent hard ceiling.
-    if reserve_mode and state.recycle_tao > policy.reserve_max_recycle_tao:
+    if (
+        reserve_mode
+        and not renewal_due
+        and state.recycle_tao > policy.reserve_max_recycle_tao
+    ):
         return verdict(WAIT, REASON_RESERVE_PRICE)
+    # Once the oldest working-fleet uid can expire inside the next validator
+    # epoch, this is maintenance rather than speculation.  Registering either
+    # builds the thirteenth-slot buffer or replaces one of our own unprotected
+    # uids and resets its immunity.  It therefore bypasses the cheap-reserve
+    # threshold and pacing, but never the hard price or daily-spend rails above.
+    # This exact gap cost uid 24 in epoch 25293: the fleet briefly reached 12,
+    # the price stayed above the cheap-reserve threshold, and the unprotected
+    # uid was pruned before validation, leaving only 11 scored entries.
+    if renewal_due:
+        return verdict(BUY, REASON_BUY_RENEWAL)
     # PACING outranks urgency, because both pacing rules are BOUNDED waits and
     # each one protects something urgency cannot buy back -- EXCEPT below
     # target, where the thing they protect is a fleet we do not have.
@@ -817,7 +883,7 @@ def top_up_tao(
     shortfall = max(0.0, target_tao - need_tao)
     if shortfall <= 0:
         return {"converted": False, "why": "free tao already covers the target"}
-    wanted_alpha = shortfall / price_tao
+    wanted_alpha = shortfall / (price_tao * (1.0 - slippage))
     room = max(0.0, daily_cap_alpha - spent_alpha_today)
     if room <= 0:
         return {"converted": False, "why": "daily conversion cap reached",
@@ -922,9 +988,10 @@ def read_chain_state(
         uid for uid, coldkey in enumerate(coldkeys) if coldkey == coldkey_ss58
     )
     registration_blocks = list(getattr(metagraph, "block_at_registration", []) or [])
-    ours_blocks = [
+    live_registration_blocks = [
         int(registration_blocks[uid]) for uid in ours if uid < len(registration_blocks)
     ]
+    ours_blocks = list(live_registration_blocks)
     if log_last_block is not None:
         ours_blocks.append(int(log_last_block))
     return ChainState(
@@ -933,6 +1000,9 @@ def read_chain_state(
         registrations_this_interval=_registrations_this_interval(subtensor, netuid),
         registered_uids=ours,
         last_registration_block=max(ours_blocks) if ours_blocks else None,
+        oldest_registration_block=(
+            min(live_registration_blocks) if live_registration_blocks else None
+        ),
     )
 
 
@@ -1169,6 +1239,7 @@ def _policy_from_args(args: argparse.Namespace) -> SlotPolicy:
         target=args.target,
         reserve_slots=args.reserve_slots,
         reserve_max_recycle_tao=args.reserve_max_recycle_tao,
+        submission_freeze_blocks=args.submission_freeze_blocks,
         urgent_below=args.urgent_below,
         max_recycle_tao=args.max_recycle_tao,
         max_spend_tao_per_day=args.max_spend_tao_per_day,
@@ -1292,6 +1363,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=SlotPolicy().reserve_max_recycle_tao,
         help="buy an optional reserve only at or below this price "
         f"(default: {SlotPolicy().reserve_max_recycle_tao})",
+    )
+    parser.add_argument(
+        "--submission-freeze-blocks",
+        type=int,
+        default=SlotPolicy().submission_freeze_blocks,
+        help="refuse roster-changing registrations this many blocks before "
+        "epoch close (default: %(default)s)",
     )
     parser.add_argument(
         "--decision-log",

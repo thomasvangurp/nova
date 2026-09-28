@@ -112,12 +112,27 @@
     hotkey_sync_vast_label: "{{ lookup('env', 'NOVA_VAST_LABEL') | default('nova-nanobody-pixi', true) }}"
     hotkey_sync_boot_seconds: 300
     hotkey_sync_interval_seconds: 600
+    # This label is the production miner, not an ephemeral research rental.  A
+    # stopped-but-existing instance is always restarted; missing or duplicate
+    # labels fail closed and never rent or destroy infrastructure.
+    producer_guard_service: nova-nanobody-producer-guard
+    producer_guard_script: "{{ slot_host_workspace }}/ensure_vast_running.py"
+    producer_guard_disable_marker: "{{ slot_manager_home }}/.nova/producer-autostart.disabled"
     artifact_backup_service: nova-artifact-backup
     artifact_backup_script: "{{ slot_host_workspace }}/backup_artifacts.sh"
     artifact_backup_dir: "{{ slot_manager_home }}/nova-backups"
-    # A window of snapshots, not one copy: corruption noticed late is only
-    # recoverable if an older good one survives. 24 at 30 minutes is 12 hours.
-    artifact_backup_keep: 24
+    # Mutation history is backed up by the durable Mac, not by the Pi that must
+    # retain enough free space to buy slots and submit every epoch.
+    artifact_backup_on_slot_host: false
+    # Full SQLite snapshots grow with the observation bank, so retention must
+    # not be allowed to consume the submit host. Six half-hour snapshots retain
+    # three hours of rollback while leaving the Pi enough room to submit.
+    artifact_backup_keep: 6
+    # Count-based retention alone eventually fills the disk as the database
+    # grows. Prune oldest verified snapshots until this reserve is restored,
+    # while always retaining at least two independent restore points.
+    artifact_backup_min_free_gib: 20
+    artifact_backup_min_keep: 2
     artifact_backup_boot_seconds: 420
     # Shorter than one 72-minute epoch, so at most one epoch of exact screens
     # is ever at risk.
@@ -164,6 +179,8 @@
           - "{{ slot_manager_reserve_hotkeys }}"
           - --reserve-max-recycle-tao
           - "{{ slot_manager_reserve_max_recycle_tao }}"
+          - --submission-freeze-blocks
+          - "90"
           - --decision-log
           - "{{ slot_manager_decision_log }}"
           - --max-recycle-tao
@@ -650,6 +667,26 @@
         mode: "0644"
       register: hotkey_sync_timer_unit
 
+    - name: Install the nanobody producer guard unit (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-nanobody-producer-guard.service.j2
+        dest: "/etc/systemd/system/{{ producer_guard_service }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the nanobody producer guard timer (Linux)
+      become: true
+      when: ansible_system == 'Linux'
+      ansible.builtin.template:
+        src: templates/nova-nanobody-producer-guard.timer.j2
+        dest: "/etc/systemd/system/{{ producer_guard_service }}.timer"
+        owner: root
+        group: root
+        mode: "0644"
+
     # The TIMER is enabled, never the service: enabling a oneshot service would
     # push once at boot and then never again.
     - name: Schedule the hotkey sync (Linux)
@@ -661,14 +698,32 @@
         enabled: true
         daemon_reload: true
 
+    - name: Schedule the nanobody production guard (Linux)
+      become: true
+      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      ansible.builtin.systemd_service:
+        name: "{{ producer_guard_service }}.timer"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Disable the legacy Pi artifact backup schedule (Linux)
+      become: true
+      when: ansible_system == 'Linux' and not (artifact_backup_on_slot_host | bool)
+      ansible.builtin.systemd_service:
+        name: "{{ artifact_backup_service }}.timer"
+        state: stopped
+        enabled: false
+        daemon_reload: true
+
     - name: Require the artifact backup script in the synced tree (Linux)
-      when: ansible_system == 'Linux'
+      when: ansible_system == 'Linux' and (artifact_backup_on_slot_host | bool)
       ansible.builtin.stat:
         path: "{{ artifact_backup_script }}"
       register: artifact_backup_script_stat
 
     - name: Refuse to schedule a backup with no script to run (Linux)
-      when: ansible_system == 'Linux'
+      when: ansible_system == 'Linux' and (artifact_backup_on_slot_host | bool)
       ansible.builtin.assert:
         that: artifact_backup_script_stat.stat.exists
         fail_msg: >-
@@ -677,7 +732,7 @@
           prevent.
 
     - name: Create the backup directory (Linux)
-      when: ansible_system == 'Linux'
+      when: ansible_system == 'Linux' and (artifact_backup_on_slot_host | bool)
       ansible.builtin.file:
         path: "{{ artifact_backup_dir }}"
         state: directory
@@ -687,7 +742,7 @@
 
     - name: Install the artifact backup unit (Linux)
       become: true
-      when: ansible_system == 'Linux'
+      when: ansible_system == 'Linux' and (artifact_backup_on_slot_host | bool)
       ansible.builtin.template:
         src: templates/nova-artifact-backup.service.j2
         dest: "/etc/systemd/system/{{ artifact_backup_service }}.service"
@@ -697,7 +752,7 @@
 
     - name: Install the artifact backup timer (Linux)
       become: true
-      when: ansible_system == 'Linux'
+      when: ansible_system == 'Linux' and (artifact_backup_on_slot_host | bool)
       ansible.builtin.template:
         src: templates/nova-artifact-backup.timer.j2
         dest: "/etc/systemd/system/{{ artifact_backup_service }}.timer"
@@ -707,7 +762,9 @@
 
     - name: Schedule the artifact backup (Linux)
       become: true
-      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      when: >-
+        slot_manager_activate | bool and ansible_system == 'Linux'
+        and artifact_backup_on_slot_host | bool
       ansible.builtin.systemd_service:
         name: "{{ artifact_backup_service }}.timer"
         state: restarted
@@ -716,7 +773,9 @@
 
     - name: Confirm the backup schedule is armed and has a next run (Linux)
       become: true
-      when: slot_manager_activate | bool and ansible_system == 'Linux'
+      when: >-
+        slot_manager_activate | bool and ansible_system == 'Linux'
+        and artifact_backup_on_slot_host | bool
       ansible.builtin.command:
         argv:
           - systemctl

@@ -1,0 +1,195 @@
+---
+- name: Deploy bounded daily infrastructure funding on the Pi
+  hosts: slot_manager
+  gather_facts: true
+  any_errors_fatal: true
+
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    sweep_repo: /opt/nova-nanobody
+    sweep_python: /opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/python
+    sweep_user: "{{ ansible_user_id }}"
+    sweep_home: "{{ ansible_env.HOME }}"
+    sweep_wallet: mining_ops
+    sweep_network: finney
+    sweep_netuid: 68
+    # The policy contains no secret; keep it beside the target/ledger so the
+    # unprivileged signing service can read it without opening /etc/nova,
+    # whose mode 0700 protects the encrypted coldkey credential.
+    sweep_config: "{{ sweep_home }}/.nova/infra-sweep.json"
+    sweep_target: "{{ sweep_home }}/.nova/infra_funding_target.json"
+    sweep_ledger: "{{ sweep_home }}/.nova/infra_sweeps.jsonl"
+    sweep_credential_name: nova-coldkey-password
+    sweep_credential_path: /etc/nova/coldkey-password.cred
+    sweep_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
+    sweep_destination_ss58: 5EZKgfuBjp2BSmQ9Hi6CJ3hUQYhFmxarqEGATxoK8tPbcN6v
+    sweep_maximum_tao_per_day: 0.5
+    sweep_registration_reserve_tao: 1.0
+    sweep_convert_slippage: 0.005
+    sweep_maximum_convert_alpha_per_day: 100.0
+    # Optional deploy-time acknowledgement of a canary already sent today.
+    # Keep empty for normal deployments; it prevents a second same-day sweep.
+    sweep_seed_completed_day: ""
+    sweep_seed_completed_amount: 0.0
+
+  tasks:
+    - name: Require the Linux signing host
+      ansible.builtin.assert:
+        that: ansible_system == 'Linux'
+
+    - name: Require the existing host-bound coldkey credential without reading it
+      become: true
+      ansible.builtin.stat:
+        path: "{{ sweep_credential_path }}"
+        get_checksum: false
+      register: sweep_credential
+
+    - name: Refuse deployment without the encrypted credential
+      ansible.builtin.assert:
+        that: sweep_credential.stat.exists
+
+    - name: Validate the destination locally without exposing wallet material
+      ansible.builtin.command:
+        argv:
+          - "{{ sweep_python }}"
+          - -c
+          - >-
+            import bittensor as b,sys;
+            sys.exit(0 if b.utils.is_valid_ss58_address({{ sweep_destination_ss58 | to_json }}) else 1)
+      changed_when: false
+
+    - name: Deploy the funding agent
+      become: true
+      ansible.builtin.copy:
+        src: "{{ repo }}/nanobody_opt/infra_sweep.py"
+        dest: "{{ sweep_repo }}/nanobody_opt/infra_sweep.py"
+        owner: "{{ sweep_user }}"
+        group: "{{ sweep_user }}"
+        mode: "0644"
+
+    - name: Deploy the shared conversion helpers
+      become: true
+      ansible.builtin.copy:
+        src: "{{ repo }}/nanobody_opt/slot_manager.py"
+        dest: "{{ sweep_repo }}/nanobody_opt/slot_manager.py"
+        owner: "{{ sweep_user }}"
+        group: "{{ sweep_user }}"
+        mode: "0644"
+
+    - name: Install the fixed destination and hard limits
+      ansible.builtin.copy:
+        dest: "{{ sweep_config }}"
+        owner: "{{ sweep_user }}"
+        group: "{{ sweep_user }}"
+        mode: "0600"
+        content: |
+          {
+            "destination_ss58": {{ sweep_destination_ss58 | to_json }},
+            "maximum_tao_per_day": {{ sweep_maximum_tao_per_day }},
+            "registration_reserve_tao": {{ sweep_registration_reserve_tao }},
+            "convert_slippage": {{ sweep_convert_slippage }},
+            "maximum_convert_alpha_per_day": {{ sweep_maximum_convert_alpha_per_day }}
+          }
+
+    - name: Record an already verified same-day canary when requested
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import json,os,pathlib,sys,time;
+            p=pathlib.Path(sys.argv[1]); day=sys.argv[2]; amount=float(sys.argv[3]);
+            rows=[] if not p.exists() else [json.loads(x) for x in p.read_text().splitlines() if x.strip()];
+            blocked=any(r.get('target_day')==day and r.get('state') in ('transfer_started','complete','uncertain') for r in rows);
+            p.parent.mkdir(parents=True,exist_ok=True);
+            fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600);
+            f=os.fdopen(fd,'a');
+            f.write('' if blocked else json.dumps({'state':'complete','target_day':day,'at':int(time.time()),'amount_tao':amount,'source':'verified canary'})+'\n');
+            f.close()
+          - "{{ sweep_ledger }}"
+          - "{{ sweep_seed_completed_day }}"
+          - "{{ sweep_seed_completed_amount | string }}"
+      when: sweep_seed_completed_day | length > 0
+      changed_when: true
+
+    - name: Install the sweep service
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-infra-sweep.service.j2
+        dest: /etc/systemd/system/nova-infra-sweep.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the sweep timer
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-infra-sweep.timer.j2
+        dest: /etc/systemd/system/nova-infra-sweep.timer
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Add the shared coldkey lock to the slot manager
+      become: true
+      ansible.builtin.template:
+        src: templates/nova-slot-manager.service.j2
+        dest: /etc/systemd/system/nova-slot-manager.service
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        slot_manager_repo: /opt/nova-nanobody
+        slot_manager_user: "{{ sweep_user }}"
+        slot_manager_home: "{{ sweep_home }}"
+        slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
+        slot_manager_credential_name: nova-coldkey-password
+        slot_manager_credential_path: /etc/nova/coldkey-password.cred
+        slot_manager_execute: true
+        slot_manager_max_spend_tao_per_day: 3.4560
+        slot_manager_decision_log: "{{ sweep_home }}/.nova/subnet68_slots.jsonl"
+        slot_manager_exec: >-
+          /opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/python
+          -m nanobody_opt.slot_manager --netuid 68 --network finney
+          --wallet mining_ops --hotkey-prefix nova68-slot --minimum-hotkeys 12
+          --reserve-hotkeys 1 --reserve-max-recycle-tao 0.175
+          --decision-log {{ sweep_home }}/.nova/subnet68_slots.jsonl
+          --max-recycle-tao 0.20 --max-spend-tao-per-day 3.4560
+          --keychain-service-env NOVA_COLDKEY_KEYCHAIN_SERVICE
+          --credential-source auto --lookback-blocks 180
+          --auto-convert-alpha --convert-target-tao 1.0
+          --convert-slippage 0.005 --max-convert-alpha-per-day 250
+          --interval 0 --execute-registrations
+
+    - name: Validate the dry-run policy before enabling the timer
+      ansible.builtin.command:
+        argv:
+          - "{{ sweep_python }}"
+          - -m
+          - nanobody_opt.infra_sweep
+          - --config
+          - "{{ sweep_config }}"
+          - --target
+          - "{{ sweep_target }}"
+          - --ledger
+          - "{{ sweep_ledger }}"
+      args:
+        chdir: "{{ sweep_repo }}"
+      register: sweep_dry_run
+      changed_when: false
+      failed_when: sweep_dry_run.rc != 0
+
+    - name: Reload units and enable both schedules
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      loop:
+        - nova-slot-manager.timer
+        - nova-infra-sweep.timer
+
+    - name: Report only the safe dry-run decision
+      ansible.builtin.debug:
+        msg: "{{ sweep_dry_run.stdout | from_json }}"

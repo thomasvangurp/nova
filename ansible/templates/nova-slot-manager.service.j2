@@ -53,7 +53,10 @@ Environment=PYTHONUNBUFFERED=1
 # The NAME of the credential, never its value.
 Environment={{ slot_manager_keychain_service_env }}={{ slot_manager_credential_name }}
 LoadCredentialEncrypted={{ slot_manager_credential_name }}:{{ slot_manager_credential_path }}
-ExecStart={{ slot_manager_exec }}
+# Serialize every operation that unlocks this coldkey.  The daily
+# infrastructure sweep uses the same lock, so an alpha conversion/transfer can
+# never overlap a slot registration.
+ExecStart=/usr/bin/flock --exclusive --wait 240 /run/lock/nova-coldkey.lock {{ slot_manager_exec }}
 # A registration is a chain write; never run two of these at once. The timer
 # does not stack runs, and oneshot means systemd will not start a second while
 # the first is still going.

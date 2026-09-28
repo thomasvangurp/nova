@@ -1,0 +1,29 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily infrastructure funding from mined TAO (LIVE -- TRANSFERS TAO)
+Documentation=file://{{ sweep_repo }}/nanobody_opt/infra_sweep.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ sweep_user }}
+Group={{ sweep_user }}
+Environment=HOME={{ sweep_home }}
+Environment=PYTHONUNBUFFERED=1
+Environment={{ sweep_keychain_service_env }}={{ sweep_credential_name }}
+LoadCredentialEncrypted={{ sweep_credential_name }}:{{ sweep_credential_path }}
+WorkingDirectory={{ sweep_repo }}
+ExecStart=/usr/bin/flock --exclusive --wait 240 /run/lock/nova-coldkey.lock {{ sweep_python }} -m nanobody_opt.infra_sweep --config {{ sweep_config }} --target {{ sweep_target }} --ledger {{ sweep_ledger }} --wallet {{ sweep_wallet }} --network {{ sweep_network }} --netuid {{ sweep_netuid }} --keychain-service-env {{ sweep_keychain_service_env }} --credential-source systemd --execute
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths={{ sweep_home }}/.nova {{ sweep_home }}/.bittensor
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+

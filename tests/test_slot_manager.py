@@ -53,7 +53,9 @@ def haggling_policy(**kw):
     return sm.SlotPolicy(**kw)
 
 
-def state_at(history, *, regs=0, registered=HOLDING_A_FLEET, last=None):
+def state_at(
+    history, *, regs=0, registered=HOLDING_A_FLEET, last=None, oldest=None
+):
     latest = history[-1]
     return sm.ChainState(
         block=latest.block,
@@ -61,6 +63,7 @@ def state_at(history, *, regs=0, registered=HOLDING_A_FLEET, last=None):
         registrations_this_interval=regs,
         registered_uids=tuple(registered),
         last_registration_block=last,
+        oldest_registration_block=oldest,
     )
 
 
@@ -181,6 +184,27 @@ def test_below_a_working_fleet_an_affordable_price_beats_a_perfect_one():
     )
     assert done.action == sm.WAIT
     assert done.reason == sm.REASON_TARGET_MET
+
+
+def test_slot_purchases_freeze_before_the_validator_submission_window():
+    policy = sm.SlotPolicy()
+    epoch = 25296
+    frozen_block = (epoch + 1) * sm.EPOCH_LENGTH - policy.submission_freeze_blocks
+    history = decaying(frozen_block - 60, 61, 0.10)
+    state = state_at(
+        history, registered=tuple(range(policy.target - 1))
+    )
+
+    frozen = sm.decide(state, history, [], policy)
+
+    assert frozen.action == sm.WAIT
+    assert frozen.reason == sm.REASON_SUBMISSION_FREEZE
+    assert frozen.detail["blocks_until_epoch_end"] == policy.submission_freeze_blocks
+
+    outside = replace(state, block=state.block - 1)
+    active = sm.decide(outside, history, [], policy)
+    assert active.action == sm.BUY
+    assert active.reason == sm.REASON_BUY_URGENT
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +333,57 @@ def test_a_reserve_waits_above_its_trough_price_and_stops_at_one():
     capped = sm.decide(state_at(cheap, registered=thirteen), cheap, [], policy)
     assert capped.action == sm.WAIT
     assert capped.reason == sm.REASON_TARGET_MET
+
+
+def test_expiring_working_uid_is_renewed_above_the_cheap_reserve_price():
+    """A cheap-only reserve allowed uid 24 to disappear before epoch 25293 scored.
+
+    Once an owned uid can lose immunity inside the next validator epoch, the
+    registration is working-fleet maintenance.  It may use the existing hard
+    ceiling and must not be blocked by same-interval/stagger pacing.
+    """
+    policy = sm.SlotPolicy(reserve_slots=1, reserve_max_recycle_tao=0.175)
+    history = decaying(1_000_000, 61, 0.19)
+    block = history[-1].block
+    decision = sm.decide(
+        state_at(
+            history,
+            registered=tuple(range(policy.target)),
+            last=block - 5,
+            oldest=block - sm.IMMUNITY_PERIOD + policy.renewal_lead_blocks,
+        ),
+        history,
+        [],
+        policy,
+    )
+    assert decision.action == sm.BUY
+    assert decision.reason == sm.REASON_BUY_RENEWAL
+    assert decision.detail["renewal_due"] is True
+    assert decision.detail["oldest_immunity_remaining_blocks"] == (
+        policy.renewal_lead_blocks
+    )
+
+
+def test_expiry_renewal_never_overrides_the_hard_price_ceiling():
+    policy = sm.SlotPolicy(reserve_slots=1)
+    history = decaying(
+        1_000_000,
+        61,
+        (policy.max_recycle_tao + 0.01) / sm.DECAY_PER_BLOCK**60,
+    )
+    block = history[-1].block
+    decision = sm.decide(
+        state_at(
+            history,
+            registered=tuple(range(policy.target)),
+            oldest=block - sm.IMMUNITY_PERIOD,
+        ),
+        history,
+        [],
+        policy,
+    )
+    assert decision.action == sm.WAIT
+    assert decision.reason == sm.REASON_CEILING
 
 
 def test_the_reserve_obeys_pacing_and_the_existing_daily_budget():
@@ -711,6 +786,7 @@ def test_reconcile_counts_only_our_uids_that_are_actually_on_chain():
     assert state.registrations_this_interval == 1
     # The stagger keys on the most recent of our registrations, not the oldest.
     assert state.last_registration_block == 1_000_100
+    assert state.oldest_registration_block == 999_000
     assert state.epoch == 1_000_500 // sm.EPOCH_LENGTH
     assert state.interval == 1_000_500 // sm.ADJUSTMENT_INTERVAL
 
@@ -728,6 +804,7 @@ def test_reconcile_on_an_empty_field_takes_the_last_block_from_the_log():
     remembered = sm.read_chain_state(chain, 68, OURS, log_last_block=same_interval)
     assert remembered.registered == 0
     assert remembered.last_registration_block == same_interval
+    assert remembered.oldest_registration_block is None
     # A hotkey we bought and then had pruned spent the interval quota even
     # though nothing survived. That used to block a same-interval rebuy on the
     # grounds that the wait is bounded and stops us bidding the burn price up

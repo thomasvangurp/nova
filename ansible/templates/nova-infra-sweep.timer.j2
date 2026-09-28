@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Retry the daily infrastructure funding check hourly
+
+[Timer]
+Unit=nova-infra-sweep.service
+OnCalendar=*-*-* *:17:00 UTC
+RandomizedDelaySec=120
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+
