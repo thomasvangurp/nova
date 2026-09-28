@@ -165,6 +165,30 @@ def _compiled_metric_ranks(
     return ranks
 
 
+METRIC_INDEX = {metric: index for index, metric in enumerate(METRICS)}
+
+
+def _observation_rank_array(observations: list[dict[str, float]],
+                            compiled: list[dict[str, np.ndarray]]) -> np.ndarray:
+    """Vectorised _compiled_metric_ranks over every observation and field.
+
+    Same searchsorted arithmetic, so ranks are identical; the scalar form was
+    ~10 Python-level binary searches per observation per field and dominated
+    rank_exact once observation history was merged (13 min on 25398).
+    """
+    values = np.asarray([[float(obs[metric]) for metric in METRICS] for obs in observations],
+                        dtype=np.float64).reshape(len(observations), len(METRICS))
+    ranks = np.empty((len(observations), len(compiled), len(METRICS)), dtype=np.float64)
+    for f, field in enumerate(compiled):
+        for j, (metric, direction) in enumerate(METRICS.items()):
+            column = field[metric]
+            if direction == "min":
+                ranks[:, f, j] = np.searchsorted(column, values[:, j], side="left") + 1
+            else:
+                ranks[:, f, j] = len(column) - np.searchsorted(column, values[:, j], side="right") + 1
+    return ranks
+
+
 # Win-probability objective.  The published rank-sum weights ten metrics
 # equally, but only the confidence metrics carry over from our scorer to the
 # validator.  Replayed on 132 epochs of our own pools with fresh draws, ordering
@@ -835,28 +859,24 @@ def main() -> None:
             or normalized_sequence in excluded_sequences
         ):
             continue
-        category_matrix = [
-            [
-                _compiled_category_rank_sums(metrics, field)
-                for field in compiled_fields
-            ]
-            for metrics in observations
-        ]
+        # ranks[observation, field, metric], each rank computed once and
+        # shared by the category sums and the win objective.
+        rank_array = _observation_rank_array(observations, compiled_fields)
+        category_sums = {
+            category: rank_array[:, :, [METRIC_INDEX[m] for m in names]].sum(axis=2)
+            for category, names in METRIC_CATEGORIES.items()
+        }
         # Keep the objective identical to the validator. Repeated observations
         # feed the fresh-draw distribution; they do not justify changing the
         # ten-metric arithmetic into a hand-weighted surrogate objective.
-        score_matrix = [
-            [float(sum(categories.values())) for categories in by_field]
-            for by_field in category_matrix
-        ]
+        score_matrix = rank_array.sum(axis=2).tolist()
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]
         # Gates and diagnostics keep the full ten-metric scores; only the
         # fresh-draw win probability ranks on the chosen objective.
         win_per_observation = per_observation if args.win_objective == "full" else [
-            float(np.median([_objective_rank_sum(metrics, field, args.win_objective)
-                             for field in compiled_fields]))
-            for metrics in observations
+            float(np.median(row)) for row in rank_array[
+                :, :, [METRIC_INDEX[m] for m in CONFIDENCE_OBJECTIVE]].sum(axis=2)
         ]
         observation_competitive = [
             score <= args.competitive_score_threshold
@@ -921,11 +941,7 @@ def main() -> None:
             for category in ("confidence", "physical_interaction", "developability")
         }
         category_distributions = {
-            category: [
-                float(categories[category])
-                for by_field in category_matrix
-                for categories in by_field
-            ]
+            category: category_sums[category].reshape(-1).tolist()
             for category in ("confidence", "physical_interaction", "developability")
         }
         p90_categories = {
