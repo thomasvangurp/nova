@@ -1,11 +1,11 @@
 """Rank exact nanobody observations with the validator's dense-rank objective.
 
 BoltzGen inference is stochastic, so a live finalist must survive more than one
-exact observation. This utility applies the validator's per-metric dense ranks
-to historical live fields. Selection uses the complete observation-by-field
-score distribution: first the probability of a competitive score, then its
-upper tail. Lower is better. These are robustness statistics, not a prediction
-of the next stochastic validator observation.
+exact observation. This utility applies the validator's unweighted per-metric
+dense ranks to historical live fields. Final selection uses the intact
+observation score vectors to calculate each molecule's empirical probability
+of beating the other qualified molecules on one fresh draw. Lower rank sums are
+better; p90 and threshold rates remain qualification diagnostics only.
 """
 from __future__ import annotations
 
@@ -13,142 +13,95 @@ import argparse
 import hashlib
 import json
 import math
+import statistics
 import sys
 from collections import defaultdict
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import os
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nanobody_opt import publication_gates
-from nanobody_opt import consensus_policy
-import statistics
-
-from nanobody_opt import shrinkage
+from nanobody_opt import consensus_policy, publication_gates, shrinkage
 from nanobody_opt.local_neighborhood import (
     FIELD_CONSENSUS_THRESHOLD,
     field_consensus,
 )
-from nanobody_opt.simulate_round import (
-    METRICS,
-    METRIC_CATEGORIES,
-)
-from nanobody_opt.win_probability import (
-    MINIMUM_SPREAD,
-    rank_by_win_probability,
-    win_probability,
-)
+from nanobody_opt.mutation_network import load_exact_artifacts
 from nanobody_opt.pose_stability import (
     exact_sample_selections,
     exact_structure_paths,
     residue_numbers,
     summarize_sequence_structures,
 )
-
+from nanobody_opt.simulate_round import METRIC_CATEGORIES, METRICS
+from nanobody_opt.win_probability import (
+    rank_by_fresh_draw_probability,
+)
 
 LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
-SELECTION_METRIC_POLICIES = (
-    "plain", "historical-drivers", "measured-signal", "iptm-lead",
-)
-#: |Spearman| of each metric against confidence_rank ACROSS THE FIELD. This is
-#: what the reverted weighting leaned on, and it is the wrong question: it says
-#: how much a metric moves the validator's rank, not whether WE can measure it.
-CONFIDENCE_DRIVER_STRENGTH = {
-    "interaction_pae": 0.812,
-    "min_design_to_target_pae": 0.729,
-    "design_to_target_iptm": 0.725,
-    "design_ptm": 0.585,
-    "design_iiptm": 0.463,
-}
-
-#: Spearman of OUR OWN measurement of each metric against the validator's
-#: realized confidence_rank, over 218 sequences we submitted and the validator
-#: then scored (epochs 25225-25250). This is the quantity that decides whether
-#: a metric is useful to us, and it ranks the metrics almost opposite to
-#: CONFIDENCE_DRIVER_STRENGTH:
-#:
-#:     metric                     field driver   our measurement
-#:     interaction_pae               0.812           0.129
-#:     min_design_to_target_pae      0.729           0.068
-#:     design_to_target_iptm         0.725           0.263
-#:     design_ptm                    0.585           0.217
-#:     design_iiptm                  0.463           0.075
-#:
-#: The two metrics the reverted policy weighted most heavily are the two we
-#: measure worst, which is the likeliest reason eleven epochs of it made our
-#: ranks worse rather than better.
-MEASURED_SIGNAL_STRENGTH = {
-    "design_to_target_iptm": 0.263,
-    "design_ptm": 0.217,
-    "interaction_pae": 0.129,
-    "design_iiptm": 0.075,
-    "min_design_to_target_pae": 0.068,
-}
-
-#: Mean (our fold - validator) over those same 218 paired sequences. Our screen
-#: reads EVERY confidence metric optimistically, and design_iiptm by +0.0087 --
-#: as large as the entire field spread on these packed metrics. Ranking an
-#: inflated value against the validator's own field places us far higher than
-#: we land, and selecting the maximum then preferentially picks the largest
-#: error. Subtracting the bias before the rank lookup removes the systematic
-#: half of that; it cannot remove the variance.
-MEASUREMENT_BIAS = {
-    "design_ptm": 0.00078,
-    "design_iiptm": 0.00867,
-    "design_to_target_iptm": 0.00071,
-    "min_design_to_target_pae": -0.01154,
-    "interaction_pae": -0.03304,
-}
-
-#: Off would mean knowingly ranking a biased value against an unbiased field.
-BIAS_CORRECTION = os.environ.get("NANOBODY_METRIC_BIAS_CORRECTION", "1") == "1"
+VALIDATOR_DUPLICATE_IDENTITY = 0.95
 
 
-def bias_corrected(metrics: dict[str, float]) -> dict[str, float]:
-    """Our measured metrics, shifted onto the validator's scale."""
-    if not BIAS_CORRECTION:
-        return metrics
-    return {k: (v - MEASUREMENT_BIAS[k])
-            if (k in MEASUREMENT_BIAS and isinstance(v, (int, float))) else v
-            for k, v in metrics.items()}
+def _exact_run_ids(paths: list[Path]) -> set[str]:
+    result = set()
+    for path in paths:
+        raw = path.read_bytes()
+        payload = json.loads(raw)
+        result.add(str(payload.get("observation_id") or hashlib.sha256(raw).hexdigest()))
+    return result
 
 
-def selection_metric_weights(policy: str = "plain") -> dict[str, float]:
-    """Historical selection weights; validator category arithmetic stays intact."""
-    if policy not in SELECTION_METRIC_POLICIES:
-        raise ValueError("unknown selection metric policy")
-    if policy == "plain":
-        return {metric: 1.0 for metric in METRICS}
-    if policy == "iptm-lead":
-        # Measured best out of sample: +0.211 mean Spearman across 22 held-out
-        # epochs, positive in 16 of them, against +0.114 for historical-drivers
-        # and +0.099 for plain. Concentrating on the one metric we measure well
-        # beats blending it with four we do not.
-        return {metric: (1.0 if metric == "design_to_target_iptm" else 0.0)
-                for metric in METRICS}
-    if policy == "measured-signal":
-        total = sum(MEASURED_SIGNAL_STRENGTH.values())
-        return {metric: (MEASURED_SIGNAL_STRENGTH[metric] / total * 5
-                         if metric in MEASURED_SIGNAL_STRENGTH else 1.0)
-                for metric in METRICS}
-    total = sum(CONFIDENCE_DRIVER_STRENGTH.values())
-    return {metric: (CONFIDENCE_DRIVER_STRENGTH[metric] / total * 5
-                     if metric in CONFIDENCE_DRIVER_STRENGTH else 1.0)
-            for metric in METRICS}
+def _sequence_identity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    shared = sum(a == b for a, b in zip(left, right))
+    return shared / max(len(left), len(right))
 
 
-def _compiled_selection_score(metrics: dict[str, float],
-                              compiled: dict[str, np.ndarray],
-                              weights: dict[str, float]) -> float:
-    """Rank OUR metrics in the validator's field, on the validator's scale."""
-    ranks = _compiled_metric_ranks(bias_corrected(metrics), compiled)
-    return float(sum(weights[metric] * rank for metric, rank in ranks.items()))
+def _with_diversity_reserve(
+    ranked: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+    count: int,
+    *,
+    maximum_identity: float = VALIDATOR_DUPLICATE_IDENTITY,
+) -> tuple[list[dict[str, Any]], int]:
+    """Append the smallest ranked tail that exposes ``count`` distinct tickets.
+
+    The top-N remains intact.  Reserve candidates are discovered by scanning
+    the full ordered cohort, then emitted in that same order, so the ranker's
+    best-first contract is preserved while downstream fleet selection can see
+    beyond a single overrepresented basin.
+    """
+    if count <= 0:
+        return selected, 0
+    reserve: list[str] = []
+    for candidate in ranked:
+        sequence = str(candidate.get("sequence") or "").strip().upper()
+        if not sequence or any(
+            _sequence_identity(sequence, other) >= maximum_identity
+            for other in reserve
+        ):
+            continue
+        reserve.append(sequence)
+        if len(reserve) >= count:
+            break
+    wanted = {
+        str(candidate.get("sequence") or "").strip().upper()
+        for candidate in selected
+    }
+    extra = set(reserve) - wanted
+    wanted.update(reserve)
+    augmented = [
+        candidate
+        for candidate in ranked
+        if str(candidate.get("sequence") or "").strip().upper() in wanted
+    ]
+    return augmented, len(extra)
 
 
 def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -163,12 +116,10 @@ def _compile_validator_field(field: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-# The assessment below records the earlier reversion. Plain remains the default;
-# the user-requested historical-drivers policy now restores epoch 25131's
-# checkpoint-proven selection weights. See LAST_WINNING_CONFIG_2026-09-16.md.
-# Selection orders on the plain sum of dense ranks, the same quantity the
-# validator's own score is built from. A weighted variant ran for eleven epochs
-# in two shapes and is reverted.
+# The selector deliberately has no per-metric weighting policy. Selection uses
+# the same plain dense-rank sum as the validator and represents stochastic
+# uncertainty through repeated observations and fresh-draw win probability.
+# A weighted variant ran for eleven epochs in two shapes and is reverted.
 #
 # What it was for: over 25103-25112 our median category ranks against the field
 # were level on developability (-0.2) and physical interaction (-0.7) and behind
@@ -212,6 +163,55 @@ def _compiled_metric_ranks(
             ) + 1
         ranks[metric] = float(rank)
     return ranks
+
+
+# Win-probability objective.  The published rank-sum weights ten metrics
+# equally, but only the confidence metrics carry over from our scorer to the
+# validator.  Replayed on 132 epochs of our own pools with fresh draws, ordering
+# win probability on these three plus the construction constraints below beat
+# the ten-metric order by +2.5 top-10 points (95% CI +0.9..+4.1).
+CONFIDENCE_OBJECTIVE = ("design_to_target_iptm", "design_iiptm", "design_ptm")
+
+
+def _objective_rank_sum(metrics: dict[str, float], compiled: dict[str, np.ndarray],
+                        objective: str) -> float:
+    ranks = _compiled_metric_ranks(metrics, compiled)
+    if objective == "confidence":
+        return float(sum(ranks[metric] for metric in CONFIDENCE_OBJECTIVE))
+    return float(sum(ranks.values()))
+
+
+def _public_edit_distance(sequences: list[str], public: set[str], cap: int = 3) -> dict[str, int]:
+    """Hamming distance to the nearest public sequence, capped at ``cap + 1``.
+
+    Same-length sequences only.  Pigeonhole index: any match within ``cap``
+    edits shares at least one of ``cap + 1`` blocks exactly.
+    """
+    blocks = cap + 1
+    by_length: dict[int, dict[tuple[int, str], list[str]]] = defaultdict(lambda: defaultdict(list))
+    bounds_by_length: dict[int, list[tuple[int, int]]] = {}
+    for sequence in public:
+        n = len(sequence)
+        bounds = bounds_by_length.setdefault(
+            n, [(n * b // blocks, n * (b + 1) // blocks) for b in range(blocks)])
+        for b, (lo, hi) in enumerate(bounds):
+            by_length[n][(b, sequence[lo:hi])].append(sequence)
+    distances: dict[str, int] = {}
+    for sequence in sequences:
+        n = len(sequence); best = cap + 1
+        index = by_length.get(n)
+        if index:
+            seen: set[str] = set()
+            for b, (lo, hi) in enumerate(bounds_by_length[n]):
+                for other in index.get((b, sequence[lo:hi]), ()):
+                    if other in seen:
+                        continue
+                    seen.add(other)
+                    d = sum(x != y for x, y in zip(sequence, other))
+                    if d < best:
+                        best = d
+        distances[sequence] = best
+    return distances
 
 
 def _compiled_category_rank_sums(
@@ -264,7 +264,11 @@ def _order_candidates(
     ranked = list(candidates)
     consensus_policy.checked_policy(consensus_ranking_policy)
     if selection_order == "win-probability":
-        ranked = rank_by_win_probability(ranked, competitive_score_threshold)
+        # Estimate the event that actually pays: each candidate receives one
+        # untouched draw of the validator's complete ten-metric objective and
+        # the best draw wins.  The former normal-tail approximation optimized
+        # crossing a fixed threshold instead of beating this candidate field.
+        ranked = rank_by_fresh_draw_probability(ranked)
         ranked = consensus_policy.ordered_candidates(ranked, consensus_ranking_policy)
     elif selection_order == "p90":
         ranked.sort(key=lambda item: (
@@ -296,15 +300,11 @@ def _pose_order_is_subset_invariant(
 ) -> bool:
     """Whether pose failures cannot reorder the unevaluated tail.
 
-    The p90 and competitive-rate orders contain no cohort statistic.  The win
-    estimator normally does: removing a pose failure changes its cohort mean
-    and pooled spread, so stopping after the first ``limit`` survivors would be
-    an ordering change.  There is one common live case we can prove safe.  When
-    every candidate has one observation, every candidate uses the same spread
-    floor and the same cohort-mean shrinkage; probability is strictly monotone
-    in its one score.  Requiring a positive probability even at the worst
-    possible survivor-cohort mean also keeps the ``has_chance`` tier invariant
-    instead of relying on floating-point underflow behavior.
+    The p90 and competitive-rate orders contain no cohort statistic.  Fresh-
+    draw probability does: removing a pose failure changes the opponent field.
+    There is one common live case we can prove safe.  With one observation per
+    candidate, the empirical tournament order is exactly the score order (ties
+    use the same stable fallback), so removing candidates cannot reverse it.
     """
     if selection_order != "win-probability":
         return True
@@ -312,19 +312,7 @@ def _pose_order_is_subset_invariant(
         item.get("per_observation_median_rank_sum") or []
         for item in candidates
     ]
-    if not score_rows or any(len(scores) != 1 for scores in score_rows):
-        return False
-    worst_cohort_mean = max(float(scores[0]) for scores in score_rows)
-    return all(
-        win_probability(
-            [float(scores[0])],
-            competitive_score_threshold,
-            fallback_spread=MINIMUM_SPREAD,
-            spread=MINIMUM_SPREAD,
-            cohort_mean=worst_cohort_mean,
-        ) > 0.0
-        for scores in score_rows
-    )
+    return bool(score_rows) and all(len(scores) == 1 for scores in score_rows)
 
 
 def settled_deviation_count(sequence: str, consensus: dict) -> int:
@@ -344,6 +332,26 @@ def settled_deviation_count(sequence: str, consensus: dict) -> int:
         if position < len(sequence) and sequence[position] != residue:
             count += 1
     return count
+
+
+def compact_persisted_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop the transient observation-by-field matrix from a rank artifact.
+
+    ``per_observation_field_rank_sums`` is needed while this process computes
+    qualification statistics, but no downstream consumer reads it.  Persisting
+    it duplicated every historical field score for every shortlisted sequence:
+    live screen/stage rank files reached ~810 MB each and eventually filled the
+    producer disk.  Keep the per-observation medians and every derived statistic
+    that selection/publication consumes; record only the matrix dimensions for
+    auditability.
+    """
+    persisted = dict(item)
+    matrix = persisted.pop("per_observation_field_rank_sums", None) or []
+    persisted["field_replay_matrix_shape"] = [
+        len(matrix),
+        max((len(row) for row in matrix), default=0),
+    ]
+    return persisted
 
 
 def _observations(paths: list[Path], target: str) -> dict[str, list[dict[str, float]]]:
@@ -371,7 +379,8 @@ def _observations(paths: list[Path], target: str) -> dict[str, list[dict[str, fl
 
 
 def _historical_observations(database: Path, target: str,
-                             known: dict[str, list[dict[str, float]]]
+                             known: dict[str, list[dict[str, float]]],
+                             excluded_run_ids: set[str] | None = None,
                              ) -> tuple[dict[str, list[dict[str, float]]], int]:
     """Folds from earlier epochs, which are still valid evidence today.
 
@@ -399,12 +408,19 @@ def _historical_observations(database: Path, target: str,
         return found, 0
     try:
         rows = connection.execute(
-            "SELECT n.sequence, o.metrics_json FROM observations o "
+            "SELECT n.sequence, o.metrics_json, x.run_id "
+            "FROM observations o "
             "JOIN nodes n ON n.id = o.node_id "
-            "WHERE n.target = ? AND o.source LIKE 'live_exact%' "
+            "JOIN exact_run_observations x "
+            "ON x.observation_id=o.observation_id AND x.target=n.target "
+            "JOIN exact_runs r ON r.target=x.target "
+            "AND r.run_id=x.run_id AND r.complete=1 "
+            "WHERE n.target = ? AND o.source='local_exact_raw' "
             "AND o.metrics_json IS NOT NULL",
             (target,))
-        for sequence, blob in rows:
+        for sequence, blob, run_id in rows:
+            if str(run_id or "") in (excluded_run_ids or set()):
+                continue
             try:
                 metrics = json.loads(blob)
             except (TypeError, ValueError):
@@ -499,13 +515,26 @@ def fetch_leaderboard_fields(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--selection-metric-policy", choices=SELECTION_METRIC_POLICIES,
-                        default="plain", help="selection score only; raw validator estimates are unchanged")
-    parser.add_argument("--exact", action="append", required=True, type=Path)
+    parser.add_argument(
+        "--selection-metric-policy",
+        choices=("plain",),
+        default="plain",
+        help="compatibility field; only the validator's plain dense-rank sum is supported",
+    )
+    parser.add_argument("--exact", action="append", default=[], type=Path)
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--target", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument(
+        "--diversity-reserve-count",
+        type=int,
+        default=0,
+        help=(
+            "append the minimum ranked tail needed to expose this many "
+            "pairwise validator-distinct sequences"
+        ),
+    )
     parser.add_argument(
         "--minimum-observations",
         type=int,
@@ -616,12 +645,33 @@ def main() -> None:
     parser.add_argument("--minimum-median-contact-jaccard", type=float, default=0.0)
     parser.add_argument("--maximum-cdr3-rmsd", type=float)
     parser.add_argument("--minimum-epitope-occupancy", type=float, default=0.0)
+    parser.add_argument("--win-objective", choices=("confidence", "full"), default="confidence",
+                        help="metrics the fresh-draw win probability ranks on; gates and "
+                             "diagnostics keep the full ten-metric rank sum")
+    parser.add_argument("--maximum-public-edits", type=int, default=2,
+                        help="keep candidates within this many edits of a recent public "
+                             "sequence (and not identical to one); 0 disables")
+    parser.add_argument("--public-parent-window", type=int, default=600,
+                        help="most recent archive rows that count as public parents")
+    parser.add_argument("--liability-quantile", type=float, default=0.9,
+                        help="drop candidates whose mean liability score is above this "
+                             "quantile of the candidate pool; 0 disables")
+    parser.add_argument("--minimum-constrained-pool", type=int, default=40,
+                        help="skip the construction constraints for this run if fewer "
+                             "candidates than this would survive them")
     args = parser.parse_args()
+
+    if not args.exact and args.observation_history is None:
+        parser.error("at least one --exact or --observation-history is required")
 
     if args.paired_consensus_shortlist and (
         args.selection_order != "win-probability" or args.limit < 2 or args.limit % 2
     ):
         parser.error("paired consensus shortlist requires win-probability and an even limit >= 2")
+    if args.diversity_reserve_count < 0:
+        parser.error("--diversity-reserve-count cannot be negative")
+    if args.paired_consensus_shortlist and args.diversity_reserve_count:
+        parser.error("diversity reserve is not supported by the paired shortlist")
 
     if args.minimum_observations < 1:
         parser.error("--minimum-observations must be positive")
@@ -728,10 +778,36 @@ def main() -> None:
             args.exact, args.target, pose_kind="writer"
         )
         sample_selections = exact_sample_selections(args.exact, args.target)
+        if args.observation_history is not None:
+            current_run_ids = _exact_run_ids(args.exact)
+            for sequence, records in load_exact_artifacts(
+                args.observation_history, target=args.target
+            ).items():
+                for record in records:
+                    if str(record.get("run_id") or "") in current_run_ids:
+                        continue
+                    confidence = record.get("confidence_path")
+                    writer = record.get("writer_path")
+                    if confidence:
+                        structure_paths.setdefault(sequence, []).append(
+                            Path(str(confidence))
+                        )
+                    if writer:
+                        writer_structure_paths.setdefault(sequence, []).append(
+                            Path(str(writer))
+                        )
+                    selection = record.get("sample_selection")
+                    if isinstance(selection, dict):
+                        sample_selections.setdefault(sequence, []).append(selection)
     observations_by_sequence = _observations(args.exact, args.target)
     if args.observation_history is not None:
+        exact_run_ids = _exact_run_ids(args.exact)
         history, added = _historical_observations(
-            args.observation_history, args.target, observations_by_sequence)
+            args.observation_history,
+            args.target,
+            observations_by_sequence,
+            excluded_run_ids=exact_run_ids,
+        )
         for sequence, folds in history.items():
             observations_by_sequence[sequence].extend(folds)
         depths = [len(v) for v in observations_by_sequence.values()] or [0]
@@ -751,7 +827,6 @@ def main() -> None:
                 observations_by_sequence, tuple(METRICS))
         except (ValueError, statistics.StatisticsError):
             shrunk_by_sequence = {}
-    selection_weights = selection_metric_weights(args.selection_metric_policy)
     ranked = []
     for sequence, observations in observations_by_sequence.items():
         normalized_sequence = sequence.strip().upper()
@@ -767,18 +842,22 @@ def main() -> None:
             ]
             for metrics in observations
         ]
-        # A historical policy may weight selection; category estimates always
-        # retain the validator's unweighted arithmetic.
+        # Keep the objective identical to the validator. Repeated observations
+        # feed the fresh-draw distribution; they do not justify changing the
+        # ten-metric arithmetic into a hand-weighted surrogate objective.
         score_matrix = [
-            [_compiled_selection_score(metrics, field, selection_weights)
-             for field in compiled_fields]
-            for metrics in observations
-        ] if args.selection_metric_policy != "plain" else [
             [float(sum(categories.values())) for categories in by_field]
             for by_field in category_matrix
         ]
         score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
         per_observation = [float(np.median(scores)) for scores in score_matrix]
+        # Gates and diagnostics keep the full ten-metric scores; only the
+        # fresh-draw win probability ranks on the chosen objective.
+        win_per_observation = per_observation if args.win_objective == "full" else [
+            float(np.median([_objective_rank_sum(metrics, field, args.win_objective)
+                             for field in compiled_fields]))
+            for metrics in observations
+        ]
         observation_competitive = [
             score <= args.competitive_score_threshold
             for score in per_observation
@@ -896,7 +975,8 @@ def main() -> None:
             "score_p90": score_p90,
             "score_worst": float(np.max(score_distribution)),
             "per_observation_field_rank_sums": score_matrix,
-            "per_observation_median_rank_sum": per_observation,
+            "per_observation_median_rank_sum": win_per_observation,
+            "per_observation_full_rank_sum": per_observation,
             "p90_category_rank_sums": p90_categories,
             "aggregate_median_rank_sum": float(np.median(aggregate_field_scores)),
             "aggregate_p90_rank_sum": float(np.quantile(aggregate_field_scores, 0.9)),
@@ -943,6 +1023,28 @@ def main() -> None:
             if item["observation_count"] >= observation_floor
         ]
 
+    constrained = list(ranked)
+    if args.maximum_public_edits > 0 and constrained:
+        public = set(full_archive.sequence.dropna().astype(str).str.strip().str.upper()
+                     .tail(args.public_parent_window))
+        distance = _public_edit_distance([item["sequence"] for item in constrained], public,
+                                         cap=args.maximum_public_edits)
+        constrained = [item for item in constrained
+                       if 1 <= distance[item["sequence"]] <= args.maximum_public_edits]
+    if 0 < args.liability_quantile < 1 and constrained:
+        liabilities = sorted(float(item["metrics"]["liability_score"]) for item in constrained)
+        cut = liabilities[int(args.liability_quantile * (len(liabilities) - 1))]
+        constrained = [item for item in constrained
+                       if float(item["metrics"]["liability_score"]) <= cut]
+    if args.maximum_public_edits > 0 or 0 < args.liability_quantile < 1:
+        if len(constrained) >= args.minimum_constrained_pool:
+            print(f"CONSTRUCTION_CONSTRAINTS_APPLIED kept={len(constrained)} of={len(ranked)}",
+                  flush=True)
+            ranked = constrained
+        else:
+            print(f"CONSTRUCTION_CONSTRAINTS_SKIPPED kept={len(constrained)} of={len(ranked)} "
+                  f"minimum={args.minimum_constrained_pool}", flush=True)
+
     # Pose stability dominates strict runtime.  Order the cheap scalar evidence
     # first, then walk that order.  Early stopping is used only where removing a
     # pose failure provably cannot change the order; mixed-depth win-probability
@@ -954,6 +1056,7 @@ def main() -> None:
     pose_early_stop = (
         pose_challenge is not None
         and not args.paired_consensus_shortlist
+        and not args.diversity_reserve_count
         and _pose_order_is_subset_invariant(
             preliminary,
             args.selection_order,
@@ -1018,6 +1121,11 @@ def main() -> None:
             consensus_policy.paired_shortlist(ranked, args.limit),
             args.consensus_ranking_policy,
         ) if args.paired_consensus_shortlist else ranked[:args.limit]
+    )
+    selected, diversity_reserve_added = _with_diversity_reserve(
+        ranked,
+        selected,
+        args.diversity_reserve_count,
     )
     if not selected:
         raise SystemExit(
@@ -1085,14 +1193,18 @@ def main() -> None:
         "rank_method": "dense",
         "selection_order": args.selection_order,
         "selection_metric_policy": args.selection_metric_policy,
-        "selection_metric_weights": selection_weights,
-        "prediction_event": "selection_rank_sum_below_fixed_threshold",
+        "prediction_event": "best_selection_rank_sum_on_one_fresh_draw",
         "consensus_ranking_policy": args.consensus_ranking_policy,
         "consensus_shortlist": {
             "mode": "paired" if args.paired_consensus_shortlist else "single",
             "capacity": args.limit,
             "per_policy_prefix": args.limit // 2 if args.paired_consensus_shortlist else None,
             "qualified_candidate_count": len(ranked),
+        },
+        "diversity_reserve": {
+            "requested_distinct_count": args.diversity_reserve_count,
+            "added_candidate_count": diversity_reserve_added,
+            "maximum_identity": VALIDATOR_DUPLICATE_IDENTITY,
         },
         "score_semantics": (
             "raw metrics use the validator score-share arithmetic mean; dense ranks "
@@ -1104,7 +1216,7 @@ def main() -> None:
         "excluded_sequence_count": len(excluded_sequences),
         "candidate_count": len(ranked),
         "sequences": [item["sequence"] for item in selected],
-        "candidates": selected,
+        "candidates": [compact_persisted_candidate(item) for item in selected],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
