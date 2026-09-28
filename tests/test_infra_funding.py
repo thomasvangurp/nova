@@ -21,8 +21,7 @@ def _connection():
 
 def test_target_covers_forward_aws_and_all_live_vast_but_not_more_than_earnings(monkeypatch):
     connection = _connection()
-    monkeypatch.setattr(funding, "subnet_pnl_history", lambda *_: [])
-    monkeypatch.setattr(funding, "daily_money_history", lambda *_: [
+    monkeypatch.setattr(funding, "daily_mining_earnings", lambda *_: [
         {"day": "2026-09-22", "gross_tao": 1.2, "registration_tao": 0.2},
         {"day": "2026-09-23", "gross_tao": 1.0, "registration_tao": 0.2},
     ])
@@ -46,8 +45,7 @@ def test_target_covers_forward_aws_and_all_live_vast_but_not_more_than_earnings(
 
 def test_target_is_hard_capped_even_when_cost_and_earnings_are_higher(monkeypatch):
     connection = _connection()
-    monkeypatch.setattr(funding, "subnet_pnl_history", lambda *_: [])
-    monkeypatch.setattr(funding, "daily_money_history", lambda *_: [
+    monkeypatch.setattr(funding, "daily_mining_earnings", lambda *_: [
         {"day": "2026-09-23", "gross_tao": 2.0, "registration_tao": 0.0},
     ])
     target = funding.build_target(
@@ -79,3 +77,21 @@ def test_pi_refuses_stale_duplicate_and_over_cap_targets():
     target["target_day"] = "2026-09-23"
     assert decide(target, [], now=now, maximum_tao=0.5)["reason"] == \
         "target_not_for_today"
+
+
+def test_target_builds_end_to_end_without_stubs():
+    """No stand-ins: a signature change in money.py must fail this test."""
+    connection = _connection()
+    day0 = dt.datetime(2026, 9, 22, tzinfo=dt.timezone.utc).timestamp()
+    connection.executemany(
+        "INSERT INTO balances (block, netuid, alpha, alpha_price_tao, free_tao, sampled_at) VALUES (?,?,?,?,?,?)",
+        [(1000, 68, 100.0, 0.02, 1.0, day0), (8200, 68, 150.0, 0.02, 1.0, day0 + 86400)])
+    connection.execute("INSERT INTO slots VALUES (?,?,?,?,?)", (day0 + 3600, 4000, 1, 0.2, 0.2))
+    rows = funding.daily_mining_earnings(connection, 300.0)
+    assert len(rows) == 1 and abs(rows[0]["gross_tao"] - 1.0) < 1e-9
+    assert abs(rows[0]["registration_tao"] - 0.2) < 1e-9
+    target = funding.build_target(
+        connection, {"aws": {"operating_usd_per_day": 30.0}, "vast": {}}, 300.0,
+        now=dt.datetime(2026, 9, 30, 12, tzinfo=dt.timezone.utc), maximum_tao=0.5)
+    assert abs(target["earnings_tao_per_day"] - 0.8) < 1e-9
+    assert abs(target["authorized_tao"] - 0.1) < 1e-9

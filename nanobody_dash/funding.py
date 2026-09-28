@@ -18,7 +18,24 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from .money import daily_money_history, subnet_pnl_history
+from .money import subnet_pnl_history
+
+
+def daily_mining_earnings(connection: sqlite3.Connection, tao_usd: float) -> list[dict]:
+    """Per UTC day: mining gross and registration burn, summed over subnets.
+
+    Funding is sized from mining earnings net of the slot registration burn.
+    It deliberately does not use the dashboard's portfolio delta, which moves
+    with any TAO entering or leaving the coldkey, including the infra
+    transfers this target itself authorises.
+    """
+    by_day: dict[str, dict] = {}
+    for row in subnet_pnl_history(connection, tao_usd):
+        bucket = by_day.setdefault(row["day"], dict(day=row["day"], gross_tao=0.0,
+                                                    registration_tao=0.0))
+        bucket["gross_tao"] += row["gross_tao_per_day"]
+        bucket["registration_tao"] += row["registration_tao_per_day"]
+    return [by_day[day] for day in sorted(by_day)]
 
 
 SCHEMA_VERSION = 1
@@ -68,9 +85,7 @@ def build_target(
     cost_usd = max(0.0, aws_usd + vast_usd)
     cost_tao = cost_usd / tao_usd
 
-    history = daily_money_history(
-        connection, subnet_pnl_history(connection, tao_usd), tao_usd,
-    )
+    history = daily_mining_earnings(connection, tao_usd)
     complete = [
         row for row in history
         if str(row.get("day")) < current.date().isoformat()
