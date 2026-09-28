@@ -229,9 +229,8 @@ def test_daily_money_history_uses_interval_local_flows_and_costs():
     assert len(history) == 1
     assert history[0]["gross_tao_per_day"] == 0.5
     assert history[0]["registration_tao_per_day"] == 0.1
-    # Registration burn is capital-funded, so net revenue is the mining
-    # revenue itself (0.5), not revenue minus the burn (0.4).
-    assert history[0]["net_tao_per_day"] == 0.5
+    # Registration burn is a real cost, so net is gross minus the burn (0.4).
+    assert history[0]["net_tao_per_day"] == 0.4
 
     connection.execute(
         "INSERT INTO costs VALUES (?,?,?,?)",
@@ -242,8 +241,8 @@ def test_daily_money_history_uses_interval_local_flows_and_costs():
     assert daily[0]["registration_usd"] == 1.0
     assert daily[0]["infra_usd"] == 2.0
     assert daily[0]["infrastructure"] == {"vast.ai": 2.0}
-    # Registration and infra are capital-funded, so net USD is mining revenue.
-    assert daily[0]["net_usd"] == 5.0
+    # Net USD is mining revenue minus registration and infrastructure (2.0).
+    assert daily[0]["net_usd"] == 2.0
     assert daily[0]["portfolio_tao"] == 7.0
 
 

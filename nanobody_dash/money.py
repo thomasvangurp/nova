@@ -14,10 +14,9 @@ Two corrections keep revenue from reading as a burn-down that does not exist:
   re-burn moves it back).  That is a change of asset, not a mining loss, so a
   negative daily delta is floored to zero -- revenue is the emission, which
   cannot go negative.
-* The registration burn (``burned_register``, ~2.5 TAO/day) is funded by Kraken
-  capital deposits into the coldkey, not by mining revenue.  It is reported
-  alongside net as a separate cost line rather than subtracted into net, which
-  had fabricated a -2.5 TAO/day "loss" while Taostats showed total TAO rising.
+* The registration burn (``burned_register``, ~2.5 TAO/day) is a real TAO cost
+  of holding the slots -- the recycle TAO leaves the coldkey.  It is subtracted
+  from net alongside infrastructure and shown in the slot-purchases panel.
 """
 from __future__ import annotations
 
@@ -121,16 +120,14 @@ def subnet_pnl_history(connection: sqlite3.Connection,
             # emission, which cannot go below zero.
             earned_alpha = max(0.0, earned_alpha)
             gross_tao = earned_alpha * price / elapsed_days
+            # The registration burn is a real TAO cost of holding the slots
+            # (the TAO leaves the coldkey), so it is subtracted from net.
             registration = 0.0
             if netuid == 68:
                 registration = sum(
                     cost for block, cost in purchases if b0 < block <= b1
                 ) / elapsed_days
-            # The registration burn is funded by Kraken capital deposits, not
-            # by mining revenue, so it is reported beside net rather than
-            # subtracted into it.  Subtracting it turned a profitable subnet
-            # into a fake -2.5 TAO/day burn-down.
-            net_tao = gross_tao
+            net_tao = gross_tao - registration
             out.append(dict(
                 day=block_time(b1).date().isoformat(), block_start=b0, block_end=b1,
                 netuid=netuid, name=SUBNET_NAMES.get(netuid, f"SN{netuid}"),
@@ -147,7 +144,7 @@ def subnet_pnl_history(connection: sqlite3.Connection,
 
 def daily_money_history(connection: sqlite3.Connection, subnet_history: list[dict],
                         tao_usd: float) -> list[dict]:
-    """Daily revenue, registration, infrastructure, net and portfolio value."""
+    """Daily revenue, infrastructure, net and portfolio value."""
     by_day: dict[str, dict] = {}
     for row in subnet_history:
         day = row["day"]
@@ -172,10 +169,9 @@ def daily_money_history(connection: sqlite3.Connection, subnet_history: list[dic
         row = by_day[day]
         gross_usd = row["gross_tao"] * tao_usd
         registration_usd = row["registration_tao"] * tao_usd
-        # Registration burn and infrastructure are funded by Kraken capital
-        # deposits, not by mining revenue, so net revenue is the mining
-        # revenue itself and cannot go negative.
-        net_usd = gross_usd
+        # Registration burn and infrastructure are real costs paid out of
+        # mining revenue, so net revenue is mining revenue minus both.
+        net_usd = gross_usd - registration_usd - row["infra_usd"]
         out.append(dict(
             **row,
             gross_usd=gross_usd,
@@ -203,7 +199,7 @@ def infrastructure_cost_history(connection: sqlite3.Connection) -> list[dict]:
 
 def subnet_pnl(connection: sqlite3.Connection, tao_usd: float,
                registration_tao_per_day: float = 0.0) -> list[dict]:
-    """One row per subnet: earned alpha, TAO/day, USD/day, and costs."""
+    """One row per subnet: earned alpha, TAO/day, USD/day, and registration cost."""
     balances: dict[int, list] = {}
     for block, netuid, alpha, price, free, _ in connection.execute(
             "SELECT block, netuid, alpha, alpha_price_tao, free_tao, sampled_at "
@@ -251,13 +247,12 @@ def subnet_pnl(connection: sqlite3.Connection, tao_usd: float,
             usd_per_day=round(tao_day * tao_usd, 2),
             holding_tao=round(a1 * (p1 or 0.0), 3)))
     out.sort(key=lambda r: -r["tao_per_day"])
-    # registration burn is a subnet-68 cost funded by Kraken capital deposits,
-    # not by mining revenue, so it is reported alongside net rather than
-    # subtracted into it (which had fabricated a negative net).
+    # Registration burn is a real TAO cost of holding the slots, so net is
+    # gross minus the registration burn for SN68.
     for row in out:
         cost = registration_tao_per_day if row["netuid"] == 68 else 0.0
         row["cost_tao_per_day"] = round(cost, 4)
-        row["net_tao_per_day"] = round(row["tao_per_day"], 4)
+        row["net_tao_per_day"] = round(row["tao_per_day"] - cost, 4)
         row["net_usd_per_day"] = round(row["net_tao_per_day"] * tao_usd, 2)
     return out
 
@@ -267,8 +262,7 @@ def portfolio_tao_per_day(connection: sqlite3.Connection) -> float:
 
     This is the number Taostats shows as the steady total-TAO trend: free TAO
     plus every subnet's staked alpha valued at its current price.  It cancels
-    the SN68 slot-recycle churn (alpha <-> free TAO) and nets the registration
-    burn against the Kraken capital deposits that fund it, so it reads as the
+    the SN68 slot-recycle churn (alpha <-> free TAO), so it reads as the
     genuine balance change rather than a fake -2.5 TAO/day burn-down.
     """
     rows = connection.execute(
@@ -292,7 +286,7 @@ def portfolio_tao_per_day(connection: sqlite3.Connection) -> float:
 
 
 def registration_burn(connection: sqlite3.Connection, days: float = 8.0) -> float:
-    """TAO/day destroyed buying uids, from the slot manager's executed buys."""
+    """TAO/day recycled buying uids, from the slot manager's executed buys."""
     since = dt.datetime.now(dt.timezone.utc).timestamp() - days * 86400
     total = connection.execute(
         "SELECT COALESCE(SUM(COALESCE(decision_recycle_tao, recycle_tao, 0)), 0) "

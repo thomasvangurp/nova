@@ -720,11 +720,11 @@ TABS = [
         ("Rates and fleet size", "Field-beating and top-10 entries as a percentage of submissions, with median fleet size on the right axis.", "competitors"),
     ]),
     ("money", "Money", [
-        ("Yield per subnet", "Daily balance-to-balance yield by subnet. Alpha purchases and sales are removed; SN68 registration burn is included.", "pnl_history"),
+        ("Yield per subnet", "Daily balance-to-balance yield by subnet. Alpha purchases and sales are removed; SN68 registration burn is subtracted as a real slot cost.", "pnl_history"),
         ("Cloud cost tracking", "AWS Bills accrued cost is kept separate from the forward Cost Explorer projection. SN2 operating economics exclude explicitly identified one-time migration traffic; Vast runtime is split into SN68 production, research and unattributed spend.", "cloud_costs"),
         ("AWS charge breakdown", "Cost Explorer charges grouped into the same operational categories as AWS Bills, with billed and recurring amounts kept separate. Transfer usage is collected from the API in GB.", "aws_cost_breakdown"),
         ("Infrastructure charges per day", "Daily operational cloud charges by provider and cost category. The one-time Ohio migration is retained in the AWS bill reconciliation but excluded here and from net operating economics.", "cloud_daily"),
-        ("Money history", "Daily mining revenue, registration burn, total infrastructure spend, and net result. Provider and service detail is kept in the infrastructure panels above; TAO revenue is valued at the current TAO price.", "money_history"),
+        ("Money history", "Daily mining revenue, registration burn, total infrastructure spend, and net result. Provider and service detail is kept in the infrastructure panels above.", "money_history"),
         ("Current yield rate", "Whole-window daily rate by subnet, retained as the current summary beside the daily history.", "pnl"),
         ("Infrastructure against revenue", "vast.ai burn per project versus what that project earns. Compound is an investment that has not paid off yet.", "infra"),
         ("Projection", "Forward cumulative TAO at the current net rate, and at a 12-entry fleet.", "projection"),
