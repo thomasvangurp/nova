@@ -71,8 +71,18 @@ QUALITY_GATES: dict[str, str] = {
 # The change that would actually buy the replay's benefit is in the PRODUCER:
 # screen each candidate k times within one epoch.  Until that exists, this stays
 # at one.
+#
+# 2026-09-28: it exists and the floor is now eight.  The producer's confirmation
+# stage repeat-scores its 96 finalists up to 12 times within the epoch, and it
+# now finishes (--reserve-blocks 120) before the Pi commits, which the Pi holds
+# until just before its safe deadline.  A fresh candidate therefore reaches eight
+# observations in its first epoch, so the floor is an evidence filter again, not
+# a survivorship filter.  Measured on real validator outcomes, epochs
+# 25335-25394: our committed tickets with 1-5 observations made the top 10 at
+# 12.3% (399 tickets, 53% of the fleet) against ~20% at 6-40 observations.
+# Eight matches the producer's own --minimum-publishable-observations.
 EVIDENCE_GATES: dict[str, str] = {
-    "--minimum-observations": "1",
+    "--minimum-observations": "8",
     "--minimum-structure-observations": "1",
 }
 

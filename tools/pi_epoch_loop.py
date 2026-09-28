@@ -168,6 +168,28 @@ def producer_epoch_here(a, epoch: int, reaction: int) -> int | None:
         return None
 
 
+def artifact_confirmation(path: Path, epoch: int, minimum: int) -> tuple[int, int]:
+    """(confirmed, total) submissions in this epoch's artifact.
+
+    A submission is confirmed when it carries at least ``minimum`` exact
+    observations.  The producer repeat-scores its finalists within the epoch;
+    committing the first provisional artifact instead (1-5 minutes after the
+    window opened) put 53% of our tickets on 1-5 observations, and those made
+    the top 10 at 12.3% against ~20% for 6-40 observations (epochs
+    25335-25394).
+    """
+    try:
+        artifact = json.loads(Path(path).read_text())
+    except Exception:
+        return 0, 0
+    if int(artifact.get("epoch", -1)) != epoch:
+        return 0, 0
+    submissions = artifact.get("submissions") or []
+    confirmed = sum(1 for item in submissions
+                    if int(item.get("observation_count") or 0) >= minimum)
+    return confirmed, len(submissions)
+
+
 def producer_epoch() -> int | None:
     got = run(PROD, "python3 -c \"import json;print(json.load("
                     "open('/root/artifacts/nanobody_result.json'))['epoch'])\"")
@@ -211,6 +233,14 @@ def main() -> int:
     parser.add_argument("--root", default=None,
                         help="override the tree root (the submit host uses /opt/nova-submit)")
     parser.add_argument("--fleet-tree", default=None)
+    parser.add_argument("--late-commit", action=argparse.BooleanOptionalAction, default=True,
+                        help="hold the commit until just before the safe deadline so it carries the "
+                             "producer's in-epoch repeat scoring (--no-late-commit: first artifact)")
+    parser.add_argument("--late-commit-margin-seconds", type=int, default=120,
+                        help="stop holding this long before the commit deadline, leaving time for "
+                             "the final pull and the crew refresh")
+    parser.add_argument("--confirmation-min-observations", type=int, default=8,
+                        help="observation depth reported as 'deep' in the late-commit log")
     parser.add_argument("--dry-run", action="store_true")
     a = parser.parse_args()
     global PI, ROOT
@@ -439,6 +469,28 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
             stale_ok = True
             say(event="producer_late", molecules=have_molecules,
                 why="committing last epoch's sequences rather than nothing")
+
+        # Then hold until just before the safe deadline, re-pulling so the
+        # commit carries the producer's in-epoch repeat scoring.  The first
+        # artifact for an epoch is provisional and built before the producer's
+        # confirmation stage; committing it 1-5 minutes after the window opened
+        # put 53% of our tickets on 1-5 exact observations, which made the top
+        # 10 at 12.3% against ~20% for 6-40 observations (epochs 25335-25394).
+        # Committing later only loses exact final-score ties to rivals that
+        # commit in between, and every rival ticket in that window was
+        # committed earlier than ours anyway (3 ties newly lost in 60 epochs).
+        if not stale_ok and a.on_submit_host and a.late_commit:
+            hold_until = deadline - a.late_commit_margin_seconds
+            local = Path("/opt/nova-submit/nanobody_result.json")
+            while time.time() < hold_until:
+                confirmed, total = artifact_confirmation(local, epoch, a.confirmation_min_observations)
+                say(event="late_commit_wait", seconds_left=round(hold_until - time.time()),
+                    deep=confirmed, total=total, minimum=a.confirmation_min_observations)
+                time.sleep(min(60, max(1, hold_until - time.time())))
+                producer_epoch_here(a, epoch, view["reaction"])
+            confirmed, total = artifact_confirmation(local, epoch, a.confirmation_min_observations)
+            say(event="late_commit_ready", deep=confirmed, total=total,
+                minimum=a.confirmation_min_observations)
 
         pull = run(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
                        f"--epoch {epoch} --reaction {view['reaction']} --pull-only", timeout=300)
