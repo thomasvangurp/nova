@@ -789,6 +789,7 @@ def _rank_command(
     consensus_ranking_policy: str = "tier",
     minimum_selection_observations: int | None = None,
     observation_history: Path | None = None,
+    only_sequences: Path | None = None,
 ) -> list[str]:
     command = [sys.executable, "-m", "nanobody_opt.rank_exact",
                "--selection-metric-policy", selection_metric_policy,
@@ -828,6 +829,12 @@ def _rank_command(
         command.extend(["--selection-order", "p90"])
         if minimum_selection_observations is not None:
             command.extend(["--minimum-observations", str(minimum_selection_observations)])
+    if only_sequences is not None:
+        # A prune reorders the alive finalists only. They already passed the
+        # pool-level construction constraints, which would otherwise re-cut
+        # them against a pool of tens rather than thousands.
+        command.extend(["--only-sequences", str(only_sequences),
+                        "--maximum-public-edits", "0", "--liability-quantile", "0"])
     return command
 
 
@@ -2103,6 +2110,9 @@ def main() -> None:
         def _prune(alive: list[str], keep: int) -> list[str]:
             """Keep the best of the alive set on all pooled observations."""
             ranking = args.output_dir / "rounds" / "stage_ranking.json"
+            alive_file = args.output_dir / "rounds" / "stage_alive.txt"
+            alive_file.parent.mkdir(parents=True, exist_ok=True)
+            alive_file.write_text("".join(f"{item}\n" for item in alive))
             try:
                 subprocess.run(
                     _rank_command(
@@ -2122,6 +2132,7 @@ def main() -> None:
                         consensus_ranking_policy=args.consensus_ranking_policy,
                         minimum_selection_observations=args.minimum_selection_observations,
                         observation_history=args.mutation_database,
+                        only_sequences=alive_file,
                     ),
                     check=True,
                 )

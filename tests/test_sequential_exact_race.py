@@ -893,7 +893,7 @@ def test_the_prune_actually_uses_the_family_slate():
 
     source = inspect.getsource(race)
     prune = source.index("def _prune(alive: list[str], keep: int)")
-    body = source[prune:prune + 2000]
+    body = source[prune:prune + 3000]
     assert "_keep_a_family_slate(" in body, (
         "_prune still truncates by rank alone"
     )

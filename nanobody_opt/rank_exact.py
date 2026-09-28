@@ -683,6 +683,9 @@ def main() -> None:
     parser.add_argument("--minimum-constrained-pool", type=int, default=40,
                         help="skip the construction constraints for this run if fewer "
                              "candidates than this would survive them")
+    parser.add_argument("--only-sequences", type=Path, default=None,
+                        help="rank only the sequences listed in this newline-delimited "
+                             "file; history and shrinkage still use the full pool")
     args = parser.parse_args()
 
     if not args.exact and args.observation_history is None:
@@ -852,8 +855,14 @@ def main() -> None:
         except (ValueError, statistics.StatisticsError):
             shrunk_by_sequence = {}
     ranked = []
+    only_sequences = None
+    if args.only_sequences is not None:
+        only_sequences = {line.strip().upper() for line in
+                          args.only_sequences.read_text().splitlines() if line.strip()}
     for sequence, observations in observations_by_sequence.items():
         normalized_sequence = sequence.strip().upper()
+        if only_sequences is not None and normalized_sequence not in only_sequences:
+            continue
         if (
             normalized_sequence in historical_sequences
             or normalized_sequence in excluded_sequences
