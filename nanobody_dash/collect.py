@@ -125,8 +125,18 @@ def collect_leaderboard(connection, first: int, last: int, workers: int = 6,
     never gets corrected would silently understate the field for good.
     """
     known = have(connection)
+    # ``last`` intentionally probes ahead of the newest stored epoch.  Using
+    # it as the refetch boundary therefore re-requested only future 404s and
+    # left a partially written newest leaderboard frozen forever.  Anchor the
+    # retry window to the newest epoch we actually hold instead.
+    newest_known = max(known) if known else None
+    refetch_from = (
+        newest_known - refetch_last + 1
+        if newest_known is not None and refetch_last > 0
+        else last + 1
+    )
     wanted = [e for e in range(first, last + 1)
-              if e not in known or e > last - refetch_last]
+              if e not in known or e >= refetch_from]
     done = failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch_epoch, e): e for e in wanted}
@@ -191,7 +201,10 @@ def main() -> int:
         known = have(connection)
         # Probe forward from the newest stored epoch rather than trusting a
         # local clock: the dashboard must not invent epochs that do not exist.
-        last = (max(known) if known else 25256) + 12
+        # Probe only just beyond the newest real epoch.  The old +12 window
+        # generated twelve predictable 404s on every daemon tick and delayed
+        # the useful newest-epoch refetch.
+        last = (max(known) if known else 25256) + 2
     first = arguments.first if arguments.first is not None else last - arguments.history
     report = collect_leaderboard(connection, first, last)
     report.update(collect_slots(connection, arguments.slot_log))

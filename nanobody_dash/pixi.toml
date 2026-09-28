@@ -1,0 +1,14 @@
+[workspace]
+name = "nova-nanobody-dashboard"
+version = "0.1.0"
+description = "Locked local runtime for collecting and rendering the dashboard"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+requires-pixi = ">=0.73,<0.74"
+
+[dependencies]
+python = "3.12.*"
+plotly = "==6.5.0"
+
+[tasks]
+refresh = { cmd = "python -m nanobody_dash.refresh", cwd = ".." }

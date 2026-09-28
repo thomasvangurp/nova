@@ -13,6 +13,8 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
+from .outcomes import annotate_field_beating_entries, is_entry_win
+
 PAPER = "#0e1117"
 CARD = "#161a23"
 INK = "#e6e9ef"
@@ -36,16 +38,21 @@ def _by_coldkey(data):
     return out
 
 
-def rolling_rates(per_epoch, epochs, window=20):
-    """Trailing win-per-entry, top10-per-entry and fleet size."""
+def rolling_rates(per_epoch, epochs, window=20, min_entries=1):
+    """Trailing field-beating-entry, top10-per-entry and fleet size.
+
+    A window holding fewer than ``min_entries`` entries yields a gap rather
+    than a rate: once a miner stops submitting, its trailing window drains to
+    a handful of old entries and a single top-10 would plot as 100%.
+    """
     wins, tens, fleet = [], [], []
     for i, _ in enumerate(epochs):
         chunk = epochs[max(0, i - window + 1):i + 1]
         rows = [r for e in chunk for r in per_epoch.get(e, [])]
         sizes = [len(per_epoch[e]) for e in chunk if per_epoch.get(e)]
-        if not rows:
+        if len(rows) < max(1, min_entries):
             wins.append(None); tens.append(None); fleet.append(None); continue
-        wins.append(100 * sum(1 for r in rows if r["rank"] == 1) / len(rows))
+        wins.append(100 * sum(is_entry_win(r) for r in rows) / len(rows))
         tens.append(100 * sum(1 for r in rows if r["rank"] <= 10) / len(rows))
         fleet.append(st.median(sizes) if sizes else None)
     return wins, tens, fleet
@@ -60,7 +67,8 @@ def fig_our_progress(data, database: Path | None = None, window: int = 20) -> go
     figure = go.Figure()
     figure.add_trace(go.Scatter(x=epochs, y=tens, name=f"top-10 per entry % ({window}ep)",
                                 line=dict(color=OURS, width=2.4)))
-    figure.add_trace(go.Scatter(x=epochs, y=wins, name=f"wins per entry % ({window}ep)",
+    figure.add_trace(go.Scatter(
+        x=epochs, y=wins, name=f"field-beating entries % ({window}ep)",
                                 line=dict(color=WIN, width=2.4)))
     figure.add_trace(go.Scatter(x=epochs, y=fleet, name="fleet size (median)",
                                 yaxis="y2", line=dict(color=WARN, width=1.6, dash="dot")))
@@ -86,22 +94,31 @@ def fig_our_progress(data, database: Path | None = None, window: int = 20) -> go
     return figure
 
 
-def fig_rates_vs_rivals(data, top: int = 3, window: int = 30) -> go.Figure:
-    """Our top-10 rate against the strongest rivals, same trailing window."""
+def fig_rates_vs_rivals(data, top: int = 3, window: int = 30,
+                        min_entries: int = 20, recent: int = 60) -> go.Figure:
+    """Our top-10 rate against the strongest rivals, same trailing window.
+
+    Rivals are chosen by entry wins over the last ``recent`` epochs, not all
+    time: an all-time ranking keeps plotting a miner that stopped submitting
+    long ago (5Fq7TBKW left at 25293 and still held a slot).
+    """
+    annotate_field_beating_entries(data["entries"])
     grouped = _by_coldkey(data)
-    ranked = sorted(grouped.items(),
-                    key=lambda kv: -sum(1 for rows in kv[1].values()
-                                        for r in rows if r["rank"] == 1))
     epochs = sorted(data["epochs"])
+    cutoff = epochs[-recent] if len(epochs) >= recent else epochs[0]
+    ranked = sorted(grouped.items(),
+                    key=lambda kv: -sum(1 for epoch, rows in kv[1].items()
+                                        if epoch >= cutoff
+                                        for r in rows if is_entry_win(r)))
     figure = go.Figure()
-    _, tens, _ = rolling_rates(data["by_epoch"], epochs, window)
+    _, tens, _ = rolling_rates(data["by_epoch"], epochs, window, min_entries)
     figure.add_trace(go.Scatter(x=epochs, y=tens, name="US",
                                 line=dict(color=WIN, width=3)))
     shown = 0
     for coldkey, per_epoch in ranked:
         if coldkey == data.get("coldkey") or shown >= top:
             continue
-        _, rival_tens, _ = rolling_rates(per_epoch, epochs, window)
+        _, rival_tens, _ = rolling_rates(per_epoch, epochs, window, min_entries)
         figure.add_trace(go.Scatter(
             x=epochs, y=rival_tens, name=coldkey[:8] + "...",
             line=dict(color=RIVALS[shown % len(RIVALS)], width=1.6)))
@@ -114,10 +131,11 @@ def fig_rates_vs_rivals(data, top: int = 3, window: int = 30) -> go.Figure:
 
 
 def competitor_table(rows) -> str:
-    """The competitor numbers as an actual table, sorted by wins per entry."""
+    """Entry efficiency plus the separately capped winning-epoch count."""
     rows = sorted(rows, key=lambda r: -r["win_per_entry"])
     head = ("<tr><th>coldkey</th><th>fleet</th><th>entries</th><th>epochs</th>"
-            "<th>wins</th><th>win / entry</th><th>top-10 / entry</th>"
+            "<th>entry wins</th><th>entry win / entry</th><th>winning epochs</th>"
+            "<th>top-10 / entry</th>"
             "<th>best score</th></tr>")
     body = []
     for r in rows:
@@ -126,6 +144,7 @@ def competitor_table(rows) -> str:
             f"<tr{cls}><td>{r['label']}</td><td>{r['fleet']:.0f}</td>"
             f"<td>{r['entries']}</td><td>{r['epochs']}</td><td>{r['wins']}</td>"
             f"<td>{r['win_per_entry']:.2f}%</td>"
+            f"<td>{r['winning_epochs']}</td>"
             f"<td>{r['top10_per_entry']:.1f}%</td><td>{r['best']:.0f}</td></tr>")
     return ('<table class="grid"><thead>' + head + "</thead><tbody>"
             + "".join(body) + "</tbody></table>")
