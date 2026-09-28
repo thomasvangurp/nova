@@ -68,7 +68,11 @@ def variance_components(groups: list[list[float]]) -> tuple[float, float, float]
         # makes the shrinkage factor 1 and leaves every estimate untouched.
         return mu, 0.0, statistics.pvariance(means) if len(means) > 1 else 0.0
 
-    ss = sum(sum((x - statistics.mean(g)) ** 2 for x in g) for g in replicated)
+    # One mean per candidate. Recomputing statistics.mean(g) inside the
+    # generator made this quadratic in depth (exact rational arithmetic per
+    # fold) and cost ~95% of rank_exact once history was merged.
+    ss = sum(sum((x - m) ** 2 for x in g)
+             for g, m in ((g, statistics.mean(g)) for g in replicated))
     df = sum(len(g) - 1 for g in replicated)
     within = ss / df if df else 0.0
 
