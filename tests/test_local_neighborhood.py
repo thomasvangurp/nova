@@ -3,6 +3,7 @@ import numpy as np
 
 from nanobody_opt.local_neighborhood import (
     _deduplicate_proposals,
+    _lane_limits,
     _interleave_rankings,
     _round_robin_by_basin,
     _round_robin_by_parent,
@@ -782,3 +783,18 @@ def test_off_restores_the_pre_change_ordering():
                 for i in sorted(items, key=ln._proposal_ranking_key)] == [2, 0]
     finally:
         ln._PREFER_ADHERENTS = original
+
+
+def test_lane_limits_splits_the_seed_budget_by_the_given_fraction():
+    assert _lane_limits(64, 0.5) == {"haplotype": 32, "single": 32}
+    assert _lane_limits(64, 0.8) == {"haplotype": 51, "single": 13}
+    assert _lane_limits(64, 0.0) == {"haplotype": 0, "single": 64}
+    assert _lane_limits(64, 1.0) == {"haplotype": 64, "single": 0}
+
+
+def test_lane_limits_always_sum_to_the_seed_budget():
+    for per_seed in (1, 12, 64, 65):
+        for fraction in (0.0, 0.2, 0.5, 0.7, 0.8, 1.0):
+            limits = _lane_limits(per_seed, fraction)
+            assert limits["haplotype"] + limits["single"] == per_seed
+            assert limits["haplotype"] >= 0 and limits["single"] >= 0

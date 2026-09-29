@@ -576,6 +576,7 @@ def _run_iteration(
                 args.basin_exploration_residues_per_position
             ),
             "--framework-fraction", str(args.framework_fraction),
+            "--haplotype-lane-fraction", str(args.haplotype_lane_fraction),
             "--framework-per-seed", str(args.framework_per_seed),
             "--terminal-width", str(args.terminal_width),
             "--maximum-terminal-haplotype-mutations", str(
@@ -957,6 +958,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
+    parser.add_argument("--haplotype-lane-fraction", type=float, default=0.5,
+                        help="forwarded to local_neighborhood; share of the framework_terminal/lineage budget reserved for haplotype candidates")
     parser.add_argument(
         "--donor-grafts",
         action="store_true",
