@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+from concurrent.futures import ProcessPoolExecutor
 import json
 import math
 import statistics
@@ -537,6 +539,189 @@ def fetch_leaderboard_fields(
     return fields
 
 
+#: Read-only context for _rank_candidate, set once per process: directly
+#: in the main process for a serial run, or via _init_rank_worker in each
+#: pool worker (a separate process, so it cannot see main()'s closure).
+_RANK_CONTEXT: dict[str, Any] | None = None
+
+
+def _init_rank_worker(context: dict[str, Any]) -> None:
+    global _RANK_CONTEXT
+    _RANK_CONTEXT = context
+
+
+def _rank_candidate(item):
+    """One sequence's candidacy check: identical to the old loop body,
+    run in a worker process so RANK_WORKERS candidates are computed at
+    once instead of one Python-bytecode-bound core carrying all of them.
+    """
+    sequence, observations = item
+    ctx = _RANK_CONTEXT
+    args = ctx["args"]
+    compiled_fields = ctx["compiled_fields"]
+    shrunk_by_sequence = ctx["shrunk_by_sequence"]
+    consensus = ctx["consensus"]
+    sample_selections = ctx["sample_selections"]
+    historical_sequences = ctx["historical_sequences"]
+    excluded_sequences = ctx["excluded_sequences"]
+    only_sequences = ctx["only_sequences"]
+    normalized_sequence = sequence.strip().upper()
+    if only_sequences is not None and normalized_sequence not in only_sequences:
+        return None
+    if (
+        normalized_sequence in historical_sequences
+        or normalized_sequence in excluded_sequences
+    ):
+        return None
+    # ranks[observation, field, metric], each rank computed once and
+    # shared by the category sums and the win objective.
+    rank_array = _observation_rank_array(observations, compiled_fields)
+    category_sums = {
+        category: rank_array[:, :, [METRIC_INDEX[m] for m in names]].sum(axis=2)
+        for category, names in METRIC_CATEGORIES.items()
+    }
+    # Keep the objective identical to the validator. Repeated observations
+    # feed the fresh-draw distribution; they do not justify changing the
+    # ten-metric arithmetic into a hand-weighted surrogate objective.
+    score_matrix = rank_array.sum(axis=2).tolist()
+    score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
+    per_observation = [float(np.median(scores)) for scores in score_matrix]
+    # Gates and diagnostics keep the full ten-metric scores; only the
+    # fresh-draw win probability ranks on the chosen objective.
+    win_per_observation = per_observation if args.win_objective == "full" else [
+        float(np.median(row)) for row in rank_array[
+            :, :, [METRIC_INDEX[m] for m in CONFIDENCE_OBJECTIVE]].sum(axis=2)
+    ]
+    observation_competitive = [
+        score <= args.competitive_score_threshold
+        for score in per_observation
+    ]
+    observation_competitive_rate = float(np.mean(observation_competitive))
+    score_median = float(np.median(score_distribution))
+    score_p90 = float(np.quantile(score_distribution, 0.9))
+    competitive_rate = float(
+        np.mean(score_distribution <= args.competitive_score_threshold)
+    )
+    if competitive_rate < args.minimum_competitive_rate:
+        return None
+    if (
+        observation_competitive_rate
+        < args.minimum_observation_competitive_rate
+    ):
+        return None
+    if (
+        args.maximum_p90_rank_sum is not None
+        and score_p90 > args.maximum_p90_rank_sum
+    ):
+        return None
+    # Score sharing averages each raw metric across validators before the
+    # epoch field is ranked.  Our independent repeats are a local estimate
+    # of that same expectation, so their arithmetic mean is the only
+    # validator-shaped aggregate.  The observation-by-field p90 below is
+    # retained as a qualification stress test; it must not leak into the
+    # metric vector presented as the local validator-score estimate.
+    aggregate = {
+        name: float(np.mean([item[name] for item in observations]))
+        for name in METRICS
+    }
+    # Shrinkage replaces the raw mean where it could be estimated. A
+    # single fold keeps ~37% of its deviation from the pool mean and
+    # forty folds keep ~96%, so one lucky measurement can no longer
+    # outrank a candidate we actually know something about.
+    for name, value in (shrunk_by_sequence.get(sequence) or {}).items():
+        if name in aggregate and math.isfinite(value):
+            aggregate[name] = float(value)
+    metric_standard_errors = {
+        name: float(
+            np.std([item[name] for item in observations], ddof=1)
+            / math.sqrt(len(observations))
+        )
+        if len(observations) > 1
+        else 0.0
+        for name in METRICS
+    }
+    aggregate_categories = [
+        _compiled_category_rank_sums(aggregate, field)
+        for field in compiled_fields
+    ]
+    aggregate_field_scores = [
+        float(sum(categories.values()))
+        for categories in aggregate_categories
+    ]
+    aggregate_category_scores = {
+        category: [
+            categories[category] for categories in aggregate_categories
+        ]
+        for category in ("confidence", "physical_interaction", "developability")
+    }
+    category_distributions = {
+        category: category_sums[category].reshape(-1).tolist()
+        for category in ("confidence", "physical_interaction", "developability")
+    }
+    p90_categories = {
+        category: float(np.quantile(scores, 0.9))
+        for category, scores in category_distributions.items()
+    }
+    category_ceilings = {
+        "confidence": args.maximum_p90_confidence_rank_sum,
+        "physical_interaction": (
+            args.maximum_p90_physical_interaction_rank_sum
+        ),
+        "developability": args.maximum_p90_developability_rank_sum,
+    }
+    if any(
+        ceiling is not None and p90_categories[category] > ceiling
+        for category, ceiling in category_ceilings.items()
+    ):
+        return None
+    selections = sample_selections.get(normalized_sequence, [])
+    selection_summary = {
+        "observation_count": len(selections),
+        "disagreement_count": sum(
+            bool(item.get("sample_selection_disagrees"))
+            for item in selections
+        ),
+        "disagreement_rate": (
+            float(np.mean([
+                bool(item.get("sample_selection_disagrees"))
+                for item in selections
+            ]))
+            if selections else None
+        ),
+        "observations": selections,
+    }
+    return {
+        "sequence": normalized_sequence,
+        "settled_deviations": settled_deviation_count(
+            normalized_sequence, consensus
+        ),
+        "observation_count": len(observations),
+        "selection_score": score_p90,
+        "competitive_score_threshold": args.competitive_score_threshold,
+        "competitive_rate": competitive_rate,
+        "observation_competitive_rate": observation_competitive_rate,
+        "observation_competitive": observation_competitive,
+        "score_median": score_median,
+        "score_p90": score_p90,
+        "score_worst": float(np.max(score_distribution)),
+        "per_observation_field_rank_sums": score_matrix,
+        "per_observation_median_rank_sum": win_per_observation,
+        "per_observation_full_rank_sum": per_observation,
+        "p90_category_rank_sums": p90_categories,
+        "aggregate_median_rank_sum": float(np.median(aggregate_field_scores)),
+        "aggregate_p90_rank_sum": float(np.quantile(aggregate_field_scores, 0.9)),
+        "aggregate_median_category_rank_sums": {
+            category: float(np.median(scores))
+            for category, scores in aggregate_category_scores.items()
+        },
+        "metric_aggregation": "arithmetic_mean",
+        "metrics": aggregate,
+        "metric_standard_errors": metric_standard_errors,
+        "observations": observations,
+        "diffusion_sample_selection": selection_summary,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -686,6 +871,14 @@ def main() -> None:
     parser.add_argument("--only-sequences", type=Path, default=None,
                         help="rank only the sequences listed in this newline-delimited "
                              "file; history and shrinkage still use the full pool")
+    parser.add_argument("--rank-workers", type=int,
+                        default=min(32, os.cpu_count() or 1),
+                        help="process pool size for the per-candidate ranking loop "
+                             "(pure Python, GIL-bound to one core otherwise); 1 disables "
+                             "the pool and ranks serially")
+    parser.add_argument("--rank-workers-minimum-candidates", type=int, default=64,
+                        help="use the pool only above this many candidates; below it, "
+                             "process-start overhead outweighs the parallel gain")
     args = parser.parse_args()
 
     if not args.exact and args.observation_history is None:
@@ -859,162 +1052,37 @@ def main() -> None:
     if args.only_sequences is not None:
         only_sequences = {line.strip().upper() for line in
                           args.only_sequences.read_text().splitlines() if line.strip()}
-    for sequence, observations in observations_by_sequence.items():
-        normalized_sequence = sequence.strip().upper()
-        if only_sequences is not None and normalized_sequence not in only_sequences:
-            continue
-        if (
-            normalized_sequence in historical_sequences
-            or normalized_sequence in excluded_sequences
-        ):
-            continue
-        # ranks[observation, field, metric], each rank computed once and
-        # shared by the category sums and the win objective.
-        rank_array = _observation_rank_array(observations, compiled_fields)
-        category_sums = {
-            category: rank_array[:, :, [METRIC_INDEX[m] for m in names]].sum(axis=2)
-            for category, names in METRIC_CATEGORIES.items()
-        }
-        # Keep the objective identical to the validator. Repeated observations
-        # feed the fresh-draw distribution; they do not justify changing the
-        # ten-metric arithmetic into a hand-weighted surrogate objective.
-        score_matrix = rank_array.sum(axis=2).tolist()
-        score_distribution = np.asarray(score_matrix, dtype=np.float64).reshape(-1)
-        per_observation = [float(np.median(scores)) for scores in score_matrix]
-        # Gates and diagnostics keep the full ten-metric scores; only the
-        # fresh-draw win probability ranks on the chosen objective.
-        win_per_observation = per_observation if args.win_objective == "full" else [
-            float(np.median(row)) for row in rank_array[
-                :, :, [METRIC_INDEX[m] for m in CONFIDENCE_OBJECTIVE]].sum(axis=2)
-        ]
-        observation_competitive = [
-            score <= args.competitive_score_threshold
-            for score in per_observation
-        ]
-        observation_competitive_rate = float(np.mean(observation_competitive))
-        score_median = float(np.median(score_distribution))
-        score_p90 = float(np.quantile(score_distribution, 0.9))
-        competitive_rate = float(
-            np.mean(score_distribution <= args.competitive_score_threshold)
-        )
-        if competitive_rate < args.minimum_competitive_rate:
-            continue
-        if (
-            observation_competitive_rate
-            < args.minimum_observation_competitive_rate
-        ):
-            continue
-        if (
-            args.maximum_p90_rank_sum is not None
-            and score_p90 > args.maximum_p90_rank_sum
-        ):
-            continue
-        # Score sharing averages each raw metric across validators before the
-        # epoch field is ranked.  Our independent repeats are a local estimate
-        # of that same expectation, so their arithmetic mean is the only
-        # validator-shaped aggregate.  The observation-by-field p90 below is
-        # retained as a qualification stress test; it must not leak into the
-        # metric vector presented as the local validator-score estimate.
-        aggregate = {
-            name: float(np.mean([item[name] for item in observations]))
-            for name in METRICS
-        }
-        # Shrinkage replaces the raw mean where it could be estimated. A
-        # single fold keeps ~37% of its deviation from the pool mean and
-        # forty folds keep ~96%, so one lucky measurement can no longer
-        # outrank a candidate we actually know something about.
-        for name, value in (shrunk_by_sequence.get(sequence) or {}).items():
-            if name in aggregate and math.isfinite(value):
-                aggregate[name] = float(value)
-        metric_standard_errors = {
-            name: float(
-                np.std([item[name] for item in observations], ddof=1)
-                / math.sqrt(len(observations))
-            )
-            if len(observations) > 1
-            else 0.0
-            for name in METRICS
-        }
-        aggregate_categories = [
-            _compiled_category_rank_sums(aggregate, field)
-            for field in compiled_fields
-        ]
-        aggregate_field_scores = [
-            float(sum(categories.values()))
-            for categories in aggregate_categories
-        ]
-        aggregate_category_scores = {
-            category: [
-                categories[category] for categories in aggregate_categories
-            ]
-            for category in ("confidence", "physical_interaction", "developability")
-        }
-        category_distributions = {
-            category: category_sums[category].reshape(-1).tolist()
-            for category in ("confidence", "physical_interaction", "developability")
-        }
-        p90_categories = {
-            category: float(np.quantile(scores, 0.9))
-            for category, scores in category_distributions.items()
-        }
-        category_ceilings = {
-            "confidence": args.maximum_p90_confidence_rank_sum,
-            "physical_interaction": (
-                args.maximum_p90_physical_interaction_rank_sum
-            ),
-            "developability": args.maximum_p90_developability_rank_sum,
-        }
-        if any(
-            ceiling is not None and p90_categories[category] > ceiling
-            for category, ceiling in category_ceilings.items()
-        ):
-            continue
-        selections = sample_selections.get(normalized_sequence, [])
-        selection_summary = {
-            "observation_count": len(selections),
-            "disagreement_count": sum(
-                bool(item.get("sample_selection_disagrees"))
-                for item in selections
-            ),
-            "disagreement_rate": (
-                float(np.mean([
-                    bool(item.get("sample_selection_disagrees"))
-                    for item in selections
-                ]))
-                if selections else None
-            ),
-            "observations": selections,
-        }
-        ranked.append({
-            "sequence": normalized_sequence,
-            "settled_deviations": settled_deviation_count(
-                normalized_sequence, consensus
-            ),
-            "observation_count": len(observations),
-            "selection_score": score_p90,
-            "competitive_score_threshold": args.competitive_score_threshold,
-            "competitive_rate": competitive_rate,
-            "observation_competitive_rate": observation_competitive_rate,
-            "observation_competitive": observation_competitive,
-            "score_median": score_median,
-            "score_p90": score_p90,
-            "score_worst": float(np.max(score_distribution)),
-            "per_observation_field_rank_sums": score_matrix,
-            "per_observation_median_rank_sum": win_per_observation,
-            "per_observation_full_rank_sum": per_observation,
-            "p90_category_rank_sums": p90_categories,
-            "aggregate_median_rank_sum": float(np.median(aggregate_field_scores)),
-            "aggregate_p90_rank_sum": float(np.quantile(aggregate_field_scores, 0.9)),
-            "aggregate_median_category_rank_sums": {
-                category: float(np.median(scores))
-                for category, scores in aggregate_category_scores.items()
-            },
-            "metric_aggregation": "arithmetic_mean",
-            "metrics": aggregate,
-            "metric_standard_errors": metric_standard_errors,
-            "observations": observations,
-            "diffusion_sample_selection": selection_summary,
-        })
+    items = [
+        (sequence, observations)
+        for sequence, observations in observations_by_sequence.items()
+    ]
+    global _RANK_CONTEXT
+    _RANK_CONTEXT = {
+        "args": args,
+        "compiled_fields": compiled_fields,
+        "shrunk_by_sequence": shrunk_by_sequence,
+        "consensus": consensus,
+        "sample_selections": sample_selections,
+        "historical_sequences": historical_sequences,
+        "excluded_sequences": excluded_sequences,
+        "only_sequences": only_sequences,
+    }
+    workers = max(1, args.rank_workers)
+    if workers > 1 and len(items) >= args.rank_workers_minimum_candidates:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_rank_worker,
+            initargs=(_RANK_CONTEXT,),
+        ) as pool:
+            results = list(pool.map(
+                _rank_candidate, items,
+                chunksize=max(1, len(items) // (workers * 4)),
+            ))
+    else:
+        results = [_rank_candidate(item) for item in items]
+    for result in results:
+        if result is not None:
+            ranked.append(result)
 
     # Selecting on a one-observation estimate is selecting on noise, but
     # publishing nothing is the only outcome that certainly pays nothing.  Take
