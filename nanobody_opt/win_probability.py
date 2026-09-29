@@ -1,4 +1,4 @@
-"""Rank candidates by their chance of drawing a winning score, not by their average.
+"""Rank candidates by their chance of drawing a winning score, not their average.
 
 Only rank one pays, and the validator scores a submission with a single
 observation.  Measured on epoch 25062, the molecule that won drew 85 rank points
@@ -6,23 +6,21 @@ better than its own three-observation average, against a median competitor
 fluctuation of 23, and sat 13th of 46 on averaged quality.  Twelve better
 molecules lost to it.  Epochs are decided by the largest upward fluctuation.
 
-That makes spread an asset rather than a defect.  Given a winning threshold ``t``,
-a candidate with mean 130 and spread 50 beats one with mean 120 and spread 30,
-because P(draw < t) is higher even though its average is worse.  Selecting on the
-mean actively discards the candidates most likely to win.
-
-The estimator is the normal-fitted probability that one fresh draw lands below
-``t``.  Two reasons not to use the empirical fraction instead: with nine
-observations it only resolves in steps of 11%, and it assigns exactly zero to
-every candidate that has not yet produced a winning draw -- which is most of
-them, leaving the ordering undefined where it matters most.
+The production selector uses the exact empirical probability that a candidate
+beats the other qualified candidates when each receives one independent fresh
+draw.  This keeps each observation's complete validator rank sum intact and
+targets the event that actually pays.  The older normal-fitted probability of
+crossing a fixed threshold remains below for artifact replay and diagnostics;
+it is no longer the live field-ordering rule.
 """
 
 from __future__ import annotations
 
+import bisect
 import math
+from collections.abc import Sequence
 from statistics import fmean, stdev
-from typing import Sequence
+from typing import Any
 
 # A spread floor, in rank points.  Without it a candidate whose few observations
 # happen to coincide gets an infinitely confident verdict in whichever direction
@@ -32,7 +30,9 @@ MINIMUM_SPREAD = 5.0
 
 def pooled_spread(spreads: Sequence[float]) -> float:
     """A stand-in spread for candidates with too few observations to have one."""
-    usable = [value for value in spreads if value and math.isfinite(value) and value > 0]
+    usable = [
+        value for value in spreads if value and math.isfinite(value) and value > 0
+    ]
     if not usable:
         return MINIMUM_SPREAD
     ordered = sorted(usable)
@@ -133,9 +133,7 @@ def rank_by_win_probability(
     The spread of candidates that have one observation is unknowable, so they
     borrow the cohort's median spread rather than being ranked as if certain.
     """
-    spreads = [
-        observation_spread(item.get(scores_key) or []) for item in candidates
-    ]
+    spreads = [observation_spread(item.get(scores_key) or []) for item in candidates]
     fallback = pooled_spread([value for value in spreads if value is not None])
     means = [
         fmean(item.get(scores_key) or [0.0]) if (item.get(scores_key) or []) else None
@@ -166,6 +164,121 @@ def rank_by_win_probability(
             -item["win_probability"],
             item.get("score_median", 0.0),
             item.get("sequence", ""),
+        )
+    )
+    return annotated
+
+
+def empirical_fresh_draw_probabilities(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    scores_key: str = "per_observation_median_rank_sum",
+) -> dict[str, float]:
+    """Return each candidate's exact chance of winning one empirical draw.
+
+    Each candidate supplies independent, equally likely observations of the
+    validator's *complete* dense-rank objective.  For every possible draw of a
+    candidate, the calculation integrates over every opponent's empirical
+    distribution.  Ties split the win equally, which makes the probabilities
+    sum to one without random bootstrap noise.
+
+    Keeping an observation's ten metrics together before they become one score
+    preserves their covariance.  This is the deterministic equivalent of the
+    Monte Carlo selector used by ``analysis/nanobody-gap/monte_carlo_selector``.
+    """
+    sequences = [str(item.get("sequence", "")) for item in candidates]
+    distributions = [
+        [float(value) for value in (item.get(scores_key) or [])] for item in candidates
+    ]
+    probabilities = {sequence: 0.0 for sequence in sequences}
+    eligible = [index for index, scores in enumerate(distributions) if scores]
+    if not eligible:
+        return probabilities
+
+    # Each opponent is queried by every other candidate's every own score, so
+    # its worse/equal counts are computed len(eligible)-1 times per own score.
+    # A linear scan of the opponent's own list (`sum(value > score for ...)`)
+    # cost O(depth); sorting each opponent's list once and using bisect turns
+    # that into O(log depth) per query, exact and order-preserving (bisect on
+    # sorted data gives the identical counts a linear scan would). Measured on
+    # a 1,016-candidate, up-to-528-deep pool this was ~94% of a publisher
+    # cycle (~19.7 of ~19.8 minutes); this is the same worse/equal counts,
+    # computed the fast way.
+    sorted_distributions = {index: sorted(distributions[index]) for index in eligible}
+    lengths = {index: float(len(sorted_distributions[index])) for index in eligible}
+
+    for candidate_index in eligible:
+        own = distributions[candidate_index]
+        probability = 0.0
+        for score in own:
+            # Coefficient k is the probability that exactly k opponents tie
+            # this score while every other opponent draws a worse score.  An
+            # outcome with k ties contributes 1/(k+1) of a win.
+            tie_polynomial = [1.0]
+            scalar = 1.0
+            for opponent_index in eligible:
+                if opponent_index == candidate_index:
+                    continue
+                opponent = sorted_distributions[opponent_index]
+                denominator = lengths[opponent_index]
+                left = bisect.bisect_left(opponent, score)
+                right = bisect.bisect_right(opponent, score)
+                worse = (len(opponent) - right) / denominator
+                equal = (right - left) / denominator
+                # Almost every opponent has zero mass at this exact dense-rank
+                # sum.  Such a factor is the scalar ``worse``; appending a
+                # trailing zero coefficient for it made the polynomial grow to
+                # every candidate anyway.  The former implementation was cubic
+                # in cohort size and a DB-backed 2,195-candidate rank took more
+                # than three minutes.  Grow the polynomial only for real ties;
+                # this is algebraically identical and remains exact.
+                if equal == 0.0:
+                    scalar *= worse
+                    if scalar == 0.0:
+                        break
+                    continue
+                expanded = [0.0] * (len(tie_polynomial) + 1)
+                for ties, coefficient in enumerate(tie_polynomial):
+                    expanded[ties] += coefficient * worse
+                    expanded[ties + 1] += coefficient * equal
+                tie_polynomial = expanded
+            if scalar:
+                probability += scalar * sum(
+                    coefficient / (ties + 1)
+                    for ties, coefficient in enumerate(tie_polynomial)
+                ) / len(own)
+        probabilities[sequences[candidate_index]] = probability
+    return probabilities
+
+
+def rank_by_fresh_draw_probability(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    scores_key: str = "per_observation_median_rank_sum",
+) -> list[dict[str, Any]]:
+    """Order candidates by empirical probability of winning a fresh draw.
+
+    Unlike :func:`rank_by_win_probability`, this does not fit independent
+    normal tails or optimize a hand-picked threshold.  It directly asks the
+    event that pays: which candidate is best when every candidate receives one
+    new draw of the validator's full objective?
+    """
+    probabilities = empirical_fresh_draw_probabilities(
+        candidates, scores_key=scores_key
+    )
+    annotated: list[dict[str, Any]] = []
+    for item in candidates:
+        enriched = dict(item)
+        enriched["win_probability"] = probabilities.get(
+            str(item.get("sequence", "")), 0.0
+        )
+        enriched["win_probability_method"] = "empirical-independent-fresh-draw"
+        annotated.append(enriched)
+    annotated.sort(
+        key=lambda item: (
+            -float(item["win_probability"]),
+            float(item.get("score_median", 0.0)),
+            str(item.get("sequence", "")),
         )
     )
     return annotated
