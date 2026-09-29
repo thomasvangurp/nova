@@ -314,3 +314,32 @@ def test_bisect_rewrite_matches_the_reference_implementation_with_floats(monkeyp
         want = _reference_fresh_draw_probabilities(candidates)
         for seq in want:
             assert got[seq] == pytest.approx(want[seq], abs=1e-12), (trial, candidates)
+
+
+def test_parallel_matches_serial_on_a_pool_above_the_worker_threshold():
+    import random
+    from nanobody_opt.win_probability import empirical_fresh_draw_probabilities
+
+    rng = random.Random(7)
+    candidates = [
+        {"sequence": f"seq{i}",
+         "per_observation_median_rank_sum": [float(rng.randint(0, 20)) for _ in range(rng.randint(1, 5))]}
+        for i in range(80)
+    ]
+    serial = empirical_fresh_draw_probabilities(candidates, workers=1)
+    parallel = empirical_fresh_draw_probabilities(
+        candidates, workers=4, workers_minimum_candidates=64
+    )
+    assert serial == parallel
+
+
+def test_pool_is_skipped_below_the_minimum_candidate_count():
+    from nanobody_opt.win_probability import empirical_fresh_draw_probabilities
+
+    candidates = [{"sequence": "a", "per_observation_median_rank_sum": [1.0]},
+                  {"sequence": "b", "per_observation_median_rank_sum": [2.0]}]
+    # workers=4 but only 2 candidates, well under the default minimum: must not
+    # spin up a pool (would hang if _fresh_draw_probability_for's context were
+    # never initialised for a size-2 workload in a test process).
+    result = empirical_fresh_draw_probabilities(candidates, workers=4)
+    assert set(result) == {"a", "b"}

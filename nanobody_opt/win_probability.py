@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import bisect
 import math
+import os
+from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Sequence
 from statistics import fmean, stdev
 from typing import Any
@@ -169,10 +171,71 @@ def rank_by_win_probability(
     return annotated
 
 
+#: Read-only context for _fresh_draw_probability_for, set once per process:
+#: directly in the main process for a serial run, or via
+#: _init_fresh_draw_worker in each pool worker (a separate process, so it
+#: cannot see empirical_fresh_draw_probabilities's local variables).
+_FRESH_DRAW_CONTEXT: dict[str, Any] | None = None
+
+
+def _init_fresh_draw_worker(context: dict[str, Any]) -> None:
+    global _FRESH_DRAW_CONTEXT
+    _FRESH_DRAW_CONTEXT = context
+
+
+def _fresh_draw_probability_for(candidate_index: int) -> float:
+    """One candidate's exact win probability. Same math as before, just able
+    to run in a worker process: this loop, not the bisect lookups it calls,
+    is what actually dominates (measured: 73% of a cycle after the bisect
+    fix alone -- O(depth) -> O(log depth) sped up the inner comparison, but
+    the outer candidate x own-score x opponent structure is still a
+    Python-level loop over up to 1,016 candidates)."""
+    ctx = _FRESH_DRAW_CONTEXT
+    eligible = ctx["eligible"]
+    distributions = ctx["distributions"]
+    sorted_distributions = ctx["sorted_distributions"]
+    lengths = ctx["lengths"]
+    own = distributions[candidate_index]
+    probability = 0.0
+    for score in own:
+        # Coefficient k is the probability that exactly k opponents tie
+        # this score while every other opponent draws a worse score.  An
+        # outcome with k ties contributes 1/(k+1) of a win.
+        tie_polynomial = [1.0]
+        scalar = 1.0
+        for opponent_index in eligible:
+            if opponent_index == candidate_index:
+                continue
+            opponent = sorted_distributions[opponent_index]
+            denominator = lengths[opponent_index]
+            left = bisect.bisect_left(opponent, score)
+            right = bisect.bisect_right(opponent, score)
+            worse = (len(opponent) - right) / denominator
+            equal = (right - left) / denominator
+            if equal == 0.0:
+                scalar *= worse
+                if scalar == 0.0:
+                    break
+                continue
+            expanded = [0.0] * (len(tie_polynomial) + 1)
+            for ties, coefficient in enumerate(tie_polynomial):
+                expanded[ties] += coefficient * worse
+                expanded[ties + 1] += coefficient * equal
+            tie_polynomial = expanded
+        if scalar:
+            probability += scalar * sum(
+                coefficient / (ties + 1)
+                for ties, coefficient in enumerate(tie_polynomial)
+            ) / len(own)
+    return probability
+
+
 def empirical_fresh_draw_probabilities(
     candidates: Sequence[dict[str, Any]],
     *,
     scores_key: str = "per_observation_median_rank_sum",
+    workers: int = 1,
+    workers_minimum_candidates: int = 64,
 ) -> dict[str, float]:
     """Return each candidate's exact chance of winning one empirical draw.
 
@@ -207,46 +270,27 @@ def empirical_fresh_draw_probabilities(
     sorted_distributions = {index: sorted(distributions[index]) for index in eligible}
     lengths = {index: float(len(sorted_distributions[index])) for index in eligible}
 
-    for candidate_index in eligible:
-        own = distributions[candidate_index]
-        probability = 0.0
-        for score in own:
-            # Coefficient k is the probability that exactly k opponents tie
-            # this score while every other opponent draws a worse score.  An
-            # outcome with k ties contributes 1/(k+1) of a win.
-            tie_polynomial = [1.0]
-            scalar = 1.0
-            for opponent_index in eligible:
-                if opponent_index == candidate_index:
-                    continue
-                opponent = sorted_distributions[opponent_index]
-                denominator = lengths[opponent_index]
-                left = bisect.bisect_left(opponent, score)
-                right = bisect.bisect_right(opponent, score)
-                worse = (len(opponent) - right) / denominator
-                equal = (right - left) / denominator
-                # Almost every opponent has zero mass at this exact dense-rank
-                # sum.  Such a factor is the scalar ``worse``; appending a
-                # trailing zero coefficient for it made the polynomial grow to
-                # every candidate anyway.  The former implementation was cubic
-                # in cohort size and a DB-backed 2,195-candidate rank took more
-                # than three minutes.  Grow the polynomial only for real ties;
-                # this is algebraically identical and remains exact.
-                if equal == 0.0:
-                    scalar *= worse
-                    if scalar == 0.0:
-                        break
-                    continue
-                expanded = [0.0] * (len(tie_polynomial) + 1)
-                for ties, coefficient in enumerate(tie_polynomial):
-                    expanded[ties] += coefficient * worse
-                    expanded[ties + 1] += coefficient * equal
-                tie_polynomial = expanded
-            if scalar:
-                probability += scalar * sum(
-                    coefficient / (ties + 1)
-                    for ties, coefficient in enumerate(tie_polynomial)
-                ) / len(own)
+    global _FRESH_DRAW_CONTEXT
+    _FRESH_DRAW_CONTEXT = {
+        "eligible": eligible,
+        "distributions": distributions,
+        "sorted_distributions": sorted_distributions,
+        "lengths": lengths,
+    }
+    pool_size = max(1, workers)
+    if pool_size > 1 and len(eligible) >= workers_minimum_candidates:
+        with ProcessPoolExecutor(
+            max_workers=pool_size,
+            initializer=_init_fresh_draw_worker,
+            initargs=(_FRESH_DRAW_CONTEXT,),
+        ) as pool:
+            results = list(pool.map(
+                _fresh_draw_probability_for, eligible,
+                chunksize=max(1, len(eligible) // (pool_size * 4)),
+            ))
+    else:
+        results = [_fresh_draw_probability_for(index) for index in eligible]
+    for candidate_index, probability in zip(eligible, results):
         probabilities[sequences[candidate_index]] = probability
     return probabilities
 
@@ -255,6 +299,8 @@ def rank_by_fresh_draw_probability(
     candidates: Sequence[dict[str, Any]],
     *,
     scores_key: str = "per_observation_median_rank_sum",
+    workers: int = 1,
+    workers_minimum_candidates: int = 64,
 ) -> list[dict[str, Any]]:
     """Order candidates by empirical probability of winning a fresh draw.
 
@@ -264,7 +310,8 @@ def rank_by_fresh_draw_probability(
     new draw of the validator's full objective?
     """
     probabilities = empirical_fresh_draw_probabilities(
-        candidates, scores_key=scores_key
+        candidates, scores_key=scores_key,
+        workers=workers, workers_minimum_candidates=workers_minimum_candidates,
     )
     annotated: list[dict[str, Any]] = []
     for item in candidates:

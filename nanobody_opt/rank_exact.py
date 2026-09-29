@@ -285,6 +285,8 @@ def _order_candidates(
     selection_order: str,
     competitive_score_threshold: float,
     consensus_ranking_policy: str = "tier",
+    rank_workers: int = 1,
+    rank_workers_minimum_candidates: int = 64,
 ) -> list[dict[str, Any]]:
     """Apply the one production ordering in a reusable, non-pose stage."""
     ranked = list(candidates)
@@ -294,7 +296,10 @@ def _order_candidates(
         # untouched draw of the validator's complete ten-metric objective and
         # the best draw wins.  The former normal-tail approximation optimized
         # crossing a fixed threshold instead of beating this candidate field.
-        ranked = rank_by_fresh_draw_probability(ranked)
+        ranked = rank_by_fresh_draw_probability(
+            ranked, workers=rank_workers,
+            workers_minimum_candidates=rank_workers_minimum_candidates,
+        )
         ranked = consensus_policy.ordered_candidates(ranked, consensus_ranking_policy)
     elif selection_order == "p90":
         ranked.sort(key=lambda item: (
@@ -1145,6 +1150,8 @@ def main() -> None:
     preliminary = _order_candidates(
         ranked, args.selection_order, args.competitive_score_threshold,
         args.consensus_ranking_policy,
+        rank_workers=args.rank_workers,
+        rank_workers_minimum_candidates=args.rank_workers_minimum_candidates,
     )
     pose_early_stop = (
         pose_challenge is not None
@@ -1208,6 +1215,8 @@ def main() -> None:
     ranked = _order_candidates(
         ranked, args.selection_order, args.competitive_score_threshold,
         args.consensus_ranking_policy,
+        rank_workers=args.rank_workers,
+        rank_workers_minimum_candidates=args.rank_workers_minimum_candidates,
     )
     selected = (
         consensus_policy.ordered_candidates(
