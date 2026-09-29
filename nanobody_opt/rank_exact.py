@@ -669,7 +669,7 @@ def main() -> None:
     parser.add_argument("--minimum-median-contact-jaccard", type=float, default=0.0)
     parser.add_argument("--maximum-cdr3-rmsd", type=float)
     parser.add_argument("--minimum-epitope-occupancy", type=float, default=0.0)
-    parser.add_argument("--win-objective", choices=("confidence", "full"), default="confidence",
+    parser.add_argument("--win-objective", choices=("confidence", "full"), default="full",
                         help="metrics the fresh-draw win probability ranks on; gates and "
                              "diagnostics keep the full ten-metric rank sum")
     parser.add_argument("--maximum-public-edits", type=int, default=0,
