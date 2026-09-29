@@ -3,12 +3,102 @@ import sqlite3
 
 from nanobody_opt.mutation_network import (
     MutationNetwork,
+    exact_run_is_complete,
+    load_exact_artifacts,
     load_lineage_edges,
     load_mutation_effects,
     load_observations,
+    record_exact_run,
     rebuild_nearest_edges,
     update_observation_store,
 )
+
+
+def test_raw_exact_run_is_sealed_only_with_all_target_rows_and_artifacts(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    observation_id = "local-exact:run-one:0:AAAA"
+    update_observation_store(path, [{
+        "observation_id": observation_id,
+        "sequence": "AAAA",
+        "score": 42,
+        "source": "local_exact_raw",
+        "target": "P20809",
+        "metrics": {"design_iiptm": 0.7},
+        "structure": {
+            "confidence_path": "confidence.cif",
+            "writer_path": "writer.cif",
+            "sample_selection": {"confidence_sample": 1, "writer_sample": 0},
+        },
+    }])
+
+    sealed = record_exact_run(
+        path,
+        target="P20809",
+        run_id="run-one",
+        epoch=25_275,
+        source_path=tmp_path / "exact_all.json",
+        file_sha256="abc123",
+        scorer_protocol="validator-fast-v1",
+        observation_ids=[observation_id],
+    )
+
+    assert sealed["complete"] is True
+    assert exact_run_is_complete(
+        path,
+        target="P20809",
+        run_id="run-one",
+        file_sha256="abc123",
+        expected_rows=1,
+    )
+    assert load_exact_artifacts(path, target="P20809")["AAAA"] == [{
+        "observation_id": observation_id,
+        "run_id": "run-one",
+        "confidence_path": "confidence.cif",
+        "writer_path": "writer.cif",
+        "structure": {
+            "confidence_path": "confidence.cif",
+            "writer_path": "writer.cif",
+            "sample_selection": {"confidence_sample": 1, "writer_sample": 0},
+        },
+        "sample_selection": {"confidence_sample": 1, "writer_sample": 0},
+    }]
+
+
+def test_incomplete_raw_exact_run_never_becomes_authoritative(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "present",
+        "sequence": "AAAA",
+        "score": 42,
+        "source": "local_exact_raw",
+        "target": "P20809",
+    }])
+
+    sealed = record_exact_run(
+        path,
+        target="P20809",
+        run_id="partial",
+        epoch=1,
+        source_path=tmp_path / "exact_all.json",
+        file_sha256="partial-sha",
+        scorer_protocol=None,
+        observation_ids=["present", "missing"],
+    )
+
+    assert sealed == {
+        "target": "P20809",
+        "run_id": "partial",
+        "expected_rows": 2,
+        "ingested_rows": 1,
+        "complete": False,
+    }
+    assert not exact_run_is_complete(
+        path,
+        target="P20809",
+        run_id="partial",
+        file_sha256="partial-sha",
+        expected_rows=2,
+    )
 
 
 def test_virtual_node_uses_all_nearby_scored_predecessors(tmp_path):
@@ -600,3 +690,59 @@ def test_supported_effect_count_and_uncertainty_survive_the_batched_path():
             [], query, vector, distance_penalty=5.0
         ) == []
     assert checked >= 24
+
+
+def test_load_observations_serves_a_cache_hit_without_reopening_the_database(tmp_path, monkeypatch):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "epoch1:AAA", "sequence": "AAA", "score": 80,
+        "epoch": 1, "target": "P20809",
+    }])
+    first = load_observations(path, target="P20809")
+    assert len(first) == 1 and first[0]["score"] == 80
+
+    import nanobody_opt.mutation_network as mn
+    def fail_if_called(*a, **k):
+        raise AssertionError("cache hit should not touch the database")
+    monkeypatch.setattr(mn, "_load_observations_uncached", fail_if_called)
+    cached = load_observations(path, target="P20809")
+    assert cached == first
+
+
+def test_load_observations_cache_invalidates_when_the_database_changes(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "epoch1:AAA", "sequence": "AAA", "score": 80,
+        "epoch": 1, "target": "P20809",
+    }])
+    load_observations(path, target="P20809")  # populate the cache
+    update_observation_store(path, [{
+        "observation_id": "epoch1:CCC", "sequence": "CCC", "score": 90,
+        "epoch": 1, "target": "P20809",
+    }])
+    refreshed = load_observations(path, target="P20809")
+    assert {item["sequence"] for item in refreshed} == {"AAA", "CCC"}
+
+
+def test_load_observations_cache_is_specific_to_the_target(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [
+        {"observation_id": "epoch1:AAA", "sequence": "AAA", "score": 80,
+         "epoch": 1, "target": "P20809"},
+        {"observation_id": "epoch1:CCC", "sequence": "CCC", "score": 50,
+         "epoch": 1, "target": "OTHER"},
+    ])
+    assert {i["sequence"] for i in load_observations(path, target="P20809")} == {"AAA"}
+    assert {i["sequence"] for i in load_observations(path, target="OTHER")} == {"CCC"}
+
+
+def test_load_observations_survives_a_corrupt_cache_file(tmp_path):
+    path = tmp_path / "observations.sqlite"
+    update_observation_store(path, [{
+        "observation_id": "epoch1:AAA", "sequence": "AAA", "score": 80,
+        "epoch": 1, "target": "P20809",
+    }])
+    cache_path = path.with_name(f"{path.name}.obs_cache.P20809.pkl")
+    cache_path.write_bytes(b"not a pickle")
+    result = load_observations(path, target="P20809")
+    assert len(result) == 1 and result[0]["sequence"] == "AAA"

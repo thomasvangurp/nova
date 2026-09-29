@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import math
+import pickle
 import os
 import sqlite3
 import tempfile
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -586,6 +588,38 @@ def _connect(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS observations_node_epoch
             ON observations(node_id, epoch);
+        CREATE TABLE IF NOT EXISTS exact_runs (
+            target TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            epoch INTEGER,
+            source_path TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            scorer_protocol TEXT,
+            expected_rows INTEGER NOT NULL,
+            ingested_rows INTEGER NOT NULL,
+            complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
+            ingested_at REAL NOT NULL,
+            PRIMARY KEY(target, run_id)
+        );
+        CREATE TABLE IF NOT EXISTS exact_run_observations (
+            target TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            observation_id TEXT NOT NULL
+                REFERENCES observations(observation_id) ON DELETE CASCADE,
+            PRIMARY KEY(target, run_id, observation_id),
+            FOREIGN KEY(target, run_id)
+                REFERENCES exact_runs(target, run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS exact_run_observations_observation
+            ON exact_run_observations(observation_id);
+        CREATE TABLE IF NOT EXISTS observation_artifacts (
+            observation_id TEXT PRIMARY KEY
+                REFERENCES observations(observation_id) ON DELETE CASCADE,
+            confidence_path TEXT,
+            writer_path TEXT,
+            structure_json TEXT NOT NULL DEFAULT '{}',
+            sample_selection_json TEXT
+        );
         CREATE TABLE IF NOT EXISTS edges (
             source_node_id INTEGER NOT NULL REFERENCES nodes(id),
             target_node_id INTEGER NOT NULL REFERENCES nodes(id),
@@ -634,7 +668,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         """
     )
     connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '2')"
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '4')"
     )
     return connection
 
@@ -679,7 +713,7 @@ def update_observation_store(
             excluded = {
                 "observation_id", "sequence", "target", "epoch", "source",
                 "score_kind", "score", "observation_count", "metrics",
-                "pose_stability",
+                "pose_stability", "structure",
             }
             provenance = {
                 key: value for key, value in observation.items() if key not in excluded
@@ -715,6 +749,34 @@ def update_observation_store(
                     json.dumps(provenance, sort_keys=True),
                 ),
             )
+            structure = observation.get("structure")
+            if isinstance(structure, dict):
+                confidence_path = (
+                    structure.get("confidence_path") or structure.get("path")
+                )
+                writer_path = structure.get("writer_path") or structure.get("path")
+                sample_selection = structure.get("sample_selection")
+                connection.execute(
+                    """
+                    INSERT INTO observation_artifacts(
+                        observation_id, confidence_path, writer_path,
+                        structure_json, sample_selection_json
+                    ) VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(observation_id) DO UPDATE SET
+                        confidence_path=excluded.confidence_path,
+                        writer_path=excluded.writer_path,
+                        structure_json=excluded.structure_json,
+                        sample_selection_json=excluded.sample_selection_json
+                    """,
+                    (
+                        observation_id,
+                        str(confidence_path) if confidence_path else None,
+                        str(writer_path) if writer_path else None,
+                        json.dumps(structure, sort_keys=True),
+                        json.dumps(sample_selection, sort_keys=True)
+                        if isinstance(sample_selection, dict) else None,
+                    ),
+                )
             parent_sequence = str(
                 observation.get("parent_sequence", "")
             ).strip().upper()
@@ -787,9 +849,224 @@ def update_observation_store(
     return written
 
 
+def record_exact_run(
+    path: Path,
+    *,
+    target: str,
+    run_id: str,
+    epoch: int | None,
+    source_path: Path,
+    file_sha256: str,
+    scorer_protocol: str | None,
+    observation_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Seal one raw exact run only after every expected row is present.
+
+    ``exact_runs.complete`` is the ingestion barrier used by publication.  A
+    half-written import can leave useful observation rows behind, but it can
+    never be mistaken for an authoritative run until a later retry seals it.
+    """
+    expected = list(dict.fromkeys(str(item) for item in observation_ids))
+    with _connect(path) as connection:
+        present_ids = {
+            str(row[0])
+            for observation_id in expected
+            for row in connection.execute(
+                """
+                SELECT o.observation_id
+                FROM observations o
+                JOIN nodes n ON n.id=o.node_id
+                WHERE o.observation_id=? AND n.target=?
+                """,
+                (observation_id, target),
+            )
+        }
+        present = len(present_ids)
+        complete = int(present == len(expected) and bool(expected))
+        connection.execute(
+            """
+            INSERT INTO exact_runs(
+                target, run_id, epoch, source_path, file_sha256,
+                scorer_protocol, expected_rows, ingested_rows, complete,
+                ingested_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(target, run_id) DO UPDATE SET
+                epoch=excluded.epoch,
+                source_path=excluded.source_path,
+                file_sha256=excluded.file_sha256,
+                scorer_protocol=excluded.scorer_protocol,
+                expected_rows=excluded.expected_rows,
+                ingested_rows=excluded.ingested_rows,
+                complete=excluded.complete,
+                ingested_at=excluded.ingested_at
+            """,
+            (
+                target, run_id, epoch, str(source_path), file_sha256,
+                scorer_protocol, len(expected), present, complete, time.time(),
+            ),
+        )
+        connection.execute(
+            "DELETE FROM exact_run_observations WHERE target=? AND run_id=?",
+            (target, run_id),
+        )
+        connection.executemany(
+            """
+            INSERT INTO exact_run_observations(target, run_id, observation_id)
+            VALUES(?, ?, ?)
+            """,
+            ((target, run_id, observation_id) for observation_id in present_ids),
+        )
+    return {
+        "target": target,
+        "run_id": run_id,
+        "expected_rows": len(expected),
+        "ingested_rows": present,
+        "complete": bool(complete),
+    }
+
+
+def exact_run_is_complete(
+    path: Path,
+    *,
+    target: str,
+    run_id: str,
+    file_sha256: str,
+    expected_rows: int,
+) -> bool:
+    """Whether the database holds a sealed, byte-matched raw exact run."""
+    if not path.is_file():
+        return False
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        row = connection.execute(
+            """
+            SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
+                   COUNT(x.observation_id)
+            FROM exact_runs r
+            LEFT JOIN exact_run_observations x
+              ON x.target=r.target AND x.run_id=r.run_id
+            WHERE r.target=? AND r.run_id=?
+            GROUP BY r.target, r.run_id
+            """,
+            (target, run_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        if "connection" in locals():
+            connection.close()
+    return bool(
+        row
+        and str(row[0]) == file_sha256
+        and int(row[1]) == expected_rows
+        and int(row[2]) == expected_rows
+        and int(row[3]) == 1
+        and int(row[4]) == expected_rows
+    )
+
+
+def load_exact_artifacts(
+    path: Path, *, target: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Load retained structure/sample metadata for authoritative raw folds."""
+    if not path.is_file():
+        return {}
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    try:
+        rows = connection.execute(
+            """
+            SELECT n.sequence, o.observation_id, x.run_id, a.confidence_path,
+                   a.writer_path, a.structure_json, a.sample_selection_json
+            FROM observations o
+            JOIN nodes n ON n.id=o.node_id
+            JOIN exact_run_observations x
+              ON x.observation_id=o.observation_id AND x.target=n.target
+            JOIN exact_runs r
+              ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
+            JOIN observation_artifacts a ON a.observation_id=o.observation_id
+            WHERE n.target=? AND o.source='local_exact_raw'
+            ORDER BY o.observation_id
+            """,
+            (target,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        connection.close()
+    found: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for (
+        sequence, observation_id, run_id, confidence, writer, structure, selection
+    ) in rows:
+        try:
+            structure_payload = json.loads(structure or "{}")
+        except (TypeError, ValueError):
+            structure_payload = {}
+        try:
+            selection_payload = json.loads(selection) if selection else None
+        except (TypeError, ValueError):
+            selection_payload = None
+        found[str(sequence)].append({
+            "observation_id": str(observation_id),
+            "run_id": str(run_id),
+            "confidence_path": confidence,
+            "writer_path": writer,
+            "structure": structure_payload,
+            "sample_selection": selection_payload,
+        })
+    return dict(found)
+
+
 def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
+    """Every observation for one target: a full-table scan plus a JSON decode
+    of three columns per row (~392k rows and counting). Each producer
+    iteration is a fresh subprocess and the epoch runs several of them
+    (2-3 in-epoch, up to 2 more prescreening the next epoch), so this ran
+    from scratch every time although the table barely changes between them
+    -- measured 22% of a 239s generation. Cached on disk, keyed on the
+    database's own (mtime, size): a real change is a miss, a rerun on an
+    unchanged database is not.
+    """
     if not path.is_file():
         return []
+    # A cheap COUNT+MAX as the cache key, not file mtime/size: the store runs
+    # in WAL mode (_connect below), where a write can leave the main file's
+    # mtime and size untouched until the next checkpoint, and PRAGMA
+    # data_version proved unreliable across short-lived connections in
+    # testing. Counting rows and the newest observation_id is a fraction of
+    # the cost of decoding every row's JSON, and changes exactly when new
+    # observations for this target actually land.
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as probe:
+        cache_key = probe.execute(
+            """
+            SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
+            FROM observations o JOIN nodes n ON n.id=o.node_id
+            WHERE n.target=?
+            """,
+            (target,),
+        ).fetchone()
+    cache_path = path.with_name(f"{path.name}.obs_cache.{target}.pkl")
+    try:
+        with cache_path.open("rb") as handle:
+            cached_key, cached_records = pickle.load(handle)
+        if tuple(cached_key) == tuple(cache_key):
+            return cached_records
+    except (OSError, EOFError, pickle.UnpicklingError, ValueError):
+        pass
+    records = _load_observations_uncached(path, target=target)
+    try:
+        handle_fd, temporary = tempfile.mkstemp(
+            prefix=".obs_cache_", suffix=".pkl", dir=path.parent
+        )
+        with os.fdopen(handle_fd, "wb") as handle:
+            pickle.dump((cache_key, records), handle,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temporary, cache_path)
+    except OSError:
+        pass  # a cache that cannot write must not fail generation
+    return records
+
+
+def _load_observations_uncached(path: Path, *, target: str) -> list[dict[str, Any]]:
     with _connect(path) as connection:
         rows = connection.execute(
             """
@@ -1149,10 +1426,12 @@ def ranking_observations(
         if not sequence or score is None:
             continue
         observations.append({
-            "observation_id": (
-                f"{source}:epoch{epoch}:"
-                f"{candidate.get('observation_count', 0)}:{sequence}"
-            ),
+            # This is a mutable derived snapshot, not an independent scorer
+            # draw.  Its identity must therefore be stable as evidence depth
+            # changes within an epoch.  Including observation_count here grew
+            # production to >500k near-duplicate rows and was the reason the
+            # raw/derived distinction became impossible to reason about.
+            "observation_id": f"{source}:epoch{epoch}:{sequence}",
             "sequence": sequence,
             "score": float(score),
             "score_kind": "local_validator_replay_rank_sum",
