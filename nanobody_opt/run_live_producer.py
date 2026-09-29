@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shlex
+import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -35,6 +38,154 @@ ARCHIVE_URL = (
 #: plan of an epoch has real replication rows to fit; short enough that a
 #: genuine change in cost is reflected within an epoch or two.
 BUDGET_SEED_EPOCHS = 3
+DEFAULT_MINIMUM_FREE_GIB = 20.0
+DEFAULT_MAXIMUM_PERSISTED_RANKING_MIB = 64.0
+DEFAULT_RETAINED_EPOCHS = 16
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
+    """Prove every raw exact file is losslessly represented in SQLite.
+
+    An epoch is eligible for removal only when every raw run is byte-matched,
+    sealed with all expected observations, and has the structure/sample audit
+    row extracted by the importer. Any ambiguity fails closed.
+    """
+    if not paths or not database.is_file():
+        return False
+    try:
+        connection = sqlite3.connect(
+            f"file:{database}?mode=ro", uri=True, timeout=60
+        )
+        rows = connection.execute(
+            """
+            SELECT r.source_path, r.file_sha256, r.expected_rows,
+                   r.ingested_rows, r.complete,
+                   COUNT(DISTINCT x.observation_id),
+                   COUNT(DISTINCT a.observation_id)
+            FROM exact_runs r
+            LEFT JOIN exact_run_observations x
+              ON x.target=r.target AND x.run_id=r.run_id
+            LEFT JOIN observation_artifacts a
+              ON a.observation_id=x.observation_id
+            WHERE r.target='P20809'
+            GROUP BY r.target, r.run_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    finally:
+        if "connection" in locals():
+            connection.close()
+    sealed = {str(row[0]): row[1:] for row in rows}
+    for path in paths:
+        row = sealed.get(str(path))
+        if row is None:
+            return False
+        digest, expected, ingested, complete, linked, artifacts = row
+        expected = int(expected)
+        if not (
+            expected > 0
+            and int(ingested) == expected
+            and int(complete) == 1
+            and int(linked) == expected
+            and int(artifacts) == expected
+            and str(digest) == _sha256(path)
+        ):
+            return False
+    return True
+
+
+def maintain_runtime_storage(
+    runtime_root: Path,
+    current_epoch: int,
+    *,
+    minimum_free_gib: float = DEFAULT_MINIMUM_FREE_GIB,
+    maximum_persisted_ranking_mib: float = DEFAULT_MAXIMUM_PERSISTED_RANKING_MIB,
+    observation_database: Path | None = None,
+    retained_epochs: int = DEFAULT_RETAINED_EPOCHS,
+) -> dict[str, int]:
+    """Prune regenerable legacy rank matrices and enforce a disk reserve.
+
+    Only the two internal race rankings are eligible.  They are derived from
+    retained ``exact_all.json`` observations and are not publisher inputs once
+    their epoch has completed. Older epoch trees are removed only after every
+    raw exact file and its extracted audit metadata are byte-verified in the
+    normalized observation database. Publication artifacts are never touched.
+    """
+    live_root = runtime_root / "live"
+    maximum_bytes = int(maximum_persisted_ranking_mib * 1024**2)
+    removed_files = 0
+    removed_bytes = 0
+    removed_epoch_dirs = 0
+    if live_root.is_dir():
+        for epoch_root in live_root.glob("epoch[0-9]*"):
+            suffix = epoch_root.name.removeprefix("epoch")
+            if not suffix.isdigit() or int(suffix) >= current_epoch:
+                continue
+            for pattern in (
+                "producer/iteration_*/race/screen_ranking.json",
+                "producer/iteration_*/race/rounds/stage_ranking.json",
+            ):
+                for path in epoch_root.glob(pattern):
+                    try:
+                        size = path.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    if size <= maximum_bytes:
+                        continue
+                    path.unlink()
+                    removed_files += 1
+                    removed_bytes += size
+        if observation_database is not None and retained_epochs >= 1:
+            cutoff = current_epoch - retained_epochs
+            for epoch_root in sorted(live_root.glob("epoch[0-9]*")):
+                suffix = epoch_root.name.removeprefix("epoch")
+                if (
+                    not suffix.isdigit()
+                    or int(suffix) >= cutoff
+                    or epoch_root.is_symlink()
+                ):
+                    continue
+                exact_files = sorted(epoch_root.glob("**/exact_all.json"))
+                if not _sealed_exact_files(observation_database, exact_files):
+                    continue
+                for path in epoch_root.rglob("*"):
+                    try:
+                        if path.is_file() and not path.is_symlink():
+                            removed_bytes += path.stat().st_size
+                            removed_files += 1
+                    except FileNotFoundError:
+                        pass
+                shutil.rmtree(epoch_root)
+                removed_epoch_dirs += 1
+    free_bytes = shutil.disk_usage(runtime_root).free
+    minimum_bytes = int(minimum_free_gib * 1024**3)
+    if free_bytes < minimum_bytes:
+        raise RuntimeError(
+            "producer disk reserve violated: "
+            f"free={free_bytes} required={minimum_bytes}; refusing new GPU work"
+        )
+    if removed_files or removed_epoch_dirs:
+        print(
+            "PRODUCER_STORAGE_PRUNED "
+            f"epoch_dirs={removed_epoch_dirs} files={removed_files} "
+            f"bytes={removed_bytes} free={free_bytes}",
+            flush=True,
+        )
+    return {
+        "removed_files": removed_files,
+        "removed_bytes": removed_bytes,
+        "removed_epoch_dirs": removed_epoch_dirs,
+        "free_bytes": free_bytes,
+    }
 
 
 def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> dict:
@@ -694,8 +845,12 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--selection-metric-policy", choices=("plain", "historical-drivers"),
-                        default="plain", help="forwarded to screen and confirmation ranking")
+    parser.add_argument(
+        "--selection-metric-policy",
+        choices=("plain",),
+        default="plain",
+        help="compatibility flag; screen and confirmation use validator arithmetic",
+    )
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
     parser.add_argument("--budget-mode", choices=("static", "adaptive"), default="static")
@@ -725,6 +880,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-chain-state-age", type=float, default=90)
     parser.add_argument("--reserve-blocks", type=int, default=55)
     parser.add_argument("--poll-interval", type=float, default=30)
+    parser.add_argument(
+        "--prescreen-next-epoch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="once this epoch's confirmation is done, run the next epoch's first "
+             "generate-and-screen iterations in the otherwise idle tail",
+    )
+    parser.add_argument(
+        "--prescreen-minimum-blocks",
+        type=int,
+        default=60,
+        help="start another prescreen iteration only with at least this many "
+             "blocks of the current epoch left",
+    )
     parser.add_argument(
         "--gpus",
         default=None,
@@ -957,8 +1126,98 @@ def _parser() -> argparse.ArgumentParser:
             "cannot change the grouping that scores depend on"
         ),
     )
+    parser.add_argument(
+        "--minimum-free-gib",
+        type=float,
+        default=DEFAULT_MINIMUM_FREE_GIB,
+        help="refuse new GPU work when the runtime filesystem falls below this reserve",
+    )
+    parser.add_argument(
+        "--maximum-persisted-ranking-mib",
+        type=float,
+        default=DEFAULT_MAXIMUM_PERSISTED_RANKING_MIB,
+        help="prune older regenerable screen/stage rank files above this size",
+    )
+    parser.add_argument(
+        "--retained-epoch-directories",
+        type=int,
+        default=DEFAULT_RETAINED_EPOCHS,
+        help=(
+            "keep this many recent raw epoch trees; older trees are removed "
+            "only after byte-matched sealed ingestion into the observation DB"
+        ),
+    )
     parser.add_argument("--once", action="store_true")
     return parser
+
+
+#: Per-epoch inputs computed from the leaderboard before the epoch. A prescreen
+#: builds them one epoch early, before the previous epoch is scored, so they
+#: are rebuilt once the epoch really starts.
+PRESCREEN_STALE_INPUTS = ("winner_priors.json", "elite_parents.json",
+                          "elite_parents_layer2.json")
+
+
+def run_prescreen(args: argparse.Namespace, state: dict[str, Any]) -> bool:
+    """Run one generate-and-screen iteration for the NEXT epoch, early.
+
+    After confirmation the GPUs sat idle for the rest of the epoch (~25-30
+    min). Screening does not depend on the epoch: the target is fixed and raw
+    metrics are only ranked against the field later. The iteration is written
+    into the next epoch's own producer root, so when that epoch starts its
+    ranking pools these folds like any other iteration's and the loop simply
+    continues at the next iteration number.
+
+    The race reads a synthetic chain state placing it at the start of the next
+    epoch; the real one would report zero blocks left for an epoch that has
+    not begun and the race would screen nothing.
+    """
+    epoch_length = int(state["epoch_length"])
+    remaining = epoch_length - int(state["block"]) % epoch_length
+    if remaining < args.prescreen_minimum_blocks:
+        return False
+    following = int(state["epoch"]) + 1
+    producer_root = args.runtime_root / "live" / f"epoch{following}" / "producer"
+    producer_root.mkdir(parents=True, exist_ok=True)
+    synthetic_path = producer_root / "prescreen_chain_state.json"
+    synthetic = {**state, "epoch": following, "block": following * epoch_length,
+                 "updated_at_unix": time.time()}
+    _atomic_json(synthetic_path, synthetic)
+    retained = [int(path.name.split("_")[-1]) for path in producer_root.glob("iteration_[0-9]*")
+                if path.is_dir() and path.name.split("_")[-1].isdigit()]
+    iteration = max(retained, default=0) + 1
+    marker = producer_root / "prescreen.json"
+    record = json.loads(marker.read_text()) if marker.is_file() else {"iterations": []}
+    record["iterations"].append(iteration)
+    record["refreshed"] = False
+    _atomic_json(marker, record)
+    print(f"PRODUCER_PRESCREEN epoch={following} iteration={iteration} "
+          f"current_epoch_blocks_left={remaining}", flush=True)
+    early = argparse.Namespace(**{**vars(args), "chain_state": synthetic_path})
+    try:
+        _run_iteration(args=early, state=synthetic, iteration=iteration)
+    except subprocess.CalledProcessError as error:
+        _atomic_json(producer_root / f"iteration_{iteration:02d}" / "failed.json", {
+            "epoch": following, "iteration": iteration, "prescreen": True,
+            "returncode": error.returncode, "command": error.cmd,
+        })
+        print(f"PRODUCER_PRESCREEN_FAILED {error}", flush=True)
+    return True
+
+
+def refresh_prescreen_inputs(producer_root: Path) -> None:
+    """Drop the leaderboard-derived inputs a prescreen built one epoch early."""
+    marker = producer_root / "prescreen.json"
+    if not marker.is_file():
+        return
+    record = json.loads(marker.read_text())
+    if record.get("refreshed"):
+        return
+    for name in PRESCREEN_STALE_INPUTS:
+        (producer_root / name).unlink(missing_ok=True)
+    record["refreshed"] = True
+    _atomic_json(marker, record)
+    print(f"PRODUCER_PRESCREEN_REFRESHED {producer_root}", flush=True)
 
 
 def main() -> None:
@@ -981,16 +1240,23 @@ def main() -> None:
         try:
             state = _chain_state(args.chain_state, args.maximum_chain_state_age)
             epoch = int(state["epoch"])
+            maintain_runtime_storage(
+                args.runtime_root,
+                epoch,
+                minimum_free_gib=args.minimum_free_gib,
+                maximum_persisted_ranking_mib=args.maximum_persisted_ranking_mib,
+                observation_database=args.mutation_database,
+                retained_epochs=args.retained_epoch_directories,
+            )
             offset = int(state["block"]) % int(state["epoch_length"])
-            if epoch in finished_epochs:
-                print(f"PRODUCER_CONFIRMATION_FINISHED epoch={epoch} offset={offset}; waiting", flush=True)
-            elif offset >= int(state["epoch_length"]) - _handoff_reserve(args):
-                print(
-                    f"PRODUCER_RESERVE epoch={epoch} offset={offset}; waiting",
-                    flush=True,
-                )
+            if epoch in finished_epochs or offset >= int(state["epoch_length"]) - _handoff_reserve(args):
+                if not (args.prescreen_next_epoch and run_prescreen(args, state)):
+                    label = ("PRODUCER_CONFIRMATION_FINISHED" if epoch in finished_epochs
+                             else "PRODUCER_RESERVE")
+                    print(f"{label} epoch={epoch} offset={offset}; waiting", flush=True)
             else:
                 producer_root = args.runtime_root / "live" / f"epoch{epoch}" / "producer"
+                refresh_prescreen_inputs(producer_root)
                 if epoch in exhausted_epochs and not (
                     args.budget_mode == "adaptive" and args.replication_rounds
                     and _closing(args, state, producer_root)
