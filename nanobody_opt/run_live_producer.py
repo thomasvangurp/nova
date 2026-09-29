@@ -566,6 +566,9 @@ def _run_iteration(
             "--neighbor-seed-count", str(args.neighbor_seed_count),
             "--minimum-seeds", str(args.minimum_seeds),
             "--per-seed", str(args.per_seed),
+            "--generation-workers", str(args.generation_workers),
+            "--generation-workers-minimum-candidates",
+            str(args.generation_workers_minimum_candidates),
             "--proposal-limit", str(args.proposal_limit),
             "--basin-fraction", str(basin_fraction),
             "--basin-routes-per-core", str(args.basin_routes_per_core),
@@ -941,6 +944,11 @@ def _parser() -> argparse.ArgumentParser:
         default=12,
         help="proposals generated per elite parent before Layer-2 filtering",
     )
+    parser.add_argument("--generation-workers", type=int,
+                        default=min(32, os.cpu_count() or 1),
+                        help="forwarded to local_neighborhood")
+    parser.add_argument("--generation-workers-minimum-candidates", type=int,
+                        default=64, help="forwarded to local_neighborhood")
     parser.add_argument(
         "--settled-deviation-policy",
         choices=("repair-only", "prefer", "off"),

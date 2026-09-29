@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+import os
 import hashlib
 import json
 import math
@@ -956,6 +959,61 @@ def _lane_limits(per_seed: int, haplotype_fraction: float) -> dict[str, int]:
     return {"haplotype": haplotype_limit, "single": per_seed - haplotype_limit}
 
 
+#: The shared, read-only network for _evidence_worker. Set as a plain module
+#: global right before the pool is created, never passed through initargs:
+#: under the "fork" start method a worker inherits it via copy-on-write from
+#: the parent's already-built object, instead of pickling a network built
+#: from hundreds of thousands of observations into every worker.
+_EVIDENCE_NETWORK: MutationNetwork | None = None
+
+
+def _evidence_worker(item: tuple[str, str, set[int]]) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """One candidate's evidence() plus mutation_contexts(): identical to what
+    add_candidate used to compute inline, just off the one core the GIL
+    otherwise confines it to."""
+    parent, candidate, protected = item
+    evidence = _EVIDENCE_NETWORK.evidence(candidate)
+    neighbours = evidence.pop("predecessor_neighbours")
+    evidence["predecessor_neighbours"] = json.dumps(neighbours, sort_keys=True)
+    contexts = mutation_contexts(parent, candidate, contact_positions=protected)
+    evidence["mutation_contexts"] = json.dumps(contexts, sort_keys=True)
+    return evidence
+
+
+def _resolve_pending_evidence(
+    pending: list[tuple[dict[str, object], str, str, set[int]]],
+    mutation_network: MutationNetwork,
+    *,
+    workers: int,
+    workers_minimum_candidates: int,
+) -> None:
+    """Fill in every accepted candidate's evidence()/mutation_contexts() at
+    once, across the pool if the batch is worth it. Mutates each record dict
+    in place; order does not matter since results merge by list position."""
+    if not pending:
+        return
+    items = [(parent, candidate, protected) for _, parent, candidate, protected in pending]
+    # Set unconditionally: _evidence_worker reads this global on BOTH the pool
+    # and the serial fallback path. Setting it only inside the pool branch left
+    # the serial path crashing on None -- masked in testing because module
+    # globals persist across test functions in one process, so an earlier
+    # test's pool run had already populated it before the serial test ran.
+    global _EVIDENCE_NETWORK
+    _EVIDENCE_NETWORK = mutation_network
+    pool_size = max(1, workers)
+    if pool_size > 1 and len(items) >= workers_minimum_candidates:
+        context = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=pool_size, mp_context=context) as pool:
+            results = list(pool.map(
+                _evidence_worker, items,
+                chunksize=max(1, len(items) // (pool_size * 4)),
+            ))
+    else:
+        results = [_evidence_worker(item) for item in items]
+    for (record, _, _, _), evidence in zip(pending, results):
+        record.update(evidence)
+
+
 def balanced_proposal_order(
     core: list[dict[str, object]],
     framework: list[dict[str, object]],
@@ -1212,6 +1270,21 @@ def main() -> None:
         help="minimum current-valid elite parents required to continue",
     )
     parser.add_argument("--per-seed", type=int, default=32)
+    parser.add_argument(
+        "--generation-workers",
+        type=int,
+        default=min(32, os.cpu_count() or 1),
+        help="process pool size for resolving each accepted candidate's "
+             "evidence()/mutation_contexts() (pure Python, GIL-bound to one "
+             "core otherwise); 1 disables the pool and resolves serially",
+    )
+    parser.add_argument(
+        "--generation-workers-minimum-candidates",
+        type=int,
+        default=64,
+        help="use the pool only above this many accepted candidates; below "
+             "it, process-start overhead outweighs the parallel gain",
+    )
     parser.add_argument(
         "--proposal-limit",
         type=int,
@@ -1583,6 +1656,14 @@ def main() -> None:
         existing.update(excluded.sequence.dropna().astype(str).str.strip().str.upper())
     seen: set[str] = set()
     lineage_attributions: set[tuple[str, str, str]] = set()
+    # (proposal dict, parent sequence, candidate sequence, protected positions):
+    # mutation_network.evidence() and mutation_contexts() are read-only queries
+    # against the shared network/consensus, deferred here and resolved for
+    # every accepted candidate at once in _resolve_pending_evidence, in a
+    # process pool -- evidence() alone was 48% of a 148s generation
+    # (neighbours() 18%, its numpy distance sum 30%), all Python-bytecode-
+    # bound to one core regardless of the 256 available.
+    pending_evidence: list[tuple[dict[str, object], str, str, set[int]]] = []
     core_proposals: list[dict[str, object]] = []
     framework_proposals: list[dict[str, object]] = []
     lineage_proposals: list[dict[str, object]] = []
@@ -1642,18 +1723,11 @@ def main() -> None:
             math.exp(np.mean(np.log(mutation_weights)))
             if mutation_weights else 1.0
         )
-        evidence = mutation_network.evidence(candidate)
-        neighbours = evidence.pop("predecessor_neighbours")
-        contexts = mutation_contexts(
-            parent,
-            candidate,
-            contact_positions=protected,
-        )
         if allow_seen_sequence:
             lineage_attributions.add(attribution)
         else:
             seen.add(candidate)
-        destination.append({
+        record: dict[str, object] = {
             "sequence": candidate,
             "parent_sequence": parent,
             "parent_selection_score": parent_score,
@@ -1674,14 +1748,13 @@ def main() -> None:
                 f"{before}{index + 1}{after}"
                 for index, before, after in changed
             ),
-            "mutation_contexts": json.dumps(contexts, sort_keys=True),
             "proposal_prior_score": proposal_prior_score,
             "protected_parent_contact_count": len(protected),
             "max_jaccard_to_top50": max_jaccard,
-            **evidence,
-            "predecessor_neighbours": json.dumps(neighbours, sort_keys=True),
             **(extra_evidence or {}),
-        })
+        }
+        destination.append(record)
+        pending_evidence.append((record, parent, candidate, protected))
         return True
 
     for parent_record in core_seeds:
@@ -2127,6 +2200,12 @@ def main() -> None:
                 break
             lineage_proposals.append(item)
             accepted += 1
+
+    _resolve_pending_evidence(
+        pending_evidence, mutation_network,
+        workers=args.generation_workers,
+        workers_minimum_candidates=args.generation_workers_minimum_candidates,
+    )
 
     baseline_proposals = balanced_proposal_order(
         _round_robin_by_basin(core_proposals),

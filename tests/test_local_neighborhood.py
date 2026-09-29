@@ -16,6 +16,7 @@ from nanobody_opt.local_neighborhood import (
     bounded_basin_terminal_routes,
     residue_prior_weights,
 )
+from nanobody_opt.mutation_network import MutationNetwork
 from nanobody_opt.terminal_policy import TerminalPriors
 
 
@@ -798,3 +799,89 @@ def test_lane_limits_always_sum_to_the_seed_budget():
             limits = _lane_limits(per_seed, fraction)
             assert limits["haplotype"] + limits["single"] == per_seed
             assert limits["haplotype"] >= 0 and limits["single"] >= 0
+
+
+def _evidence_test_network():
+    return MutationNetwork([
+        {"sequence": "AAAA", "score": 40, "epoch": 1, "source": "winner"},
+        {"sequence": "AAAC", "score": 60, "epoch": 2, "source": "elite"},
+        {"sequence": "AAAC", "score": 50, "epoch": 3, "source": "winner"},
+        {"sequence": "CCCC", "score": 100, "epoch": 3, "source": "elite"},
+    ])
+
+
+@pytest.fixture(autouse=True)
+def _reset_evidence_network_global():
+    """_EVIDENCE_NETWORK is a module global _resolve_pending_evidence sets;
+    reset it around every test in this file so one test's pool run can never
+    mask a bug in another test's serial path (exactly how the missing
+    unconditional assignment above was hidden before this fixture existed)."""
+    from nanobody_opt import local_neighborhood as ln
+    ln._EVIDENCE_NETWORK = None
+    yield
+    ln._EVIDENCE_NETWORK = None
+
+
+def test_evidence_worker_matches_the_inline_computation_add_candidate_used():
+    import json
+    from nanobody_opt import local_neighborhood as ln
+    from nanobody_opt.mutation_network import mutation_contexts
+
+    network = _evidence_test_network()
+    ln._EVIDENCE_NETWORK = network
+    got = ln._evidence_worker(("AAAA", "AAAS", {2}))
+
+    direct = network.evidence("AAAS")
+    neighbours = direct.pop("predecessor_neighbours")
+    direct["predecessor_neighbours"] = json.dumps(neighbours, sort_keys=True)
+    contexts = mutation_contexts("AAAA", "AAAS", contact_positions={2})
+    direct["mutation_contexts"] = json.dumps(contexts, sort_keys=True)
+    assert got == direct
+
+
+def test_resolve_pending_evidence_parallel_matches_serial():
+    from nanobody_opt.local_neighborhood import _resolve_pending_evidence
+
+    network = _evidence_test_network()
+    serial_records = [{"sequence": f"AAA{c}"} for c in "STDEFGHIKLMNPQRVWY"]
+    serial_pending = [(record, "AAAA", record["sequence"], {2}) for record in serial_records]
+    _resolve_pending_evidence(serial_pending, network, workers=1, workers_minimum_candidates=64)
+
+    parallel_records = [{"sequence": f"AAA{c}"} for c in "STDEFGHIKLMNPQRVWY"]
+    parallel_pending = [(record, "AAAA", record["sequence"], {2}) for record in parallel_records]
+    _resolve_pending_evidence(parallel_pending, network, workers=4, workers_minimum_candidates=1)
+
+    assert serial_records == parallel_records
+
+
+def test_resolve_pending_evidence_serial_path_sets_the_network_global():
+    """Regression: workers=1 used to skip setting _EVIDENCE_NETWORK entirely,
+    so _evidence_worker crashed on a None network the moment nothing else in
+    the test process had populated it first."""
+    from nanobody_opt import local_neighborhood as ln
+
+    ln._EVIDENCE_NETWORK = None
+    network = _evidence_test_network()
+    records = [{"sequence": "AAAS"}]
+    pending = [(records[0], "AAAA", "AAAS", set())]
+    ln._resolve_pending_evidence(pending, network, workers=1, workers_minimum_candidates=64)
+    assert "predecessor_min_distance" in records[0]
+
+
+def test_resolve_pending_evidence_skips_the_pool_below_the_minimum():
+    from nanobody_opt.local_neighborhood import _resolve_pending_evidence
+
+    network = _evidence_test_network()
+    records = [{"sequence": "AAAS"}, {"sequence": "AAAD"}]
+    pending = [(record, "AAAA", record["sequence"], set()) for record in records]
+    # workers=4 but only 2 candidates, well under the default minimum: must not
+    # hang waiting to fork a pool for a trivially small workload.
+    _resolve_pending_evidence(pending, network, workers=4, workers_minimum_candidates=64)
+    assert all("predecessor_min_distance" in record for record in records)
+
+
+def test_resolve_pending_evidence_is_a_no_op_on_an_empty_batch():
+    from nanobody_opt.local_neighborhood import _resolve_pending_evidence
+
+    _resolve_pending_evidence([], _evidence_test_network(), workers=8,
+                              workers_minimum_candidates=1)
