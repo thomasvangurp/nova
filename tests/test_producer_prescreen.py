@@ -7,7 +7,8 @@ from nanobody_opt import run_live_producer as producer
 
 def _args(tmp_path: Path, **extra) -> argparse.Namespace:
     return argparse.Namespace(runtime_root=tmp_path, chain_state=tmp_path / "chain_state.json",
-                              prescreen_minimum_blocks=60, **extra)
+                              prescreen_minimum_blocks=60,
+                              prescreen_screen_tranches=2, **extra)
 
 
 def _state(offset: int) -> dict:
@@ -23,6 +24,7 @@ def test_prescreen_runs_the_next_epochs_iteration_at_its_start(tmp_path, monkeyp
     (early, state, iteration), = calls
     assert state["epoch"] == 25412 and state["block"] % 361 == 0
     assert iteration == 1
+    assert early.maximum_screen_tranches_override == 2
     synthetic = json.loads(early.chain_state.read_text())
     assert synthetic["epoch"] == 25412 and synthetic["block"] == 25412 * 361
     root = tmp_path / "live" / "epoch25412" / "producer"

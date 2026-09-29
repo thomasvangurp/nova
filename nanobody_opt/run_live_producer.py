@@ -743,7 +743,8 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         race_command.extend(["--minimum-selection-observations", str(args.minimum_selection_observations)])
     if args.budget_mode == "adaptive":
         race_command.extend([
-            "--carry-pending-candidates", "--maximum-screen-tranches", "1",
+            "--carry-pending-candidates", "--maximum-screen-tranches",
+            str(getattr(args, "maximum_screen_tranches_override", 1)),
             "--replication-load-seconds", str(plan["load_seconds"]),
             "--replication-seconds-per-observation", str(plan["gpu_seconds_per_candidate"]),
             "--screen-gpu-seconds-per-candidate", str(plan["gpu_seconds_per_candidate"]),
@@ -886,6 +887,13 @@ def _parser() -> argparse.ArgumentParser:
         default=False,
         help="once this epoch's confirmation is done, run the next epoch's first "
              "generate-and-screen iterations in the otherwise idle tail",
+    )
+    parser.add_argument(
+        "--prescreen-screen-tranches",
+        type=int,
+        default=2,
+        help="screen tranches per prescreen iteration: one generation, several "
+             "tranches from its pool, pipelined, to fill the idle tail",
     )
     parser.add_argument(
         "--prescreen-minimum-blocks",
@@ -1193,7 +1201,8 @@ def run_prescreen(args: argparse.Namespace, state: dict[str, Any]) -> bool:
     _atomic_json(marker, record)
     print(f"PRODUCER_PRESCREEN epoch={following} iteration={iteration} "
           f"current_epoch_blocks_left={remaining}", flush=True)
-    early = argparse.Namespace(**{**vars(args), "chain_state": synthetic_path})
+    early = argparse.Namespace(**{**vars(args), "chain_state": synthetic_path,
+                                  "maximum_screen_tranches_override": args.prescreen_screen_tranches})
     try:
         _run_iteration(args=early, state=synthetic, iteration=iteration)
     except subprocess.CalledProcessError as error:
