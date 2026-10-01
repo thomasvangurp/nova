@@ -1,0 +1,215 @@
+---
+- name: Launch frozen winner-calibration and ten-ticket replay
+  hosts: winner_calibration_worker
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    experiment: "{{ repo }}/analysis/nanobody-gap/winner-calibration-ten-ticket-20260922"
+    remote_experiment: /root/winner-calibration-ten-ticket-20260922
+    remote_test_copy: /root/analysis/nanobody-gap/winner-calibration-ten-ticket-20260922
+    prereg_sha256: 832882b5be45d7ae0823be1aa278ef9baeb5c2ec03ddf61bfc745d9f8c8bc0b8
+    research_instance_id: "{{ required_research_instance_id }}"
+    research_hourly_cost: >-
+      {{ (lookup('file', experiment ~ '/replacement_instance.json') | from_json).quoted_dph }}
+    # Keep transport bounded and auditable.  Synchronizing the source
+    # directories recursively pulled in controller-only state (most notably
+    # nanobody_dash/.pixi, 223 MiB) and made an otherwise 2.2 MiB frozen launch
+    # package appear to hang.  These are the only immutable files the replay
+    # and its regression test consume.
+    frozen_package_files:
+      - FREEZE_MANIFEST.sha256
+      - PREREGISTRATION.sha256
+      - preregistration.json
+      - historical_sampling.json
+      - calibration_cohort.json
+      - rival_panels.json
+      - fleets.json
+      - sequences.json
+      - experiment.py
+      - build_preregistration.py
+      - analyze_fresh.py
+      - test_frozen_semantics.py
+      - run_remote.sh
+      - timing_watch.py
+  tasks:
+    - name: Require exactly eight RTX 4090 GPUs
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        nvidia-smi --query-gpu=name --format=csv,noheader |
+        awk '$0 !~ /RTX 4090/ {bad=1} END {exit (NR == 8 && !bad) ? 0 : 1}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Require retained locked Pixi runtime
+      ansible.builtin.shell: |
+        set -euo pipefail
+        /usr/local/bin/pixi --version
+        test -x /root/.pixi/envs/bgen/bin/python
+        test -x /root/bgen_python.sh
+        test -f /root/config/config.yaml
+        test -f /root/artifacts/nanobody_fast_scorer.json
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Refuse to overwrite an existing fresh replay
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if test -d {{ remote_experiment | quote }}; then
+          ! find {{ remote_experiment | quote }} -path '*/fresh_*/exact_all.json' -print -quit | grep -q .
+          test ! -e {{ (remote_experiment ~ '/COMPLETE') | quote }}
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Create isolated experiment directory
+      ansible.builtin.file:
+        path: "{{ remote_experiment }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy the explicit frozen experiment package
+      ansible.builtin.copy:
+        src: "{{ experiment }}/{{ item }}"
+        dest: "{{ remote_experiment }}/{{ item }}"
+        mode: preserve
+      loop: "{{ frozen_package_files }}"
+
+    - name: Seed mutable run metadata once
+      ansible.builtin.copy:
+        src: "{{ experiment }}/run_metadata.json"
+        dest: "{{ remote_experiment }}/run_metadata.json"
+        mode: "0644"
+        force: false
+
+    - name: Create repository-depth test directory
+      ansible.builtin.file:
+        path: "{{ remote_test_copy }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy frozen package to test-only repository depth
+      ansible.builtin.copy:
+        src: "{{ experiment }}/{{ item }}"
+        dest: "{{ remote_test_copy }}/{{ item }}"
+        mode: preserve
+      loop: "{{ frozen_package_files }}"
+
+    - name: Create dashboard module directory required by frozen regression test
+      ansible.builtin.file:
+        path: /root/nanobody_dash
+        state: directory
+        mode: "0755"
+
+    - name: Ship only the dashboard public-identity module
+      ansible.builtin.copy:
+        src: "{{ repo }}/nanobody_dash/__init__.py"
+        dest: /root/nanobody_dash/__init__.py
+        mode: "0644"
+
+    - name: Restore experiment launch permissions
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0755"
+      loop:
+        - "{{ remote_experiment }}/run_remote.sh"
+        - "{{ remote_experiment }}/timing_watch.py"
+
+    - name: Verify every frozen file and preregistration remotely
+      ansible.builtin.shell: |
+        set -euo pipefail
+        shasum -a 256 -c FREEZE_MANIFEST.sha256
+        test "$(shasum -a 256 preregistration.json | awk '{print $1}')" = {{ prereg_sha256 | quote }}
+        cd {{ remote_test_copy | quote }}
+        shasum -a 256 -c FREEZE_MANIFEST.sha256
+        PYTHONPATH=/root /root/.pixi/envs/bgen/bin/python -m unittest -v test_frozen_semantics.py
+      args:
+        executable: /bin/bash
+        chdir: "{{ remote_experiment }}"
+      changed_when: false
+
+    - name: Verify exact scorer protocol in Pixi runtime
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import torch;
+            from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL;
+            assert torch.cuda.device_count() == 8;
+            assert SCORER_PROTOCOL == 'validator-dual-sample-v1';
+            print('FROZEN_REPLAY_RUNTIME_OK')
+      environment:
+        PYTHONPATH: /root
+      changed_when: false
+
+    - name: Preflight exact pinned shim from scorer launch working directory
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import os,sys;
+            assert os.getcwd() == '/root';
+            import nanobody_opt.score_boltzgen_waves;
+            sys.path.insert(0, '/root/winner-calibration-ten-ticket-20260922');
+            import experiment;
+            assert experiment.TARGET == 'P20809';
+            print('PINNED_SHIM_ENTRYPOINT_PREFLIGHT_OK')
+      args:
+        chdir: /root
+      changed_when: false
+
+    - name: Record guarded launch time
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json,time
+        from pathlib import Path
+        path=Path('run_metadata.json')
+        payload=json.loads(path.read_text())
+        payload['instance_id']=int({{ research_instance_id | quote }})
+        payload['gpu_count']=8
+        payload['gpu_model']='RTX 4090'
+        payload['hourly_cost']=float({{ research_hourly_cost | quote }})
+        payload['started_unix']=time.time()
+        path.write_text(json.dumps(payload,indent=2,sort_keys=True)+'\n')
+        PY
+      args:
+        executable: /bin/bash
+        chdir: "{{ remote_experiment }}"
+      changed_when: true
+
+    - name: Launch timing watcher
+      ansible.builtin.shell: >-
+        nohup python3 timing_watch.py > timing_watch.log 2>&1 < /dev/null &
+        echo $! > timing_watch.pid
+      args:
+        executable: /bin/bash
+        chdir: "{{ remote_experiment }}"
+      changed_when: true
+
+    - name: Launch frozen scorer
+      ansible.builtin.shell: >-
+        nohup {{ (remote_experiment ~ '/run_remote.sh') | quote }}
+        {{ remote_experiment | quote }}
+        > {{ (remote_experiment ~ '/run.log') | quote }} 2>&1 < /dev/null &
+        echo $! > {{ (remote_experiment ~ '/runner.pid') | quote }}
+      args:
+        executable: /bin/bash
+        chdir: /root
+      changed_when: true
+
+    - name: Verify scorer stayed alive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sleep 5
+        kill -0 "$(cat runner.pid)"
+      args:
+        executable: /bin/bash
+        chdir: "{{ remote_experiment }}"
+      changed_when: false

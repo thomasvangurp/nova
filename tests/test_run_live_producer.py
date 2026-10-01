@@ -1,10 +1,16 @@
 from pathlib import Path
+import hashlib
 import json
+import sqlite3
 import time
 
 import pytest
 
-from nanobody_opt.run_live_producer import _chain_state, _parser
+from nanobody_opt.run_live_producer import (
+    _chain_state,
+    _parser,
+    maintain_runtime_storage,
+)
 
 
 def test_live_producer_uses_fresh_miner_chain_state(tmp_path):
@@ -81,3 +87,115 @@ def test_the_producer_omits_the_lane_ceiling_unless_it_is_set():
     source = (Path(__file__).resolve().parents[1]
               / "nanobody_opt" / "run_live_producer.py").read_text()
     assert "if args.maximum_exhaustive_singles is not None" in source
+
+
+def test_storage_maintenance_prunes_only_old_regenerable_rank_matrices(tmp_path):
+    old = tmp_path / "live/epoch10/producer/iteration_01/race"
+    current = tmp_path / "live/epoch11/producer/iteration_01/race"
+    (old / "rounds").mkdir(parents=True)
+    (current / "rounds").mkdir(parents=True)
+    for path in (
+        old / "screen_ranking.json",
+        old / "rounds/stage_ranking.json",
+        old / "qualified_after_rounds.json",
+        current / "screen_ranking.json",
+    ):
+        path.write_bytes(b"x" * 1024)
+
+    report = maintain_runtime_storage(
+        tmp_path,
+        11,
+        minimum_free_gib=0,
+        maximum_persisted_ranking_mib=0.0001,
+    )
+
+    assert report["removed_files"] == 2
+    assert not (old / "screen_ranking.json").exists()
+    assert not (old / "rounds/stage_ranking.json").exists()
+    assert (old / "qualified_after_rounds.json").exists()
+    assert (current / "screen_ranking.json").exists()
+
+
+def test_storage_maintenance_refuses_new_work_below_reserve(tmp_path, monkeypatch):
+    import nanobody_opt.run_live_producer as producer
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        producer.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=100, used=99, free=1),
+    )
+    with pytest.raises(RuntimeError, match="disk reserve violated"):
+        maintain_runtime_storage(tmp_path, 11, minimum_free_gib=1)
+
+
+def _sealed_database(path: Path, exact: Path) -> None:
+    digest = hashlib.sha256(exact.read_bytes()).hexdigest()
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE exact_runs(
+              target TEXT, run_id TEXT, source_path TEXT, file_sha256 TEXT,
+              expected_rows INTEGER, ingested_rows INTEGER, complete INTEGER
+            );
+            CREATE TABLE exact_run_observations(
+              target TEXT, run_id TEXT, observation_id TEXT
+            );
+            CREATE TABLE observation_artifacts(observation_id TEXT);
+            """
+        )
+        connection.execute(
+            "INSERT INTO exact_runs VALUES(?,?,?,?,?,?,?)",
+            ("P20809", "run-1", str(exact), digest, 1, 1, 1),
+        )
+        connection.execute(
+            "INSERT INTO exact_run_observations VALUES(?,?,?)",
+            ("P20809", "run-1", "observation-1"),
+        )
+        connection.execute(
+            "INSERT INTO observation_artifacts VALUES(?)", ("observation-1",)
+        )
+
+
+def test_storage_maintenance_removes_only_database_sealed_old_epochs(tmp_path):
+    old = tmp_path / "live/epoch10/producer/iteration_01/race/exact_all.json"
+    recent = tmp_path / "live/epoch20/producer/iteration_01/race/exact_all.json"
+    old.parent.mkdir(parents=True)
+    recent.parent.mkdir(parents=True)
+    old.write_text('{"run": 1}')
+    recent.write_text('{"run": 2}')
+    database = tmp_path / "observations.sqlite"
+    _sealed_database(database, old)
+
+    report = maintain_runtime_storage(
+        tmp_path,
+        30,
+        minimum_free_gib=0,
+        observation_database=database,
+        retained_epochs=16,
+    )
+
+    assert report["removed_epoch_dirs"] == 1
+    assert not (tmp_path / "live/epoch10").exists()
+    assert (tmp_path / "live/epoch20").exists()
+
+
+def test_storage_maintenance_keeps_old_epoch_when_audit_row_is_missing(tmp_path):
+    old = tmp_path / "live/epoch10/producer/iteration_01/race/exact_all.json"
+    old.parent.mkdir(parents=True)
+    old.write_text('{"run": 1}')
+    database = tmp_path / "observations.sqlite"
+    _sealed_database(database, old)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM observation_artifacts")
+
+    report = maintain_runtime_storage(
+        tmp_path,
+        30,
+        minimum_free_gib=0,
+        observation_database=database,
+        retained_epochs=16,
+    )
+
+    assert report["removed_epoch_dirs"] == 0
+    assert (tmp_path / "live/epoch10").exists()

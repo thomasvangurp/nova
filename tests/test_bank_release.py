@@ -438,3 +438,24 @@ def test_the_builder_still_runs_without_the_archive():
     body = (Path(__file__).resolve().parent.parent / "tools/bank_builder.py").read_text()
     assert "validator_gate_absent" in body
     assert "if validator_gate is not None:" in body
+
+
+def test_the_builder_gate_does_not_shadow_the_novelty_index():
+    """`history` is the HistoricalIndex; the gate must not rebind it.
+
+    Rebinding it to the gate's fingerprint list made round 2 die on
+    "'list' object has no attribute 'is_novel'" -- after banking exactly one
+    batch, so it looked like a successful start.
+    """
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_builder.py").read_text()
+    assert "history, helpers = validator_gate" not in body
+    assert "gate_history, gate_helpers = validator_gate" in body
+    assert "history = HistoricalIndex(" in body
+
+
+def test_the_bank_builder_refuses_the_oss_scorer():
+    """OSS is 4x slower than NIM on identical hardware; never bank with it."""
+    body = (Path(__file__).resolve().parent.parent / "tools/bank_builder.py").read_text()
+    assert "choices=['oss', 'nim'], default='nim'" in body
+    assert "if arguments.scorer != 'nim':" in body
+    assert "refusing to build a compound bank with the OSS scorer" in body

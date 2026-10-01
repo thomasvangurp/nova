@@ -263,7 +263,7 @@ def main() -> int:
     parser.add_argument('--seed', type=int, default=68,
                         help='RNG seed; give each box a different one so their '
                              'anchor sampling and coverage draws do not overlap')
-    parser.add_argument('--scorer', choices=['oss', 'nim'], default='oss',
+    parser.add_argument('--scorer', choices=['oss', 'nim'], default='nim',
                         help="'nim' posts to a local NIM server instead of running "
                              "the OSS Boltz worker; use it on the NIM box so both "
                              "boxes fill the bank in parallel")
@@ -311,6 +311,18 @@ def main() -> int:
         globals()['VENV'] = Path(arguments.base) / 'venv'
     if not arguments.bank:
         arguments.bank = str(BASE / 'bank.sqlite')
+
+    # OSS is not an option for compound banking. Measured 2026-09-21 on an
+    # RTX 6000 Ada: OSS 127 molecules/GPU-hour against NIM's 514 -- a 4x gap,
+    # which on a 58,754-molecule bank is 46 hours versus 11, and ~$190 of
+    # rental. A slow scorer is not a cheaper scorer, it is the same work for
+    # four times the money.
+    if arguments.scorer != 'nim':
+        print('refusing to build a compound bank with the OSS scorer: it is '
+              '4x slower than NIM on identical hardware (127 vs 514 '
+              'molecules/GPU-hour). Bring up the local NIM server with '
+              'ansible/nim_native.yml and use --scorer nim.', file=sys.stderr)
+        return 2
 
     from rdkit import RDLogger
     RDLogger.DisableLog('rdApp.*')
@@ -592,8 +604,14 @@ def main() -> int:
         # Every refused molecule here is GPU time spent on something that can
         # never ship, and it also crowds the shortlist the rescore draws from.
         if validator_gate is not None:
-            history, helpers = validator_gate
-            refused = refused_by_validator([c.smiles for c in batch], history, helpers)
+            # NOT `history`: that name already holds the HistoricalIndex bound
+            # above, and rebinding it here turned the novelty gate into a list
+            # for every subsequent round -- the builder died on
+            # "'list' object has no attribute 'is_novel'" at the start of
+            # round 2, after banking exactly one batch.
+            gate_history, gate_helpers = validator_gate
+            refused = refused_by_validator([c.smiles for c in batch],
+                                           gate_history, gate_helpers)
             if refused:
                 reasons = {}
                 for why in refused.values():

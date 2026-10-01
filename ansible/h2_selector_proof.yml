@@ -1,0 +1,165 @@
+---
+- name: Run the frozen offline H2 selector proof
+  hosts: nanobody_producer
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    proof_root: /root/h2-selector-proof-20260922
+    expected_instance_id: 52073739
+    expected_label: nova-nanobody-h2-fast-20260922
+    pixi_version: "0.73.0"
+  tasks:
+    - name: Require the approved research instance only
+      ansible.builtin.assert:
+        that:
+          - vast_instance_id | int == expected_instance_id
+          - vast_label == expected_label
+          - vast_actual_status == 'running'
+          - vast_num_gpus | int == 8
+          - vast_gpu_name == 'RTX 4090'
+
+    - name: Require exactly eight RTX 4090 GPUs from the driver
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        nvidia-smi --query-gpu=name --format=csv,noheader |
+        awk '$0 !~ /RTX 4090/ {bad=1} END {exit (NR == 8 && !bad) ? 0 : 1}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Require preserved optimized scorer runtime
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /root/bgen_python.sh
+        - /root/fastscore/release/release_python.sh
+        - /root/fastscore/release/fast_score_batch.py
+        - /root/artifacts/nanobody_fast_scorer.json
+        - /usr/local/bin/pixi
+      register: scorer_runtime
+      failed_when: not scorer_runtime.stat.exists
+
+    - name: Verify Pixi version
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      register: pixi_check
+      changed_when: false
+      failed_when: "('pixi ' ~ pixi_version) not in pixi_check.stdout"
+
+    - name: Verify locked BoltzGen Pixi environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+      environment:
+        PIXI_COLOR: never
+      register: bgen_install
+      changed_when: "'Nothing to do' not in (bgen_install.stdout ~ bgen_install.stderr)"
+
+    - name: Create isolated proof directory
+      ansible.builtin.file:
+        path: "{{ proof_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Reject any pre-existing fresh result on the research instance
+      ansible.builtin.find:
+        paths: "{{ proof_root }}"
+        patterns: exact_all.json
+        recurse: true
+      register: preexisting_fresh
+      failed_when: preexisting_fresh.matched | int != 0
+
+    - name: Sync the locally frozen proof artifacts
+      ansible.posix.synchronize:
+        src: "{{ repo }}/analysis/nanobody-gap/h2-selector-proof-20260922/"
+        dest: "{{ proof_root }}/"
+        checksum: true
+        owner: false
+        group: false
+        perms: false
+        rsync_opts:
+          - --omit-dir-times
+          - --exclude=__pycache__
+          - --exclude=*.pyc
+          - --no-perms
+        use_ssh_args: true
+
+    - name: Restore proof launchers as executable
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0755"
+      loop:
+        - "{{ proof_root }}/run_remote.sh"
+        - "{{ proof_root }}/timing_watch.py"
+
+    - name: Verify the complete frozen manifest on the research instance
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - --check
+          - FREEZE_MANIFEST.sha256
+      args:
+        chdir: "{{ proof_root }}"
+      changed_when: false
+
+    - name: Verify frozen code, cohort, protocol, and GPU count
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import hashlib,json,torch;
+            from pathlib import Path;
+            from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL;
+            root=Path('/root/h2-selector-proof-20260922');
+            p=json.loads((root/'preregistration.json').read_text());
+            assert not list(root.glob('fresh_*/exact_all.json'));
+            assert all(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest for name,digest in p['frozen_code_hashes'].items());
+            assert hashlib.sha256((root/'sequences.json').read_bytes()).hexdigest()==p['sequence_manifest_sha256'];
+            assert torch.cuda.device_count()==8;
+            assert SCORER_PROTOCOL=='validator-dual-sample-v1';
+            print('FROZEN_H2_PROOF_RUNTIME_OK')
+      environment:
+        PYTHONPATH: /root
+      changed_when: false
+
+    - name: Reject an already running proof session
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, h2-selector-proof]
+      register: proof_session
+      changed_when: false
+      failed_when: proof_session.rc == 0
+
+    - name: Launch the frozen proof and timing recorder
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - h2-selector-proof
+          - >-
+            bash -lc 'cd /root &&
+            /root/bgen_python.sh {{ proof_root }}/timing_watch.py >{{ proof_root }}/timing.stdout.log 2>{{ proof_root }}/timing.stderr.log &
+            exec {{ proof_root }}/run_remote.sh {{ proof_root }} >{{ proof_root }}/runner.stdout.log 2>{{ proof_root }}/runner.stderr.log'
+      changed_when: true
+
+    - name: Confirm draw 9 runner started
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        for attempt in $(seq 1 30); do
+          test -f {{ proof_root }}/fresh_09/wave_000_input.json && exit 0;
+          tmux has-session -t h2-selector-proof || exit 2;
+          sleep 2;
+        done;
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false

@@ -36,8 +36,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 # The validator's ordering, and the only one a publisher may use.  Only rank one
-# pays and the validator draws once, so the quantity to maximize is the chance of
-# a winning draw, not the best average.  See nanobody_opt/win_probability.py.
+# pays and the validator draws once, so the quantity to maximize is the empirical
+# chance of beating the qualified field on a fresh draw, not the best average or
+# the chance of crossing an arbitrary fixed threshold. See win_probability.py.
 REQUIRED_SELECTION_ORDER = "win-probability"
 
 # ss58 addresses are 47-49 characters.  A truncated key pasted from a dashboard
@@ -328,11 +329,42 @@ DEFAULT_VALUE_SHARE = 0.0
 # proxy: the validator aligns, and an alignment can only find MORE identity
 # than position-for-position comparison of equal-length sequences. The margin
 # is what keeps a proxy conservative.
-#: The line the validator itself dedupes on. Nothing we commit may sit at or
-#: above it relative to another of our own tickets, because the second one is
-#: discarded and the registration is wasted.
+#: The line the validator itself dedupes on -- but ONLY against the top-50
+#: HISTORICAL index (utils/nanobodies.index_top_sequences, built from prior
+#: epochs' HF submissions). It is not applied between our own simultaneous
+#: tickets; see MAXIMUM_FLEET_IDENTITY.
 VALIDATOR_DUPLICATE_IDENTITY = 0.95
-MAXIMUM_FLEET_IDENTITY = 0.94
+
+#: Identity at which one of our own simultaneous tickets makes another
+#: worthless. 1.0, i.e. only an EXACT repeat is dropped.
+#:
+#: Was 0.94 on the belief that a near-identical second ticket is discarded and
+#: the registration wasted. That belief is refuted on both source and data:
+#:
+#:  * BoltzgenWrapper._deduplicate_nanobodies keys its fold map on the exact
+#:    sequence string, so identical sequences fold once and share one score,
+#:    while anything differing by a single residue is a separate key and gets
+#:    its own independent fold. Nothing in the per-uid validity loop compares
+#:    our tickets with each other.
+#:  * 10,305 same-epoch same-coldkey pairs at identity >= 0.95 were checked in
+#:    the public leaderboard; 100% of them carry a score on BOTH tickets,
+#:    including pairs at 0.9843 -- the exact figure the epoch-25100 note below
+#:    was blamed on. Those tickets scored nothing for some other reason.
+#:
+#: Near-identical tickets are therefore not wasted. At a measured per-pass SD
+#: of ~34 rank-sum they are independent draws on the same underlying quality
+#: (one observed 0.9843 pair scored 216 and 65), so k of them is k lottery
+#: tickets, not one. _clashes compares with >=, so 1.0 drops exact repeats only.
+#:
+#: The cross-epoch effect is real and separate: once one sibling enters the
+#: historical top-50, VALIDATOR_DUPLICATE_IDENTITY dedupes the rest NEXT epoch.
+#: That is NOT guarded here, and not by FIELD_COLLISION_IDENTITY or the crowd
+#: argument either -- both are unwired on purpose (see
+#: test_fleet_selection_does_not_trade_quality_for_crowd_distance). It is
+#: caught upstream: tools/publish_current_nanobody.py restricts the pool
+#: through gate="validator-novelty", which replays utils/nanobodies.is_duplicate
+#: against the top-50 historical index before selection ever runs.
+MAXIMUM_FLEET_IDENTITY = 1.0
 
 
 def sequence_identity(left: str, right: str) -> float:
@@ -590,6 +622,15 @@ def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
     Two things are still guaranteed and are what the callers below rely on:
     candidates with a chance of winning all precede candidates with none, and
     within one deviation tier the order is non-increasing by win probability.
+
+    CHANCE IS THE OUTER KEY.  rank_exact.win_probability_order_key sorts on
+    ``(0 if has_chance else 1, deviation_tier)``, so every candidate that cannot
+    win goes last whatever its tier -- a clean tier-0 sequence with no chance
+    follows a tier-2 one that has one.  Checking tiers across that boundary
+    read a legitimate order as a regression and raised "tier 0 follows tier 2",
+    which is this function's own failure mode a second time: the check, not the
+    ranker, is what takes the fleet down.  The tier ladder therefore restarts
+    at the boundary, exactly as it restarts between tiers.
     """
     previous: float | None = None
     previous_tier: int | None = None
@@ -608,8 +649,13 @@ def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
                 "ranking puts a candidate that cannot win ahead of one that "
                 f"can ({probability} follows a zero win probability)"
             )
-        if probability <= 0.0:
+        if probability <= 0.0 and not seen_no_chance:
+            # Crossing into the group that cannot win. It is ordered by tier
+            # among itself, but its first member may sit at any tier, so both
+            # ladders start again here rather than comparing across the break.
             seen_no_chance = True
+            previous = None
+            previous_tier = None
         tier = candidate.get("settled_deviations")
         tier = int(tier) if tier is not None else None
         if tier is not None and previous_tier is not None:
@@ -772,6 +818,7 @@ def fleet_artifact(
     assignments: Sequence[Assignment],
     checkpoints: Mapping[str, Mapping[str, Any]],
     unassigned: Sequence[FleetMember] = (),
+    sequence_pool: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Build the single fleet artifact: one file, one entry per uid.
 
@@ -805,6 +852,13 @@ def fleet_artifact(
             # about to commit, rather than trusting a summary of it.
             "checkpoint": dict(checkpoint),
         })
+    pool = []
+    for sequence in sequence_pool:
+        normalized = str(sequence).strip().upper()
+        if normalized and normalized not in pool:
+            pool.append(normalized)
+    if not pool:
+        pool = [entry["sequence"] for entry in entries]
     return {
         "schema_version": FLEET_ARTIFACT_SCHEMA_VERSION,
         "artifact_kind": "nanobody-fleet",
@@ -814,6 +868,11 @@ def fleet_artifact(
         "epoch": epoch,
         "submission_count": len(entries),
         "submissions": entries,
+        # Ranked and deliberately independent of uid ownership.  The producer
+        # can have an older metagraph view than the Pi that buys slots and
+        # submits.  The Pi binds this pool to its fresh crew snapshot.
+        "sequence_pool_size": len(pool),
+        "sequence_pool": pool,
         "unassigned_uids": [
             {"uid": member.uid, "hotkey": member.hotkey} for member in unassigned
         ],

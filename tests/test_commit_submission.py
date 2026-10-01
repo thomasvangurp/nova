@@ -240,6 +240,59 @@ def test_the_validators_own_parser_rejects_a_bare_sequence():
     ) is None
 
 
+NAMES = [f"rxn:3:817:{2700 + i}:{18000 + i}" for i in range(20)]
+
+
+def test_the_validator_accepts_twenty_molecules_beside_the_sequence():
+    """The compound bank reaches the chain only if this passes.
+
+    The driver hardcoded "~" in the molecule section, so every uid we committed
+    carried a nanobody and no molecules however large the bank grew.
+    """
+    validator = _validator_parser()
+    message = cs.submission_message(SEQ, NAMES)
+    parsed = validator.parse_decrypted_submission(
+        1, message, num_molecules=20, num_sequences=1
+    )
+    assert parsed is not None, "the validator would discard this submission"
+    molecules, sequences = parsed
+    assert molecules == NAMES
+    assert sequences == [SEQ]
+
+
+def test_molecules_without_a_sequence_still_commit():
+    """A uid with no qualifying nanobody must still submit its molecules."""
+    validator = _validator_parser()
+    parsed = validator.parse_decrypted_submission(
+        1, cs.submission_message(None, NAMES), num_molecules=20, num_sequences=1
+    )
+    assert parsed is not None
+    molecules, sequences = parsed
+    assert molecules == NAMES
+    assert sequences == []
+
+
+def test_the_nanobody_only_message_is_unchanged():
+    """Nanobody publishing must be bit-identical while compounds are added."""
+    assert cs.submission_message(SEQ) == f"~|{SEQ}"
+    assert cs.submission_message(SEQ, "") == f"~|{SEQ}"
+    assert cs.submission_message(SEQ, "~") == f"~|{SEQ}"
+
+
+def test_an_entirely_empty_submission_is_refused():
+    """"~|~" scores nothing and still burns the hotkey's commitment slot."""
+    for empty in (None, "", "   ", "~"):
+        with pytest.raises(ValueError):
+            cs.submission_message(empty, None)
+
+
+def test_malformed_molecules_are_refused_rather_than_sent():
+    for bad in (["rxn:3:1:2:3", "rxn 3"], ["rxn:3:1|2"], ["rxn:3:1:2:3\u00dc"],
+                ["rxn:3:1:2:3", "rxn:3:1:2:3"]):
+        with pytest.raises(ValueError):
+            cs.submission_message(SEQ, bad)
+
+
 def test_a_submission_message_is_refused_rather_than_sent_malformed():
     for bad in ("", "   ", "SEQ WITH SPACE", "SEQ|WITH|PIPES", "SEQÜ"):
         with pytest.raises(ValueError):

@@ -1,0 +1,50 @@
+---
+- name: Deploy the shared-seed EasyNano reranker
+  hosts: easynano_worker
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    expected_label: nova-easynano-p20809-20260922-retry1
+    local_root: "{{ playbook_dir }}/../analysis/easynano-p20809"
+
+  pre_tasks:
+    - name: Require the dedicated non-production rental
+      ansible.builtin.assert:
+        that:
+          - vast_label == expected_label
+          - vast_num_gpus | int == 1
+
+  tasks:
+    - name: Copy the shared-seed reranker and locked Pixi task
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - src: "{{ local_root }}/rerank_mc.py"
+          dest: /root/easynano-run/rerank_mc.py
+        - src: "{{ local_root }}/pixi.toml"
+          dest: /root/easynano-run/pixi.toml
+        - src: "{{ local_root }}/pixi.lock"
+          dest: /root/easynano-run/pixi.lock
+
+    - name: Require completed design artifacts before reranking
+      ansible.builtin.stat:
+        path: /root/easynano-run/output/design_runs.json
+      register: design_runs
+
+    - name: Validate the rerank prerequisite
+      ansible.builtin.assert:
+        that:
+          - design_runs.stat.exists
+
+    - name: Install the unchanged locked environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --locked
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+      no_log: true

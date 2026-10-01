@@ -21,6 +21,7 @@ from compound_miner.nanobody_provider import (
     validator_boltzgen_metrics,
 )
 from nanobody_opt import fleet, publication_gates
+from nanobody_opt.mutation_network import record_exact_run, update_observation_store
 from tools import publish_current_nanobody
 from tools.publish_current_nanobody import (
     COMMIT_FLEET_FAILED,
@@ -32,15 +33,22 @@ from tools.publish_current_nanobody import (
     _archive_and_audit_previous,
     _chain_view,
     _checkpoint_sequence,
+    _covered_current_assignments,
+    _current_epoch_exact_inputs,
+    _database_exact_fingerprints,
     _default_exact_inputs,
     _exact_bank_fingerprints,
+    _exact_run_descriptor,
+    _exact_run_is_sealed,
     _fleet_is_current,
     _has_new_exact_data,
+    _import_exact_command,
     _is_current_qualified,
     _parser,
     _commit_fleet,
     _publish_once,
     _publisher_state_matches,
+    _rank_command,
     _retire_completed_epoch,
     _strict_state_matches,
 )
@@ -151,6 +159,30 @@ def test_the_publisher_source_holds_no_threshold_of_its_own():
 def test_the_shortlist_is_ordered_by_win_probability():
     assert SELECTION_ORDER == "win-probability"
     assert SELECTION_ORDER == fleet.REQUIRED_SELECTION_ORDER
+
+
+def test_publisher_rank_command_uses_only_supported_plain_metric_policy(tmp_path):
+    command = _rank_command(
+        bgen_python=tmp_path / "python",
+        nanobody_opt_root=tmp_path / "nanobody_opt",
+        exact_inputs=[tmp_path / "exact.json"],
+        archive=tmp_path / "archive.csv",
+        target=TARGET,
+        output=tmp_path / "ranking.json",
+        exclusion=tmp_path / "excluded.txt",
+        epoch=EPOCH,
+        shortlist=10,
+        config=tmp_path / "config.yaml",
+        strict=False,
+    )
+
+    policy = (
+        command[command.index("--selection-metric-policy") + 1]
+        if "--selection-metric-policy" in command
+        else "plain"
+    )
+    assert policy == "plain"
+    assert "historical-drivers" not in command
 
 
 def test_help_works_with_no_chain_no_wallet_and_no_keychain():
@@ -294,6 +326,94 @@ def test_default_exact_inputs_include_aggregate_but_not_wave_shards(tmp_path):
     assert len(discovered) == len(set(discovered))
 
 
+def test_normal_discovery_never_walks_prior_epochs(tmp_path):
+    current = tmp_path / "live/epoch25275/race/screen/exact_all.json"
+    prior = tmp_path / "live/epoch25274/race/screen/exact_all.json"
+    fragment = tmp_path / "live/epoch25275/race/screen/wave_000_exact.json"
+    for path in (current, prior, fragment):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+
+    assert _current_epoch_exact_inputs(tmp_path, 25275) == (current,)
+
+
+def test_database_fingerprint_contains_only_complete_sealed_raw_runs(tmp_path):
+    database = tmp_path / "observations.sqlite"
+    exact = tmp_path / "exact_all.json"
+    _write_exact(exact, observation="raw-run")
+    descriptor = _exact_run_descriptor(exact, TARGET)
+    payload = json.loads(exact.read_text())
+    observations = []
+    for group, by_sequence in payload["per_nanobody_components"].items():
+        for sequence, by_target in by_sequence.items():
+            observations.append({
+                "observation_id": f"local-exact:raw-run:{group}:{sequence}",
+                "sequence": sequence,
+                "target": TARGET,
+                "source": "local_exact_raw",
+                "score": 42,
+                "metrics": by_target[TARGET],
+            })
+    update_observation_store(database, observations)
+    record_exact_run(
+        database,
+        target=TARGET,
+        run_id="raw-run",
+        epoch=25_275,
+        source_path=exact,
+        file_sha256=descriptor["file_sha256"],
+        scorer_protocol="validator-fast-v1",
+        observation_ids=[item["observation_id"] for item in observations],
+    )
+
+    exact_fingerprint, strict_fingerprint, count = (
+        _database_exact_fingerprints(database, TARGET)
+    )
+
+    assert count == 1
+    assert exact_fingerprint
+    assert strict_fingerprint
+    assert _exact_run_is_sealed(
+        database, target=TARGET, descriptor=descriptor
+    )
+
+
+def test_rank_command_can_query_database_without_any_exact_file(tmp_path):
+    database = tmp_path / "observations.sqlite"
+    command = _rank_command(
+        bgen_python=tmp_path / "python",
+        nanobody_opt_root=tmp_path / "nanobody_opt",
+        exact_inputs=(),
+        archive=tmp_path / "archive.csv",
+        target=TARGET,
+        output=tmp_path / "ranking.json",
+        exclusion=tmp_path / "excluded.txt",
+        epoch=25_275,
+        shortlist=10,
+        config=None,
+        strict=False,
+        observation_history=database,
+    )
+
+    assert "--exact" not in command
+    assert command[command.index("--observation-history") + 1] == str(database)
+
+
+def test_current_exact_import_runs_as_a_package_module(tmp_path):
+    command = _import_exact_command(
+        bgen_python=tmp_path / "python",
+        nanobody_opt_root=tmp_path / "nanobody_opt",
+        database=tmp_path / "observations.sqlite",
+        target=TARGET,
+        archive=tmp_path / "archive.csv",
+        exact_inputs=[tmp_path / "exact_all.json"],
+    )
+
+    assert command[:3] == [
+        str(tmp_path / "python"), "-m", "nanobody_opt.import_exact_screens"
+    ]
+
+
 def test_new_atomic_exact_result_triggers_same_epoch_refresh(tmp_path):
     artifact = tmp_path / "checkpoint.json"
     exact = tmp_path / "exact_all.json"
@@ -424,6 +544,27 @@ def test_a_live_fleet_must_cover_every_uid_with_a_distinct_sequence():
         epoch=EPOCH,
         requirements=REQUIREMENTS,
         expected_hotkeys=hotkeys,
+    )
+
+
+def test_same_epoch_shortfall_cannot_displace_broader_current_fleet():
+    sequences = [_sequence(index) for index in range(3)]
+    artifact = _artifact(sequences, HOTKEYS[:3])
+    crew = [
+        fleet.FleetMember(uid=index, hotkey=hotkey)
+        for index, hotkey in enumerate(HOTKEYS[:3])
+    ]
+
+    assert len(_covered_current_assignments(
+        artifact, crew=crew, target=TARGET, epoch=EPOCH
+    )) == 3
+    # A recycled UID is not retained for its previous owner.
+    crew[2] = fleet.FleetMember(uid=2, hotkey=HOTKEYS[3])
+    assert len(_covered_current_assignments(
+        artifact, crew=crew, target=TARGET, epoch=EPOCH
+    )) == 2
+    assert not _covered_current_assignments(
+        artifact, crew=crew, target=TARGET, epoch=EPOCH + 1
     )
 
 
@@ -566,6 +707,10 @@ class _Host:
             "--historical-layer2", str(self.layer2_history),
             "--layer2-cache-dir", str(self.root / "layer2_cache"),
             "--commit-pause-seconds", "0",
+            # This harness intentionally models tiny 2-3 uid fleets with five
+            # synthetic candidates. Production's parser default is pinned by a
+            # separate test below and remains twelve.
+            "--minimum-sequence-pool-size", "0",
         ]
         # The strict upgrade is off in production; these tests cover it, so the
         # harness turns it on unless a test is specifically about the default.
@@ -685,6 +830,22 @@ def test_every_held_uid_publishes_one_distinct_sequence(tmp_path, monkeypatch):
         assert entry["metrics"] == METRICS
 
 
+def test_producer_exports_sixteen_candidates_even_when_its_crew_is_smaller(
+    tmp_path, monkeypatch
+):
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2), candidates=17)
+
+    _publish_once(host.args(minimum_sequence_pool_size=16))
+
+    artifact = json.loads(host.artifact.read_text())
+    assert artifact["sequence_pool_size"] == 16
+    assert len(artifact["sequence_pool"]) == 16
+    assert len(set(artifact["sequence_pool"])) == 16
+    assert set(entry["sequence"] for entry in artifact["submissions"]).issubset(
+        artifact["sequence_pool"]
+    )
+
+
 def test_all_k_submissions_are_recorded_in_the_ledger(tmp_path, monkeypatch):
     host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
 
@@ -713,8 +874,8 @@ def test_the_strict_pass_uses_the_shared_gates_and_win_probability(tmp_path, mon
     provisional = host.ranked(strict=False)[0]
     assert "--maximum-p90-rank-sum" not in provisional
     assert provisional[provisional.index("--selection-order") + 1] == SELECTION_ORDER
-    # The winning threshold is what win probability is measured against, so both
-    # passes must order against the same one rather than against a CLI default.
+    # Both passes retain the same competitive-rate diagnostic threshold even
+    # though fresh-draw field-win probability no longer depends on it.
     threshold = publication_gates.gate_defaults()["--competitive-score-threshold"]
     for ranked in (command, provisional):
         assert ranked[ranked.index("--competitive-score-threshold") + 1] == threshold
@@ -901,14 +1062,18 @@ def test_a_missing_legacy_default_does_not_defer_publication(tmp_path):
 
 
 def test_publication_still_refuses_when_there_is_no_evidence_at_all(tmp_path):
-    """Relaxing the legacy requirement must not let us publish on nothing."""
+    """The database cutover must still fail closed on an empty store."""
     import tools.publish_current_nanobody as pub
 
     discovered = pub._default_exact_inputs(tmp_path)
     assert [p for p in discovered if p.is_file()] == []
+    _, _, count = _database_exact_fingerprints(
+        tmp_path / "missing.sqlite", TARGET
+    )
+    assert count == 0
     source = (Path(__file__).resolve().parents[1]
               / "tools" / "publish_current_nanobody.py").read_text()
-    assert "no exact score-bank inputs found under" in source
+    assert "no complete sealed raw exact run" in source
 
 
 
@@ -1563,3 +1728,80 @@ def test_the_strict_reserve_default_covers_the_measured_cost():
         "the strict rank has been measured at about twenty minutes -- 100 "
         "blocks -- and a reserve below that starts work it cannot finish"
     )
+
+
+def test_recovery_shortlist_limit_is_explicit():
+    args = _publisher_parser().parse_args(["--shortlist-limit", "400"])
+
+    assert args.shortlist_limit == 400
+
+
+# --- per-uid compound submissions -------------------------------------------
+# The commitment is ONE message carrying both a molecule and a sequence section,
+# so every one of these guards the nanobody fleet, not the compound bank: a
+# malformed molecule list must cost nothing, never a whole epoch's sequences.
+
+def test_no_molecules_file_leaves_the_fleet_exactly_as_it_was():
+    assert publish_current_nanobody.load_molecules_by_uid(None) == {}
+    assert publish_current_nanobody.load_molecules_by_uid("") == {}
+
+
+def test_an_unreadable_molecules_file_commits_nanobodies_alone(tmp_path):
+    missing = tmp_path / "nope.json"
+    assert publish_current_nanobody.load_molecules_by_uid(str(missing)) == {}
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    assert publish_current_nanobody.load_molecules_by_uid(str(broken)) == {}
+
+
+def test_molecules_are_loaded_per_uid_from_either_shape(tmp_path):
+    path = tmp_path / "molecules.json"
+    path.write_text(json.dumps({
+        "40": "rxn:3:1:2:3,rxn:3:1:2:4",
+        "46": ["rxn:3:5:6:7", "rxn:3:5:6:8"],
+    }))
+    loaded = publish_current_nanobody.load_molecules_by_uid(str(path))
+    assert loaded == {40: "rxn:3:1:2:3,rxn:3:1:2:4", 46: "rxn:3:5:6:7,rxn:3:5:6:8"}
+
+
+def test_one_malformed_uid_does_not_take_the_others_down(tmp_path):
+    path = tmp_path / "molecules.json"
+    path.write_text(json.dumps({
+        "40": "rxn:3:1:2:3 with space",      # whitespace
+        "41": "rxn:3:1|2:3",                 # section delimiter
+        "42": ["rxn:3:9:9:9", "rxn:3:9:9:9"],  # duplicates
+        "43": [],                            # empty
+        "46": "rxn:3:5:6:7",                 # the good one
+    }))
+    loaded = publish_current_nanobody.load_molecules_by_uid(str(path))
+    assert loaded == {46: "rxn:3:5:6:7"}
+
+
+def test_a_uid_absent_from_the_file_still_commits_its_nanobody(tmp_path):
+    path = tmp_path / "molecules.json"
+    path.write_text(json.dumps({"40": "rxn:3:1:2:3"}))
+    loaded = publish_current_nanobody.load_molecules_by_uid(str(path))
+    assert loaded.get(99, "") == ""
+    from nanobody_opt import commit_submission as cs
+    assert cs.submission_message("QVQLVESGG", loaded.get(99, "")) == "~|QVQLVESGG"
+
+
+def test_the_commit_template_advertises_the_molecules_placeholder():
+    parser = [a for a in _publisher_parser()._actions
+              if "--commit-command" in getattr(a, "option_strings", [])]
+    assert parser and "{molecules}" in (parser[0].help or "")
+
+
+def _publisher_parser():
+    import argparse as _a
+    for name in ("build_parser", "_parser", "parse_arguments", "_build_parser"):
+        fn = getattr(publish_current_nanobody, name, None)
+        if fn is None:
+            continue
+        try:
+            result = fn()
+        except TypeError:
+            continue
+        if isinstance(result, _a.ArgumentParser):
+            return result
+    pytest.skip("publisher parser factory not found under a known name")

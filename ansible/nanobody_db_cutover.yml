@@ -1,0 +1,315 @@
+---
+# One-time staged cutover from historical exact-file discovery to sealed raw
+# observations in nanobody_mutations.sqlite.  Normal future deployments remain
+# owned by nanobody.yml + nanobody_services.yml; this play exists so the live
+# host can be migrated and verified without copying a dirty working tree over
+# unrelated production code.
+- name: Stage and verify the nanobody raw-observation database cutover
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/nanobody-identity.yml
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    candidate_root: /root/nanobody-db-cutover-candidate
+    cutover_files:
+      - nanobody_opt/import_exact_screens.py
+      - nanobody_opt/mutation_network.py
+      - nanobody_opt/rank_exact.py
+      - nanobody_opt/run_live_producer.py
+      - nanobody_opt/win_probability.py
+      - tools/publish_current_nanobody.py
+    cutover_tests:
+      - tests/test_import_exact_screens.py
+      - tests/test_mutation_network.py
+      - tests/test_nanobody_rank_exact.py
+      - tests/test_publish_current_nanobody.py
+      - tests/test_run_live_producer.py
+      - tests/test_submit_host_loop.py
+      - tests/test_win_probability.py
+
+  tasks:
+    - name: Create isolated candidate source directories
+      ansible.builtin.file:
+        path: "{{ candidate_root }}/{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - nanobody_opt
+        - tools
+        - tests
+      tags: [stage]
+
+    - name: Seed the candidate with the currently deployed dependency tree
+      ansible.builtin.command:
+        argv: [cp, -a, "/root/{{ item }}/.", "{{ candidate_root }}/{{ item }}/"]
+      loop:
+        - nanobody_opt
+        - tools
+      changed_when: true
+      tags: [stage]
+
+    - name: Stage only the cutover implementation and regression tests
+      ansible.builtin.copy:
+        src: "{{ repo }}/{{ item }}"
+        dest: "{{ candidate_root }}/{{ item }}"
+        mode: "0644"
+      loop: "{{ cutover_files + cutover_tests }}"
+      tags: [stage]
+
+    - name: Compile the staged implementation in the locked scorer runtime
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/bgen/bin/python
+          - -m
+          - py_compile
+          - "{{ candidate_root }}/nanobody_opt/import_exact_screens.py"
+          - "{{ candidate_root }}/nanobody_opt/mutation_network.py"
+          - "{{ candidate_root }}/nanobody_opt/rank_exact.py"
+          - "{{ candidate_root }}/nanobody_opt/run_live_producer.py"
+          - "{{ candidate_root }}/nanobody_opt/win_probability.py"
+          - "{{ candidate_root }}/tools/publish_current_nanobody.py"
+      changed_when: false
+      tags: [stage]
+
+    - name: Run focused cutover regressions against the staged source
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - chain310
+          - python
+          - -m
+          - pytest
+          - -q
+          - -k
+          - not test_a_uid_absent_from_the_file_still_commits_its_nanobody
+          - "{{ candidate_root }}/tests/test_import_exact_screens.py"
+          - "{{ candidate_root }}/tests/test_mutation_network.py"
+          - "{{ candidate_root }}/tests/test_nanobody_rank_exact.py"
+          - "{{ candidate_root }}/tests/test_publish_current_nanobody.py"
+          - "{{ candidate_root }}/tests/test_win_probability.py"
+      args:
+        chdir: "{{ candidate_root }}"
+      environment:
+        PYTHONPATH: "{{ candidate_root }}:/root"
+        PIXI_COLOR: never
+      changed_when: false
+      tags: [stage]
+
+    - name: Install the tested cutover source with recoverable backups
+      ansible.builtin.copy:
+        src: "{{ candidate_root }}/{{ item }}"
+        dest: "/root/{{ item }}"
+        remote_src: true
+        backup: true
+        mode: "0644"
+      loop: "{{ cutover_files }}"
+      tags: [install]
+
+    - name: Backfill every preserved raw exact run into the normalized store
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+          - import-exact-screens
+          - --
+          - --database
+          - /root/artifacts/nanobody_mutations.sqlite
+          - --target
+          - P20809
+          - --archive
+          - /root/P20809_nanobodies.csv
+          - --exact-root
+          - /root/live
+          - --exact-root
+          - /root/design
+          - --exact-root
+          - /root/artifacts/rd/validator_parity
+          - --exact-root
+          - /root/local_neighborhood_round1_exact.json
+          - --exact-root
+          - /root/recombinants_cdr_probe2_exact.json
+          - --metadata-root
+          - /root/live
+          - --metadata-root
+          - /root/design
+      environment:
+        PIXI_COLOR: never
+      register: exact_backfill
+      changed_when: true
+      tags: [backfill]
+
+    - name: Require at least one complete normalized raw run
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/bgen/bin/python
+          - -c
+          - >-
+            import sqlite3;
+            c=sqlite3.connect('/root/artifacts/nanobody_mutations.sqlite');
+            n=c.execute('SELECT COUNT(*) FROM exact_runs WHERE target=? AND complete=1',('P20809',)).fetchone()[0];
+            assert n>0, 'no complete exact runs after backfill';
+            print(n)
+      register: sealed_run_gate
+      changed_when: false
+      tags: [backfill]
+
+    - name: Report the sealed-run gate without exposing observation contents
+      ansible.builtin.debug:
+        msg: "sealed raw exact runs={{ sealed_run_gate.stdout }}"
+      tags: [backfill]
+
+    - name: Resolve the live public coldkey from owned artifact hotkeys
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/chain310/bin/python
+          - -c
+          - >-
+            import collections,json,pathlib;
+            state=json.loads(pathlib.Path('/root/artifacts/chain_state.json').read_text());
+            artifact=json.loads(pathlib.Path('/root/artifacts/nanobody_result.json').read_text());
+            hotkeys={str(x.get('hotkey')) for x in artifact.get('submissions',[]) if x.get('hotkey')};
+            counts=collections.Counter(str(n.get('coldkey')) for n in state.get('neurons',[]) if str(n.get('hotkey')) in hotkeys and n.get('coldkey'));
+            assert len(counts)==1, f'expected one owned coldkey, found {len(counts)}';
+            print(next(iter(counts)))
+      register: resolved_nanobody_coldkey
+      changed_when: false
+      no_log: true
+      tags: [activate]
+
+    - name: Pause the tmux session watchdog during publisher replacement
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, nova-sessionwatch]
+      failed_when: false
+      changed_when: true
+      tags: [activate]
+
+    - name: Stop the superseded publisher session
+      ansible.builtin.command:
+        argv: [tmux, kill-session, -t, nova-nanobody-publisher]
+      failed_when: false
+      changed_when: true
+      tags: [activate]
+
+    - name: Start the DB-only publisher from the locked runtime
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - nova-nanobody-publisher
+          - /root/.pixi/envs/chain310/bin/python
+          - -m
+          - dotenv
+          - -f
+          - /root/nanobody.env
+          - run
+          - --
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - chain310
+          - publish-current-nanobody
+          - --
+          - --watch-interval
+          - "45"
+          - --expected-gpus
+          - "4"
+          - --runtime-root
+          - /root
+          - --score-bank-root
+          - /root
+          - --nanobody-opt-root
+          - /root/nanobody_opt
+          - --pixi
+          - /usr/local/bin/pixi
+          - --layer2-concurrency
+          - "40"
+          - --shortlist-limit
+          - "1000"
+          - --layer2-cache-dir
+          - /root/layer2_cache
+          - --chain-state
+          - /root/artifacts/chain_state.json
+          - --artifact
+          - /root/artifacts/nanobody_result.json
+          - --history-dir
+          - /root/artifacts/nanobody_history
+          - --audit-dir
+          - /root/artifacts/validator_audits
+          - --ledger
+          - /root/artifacts/nanobody_published_sequences.txt
+          - --state
+          - /root/artifacts/nanobody_publisher_state.json
+          - --observation-database
+          - /root/artifacts/nanobody_mutations.sqlite
+          - --coldkey
+          - "{{ resolved_nanobody_coldkey.stdout }}"
+          - --wallet-name
+          - "{{ nanobody_wallet_name }}"
+          - --wallet-path
+          - "{{ nanobody_wallet_path }}"
+          - --reserve-blocks
+          - "55"
+          - --minimum-sequence-pool-size
+          - "16"
+          - --strict-qualification-reserve-blocks
+          - "220"
+      changed_when: true
+      register: cutover_publisher_start
+      failed_when: false
+      no_log: true
+      tags: [activate]
+
+    - name: Capture the artifact-only publisher for watchdog recovery
+      ansible.builtin.include_tasks: tasks/capture_artifact_publisher.yml
+      tags: [activate]
+
+    - name: Restore the tmux session watchdog
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - nova-sessionwatch
+          - bash
+          - /root/session_watchdog.sh
+      changed_when: true
+      tags: [activate]
+
+    - name: Confirm the guarded publisher replacement succeeded
+      ansible.builtin.assert:
+        that:
+          - cutover_publisher_start.rc == 0
+        fail_msg: Publisher replacement failed before watchdog restoration
+      no_log: true
+      tags: [activate]
+
+    - name: Confirm the DB-only publisher remains alive
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, nova-nanobody-publisher]
+      changed_when: false
+      tags: [activate]
+
+    - name: Confirm the tmux session watchdog remains alive
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, nova-sessionwatch]
+      changed_when: false
+      tags: [activate]

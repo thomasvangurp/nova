@@ -1,0 +1,140 @@
+diff --git a/easynano/design.py b/easynano/design.py
+index f1a6be6..c849394 100644
+--- a/easynano/design.py
++++ b/easynano/design.py
+@@ -38,6 +38,7 @@ from .loss import (
+     compute_structure_losses, get_mid_points, build_pdb_prior,
+ )
+ from .setup import setup_target_design
++from .transformers_compat import differentiable_trunk, fold_structure
+ 
+ # `esmscore` is vendored into this repo (top-level `esmscore/` package), so
+ # `from esmscore...` resolves through the installed package — no sys.path hack.
+@@ -246,10 +247,13 @@ def predict_prior_from_full_ca(binder_seq: str, target_seq: str,
+ 
+     t0 = time.time()
+     with torch.inference_mode():
+-        out = model.forward(**features, num_loops=num_loops,
+-                            num_sampling_steps=num_sampling,
+-                            num_diffusion_samples=num_diffusion_samples,
+-                            calculate_confidence=True)
++        out = fold_structure(
++            model,
++            features,
++            num_loops=num_loops,
++            num_sampling_steps=num_sampling,
++            num_diffusion_samples=num_diffusion_samples,
++        )
+     print(f"  Full fold took {time.time() - t0:.1f}s", flush=True)
+     iptm = float(out["iptm"][0].item()) if out.get("iptm") is not None and out["iptm"].numel() else None
+     ptm = float(out["ptm"][0].item()) if out.get("ptm") is not None and out["ptm"].numel() else None
+@@ -423,10 +427,7 @@ def run_design(
+                     for k, v in features.items()}
+ 
+         with torch.set_grad_enabled(True):
+-            out = model.forward(**features, num_loops=n_loops,
+-                                num_sampling_steps=sample_steps,
+-                                num_diffusion_samples=1,
+-                                calculate_confidence=True)
++            out = differentiable_trunk(model, features, num_loops=n_loops)
+         disto_bf = out["distogram_logits"].float()
+         disto = reorder_bf_to_target_first(disto_bf, binder_len)
+         pb, pm = align_prior_to_disto(prior_bins, prior_mask, disto)
+diff --git a/easynano/evaluate.py b/easynano/evaluate.py
+index 481650d..6f4b96f 100644
+--- a/easynano/evaluate.py
++++ b/easynano/evaluate.py
+@@ -25,6 +25,7 @@ from .config import (
+ )
+ from .loss import get_mid_points, compute_structure_losses
+ from .setup import setup_target_design
++from .transformers_compat import fold_structure
+ 
+ # `esmscore` is vendored into this repo — no sys.path hack needed.
+ 
+@@ -70,10 +71,13 @@ def fold_one(model, binder_seq: str, target_seq: str,
+     features = {k: (v.to(DEVICE) if isinstance(v, torch.Tensor) else v)
+                 for k, v in features.items()}
+     with torch.inference_mode():
+-        out = model.forward(**features, num_loops=num_loops,
+-                            num_sampling_steps=num_sampling,
+-                            num_diffusion_samples=1,
+-                            calculate_confidence=True)
++        out = fold_structure(
++            model,
++            features,
++            num_loops=num_loops,
++            num_sampling_steps=num_sampling,
++            num_diffusion_samples=1,
++        )
+     return out
+ 
+ 
+diff --git a/easynano/transformers_compat.py b/easynano/transformers_compat.py
+new file mode 100644
+index 0000000..43c538d
+--- /dev/null
++++ b/easynano/transformers_compat.py
+@@ -0,0 +1,62 @@
++"""Compatibility helpers for the split Transformers 5 ESMFold2 API."""
++from __future__ import annotations
++
++import inspect
++
++
++_ATOM_KEYS = (
++    "ref_pos",
++    "ref_charge",
++    "atom_attention_mask",
++    "ref_element",
++    "ref_atom_name_chars",
++    "ref_space_uid",
++    "atom_to_token",
++)
++
++
++def _uses_split_api(model) -> bool:
++    """Return whether structure folding moved from ``forward`` to ``fold``."""
++    return hasattr(model, "fold") and "atom_inputs" in inspect.signature(model.forward).parameters
++
++
++def differentiable_trunk(model, features: dict, *, num_loops: int):
++    """Run a differentiable trunk pass and return distogram logits."""
++    if not _uses_split_api(model):
++        return model.forward(
++            **features,
++            num_loops=num_loops,
++            num_sampling_steps=1,
++            num_diffusion_samples=1,
++            calculate_confidence=True,
++        )
++    from transformers.models.esmfold2.modeling_esmfold2 import EsmFold2AtomInputs
++
++    inputs = dict(features)
++    atom_inputs = EsmFold2AtomInputs(**{key: inputs.pop(key) for key in _ATOM_KEYS})
++    return model.forward(**inputs, atom_inputs=atom_inputs, num_loops=num_loops)
++
++
++def fold_structure(
++    model,
++    features: dict,
++    *,
++    num_loops: int,
++    num_sampling_steps: int,
++    num_diffusion_samples: int,
++):
++    """Run the full structure/confidence path on old and split APIs."""
++    if _uses_split_api(model):
++        return model.fold(
++            **features,
++            num_loops=num_loops,
++            num_sampling_steps=num_sampling_steps,
++            num_diffusion_samples=num_diffusion_samples,
++        )
++    return model.forward(
++        **features,
++        num_loops=num_loops,
++        num_sampling_steps=num_sampling_steps,
++        num_diffusion_samples=num_diffusion_samples,
++        calculate_confidence=True,
++    )

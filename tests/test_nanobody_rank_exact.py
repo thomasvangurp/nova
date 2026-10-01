@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from nanobody_opt import rank_exact
+from nanobody_opt.mutation_network import record_exact_run, update_observation_store
 from nanobody_opt.simulate_round import (
     METRICS,
     category_rank_sums,
@@ -13,8 +14,117 @@ from nanobody_opt.simulate_round import (
 )
 
 
+def test_diversity_reserve_reaches_beyond_a_clustered_prefix():
+    ranked = [
+        {"sequence": "AAAAAAAAAAAAAAAAAAAA", "rank": 1},
+        {"sequence": "AAAAAAAAAAAAAAAAAAAC", "rank": 2},
+        {"sequence": "CCCCCCCCCCCCCCCCCCCC", "rank": 3},
+        {"sequence": "DDDDDDDDDDDDDDDDDDDD", "rank": 4},
+    ]
+
+    selected, added = rank_exact._with_diversity_reserve(
+        ranked, ranked[:2], 3
+    )
+
+    assert [item["rank"] for item in selected] == [1, 2, 3, 4]
+    assert added == 2
+
+
 def _metrics(value):
     return {name: float(value) for name in METRICS}
+
+
+def test_database_history_reads_only_complete_normalized_raw_runs(tmp_path):
+    database = tmp_path / "observations.sqlite"
+    raw_id = "local-exact:sealed:0:RAW"
+    partial_id = "local-exact:partial:0:PARTIAL"
+    update_observation_store(database, [
+        {
+            "observation_id": raw_id,
+            "sequence": "RAW",
+            "score": 20,
+            "score_kind": "local_exact_validator_replay_rank_sum",
+            "source": "local_exact_raw",
+            "target": "P20809",
+            "metrics": _metrics(2),
+        },
+        {
+            "observation_id": partial_id,
+            "sequence": "PARTIAL",
+            "score": 30,
+            "score_kind": "local_exact_validator_replay_rank_sum",
+            "source": "local_exact_raw",
+            "target": "P20809",
+            "metrics": _metrics(3),
+        },
+        {
+            "observation_id": "live_exact_screen:epoch1:DERIVED",
+            "sequence": "DERIVED",
+            "score": 1,
+            "score_kind": "local_validator_replay_rank_sum",
+            "source": "live_exact_screen",
+            "target": "P20809",
+            "metrics": _metrics(1),
+        },
+    ])
+    record_exact_run(
+        database,
+        target="P20809",
+        run_id="sealed",
+        epoch=1,
+        source_path=tmp_path / "sealed.json",
+        file_sha256="sealed-sha",
+        scorer_protocol="validator-fast-v1",
+        observation_ids=[raw_id],
+    )
+    record_exact_run(
+        database,
+        target="P20809",
+        run_id="partial",
+        epoch=1,
+        source_path=tmp_path / "partial.json",
+        file_sha256="partial-sha",
+        scorer_protocol="validator-fast-v1",
+        observation_ids=[partial_id, "missing"],
+    )
+
+    found, added = rank_exact._historical_observations(
+        database, "P20809", {}
+    )
+
+    assert found == {"RAW": [_metrics(2)]}
+    assert added == 1
+
+
+def test_database_history_deduplicates_a_current_raw_run(tmp_path):
+    database = tmp_path / "observations.sqlite"
+    observation_id = "local-exact:same-run:0:RAW"
+    update_observation_store(database, [{
+        "observation_id": observation_id,
+        "sequence": "RAW",
+        "score": 20,
+        "score_kind": "local_exact_validator_replay_rank_sum",
+        "source": "local_exact_raw",
+        "target": "P20809",
+        "metrics": _metrics(2),
+    }])
+    record_exact_run(
+        database,
+        target="P20809",
+        run_id="same-run",
+        epoch=1,
+        source_path=tmp_path / "same.json",
+        file_sha256="same-sha",
+        scorer_protocol=None,
+        observation_ids=[observation_id],
+    )
+
+    found, added = rank_exact._historical_observations(
+        database, "P20809", {}, excluded_run_ids={"same-run"}
+    )
+
+    assert found == {}
+    assert added == 0
 
 
 def test_rank_sum_uses_validator_dense_ties():
@@ -232,8 +342,8 @@ def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch
     assert 0 <= candidate["competitive_rate"] <= 1
     assert 0 <= candidate["observation_competitive_rate"] <= 1
     assert candidate["selection_score"] == candidate["score_p90"]
-    assert len(candidate["per_observation_field_rank_sums"]) == 1
-    assert len(candidate["per_observation_field_rank_sums"][0]) == 64
+    assert "per_observation_field_rank_sums" not in candidate
+    assert candidate["field_replay_matrix_shape"] == [1, 64]
 
 
 def test_ranker_rejects_structurally_unstable_observations(tmp_path, monkeypatch):
@@ -484,6 +594,31 @@ def _pose_order_candidate(sequence, score, observations=1, deviations=0):
     }
 
 
+def test_live_win_probability_is_the_empirical_fresh_draw_event():
+    candidates = [
+        _pose_order_candidate("RELIABLE", 2, observations=3),
+        {
+            **_pose_order_candidate("LOTTERY", 1, observations=1),
+            "per_observation_median_rank_sum": [1.0, 50.0, 100.0],
+            "score_median": 50.0,
+            "score_p90": 100.0,
+            "score_worst": 100.0,
+        },
+    ]
+
+    ranked = rank_exact._order_candidates(
+        candidates,
+        "win-probability",
+        competitive_score_threshold=1.5,
+        consensus_ranking_policy="off",
+    )
+
+    assert [item["sequence"] for item in ranked] == ["RELIABLE", "LOTTERY"]
+    assert ranked[0]["win_probability_method"] == (
+        "empirical-independent-fresh-draw"
+    )
+
+
 def test_one_observation_pose_shortcut_preserves_the_exhaustive_selected_set():
     candidates = [
         _pose_order_candidate("A", 44, deviations=1),
@@ -605,3 +740,81 @@ def test_a_candidate_without_the_field_is_treated_as_unbroken():
     from nanobody_opt.rank_exact import settled_deviation_count
 
     assert settled_deviation_count("ACDEFG", {}) == 0
+
+
+def _order(*rows):
+    return [{"sequence": name, "settled_deviations": tier, "win_probability": p}
+            for name, tier, p in rows]
+
+
+def test_a_tier_regression_among_winnable_candidates_is_still_caught():
+    """The check must still fail on a real regression, or relaxing it for the
+    chance boundary would have turned it into decoration."""
+    from nanobody_opt import fleet
+
+    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
+        fleet._assert_non_increasing_win_probability(
+            _order(("A", 2, 0.30), ("B", 0, 0.20)))
+
+
+def test_a_winnable_candidate_after_an_unwinnable_one_is_still_caught():
+    from nanobody_opt import fleet
+
+    with pytest.raises(fleet.SelectionOrderError, match="cannot win"):
+        fleet._assert_non_increasing_win_probability(
+            _order(("A", 0, 0.0), ("B", 0, 0.20)))
+
+
+def test_a_win_probability_regression_inside_one_tier_is_still_caught():
+    from nanobody_opt import fleet
+
+    with pytest.raises(fleet.SelectionOrderError, match="win probability"):
+        fleet._assert_non_increasing_win_probability(
+            _order(("A", 1, 0.10), ("B", 1, 0.30)))
+
+
+def test_a_tier_regression_inside_the_unwinnable_group_is_still_caught():
+    """The group that cannot win is still ordered by tier among itself, and
+    restarting the ladder at the boundary must not stop checking it."""
+    from nanobody_opt import fleet
+
+    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
+        fleet._assert_non_increasing_win_probability(
+            _order(("A", 0, 0.30), ("B", 2, 0.0), ("C", 0, 0.0)))
+
+
+def test_a_clean_unwinnable_candidate_may_follow_a_broken_winnable_one():
+    """The production order this used to reject.
+
+    win_probability_order_key sorts on (chance, tier), so a tier-0 sequence
+    with no chance follows a tier-2 one that has one. That is the ranker
+    working; reading it as a regression took the fleet down.
+    """
+    from nanobody_opt import fleet
+
+    fleet._assert_non_increasing_win_probability(
+        _order(("A", 0, 0.30), ("B", 1, 0.25), ("C", 2, 0.05), ("D", 0, 0.0)))
+
+
+def test_the_ranker_and_the_invariant_agree_on_a_randomised_corpus():
+    """Property check over the real order key, not a hand-picked fixture.
+
+    The two definitions drifted once before and cost an epoch; a fixture only
+    covers the shapes someone thought of.
+    """
+    import random
+
+    from nanobody_opt import fleet
+    from nanobody_opt.rank_exact import win_probability_order_key
+
+    generator = random.Random(20260920)
+    for _ in range(300):
+        rows = [
+            {"sequence": f"S{index}",
+             "settled_deviations": generator.choice([0, 0, 1, 2, 3]),
+             "win_probability": generator.choice([0.0, 0.0, round(generator.random(), 4)])}
+            for index in range(generator.randint(2, 12))
+        ]
+        rows.sort(key=lambda item: -float(item["win_probability"]))
+        rows.sort(key=win_probability_order_key)
+        fleet._assert_non_increasing_win_probability(rows)

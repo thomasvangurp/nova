@@ -1,0 +1,43 @@
+---
+- name: Deploy the in-container nanobody runtime watchdog
+  hosts: nanobody_producer
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Install the wall-clock-aware session watchdog
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../deploy/producer/session_watchdog.sh"
+        dest: /root/session_watchdog.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Replace any unmanaged watchdog with the deployed one
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          # Anchor the complete argv. A broad -f pattern also matches this
+          # Ansible shell because the later tmux command names the script, and
+          # kills the deploy that is trying to install the replacement.
+          pkill -f '^(/bin/)?bash /root/session_watchdog.sh$' 2>/dev/null || true
+          tmux kill-session -t nova-session-watchdog 2>/dev/null || true
+          tmux new-session -d -s nova-session-watchdog /root/session_watchdog.sh
+          sleep 2
+          tmux has-session -t nova-session-watchdog
+      changed_when: true
+
+    - name: Require fresh chain state and a live publisher
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          tmux has-session -t nova-nanobody-miner
+          tmux has-session -t nova-nanobody-publisher
+          python3 - <<'PY'
+          import os, time
+          age = time.time() - os.stat('/root/artifacts/chain_state.json').st_mtime
+          print(f'CHAIN_STATE_AGE_SECONDS={age:.1f}')
+          raise SystemExit(0 if age <= 150 else 1)
+          PY
+      register: runtime_guard_proof
+      changed_when: false

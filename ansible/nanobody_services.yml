@@ -248,6 +248,14 @@
         - /etc/systemd/system/nova-nanobody-publisher.timer
         - /root/nova-standalone.env
 
+    - name: Install the wall-clock-aware production session watchdog
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../deploy/producer/session_watchdog.sh"
+        dest: /root/session_watchdog.sh
+        owner: root
+        group: root
+        mode: "0755"
+
     - name: Sync the committed runtime into the single root
       ansible.builtin.include_tasks: tasks/sync_repo.yml
 
@@ -648,6 +656,8 @@
           - /root/artifacts/nanobody_published_sequences.txt
           - --state
           - /root/artifacts/nanobody_publisher_state.json
+          - --observation-database
+          - /root/artifacts/nanobody_mutations.sqlite
           - --coldkey
           - "{{ nanobody_coldkey_ss58 }}"
           - --wallet-name
@@ -656,27 +666,18 @@
           - "{{ nanobody_wallet_path }}"
           - --reserve-blocks
           - "{{ nanobody_reserve_blocks }}"
+          - --minimum-sequence-pool-size
+          - "16"
           # Strict qualification currently takes longer than an epoch and can
           # delay the next provisional fleet even though this epoch committed
           # first. Keep the reserve configured for when the pass is fast enough
           # to re-enable, but do not start it from the live publisher.
           - --strict-qualification-reserve-blocks
           - "{{ nanobody_strict_qualification_reserve_blocks | default(220) }}"
-          # One commitment per uid, each signed by that uid's own hotkey. Without
-          # this the publisher selects a distinct sequence for every uid the
-          # coldkey holds and then only one is ever sent, because a commitment is
-          # signed by a wallet and a wallet is one hotkey. With three uids that is
-          # two thirds of the fleet idle, and the waste grows with every slot
-          # bought. {hotkey} arrives as an ss58 from the chain; the driver
-          # resolves it to the local key file.
-          - --commit-command
-          - >-
-            /root/.pixi/envs/chain310/bin/python -m nanobody_opt.commit_submission
-            --uid {uid} --hotkey {hotkey} --sequence {sequence}
-            --wallet-name {{ nanobody_wallet_name }}
-            --wallet-path {{ nanobody_wallet_path }}
-            --netuid {{ nanobody_netuid | default(68) }}
-            --network {{ nanobody_network | default('finney') }}
+          # Artifact-only by design. The Pi owns the fresh roster and is the
+          # sole on-chain commitment writer. A second writer here can overwrite
+          # Pi's earlier commitment near the validator blackout and silently
+          # turn a successful commit into a missing scored UID.
 
     - name: Compile the deployed publisher and chain writer
       ansible.builtin.command:
@@ -687,6 +688,9 @@
           - /root/tools/publish_current_nanobody.py
           - /root/compound_miner/nanobody_provider.py
           - /root/nanobody_opt/fleet.py
+          - /root/nanobody_opt/import_exact_screens.py
+          - /root/nanobody_opt/mutation_network.py
+          - /root/nanobody_opt/rank_exact.py
           - /root/nanobody_opt/chain_state.py
           - /root/neurons/miner/miner.py
       changed_when: false
@@ -717,6 +721,44 @@
         entrypoint_flags: "{{ nanobody_publisher_arguments | select('match', '^--') | list }}"
         entrypoint_environment:
           PIXI_COLOR: never
+
+    # The publisher constructs rank_exact's argv internally, so checking only
+    # its own parser leaves that dependency edge untested. Epoch 25274 lost most
+    # of its preparation window when a targeted ranker deploy removed
+    # historical-drivers while the still-running publisher kept passing it.
+    # Exercise the constructed child command before the old publisher stops;
+    # an absent policy flag means rank_exact's supported plain default.
+    - name: Verify publisher-to-ranker policy compatibility before activation
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/chain310/bin/python
+          - -c
+          - >-
+            from pathlib import Path;
+            from tools.publish_current_nanobody import _rank_command;
+            command = _rank_command(
+              bgen_python=Path('/root/.pixi/envs/bgen/bin/python'),
+              nanobody_opt_root=Path('/root/nanobody_opt'),
+              exact_inputs=[Path('/tmp/exact.json')],
+              archive=Path('/tmp/archive.csv'),
+              target='P20809',
+              output=Path('/tmp/ranking.json'),
+              exclusion=Path('/tmp/excluded.txt'),
+              epoch=1,
+              shortlist=10,
+              config=Path('/tmp/config.yaml'),
+              strict=False,
+            );
+            policy = (
+              command[command.index('--selection-metric-policy') + 1]
+              if '--selection-metric-policy' in command else 'plain'
+            );
+            assert policy == 'plain', policy;
+            assert 'historical-drivers' not in command;
+            print('PUBLISHER_RANKER_POLICY_OK')
+      args:
+        chdir: /root
+      changed_when: false
 
     # The cross-program contract the publisher cannot check for itself until it
     # is already running: it needs the miner to export a chain view carrying the
@@ -932,6 +974,10 @@
       args:
         chdir: /root
       changed_when: true
+      when: nanobody_publisher_activate | bool
+
+    - name: Capture the artifact-only publisher for watchdog recovery
+      ansible.builtin.include_tasks: tasks/capture_artifact_publisher.yml
       when: nanobody_publisher_activate | bool
 
     - name: Confirm the checkpoint publisher remains alive

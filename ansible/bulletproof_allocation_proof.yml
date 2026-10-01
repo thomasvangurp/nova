@@ -1,0 +1,158 @@
+---
+- name: Run prospective multi-cohort nanobody allocation proof
+  hosts: hamming2_worker
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    proof_root: /root/bulletproof-allocation-20260923
+    expected_instance_id: 52073739
+    expected_label: nova-nanobody-h2-fast-20260922
+    pixi_version: "0.73.0"
+  tasks:
+    - name: Require the approved preserved research instance
+      ansible.builtin.assert:
+        that:
+          - expected_vast_instance | int == expected_instance_id
+          - expected_vast_label == expected_label
+
+    - name: Require exactly eight RTX 4090 GPUs
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        nvidia-smi --query-gpu=name --format=csv,noheader |
+        awk '$0 !~ /RTX 4090/ {bad=1} END {exit (NR == 8 && !bad) ? 0 : 1}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Require preserved optimized scorer runtime
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /root/bgen_python.sh
+        - /root/fastscore/release/release_python.sh
+        - /root/fastscore/release/fast_score_batch.py
+        - /root/artifacts/nanobody_fast_scorer.json
+        - /usr/local/bin/pixi
+      register: scorer_runtime
+      failed_when: not scorer_runtime.stat.exists
+
+    - name: Verify Pixi version
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      register: pixi_check
+      changed_when: false
+      failed_when: "('pixi ' ~ pixi_version) not in pixi_check.stdout"
+
+    - name: Verify locked BoltzGen Pixi environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --manifest-path
+          - /root/pixi.toml
+          - --locked
+          - --environment
+          - bgen
+      environment:
+        PIXI_COLOR: never
+      changed_when: false
+
+    - name: Reject pre-existing prospective results
+      ansible.builtin.find:
+        paths: "{{ proof_root }}"
+        patterns: exact_all.json
+        recurse: true
+      register: old_results
+      failed_when: old_results.matched | int != 0
+
+    - name: Create isolated proof directory
+      ansible.builtin.file:
+        path: "{{ proof_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Sync frozen proof artifacts
+      ansible.posix.synchronize:
+        src: "{{ repo }}/analysis/nanobody-gap/bulletproof-allocation-20260923/"
+        dest: "{{ proof_root }}/"
+        checksum: true
+        owner: false
+        group: false
+        perms: false
+        rsync_opts:
+          - --omit-dir-times
+          - --exclude=__pycache__
+          - --exclude=*.pyc
+          - --exclude=analysis.json
+          - --exclude=REPORT.md
+          - --no-perms
+        use_ssh_args: true
+
+    - name: Restore runner executable bit
+      ansible.builtin.file:
+        path: "{{ proof_root }}/run_remote.sh"
+        mode: "0755"
+
+    - name: Verify frozen manifest remotely
+      ansible.builtin.command:
+        argv: [sha256sum, --check, FREEZE_MANIFEST.sha256]
+      args:
+        chdir: "{{ proof_root }}"
+      changed_when: false
+
+    - name: Verify frozen runtime and inputs
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import json,torch;
+            from pathlib import Path;
+            from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL;
+            p=Path('/root/bulletproof-allocation-20260923');
+            e=json.loads((p/'experiment.json').read_text());
+            s=json.loads((p/'development_sequences.json').read_text());
+            assert e['unique_development_sequences']==len(s['sequences']);
+            assert e['cohort_count']==6 and e['development_draws']==12 and e['fresh_draws']==32;
+            assert torch.cuda.device_count()==8;
+            assert SCORER_PROTOCOL=='validator-dual-sample-v1';
+            print('BULLETPROOF_RUNTIME_OK')
+      environment:
+        PYTHONPATH: /root
+      changed_when: false
+
+    - name: Reject an existing proof session
+      ansible.builtin.command:
+        argv: [tmux, has-session, -t, bulletproof-allocation]
+      register: proof_session
+      changed_when: false
+      failed_when: proof_session.rc == 0
+
+    - name: Launch prospective proof
+      ansible.builtin.command:
+        argv:
+          - tmux
+          - new-session
+          - -d
+          - -s
+          - bulletproof-allocation
+          - >-
+            bash -lc 'cd /root && exec
+            {{ proof_root }}/run_remote.sh {{ proof_root }}
+            >{{ proof_root }}/runner.stdout.log
+            2>{{ proof_root }}/runner.stderr.log'
+      changed_when: true
+
+    - name: Confirm first development draw started
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        for attempt in $(seq 1 45); do
+          test -f {{ proof_root }}/development_01/wave_000_input.json && exit 0;
+          tmux has-session -t bulletproof-allocation || exit 2;
+          sleep 2;
+        done;
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false

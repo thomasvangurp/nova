@@ -384,11 +384,12 @@ def main() -> None:
             # Carried through for the fleet artifact: the reason this sequence was
             # chosen for a uid is its chance of a winning draw, not its average.
             "win_probability": winner.get("win_probability"),
+            "win_probability_method": winner.get("win_probability_method"),
             "selection_order": ranking.get("selection_order"),
             "consensus_ranking_policy": ranking.get("consensus_ranking_policy", "tier"),
             "selection_metric_policy": ranking.get("selection_metric_policy", "plain"),
             "selection_metric_weights": ranking.get("selection_metric_weights"),
-            "prediction_event": "selection_rank_sum_below_fixed_threshold",
+            "prediction_event": "best_selection_rank_sum_on_one_fresh_draw",
             "score_semantics": (
                 "published raw metrics are the arithmetic mean of independent "
                 "local observations, matching validator score sharing; the current "

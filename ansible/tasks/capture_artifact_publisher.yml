@@ -1,0 +1,55 @@
+---
+# Persist the exact safe publisher process for session_watchdog.sh.  Capturing
+# after start avoids a second handwritten argv drifting back to a chain-writing
+# configuration.  The helper prints only invariant booleans/counts; it never
+# emits the process argv.
+- name: Persist the artifact-only publisher command for watchdog recovery
+  ansible.builtin.shell: |
+    set -eu
+    python3 - <<'PY'
+    import os
+    from pathlib import Path
+
+    candidates = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            argv = [
+                item.decode("utf-8", "strict")
+                for item in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                if item
+            ]
+        except (OSError, UnicodeError):
+            continue
+        if "publish-current-nanobody" not in argv:
+            continue
+        if "--commit-command" in argv:
+            raise SystemExit("refusing to persist a chain-writing publisher")
+        if "--minimum-sequence-pool-size" not in argv:
+            raise SystemExit("publisher has no sequence-pool reserve")
+        pool = argv[argv.index("--minimum-sequence-pool-size") + 1]
+        if int(pool) < 16:
+            raise SystemExit(f"publisher pool reserve is only {pool}")
+        candidates.append((0 if "dotenv" in argv else 1, int(pid), argv))
+    if not candidates:
+        raise SystemExit("artifact publisher process not found")
+
+    argv = sorted(candidates)[0][2]
+    launch = [
+        "tmux", "new-session", "-d", "-s", "nova-nanobody-publisher", *argv
+    ]
+    destination = Path("/root/artifacts/publisher_argv.bin")
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_bytes(("\0".join(launch) + "\0").encode())
+    os.chmod(temporary, 0o600)
+    temporary.replace(destination)
+    print("PUBLISHER_WATCHDOG_ARGV_OK artifact_only=true minimum_pool=16")
+    PY
+  args:
+    executable: /bin/bash
+  register: artifact_publisher_watchdog_argv
+  changed_when: true
+  failed_when: >-
+    artifact_publisher_watchdog_argv.rc != 0 or
+    'PUBLISHER_WATCHDOG_ARGV_OK' not in artifact_publisher_watchdog_argv.stdout

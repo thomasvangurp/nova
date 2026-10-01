@@ -1,0 +1,29 @@
+[workspace]
+name = "nova-compound-analysis"
+version = "0.1.0"
+description = "Local CPU-only analysis workspace: label-bank proxy training and evaluation"
+channels = ["conda-forge"]
+# Deliberately a SEPARATE workspace from the repo root. The root manifest is
+# linux-64 only and its manifest/lock digests are pinned into trial receipts
+# (pixi_manifest_sha256 / pixi_lock_sha256); adding osx-arm64 there would change
+# those hashes. Nothing here touches the scoring or chain runtimes.
+platforms = ["osx-arm64", "linux-64"]
+requires-pixi = ">=0.73"
+
+[dependencies]
+python = "3.12.*"
+# Pinned to the versions the remote epoch-cpu environment uses, so features
+# computed locally match what was computed on the box.
+rdkit = "==2024.9.4"
+numpy = "==1.26.4"
+pandas = "==2.2.3"
+scikit-learn = "==1.6.1"
+scipy = "*"
+joblib = "*"
+requests = ">=2.34.2,<3"
+
+[tasks]
+check = "python -c \"import rdkit, numpy, pandas, sklearn; from rdkit import Chem; print('rdkit', rdkit.__version__, '| numpy', numpy.__version__, '| sklearn', sklearn.__version__)\""
+
+[pypi-dependencies]
+async-substrate-interface = "==2.0.4"

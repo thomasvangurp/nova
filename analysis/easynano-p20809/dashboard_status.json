@@ -1,0 +1,7 @@
+{
+  "stage": "complete: shared-seed mutation rerank",
+  "completed_runs": 6,
+  "expected_runs": 6,
+  "environment": "isolated A100 80 GB",
+  "production_touched": false
+}

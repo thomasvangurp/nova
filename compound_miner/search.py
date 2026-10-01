@@ -172,6 +172,7 @@ class SearchEngine:
         historical_index: HistoricalIndex,
         scorer: NIMScorer | None = None,
         seed: int = 68,
+        proposal_policy_factory=None,
     ) -> None:
         self.database = database
         self.history = history
@@ -180,6 +181,7 @@ class SearchEngine:
         self.gate = ValidityGate(historical_index)
         self.scorer = scorer
         self.rng = random.Random(seed)
+        self.proposal_policy_factory = proposal_policy_factory
 
     def run_round(
         self,
@@ -199,7 +201,7 @@ class SearchEngine:
             scored_only=True,
             scorer=VALIDATOR_EXACT_SCORER,
         )
-        policy = ProposalPolicy(
+        policy = (self.proposal_policy_factory or ProposalPolicy)(
             self.history, reaction, self.database, self.rng, exact_parents=exact_parents
         )
         if construction_workers > 1:

@@ -1,0 +1,6 @@
+[
+  {"name":"boltzgen1_diverse.ckpt","sha256":"360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c"},
+  {"name":"boltzgen1_adherence.ckpt","sha256":"ac7078b3dc13064c68e0c3fd542e5bc538c33558bf6607f65e499eb336ca5e5d"},
+  {"name":"boltzgen1_ifold.ckpt","sha256":"dd4cf108c94471bdc3a326b7b180fa3854dc019110fae780208c30b50bd56578"},
+  {"name":"boltz2_conf_final.ckpt","sha256":"525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530"}
+]

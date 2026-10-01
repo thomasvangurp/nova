@@ -189,7 +189,11 @@ def score_worker(
         compress_pre_affinity=inference["compress_pre_affinity"],
         in_memory_affinity=inference["in_memory_affinity"],
         output_format="mmcif",
-        seed=68,
+        # Threaded from the CLI so a shortlist can be scored several times with
+        # INDEPENDENT diffusion draws and averaged. Boltz sampling is stochastic:
+        # the same scorer on a different seed differs by 0.005234 per molecule,
+        # which is what makes a single-pass top-20 selection regress on rescore.
+        seed=inference.get("seed", 68),
         affinity_mw_correction=True,
         override=False,
         num_workers=0,
@@ -264,6 +268,9 @@ def main() -> None:
         help="Skip molecules already present in another score file",
     )
     parser.add_argument("--preserve-record-order", action="store_true")
+    parser.add_argument("--seed", type=int, default=68,
+                        help="Boltz sampling seed; vary it across passes to get "
+                             "independent draws for averaging")
     parser.add_argument("--recycling-steps", type=int, default=3)
     parser.add_argument("--recycling-steps-affinity", type=int, default=5)
     parser.add_argument("--sampling-steps", type=int, default=100)
@@ -345,6 +352,7 @@ def main() -> None:
         "compress_pre_affinity": args.compress_pre_affinity,
         "in_memory_affinity": not args.disk_affinity_handoff,
         "preprocessing_threads": args.preprocessing_threads,
+        "seed": args.seed,
     }
     started = time.monotonic()
     try:

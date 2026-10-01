@@ -1,0 +1,61 @@
+diff --git a/easynano/design.py b/easynano/design.py
+index a39c220..0fe7fba 100644
+--- a/easynano/design.py
++++ b/easynano/design.py
+@@ -38,7 +38,11 @@ from .loss import (
+     compute_structure_losses, get_mid_points, build_pdb_prior,
+ )
+ from .setup import setup_target_design
+-from .transformers_compat import differentiable_trunk, fold_structure
++from .transformers_compat import (
++    differentiable_trunk,
++    enable_eval_gradient_checkpointing,
++    fold_structure,
++)
+ 
+ # `esmscore` is vendored into this repo (top-level `esmscore/` package), so
+ # `from esmscore...` resolves through the installed package — no sys.path hack.
+@@ -70,8 +74,13 @@ def load_fast_model():
+     while hasattr(unwrapped, "__wrapped__"):
+         unwrapped = unwrapped.__wrapped__
+     model.forward = unwrapped.__get__(model, type(model))
++    checkpoint_layers = enable_eval_gradient_checkpointing(model)
+     n_params = sum(p.numel() for p in model.parameters()) / 1e6
+-    print(f"  loaded in {time.time() - t0:.1f}s, {n_params:.0f}M params", flush=True)
++    print(
++        f"  loaded in {time.time() - t0:.1f}s, {n_params:.0f}M params, "
++        f"checkpoint_layers={checkpoint_layers}",
++        flush=True,
++    )
+     return model
+ 
+ 
+diff --git a/easynano/transformers_compat.py b/easynano/transformers_compat.py
+index 43c538d..8e3e310 100644
+--- a/easynano/transformers_compat.py
++++ b/easynano/transformers_compat.py
+@@ -20,6 +20,24 @@ def _uses_split_api(model) -> bool:
+     return hasattr(model, "fold") and "atom_inputs" in inspect.signature(model.forward).parameters
+ 
+ 
++def enable_eval_gradient_checkpointing(model) -> int:
++    """Checkpoint split-API pair layers without enabling training-time dropout."""
++    if not _uses_split_api(model):
++        return 0
++    from transformers.modeling_layers import GradientCheckpointingLayer
++
++    model.gradient_checkpointing_enable(
++        gradient_checkpointing_kwargs={"use_reentrant": False},
++    )
++    layers = [module for module in model.modules() if isinstance(module, GradientCheckpointingLayer)]
++    for layer in layers:
++        # GradientCheckpointingLayer gates checkpointing on its own ``training``
++        # flag. Its ESMFold2 pair-update forward is explicitly dropout-free, so
++        # this does not switch the otherwise-eval model into stochastic mode.
++        layer.training = True
++    return len(layers)
++
++
+ def differentiable_trunk(model, features: dict, *, num_loops: int):
+     """Run a differentiable trunk pass and return distogram logits."""
+     if not _uses_split_api(model):

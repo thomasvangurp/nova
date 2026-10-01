@@ -1,0 +1,146 @@
+---
+# Scoped derivative of nova-compound-fleet/ansible/provision.yml. Compute only:
+# no wallets, nova.env, chain runtime, publisher, service restarts or NIM patch.
+- name: Locked offline eight-GPU Blackwell compute runtime
+  hosts: offline_nim
+  gather_facts: false
+  vars:
+    base: /root/nim19-test
+    pixi_sha: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
+  tasks:
+    - name: Reject unintended destinations
+      ansible.builtin.assert:
+        that:
+          - offline_instance_id | int == 51335750
+          - offline_gpu_count | int == 8
+          - not live_submission_authorized | bool
+
+    - name: Ensure cache directory
+      tags: [runtime]
+      ansible.builtin.file:
+        path: /root/.cache
+        state: directory
+        mode: '0700'
+
+    - name: Download checksum-pinned Pixi
+      tags: [runtime]
+      ansible.builtin.get_url:
+        url: https://github.com/prefix-dev/pixi/releases/download/v0.73.0/pixi-x86_64-unknown-linux-musl.tar.gz
+        dest: /root/.cache/pixi-0.73.0-linux.tar.gz
+        checksum: "sha256:{{ pixi_sha }}"
+        mode: '0600'
+        timeout: 45
+
+    - name: Install Pixi
+      tags: [runtime]
+      ansible.builtin.unarchive:
+        src: /root/.cache/pixi-0.73.0-linux.tar.gz
+        dest: /usr/local/bin
+        remote_src: true
+        creates: /usr/local/bin/pixi
+
+    - name: Assert pinned Pixi version
+      tags: [runtime]
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      changed_when: false
+      register: version
+      failed_when: "'pixi 0.73.0' not in version.stdout"
+
+    - name: Stage the isolated Blackwell manifest
+      tags: [runtime]
+      ansible.builtin.copy:
+        src: pixi.toml
+        dest: /root/pixi.toml
+        mode: '0600'
+
+    - name: Generate the initial reviewable Blackwell lock
+      tags: [runtime]
+      ansible.builtin.command: flock /root/nim19-test/pixi-install.lock /usr/local/bin/pixi lock --manifest-path /root/pixi.toml
+      args:
+        creates: /root/pixi.lock
+      environment:
+        PIXI_NO_PROGRESS: 'true'
+      no_log: true
+
+    - name: Install only from the lock
+      tags: [runtime]
+      ansible.builtin.command: flock /root/nim19-test/pixi-install.lock /usr/local/bin/pixi install --manifest-path /root/pixi.toml --locked --environment bz2
+      environment:
+        PIXI_NO_PROGRESS: 'true'
+      no_log: true
+
+    - name: Stage the interpreter isolation shim
+      tags: [runtime]
+      ansible.builtin.copy:
+        src: search_python.sh
+        dest: /root/search_python.sh
+        mode: '0755'
+
+    - name: Link public compute artifacts at the validated playbook paths
+      ansible.builtin.file:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        state: link
+      loop:
+        - { src: /root/nim19-test/oss-repo/compound_miner, dest: /root/compound_miner }
+        - { src: /root/nim19-test/oss-repo/combinatorial_db, dest: /root/combinatorial_db }
+        - { src: /root/nim19-test/oss-repo/tools, dest: /root/tools }
+        - { src: /root/nim19-test/oss-repo/data, dest: /root/data }
+        - { src: /root/nim19-test/oss-home/.boltz, dest: /root/.boltz }
+
+    - name: Create public gate-audit configuration directory
+      ansible.builtin.file:
+        path: /root/config
+        state: directory
+        mode: '0755'
+
+    - name: Set the challenge's actual chemistry thresholds, not the stale 0.6 config
+      ansible.builtin.copy:
+        dest: /root/config/config.yaml
+        mode: '0644'
+        content: |
+          molecule_requirements:
+            num_molecules: 20
+            min_heavy_atoms: 10
+            min_rotatable_bonds: 1
+            max_rotatable_bonds: 10
+            min_entropy: 0.25
+            banned_atom_types: [Se, Na, Fe, Zn, B, Br, Si]
+            max_similarity_to_historical: 0.5
+
+    - name: Make the public database read-only
+      ansible.builtin.file:
+        path: /root/nim19-test/oss-repo/combinatorial_db/molecules.sqlite
+        mode: '0444'
+
+    - name: Mark the public reaction database as a Python package
+      ansible.builtin.copy:
+        dest: /root/nim19-test/oss-repo/combinatorial_db/__init__.py
+        content: ''
+        mode: '0644'
+
+    - name: Extract and verify complete CCD store with the established helper
+      ansible.builtin.command: bash /root/nim19-test/client/extract_ccd.sh
+      environment:
+        BOLTZ_CACHE: /root/nim19-test/oss-home/.boltz
+      no_log: true
+
+    - name: Use verified checkpoint hardlinks so legacy byte-size checks inspect real files
+      ansible.builtin.file:
+        src: "{{ base }}/models/{{ item }}"
+        dest: "{{ base }}/oss-home/.boltz/{{ item }}"
+        state: hard
+        force: true
+      loop: [boltz2_conf.ckpt, boltz2_aff.ckpt, mols.tar, ccd.pkl]
+
+    - name: Verify artifacts, isolation and actual CUDA fast paths
+      ansible.builtin.command: /root/search_python.sh /root/nim19-test/client/nim19_pixi_gates.py
+      args:
+        chdir: /root
+      no_log: true
+
+    - name: Run the existing compute preflight with no credential environment file
+      ansible.builtin.command: /root/search_python.sh /root/nim19-test/client/nim19_pixi_gates.py --preflight
+      args:
+        chdir: /root
+      no_log: true

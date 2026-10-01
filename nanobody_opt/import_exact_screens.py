@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from nanobody_opt.mutation_network import (
+    record_exact_run,
     rebuild_nearest_edges,
     update_observation_store,
 )
@@ -247,6 +248,7 @@ def exact_observations(
                     "exact_file_sha256": file_sha256,
                     "exact_run_id": run_id,
                     "exact_group": str(group),
+                    "scorer_protocol": payload.get("scorer_protocol"),
                     "archive_sha256": archive_sha256,
                     "structure": structure,
                     **proposal,
@@ -316,6 +318,27 @@ def main() -> None:
         summary["database_rows_written"] = update_observation_store(
             args.database, observations
         )
+        runs: dict[str, list[dict[str, Any]]] = {}
+        for observation in observations:
+            runs.setdefault(str(observation["exact_run_id"]), []).append(observation)
+        sealed = []
+        for run_id, records in sorted(runs.items()):
+            first = records[0]
+            sealed.append(record_exact_run(
+                args.database,
+                target=args.target,
+                run_id=run_id,
+                epoch=first.get("epoch"),
+                source_path=Path(str(first["exact_source_path"])),
+                file_sha256=str(first["exact_file_sha256"]),
+                scorer_protocol=(
+                    str(first["scorer_protocol"])
+                    if first.get("scorer_protocol") else None
+                ),
+                observation_ids=[str(item["observation_id"]) for item in records],
+            ))
+        summary["exact_runs_recorded"] = len(sealed)
+        summary["exact_runs_complete"] = sum(item["complete"] for item in sealed)
         if args.rebuild_edges:
             summary["graph_rebuild"] = rebuild_nearest_edges(
                 args.database,

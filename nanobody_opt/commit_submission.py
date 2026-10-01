@@ -46,8 +46,23 @@ NULL_TOKEN = "~"
 SUBMISSION_DELIMITER = "|"
 
 
-def submission_message(sequence: str) -> str:
-    """Format one nanobody submission the way the validator parses it.
+def _validated_section(value: str, *, upper: bool, what: str) -> str:
+    text = str(value).strip()
+    if upper:
+        text = text.upper()
+    if not text:
+        raise ValueError(f"refusing to commit an empty {what}")
+    if any(character.isspace() for character in text):
+        raise ValueError("a submission may not contain whitespace")
+    if not text.isascii():
+        raise ValueError("a submission must be ascii")
+    if SUBMISSION_DELIMITER in text:
+        raise ValueError(f"a {what} may not contain the section delimiter")
+    return text
+
+
+def submission_message(sequence: str | None, molecules: object = None) -> str:
+    """Format one submission the way the validator parses it.
 
     parse_decrypted_submission refuses anything that does not hold exactly one
     "|", separating the molecule section from the sequence section, and refuses
@@ -57,17 +72,35 @@ def submission_message(sequence: str) -> str:
     like a healthy fleet from our side: COMMIT_OK for every uid, and not one
     row on the leaderboard in any epoch. The miner has always sent "~|<seq>";
     the fleet driver did not.
+
+    The molecule section was then hardcoded to "~" -- correct while only
+    nanobodies were being mined, and the reason a compound bank cannot reach the
+    chain through this driver until it is passed through here. Both sections are
+    optional individually and the message carries whichever are present, because
+    a uid with molecules but no qualifying nanobody must still submit, and vice
+    versa. An entirely empty submission is refused: that is the "~|~" that
+    scores nothing and consumes the hotkey's commitment slot anyway.
     """
-    text = str(sequence).strip().upper()
-    if not text:
-        raise ValueError("refusing to commit an empty sequence")
-    if any(character.isspace() for character in text):
-        raise ValueError("a submission may not contain whitespace")
-    if not text.isascii():
-        raise ValueError("a submission must be ascii")
-    if SUBMISSION_DELIMITER in text:
-        raise ValueError("a sequence may not contain the section delimiter")
-    return f"{NULL_TOKEN}{SUBMISSION_DELIMITER}{text}"
+    if molecules is None or molecules == "" or molecules == NULL_TOKEN:
+        names: list[str] = []
+    elif isinstance(molecules, str):
+        names = [part for part in molecules.split(",") if part.strip()]
+    else:
+        names = [str(part) for part in molecules if str(part).strip()]
+    checked = [_validated_section(name, upper=False, what="molecule name")
+               for name in names]
+    if len(set(checked)) != len(checked):
+        raise ValueError("refusing to commit duplicate molecules")
+    molecule_section = ",".join(checked) if checked else NULL_TOKEN
+
+    if sequence is None or str(sequence).strip() in ("", NULL_TOKEN):
+        sequence_section = NULL_TOKEN
+    else:
+        sequence_section = _validated_section(sequence, upper=True, what="sequence")
+
+    if molecule_section == NULL_TOKEN and sequence_section == NULL_TOKEN:
+        raise ValueError("refusing to commit a submission with neither section")
+    return f"{molecule_section}{SUBMISSION_DELIMITER}{sequence_section}"
 
 
 def encoded_payload(message: str, uid: int, block: int, timelock) -> tuple[str, str]:
@@ -126,6 +159,16 @@ def _parser() -> argparse.ArgumentParser:
         "local key file that holds it",
     )
     parser.add_argument("--sequence")
+    parser.add_argument(
+        "--molecules",
+        default="",
+        help=(
+            "comma-separated molecule names for this uid's compound "
+            "submission, e.g. rxn:3:1:2:3,rxn:3:1:2:4. Empty commits the "
+            "nanobody alone, which is what this driver did unconditionally "
+            "before compounds were mined."
+        ),
+    )
     parser.add_argument("--wallet-name", default="mining_ops")
     parser.add_argument("--wallet-path", default="/root/.bittensor/wallets")
     parser.add_argument("--netuid", type=int, default=68)
@@ -240,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
 
     block = subtensor.get_current_block()
     filename, encoded = encoded_payload(
-        submission_message(args.sequence),
+        submission_message(args.sequence, args.molecules),
         args.uid,
         block,
         QuicknetBittensorDrandTimelock(),

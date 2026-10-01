@@ -800,6 +800,24 @@
           - /root/nanobody_opt/qualify_screen_leader.py
       changed_when: false
 
+    # py_compile checks syntax one file at a time and therefore did not catch a
+    # partial hotfix where rank_exact imported a symbol absent from the older
+    # win_probability module. Import the deployed dependency graph before the
+    # old producer is stopped so an incomplete source set cannot be activated.
+    - name: Import the deployed ranking dependency graph
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            from nanobody_opt.rank_exact import compact_persisted_candidate;
+            from nanobody_opt.win_probability import
+            rank_by_fresh_draw_probability;
+            assert callable(compact_persisted_candidate);
+            assert callable(rank_by_fresh_draw_probability);
+            print('PRODUCER_RANKING_IMPORTS_OK')
+      changed_when: false
+
     - name: Verify autonomous producer entry points use the locked Pixi runtime
       ansible.builtin.command:
         argv:

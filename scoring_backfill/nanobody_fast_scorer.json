@@ -1,0 +1,6 @@
+{
+    "python": "/root/fastscore/pinned-530f5dcbc54d/release_python.sh",
+    "scorer": "/root/fastscore/pinned-530f5dcbc54d/fast_score_batch.py",
+    "scorer_sha256": "530f5dcbc54d4a012571f4f9a7ddb6c016552291606652766d02c91643a7d531",
+    "synth_reference": "/root/fastscore/pinned-530f5dcbc54d/refdesign/0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif"
+}

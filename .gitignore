@@ -9,6 +9,8 @@ artifacts/
 archives/
 history/
 models/
+!external_tools/fast_nanobody_scorer/boltzgen_src/boltzgen/model/models/
+!external_tools/fast_nanobody_scorer/boltzgen_src/boltzgen/model/models/*.py
 data/public/*.csv
 data/public/*.csv.gz
 *.sqlite-shm

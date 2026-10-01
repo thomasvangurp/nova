@@ -1,0 +1,24 @@
+diff --git a/easynano/loss.py b/easynano/loss.py
+index e31fcf5..f24187c 100644
+--- a/easynano/loss.py
++++ b/easynano/loss.py
+@@ -44,9 +44,16 @@ def _cdr_indices(binder_sequence: str) -> list[int]:
+     from abnumber import Chain
+     from abnumber.common import _anarci_align
+ 
+-    result = _anarci_align(
+-        sequences=[binder_sequence], scheme="chothia", allowed_species=None
+-    )[0]
++    try:
++        result = _anarci_align(
++            sequences=[binder_sequence], scheme="chothia", allowed_species=None
++        )[0]
++    except TypeError:
++        # abnumber paired with ANARCI 2024 exposes the singular ``sequence``
++        # API and already returns the per-sequence chain list.
++        result = _anarci_align(
++            sequence=binder_sequence, scheme="chothia", allowed_species=None
++        )
+     chains = [
+         Chain("".join(result[i][0].values()), scheme="chothia")
+         for i in range(len(result))

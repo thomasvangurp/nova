@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+
+from nanobody_opt.basins import basin_id
 from urllib.request import Request, urlopen
 
 from nanobody_opt.basins import basin_id, rank_basin_evidence
@@ -43,6 +45,7 @@ def _epoch_candidates(payload: Any, target: str) -> list[dict[str, Any]]:
     for submission in payload.get("data", []):
         if not isinstance(submission, dict):
             continue
+        coldkey = str(submission.get("coldkey") or "")
         for nanobody in submission.get("nanobodies", []):
             if not isinstance(nanobody, dict) or nanobody.get("protein_name") != target:
                 continue
@@ -73,9 +76,67 @@ def _epoch_candidates(payload: Any, target: str) -> list[dict[str, Any]]:
                     ),
                 },
                 "metrics": metrics,
+                # Not used by the general elite-parent pool (which stays
+                # coldkey-blind on purpose); only priority_coldkey_candidates
+                # below reads this, to guarantee a slot for specific,
+                # consistently-strong rivals regardless of capacity limits.
+                "coldkey": coldkey,
             })
     candidates.sort(key=lambda item: (item["validator_final_score"], item["sequence"]))
     return candidates
+
+
+def priority_coldkey_candidates(
+    payloads: dict[int, Any],
+    *,
+    target: str,
+    priority_coldkeys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Each priority coldkey's single best-scoring submission across the given
+    epochs, as a guaranteed-reserved parent, bypassing capacity competition.
+
+    Exists because a handful of rival coldkeys win far more than the field
+    average (one measured at a 38.8% top-10 rate against ~18-20% average),
+    yet compete for the same limited parent slots as every other rival --
+    routinely losing that competition and taking 1-11 epochs to become one of
+    our own parents even after winning. This lane is additive: it never
+    removes or displaces anything select_elite_parents already chose.
+    """
+    if not priority_coldkeys:
+        return []
+    best: dict[str, dict[str, Any]] = {}
+    for epoch in sorted(payloads):
+        for candidate in _epoch_candidates(payloads[epoch], target):
+            coldkey = candidate.get("coldkey") or ""
+            if coldkey not in priority_coldkeys:
+                continue
+            current = best.get(coldkey)
+            if current is None or candidate["validator_final_score"] < current["validator_final_score"]:
+                best[coldkey] = {**candidate, "epoch": epoch}
+    results = []
+    for coldkey in priority_coldkeys:
+        candidate = best.get(coldkey)
+        if candidate is None:
+            continue
+        sequence = str(candidate["sequence"])
+        results.append({
+            "sequence": sequence,
+            "selection_score": candidate["validator_final_score"],
+            "validator_final_score": candidate["validator_final_score"],
+            "metrics": candidate["metrics"],
+            "parent_source": "priority_coldkey",
+            "parent_selection_lane": "priority_coldkey",
+            "nearest_elite_distance": 0,
+            "basin_core_id": basin_id(sequence),
+            "basin_rank": 0,
+            "basin_allocation_reserved": True,
+            "public_observations": [{
+                "epoch": candidate["epoch"],
+                "epoch_rank": None,
+                "validator_final_score": candidate["validator_final_score"],
+            }],
+        })
+    return results
 
 
 def select_elite_parents(
@@ -93,12 +154,17 @@ def select_elite_parents(
     recent_neighbor_limit: int = 16,
     basin_core_limit: int = 5,
     basin_parent_limit: int = 32,
+    priority_coldkeys: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Select a balanced bank of global and recent family representatives.
 
     Every historical observation remains eligible.  The recent quotas prevent
     globally good but stale families from consuming the complete active bank;
     the remainder is still selected globally so recency never replaces quality.
+
+    priority_coldkeys additively reserves one guaranteed slot per listed
+    coldkey for its single best recent submission, on top of (never instead
+    of) everything below -- see priority_coldkey_candidates.
     """
     if per_epoch < 1 or limit < 1:
         raise ValueError("per_epoch and limit must be positive")
@@ -114,6 +180,17 @@ def select_elite_parents(
         basin_parent_limit,
     ) < 0:
         raise ValueError("neighbour selection arguments cannot be negative")
+
+    priority = priority_coldkey_candidates(
+        payloads, target=target, priority_coldkeys=priority_coldkeys,
+    )
+    priority_sequences = {item["sequence"] for item in priority}
+
+    def with_priority(selection: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not priority:
+            return selection
+        rest = [item for item in selection if str(item["sequence"]) not in priority_sequences]
+        return [*priority, *rest]
 
     ranked_epochs: dict[int, list[dict[str, Any]]] = {}
     for epoch in sorted(payloads, reverse=True):
@@ -303,7 +380,7 @@ def select_elite_parents(
         ),
     )
     if neighbor_per_epoch == 0 or neighbor_limit == 0:
-        return allocate_by_basin(ordered_anchors[:limit])
+        return with_priority(allocate_by_basin(ordered_anchors[:limit]))
 
     # The former early return here silently disabled this lane as soon as the
     # elite bank itself filled ``limit``. Reserve the requested neighbour
@@ -492,7 +569,7 @@ def select_elite_parents(
     ]
     for item in backfill:
         item["parent_history_scope"] = "global"
-    return allocate_by_basin([*selected_anchors, *chosen, *backfill][:limit])
+    return with_priority(allocate_by_basin([*selected_anchors, *chosen, *backfill][:limit]))
 
 
 def _database_payloads(
@@ -576,6 +653,13 @@ def main() -> None:
     parser.add_argument("--recent-neighbor-limit", type=int, default=16)
     parser.add_argument("--basin-core-limit", type=int, default=5)
     parser.add_argument("--basin-parent-limit", type=int, default=32)
+    parser.add_argument(
+        "--priority-coldkeys",
+        default="",
+        help="comma-separated coldkeys, each guaranteed one parent slot for "
+             "its best recent submission regardless of capacity limits; "
+             "empty disables the lane entirely",
+    )
     parser.add_argument("--scan-limit", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--api-root", default=LEADERBOARD_API_ROOT)
@@ -668,6 +752,9 @@ def main() -> None:
         recent_neighbor_limit=args.recent_neighbor_limit,
         basin_core_limit=args.basin_core_limit,
         basin_parent_limit=args.basin_parent_limit,
+        priority_coldkeys=tuple(
+            ck.strip() for ck in args.priority_coldkeys.split(",") if ck.strip()
+        ),
     )
     if not selected:
         raise SystemExit("no complete public nanobody parents were available")

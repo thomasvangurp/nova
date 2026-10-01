@@ -510,6 +510,7 @@ def _run_iteration(
             "--recent-neighbor-limit", str(args.recent_neighbor_parent_limit),
             "--basin-core-limit", str(args.basin_core_limit),
             "--basin-parent-limit", str(args.basin_parent_limit),
+            "--priority-coldkeys", str(args.priority_coldkeys),
             "--scan-limit", str(args.parent_scan_limit),
             "--observation-database", str(args.mutation_database),
             "--output", str(elite_parents),
@@ -935,6 +936,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--recent-neighbor-parent-limit", type=int, default=16)
     parser.add_argument("--basin-core-limit", type=int, default=5)
     parser.add_argument("--basin-parent-limit", type=int, default=32)
+    parser.add_argument(
+        "--priority-coldkeys",
+        default="",
+        help="forwarded to select_elite_parents: comma-separated coldkeys "
+             "each guaranteed a parent slot for their best recent submission",
+    )
     parser.add_argument("--seed-count", type=int, default=32)
     parser.add_argument("--neighbor-seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)

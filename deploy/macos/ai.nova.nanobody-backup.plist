@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.nova.nanobody-backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/tvgdeena/nova-nanobody/deploy/macos/backup_all.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/tvgdeena/nova-nanobody</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/tvgdeena</string>
+    <key>NOVA_VAST_LABEL</key>
+    <string>nova-nanobody-pixi</string>
+    <key>NOVA_VASTAI</key>
+    <string>/opt/homebrew/bin/vastai</string>
+    <key>NOVA_BACKUP_DIR</key>
+    <string>/Users/tvgdeena/nova-backups</string>
+    <key>NOVA_BACKUP_KEEP</key>
+    <string>24</string>
+    <key>NOVA_BACKUP_MIN_FREE_GIB</key>
+    <string>200</string>
+    <key>NOVA_BACKUP_MIN_KEEP</key>
+    <string>2</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/tvgdeena/nova-backups/backup.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tvgdeena/nova-backups/backup.stderr.log</string>
+</dict>
+</plist>

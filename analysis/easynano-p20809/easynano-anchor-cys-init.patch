@@ -1,0 +1,13 @@
+diff --git a/easynano/design.py b/easynano/design.py
+index c849394..a39c220 100644
+--- a/easynano/design.py
++++ b/easynano/design.py
+@@ -118,7 +118,7 @@ def init_soft_logits(binder_template: str, binder_wt: str,
+             wt_idx = AA_TO_TOKEN[wt_aa] - 2
+             logits[i, :] = 0.5 * torch.randn(AA_DIMS)
+             logits[i, wt_idx] = wt_logit
+-            if pin_cys_in_cdr:
++            if pin_cys_in_cdr and wt_aa != "C":
+                 logits[i, CYS_TOK - 2] = -10.0
+     return logits.requires_grad_(True)
+ 

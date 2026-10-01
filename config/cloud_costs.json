@@ -1,0 +1,43 @@
+{
+  "aws": {
+    "account_id": "668100850015",
+    "billing_region": "us-east-1",
+    "history_days": 90,
+    "profile": "polymarket",
+    "project": "SN2",
+    "refresh_hours": 6,
+    "workload_region": "us-east-2",
+    "operational_exclusions": [
+      {
+        "days": [
+          "2026-09-01",
+          "2026-09-02"
+        ],
+        "reason": "one-time Ohio migration over public IP",
+        "usage_type_contains": "DataTransfer-Regional-Bytes"
+      }
+    ],
+    "manual_snapshots": [
+      {
+        "as_of": "2026-09-24T14:24:00-04:00",
+        "bill_to_date_usd": 654.07,
+        "period": "2026-09",
+        "source": "AWS estimated bill summary"
+      }
+    ]
+  },
+  "payments": {
+    "cloud_funding_source": "Krak virtual card",
+    "real_card_allowed": false
+  },
+  "vast": {
+    "project": "SN68",
+    "nanobody_research_labels": [
+      "nova-boltz2-nim19-test-20260917",
+      "nova-boltz2-seed-noise-test-20260917"
+    ],
+    "production_labels": [
+      "nova-nanobody-pixi"
+    ]
+  }
+}

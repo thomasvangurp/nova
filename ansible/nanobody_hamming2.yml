@@ -1,0 +1,163 @@
+---
+- name: Provision isolated fast-scoring replay worker
+  hosts: hamming2_worker
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    pixi_version: "0.73.0"
+    pixi_archive: /root/.cache/pixi-0.73.0-linux.tar.gz
+    pixi_url: https://github.com/prefix-dev/pixi/releases/download/v0.73.0/pixi-x86_64-unknown-linux-musl.tar.gz
+    pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
+    scorer_root: /root/fastscore/release
+    scorer_reference: 0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif
+    ckpts:
+      - {name: boltzgen1_diverse.ckpt, sha256: 360af8bd6e59527ff6ec25dd81253967f3bd3567d200053b10680634751f8e3c}
+      - {name: boltzgen1_adherence.ckpt, sha256: ac7078b3dc13064c68e0c3fd542e5bc538c33558bf6607f65e499eb336ca5e5d}
+      - {name: boltzgen1_ifold.ckpt, sha256: dd4cf108c94471bdc3a326b7b180fa3854dc019110fae780208c30b50bd56578}
+      - {name: boltz2_conf_final.ckpt, sha256: 525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530}
+  tasks:
+    - name: Require exactly eight RTX 4090 GPUs
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        nvidia-smi --query-gpu=name --format=csv,noheader |
+        awk '$0 !~ /RTX 4090/ {bad=1} END {exit (NR == 8 && !bad) ? 0 : 1}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Create isolated runtime directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /root/.cache
+        - /root/artifacts
+        - /root/config
+        - /root/data/structures
+        - /root/external_tools
+        - /root/fastscore
+        - /root/hamming2-fast-20260922
+
+    - name: Ship locked Pixi definition
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/root/{{ item | basename }}"
+        mode: "0644"
+      loop:
+        - "{{ repo }}/pixi.toml"
+        - "{{ repo }}/pixi.lock"
+
+    - name: Ship fast scorer and replay runtime
+      ansible.posix.synchronize:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        checksum: true
+        owner: false
+        group: false
+        perms: false
+        rsync_opts: ["--omit-dir-times", "--exclude=__pycache__", "--exclude=*.pyc", "--no-perms"]
+        use_ssh_args: true
+      loop:
+        - {src: "{{ repo }}/external_tools/fast_nanobody_scorer/", dest: /root/fastscore/release/}
+        - {src: "{{ repo }}/external_tools/boltzgen/", dest: /root/external_tools/boltzgen/}
+        - {src: "{{ repo }}/nanobody_opt/", dest: /root/nanobody_opt/}
+        - {src: "{{ playbook_dir }}/files/root/", dest: /root/}
+        - {src: "{{ repo }}/analysis/nanobody-gap/hamming2-fast-20260922/", dest: /root/hamming2-fast-20260922/}
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Restore executable launchers
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0755"
+      loop:
+        - /root/bgen_python.sh
+        - /root/fastscore/release/release_python.sh
+        - /root/hamming2-fast-20260922/run_remote.sh
+
+    - name: Fetch live public validator configuration
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {url: https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml, dest: /root/config/config.yaml}
+        - {url: https://raw.githubusercontent.com/metanova-labs/nova/main/config/boltzgen_config.yaml, dest: /root/config/boltzgen_config.yaml}
+
+    - name: Fetch validator target structure
+      ansible.builtin.get_url:
+        url: https://files.rcsb.org/download/6O4O.cif
+        dest: /root/data/structures/6O4O.cif
+        checksum: sha256:1b628ce56d221c6f711c34c309a8bb90fbaca55caa56fee46dae3393d9e43898
+        mode: "0644"
+
+    - name: Download pinned Pixi archive
+      ansible.builtin.get_url:
+        url: "{{ pixi_url }}"
+        dest: "{{ pixi_archive }}"
+        checksum: "sha256:{{ pixi_sha256 }}"
+        mode: "0644"
+
+    - name: Install Pixi
+      ansible.builtin.unarchive:
+        src: "{{ pixi_archive }}"
+        dest: /usr/local/bin
+        remote_src: true
+        creates: /usr/local/bin/pixi
+
+    - name: Verify Pixi version
+      ansible.builtin.command: /usr/local/bin/pixi --version
+      register: pixi_check
+      changed_when: false
+      failed_when: "('pixi ' ~ pixi_version) not in pixi_check.stdout"
+
+    - name: Install locked BoltzGen environment
+      ansible.builtin.command:
+        argv: [/usr/local/bin/pixi, install, --manifest-path, /root/pixi.toml, --locked, --environment, bgen]
+      environment:
+        PIXI_COLOR: never
+      register: bgen_build
+      changed_when: "'Nothing to do' not in (bgen_build.stdout ~ bgen_build.stderr)"
+
+    - name: Download checksum-verified BoltzGen checkpoints
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - /root/nanobody_opt/fetch_checkpoints.py
+          - --local-dir
+          - /root/.boltzgen
+          - --specs-json
+          - "{{ ckpts | to_json }}"
+      environment:
+        HF_XET_HIGH_PERFORMANCE: "1"
+      register: checkpoint_fetch
+      changed_when: "'DOWNLOADED=0' not in checkpoint_fetch.stdout"
+
+    - name: Configure unpinned isolated scorer path
+      ansible.builtin.copy:
+        dest: /root/artifacts/nanobody_fast_scorer.json
+        mode: "0644"
+        content: |
+          {
+            "python": "/root/fastscore/release/release_python.sh",
+            "scorer": "/root/fastscore/release/fast_score_batch.py",
+            "synth_reference": "/root/fastscore/release/refdesign/{{ scorer_reference }}"
+          }
+
+    - name: Verify scorer protocol imports in locked environment
+      ansible.builtin.command:
+        argv:
+          - /root/bgen_python.sh
+          - -c
+          - >-
+            import torch;
+            from nanobody_opt.diffusion_sample_selection import SCORER_PROTOCOL;
+            assert torch.cuda.device_count() == 8;
+            assert SCORER_PROTOCOL == 'validator-dual-sample-v1';
+            print('FAST_REPLAY_RUNTIME_OK')
+      environment:
+        PYTHONPATH: /root
+      changed_when: false

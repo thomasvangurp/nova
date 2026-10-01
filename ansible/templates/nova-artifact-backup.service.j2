@@ -43,6 +43,8 @@ Environment=NOVA_VAST_LABEL={{ hotkey_sync_vast_label }}
 Environment=NOVA_VASTAI={{ hotkey_sync_vastai }}
 Environment=NOVA_BACKUP_DIR={{ artifact_backup_dir }}
 Environment=NOVA_BACKUP_KEEP={{ artifact_backup_keep }}
+Environment=NOVA_BACKUP_MIN_FREE_GIB={{ artifact_backup_min_free_gib }}
+Environment=NOVA_BACKUP_MIN_KEEP={{ artifact_backup_min_keep }}
 ExecStart={{ artifact_backup_script }}
 StandardOutput=journal
 StandardError=journal

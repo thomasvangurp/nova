@@ -369,12 +369,15 @@ def _variant(base, swaps):
     return "".join(out)
 
 
-def test_a_near_duplicate_yields_to_a_separated_candidate():
-    """Two tickets closer than the limit are one ticket to the validator.
+def test_a_near_duplicate_is_kept_over_a_weaker_separated_candidate():
+    """A one-residue neighbour is a second draw, so win probability decides.
 
-    Over epochs 25093-25095 every dropped uid was 0.9685-0.9843 identical to a
-    uid that scored, while every surviving pair sat at 0.9449-0.9606: we
-    committed seven submissions and played three.
+    The old reading of epochs 25093-25095 -- dropped uids sat at 0.9685-0.9843
+    identity to a uid that scored -- inferred causation that is not there.
+    Across every era of the public leaderboard, near-identical same-coldkey
+    pairs co-score (1,773 pairs >= 0.95 in 25068-25099 alone), and they score
+    DIFFERENTLY: median 45.5 rank-sum apart, because the validator folds per
+    distinct sequence string. Only an exact repeat shares one score.
     """
     twin = _variant(REAL, [(2, "M")])          # one residue apart
     far = _variant(REAL, [(i, "G") for i in range(30, 50)])
@@ -384,32 +387,29 @@ def test_a_near_duplicate_yields_to_a_separated_candidate():
     chosen = fleet.distinct_sequences(pool, 2)
 
     assert REAL in chosen
-    assert far in chosen, "a one-residue neighbour outranked a real second ticket"
-    assert twin not in chosen
+    assert twin in chosen, "a second independent draw beats a weaker candidate"
+    assert far not in chosen
 
 
-def test_a_degenerate_pool_yields_fewer_tickets_rather_than_duplicates():
-    """Filling the fleet regardless was wrong, and epoch 25100 showed the cost.
+def test_an_exact_repeat_is_the_only_wasted_ticket():
+    """Exact repeats share one score; one-residue neighbours do not.
 
-    Our uid 46 went out 0.9843 identical to our own uid 59, was discarded, and
-    was one of five tickets of seven that scored nothing. A uid left unspent
-    and a uid spent on a certain duplicate both score zero.
+    Measured on the public leaderboard: all 10 same-epoch same-coldkey pairs at
+    identity 1.0 carry IDENTICAL scores (one fold, distributed), while 780 pairs
+    at 0.98-0.999 differ by a median of 45.5 rank-sum. So a repeat buys nothing
+    and a neighbour buys a draw.
     """
-    twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
-             for i, aa in enumerate("MVQTA")]
-    chosen = fleet.distinct_sequences(_pool(twins), 5)
-    assert len(chosen) < 5, "spent uids on molecules the validator will discard"
-    for i, a in enumerate(chosen):
-        for b in chosen[:i]:
-            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
+    repeated = [(REAL, 0.30, 100.0), (REAL, 0.29, 101.0)]
+    assert len(fleet.distinct_sequences(_pool(repeated), 2)) == 1
 
 
 def test_sequence_identity_is_conservative_against_the_validators_rule():
     twin = _variant(REAL, [(2, "M")])
     assert fleet.sequence_identity(REAL, twin) > 0.99
     assert fleet.sequence_identity(REAL, REAL) == 1.0
-    assert fleet.MAXIMUM_FLEET_IDENTITY < 0.95, (
-        "the proxy needs margin under the rule it stands in for"
+    assert fleet.MAXIMUM_FLEET_IDENTITY == 1.0, (
+        "our own simultaneous tickets collapse only when EXACTLY equal; the "
+        "validator's 0.95 rule applies to the historical index, not to us"
     )
 
 
@@ -429,14 +429,12 @@ def test_a_candidate_the_field_is_sitting_on_is_avoided():
     assert chosen == [clear], "took a molecule the field already occupies"
 
 
-def test_crowding_does_not_force_a_duplicate():
-    """Contested beats nothing, but a duplicate of our own ticket does not."""
+def test_crowding_does_not_force_an_exact_repeat():
+    """Contested beats nothing, and neighbours are still separate draws."""
     contested = [_variant(REAL, [(2, aa)]) for aa in "MVQ"]
     pool = _pool([(s, 0.3 - i * 0.01, 100.0 + i) for i, s in enumerate(contested)])
     chosen = fleet.distinct_sequences(pool, 2, crowd=[REAL])
-    for i, a in enumerate(chosen):
-        for b in chosen[:i]:
-            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
+    assert len(chosen) == len(set(chosen)), "an exact repeat is never committed"
 
 
 def test_no_crowd_is_the_previous_behaviour():
@@ -447,24 +445,27 @@ def test_no_crowd_is_the_previous_behaviour():
     )
 
 
-def test_the_fallback_never_commits_a_certain_duplicate():
-    """Epoch 25100 sent our uid 46 out 0.9843 identical to our own uid 59.
+def test_near_identical_siblings_are_all_committed():
+    """Near-identical tickets are independent draws, not wasted registrations.
 
-    It was discarded, one of five tickets of seven that scored nothing. A uid
-    left unspent and a uid spent on a duplicate both score zero; only one of
-    them is honest about it.
+    The epoch-25100 note this test used to carry blamed five dead tickets on a
+    0.9843 identity to one of our own uids. That diagnosis is refuted: 10,305
+    same-epoch same-coldkey pairs at identity >= 0.95 on the public leaderboard
+    all carry a score on BOTH tickets, 0.9843 pairs included, and the validator
+    folds per distinct sequence string. Five siblings are five lottery tickets.
     """
     twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
              for i, aa in enumerate("MVQTA")]
     chosen = fleet.distinct_sequences(_pool(twins), 5)
-    for i, a in enumerate(chosen):
-        for b in chosen[:i]:
-            assert fleet.sequence_identity(a, b) < fleet.VALIDATOR_DUPLICATE_IDENTITY
+    assert len(chosen) == 5, "near-identical siblings must all be committed"
+    assert len(set(chosen)) == 5, "but an exact repeat is still worthless"
 
 
-def test_the_fleet_threshold_sits_just_under_the_validators_line():
-    assert fleet.MAXIMUM_FLEET_IDENTITY < fleet.VALIDATOR_DUPLICATE_IDENTITY
+def test_only_an_exact_repeat_is_dropped():
+    assert fleet.MAXIMUM_FLEET_IDENTITY == 1.0
     assert fleet.VALIDATOR_DUPLICATE_IDENTITY == 0.95
+    # the validator's line still governs the historical index and the field
+    assert fleet.FIELD_COLLISION_IDENTITY == fleet.VALIDATOR_DUPLICATE_IDENTITY
 
 
 CDR_A = {"cdr1": "GFTASRGWYG", "cdr2": "ISSSGSTWM", "cdr3": "AVFLGAHPCPLEGEMDA"}

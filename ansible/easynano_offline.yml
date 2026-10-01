@@ -1,0 +1,402 @@
+---
+- name: Provision the isolated EasyNano P20809 experiment
+  hosts: easynano_worker
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    expected_label: nova-easynano-p20809-20260922-retry1
+    easynano_revision: 2da3bea2c6a3569a6ad3c6f9fb01b4f48ab22f2e
+    pixi_version: "0.73.0"
+    pixi_archive: /root/.cache/pixi-{{ pixi_version }}-linux.tar.gz
+    pixi_url: >-
+      https://github.com/prefix-dev/pixi/releases/download/v{{ pixi_version }}/pixi-x86_64-unknown-linux-musl.tar.gz
+    pixi_sha256: 682564e7cd35d38307df3cd6c8e9a45a1437d20febac0c8d165809d7c38408d1
+    local_root: "{{ playbook_dir }}/../analysis/easynano-p20809"
+
+  pre_tasks:
+    - name: Require the dedicated non-production rental
+      ansible.builtin.assert:
+        that:
+          - vast_label == expected_label
+          - vast_num_gpus | int == 1
+        fail_msg: Refusing to provision a host outside the isolated EasyNano experiment.
+
+    - name: Read GPU capacity
+      ansible.builtin.command:
+        argv:
+          - nvidia-smi
+          - --query-gpu=name,memory.total
+          - --format=csv,noheader,nounits
+      register: gpu_capacity
+      changed_when: false
+
+    - name: Require at least 80 GB of GPU memory
+      ansible.builtin.assert:
+        that:
+          - (gpu_capacity.stdout.split(',')[-1] | trim | int) >= 80000
+        fail_msg: EasyNano ESMC-6B/ESMFold2 requires an isolated GPU with at least 80 GB.
+
+  tasks:
+    - name: Create isolated runtime directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /root/.cache
+        - /root/.cache/huggingface
+        - /root/easynano-run
+        - /root/easynano-run/input
+        - /root/easynano-run/output
+        - /root/easynano-models
+
+    - name: Download pinned Pixi archive
+      ansible.builtin.get_url:
+        url: "{{ pixi_url }}"
+        dest: "{{ pixi_archive }}"
+        checksum: "sha256:{{ pixi_sha256 }}"
+        mode: "0644"
+
+    - name: Install pinned Pixi binary
+      ansible.builtin.unarchive:
+        src: "{{ pixi_archive }}"
+        dest: /usr/local/bin
+        remote_src: true
+        creates: /usr/local/bin/pixi
+
+    - name: Checkout pinned EasyNano source
+      ansible.builtin.git:
+        repo: https://github.com/YueHuLab/EasyNano.git
+        dest: /root/easynano-source
+        version: "{{ easynano_revision }}"
+        force: true
+
+    - name: Copy the reviewed anchor-initialization patch
+      ansible.builtin.copy:
+        src: "{{ local_root }}/easynano-anchor-init.patch"
+        dest: /root/easynano-run/easynano-anchor-init.patch
+        mode: "0644"
+
+    - name: Copy the reviewed CDR compatibility patch
+      ansible.builtin.copy:
+        src: "{{ local_root }}/easynano-cdr-compat.patch"
+        dest: /root/easynano-run/easynano-cdr-compat.patch
+        mode: "0644"
+
+    - name: Copy the reviewed Transformers 5 API patch
+      ansible.builtin.copy:
+        src: "{{ local_root }}/easynano-transformers5-api.patch"
+        dest: /root/easynano-run/easynano-transformers5-api.patch
+        mode: "0644"
+
+    - name: Copy the reviewed anchor-cysteine initialization patch
+      ansible.builtin.copy:
+        src: "{{ local_root }}/easynano-anchor-cys-init.patch"
+        dest: /root/easynano-run/easynano-anchor-cys-init.patch
+        mode: "0644"
+
+    - name: Copy the reviewed gradient-checkpoint patch
+      ansible.builtin.copy:
+        src: "{{ local_root }}/easynano-gradient-checkpoint.patch"
+        dest: /root/easynano-run/easynano-gradient-checkpoint.patch
+        mode: "0644"
+
+    - name: Detect whether the EasyNano patch is already applied
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --reverse
+          - --check
+          - /root/easynano-run/easynano-anchor-init.patch
+      register: reverse_patch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Apply the anchor-initialization and P20809 patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --check
+          - /root/easynano-run/easynano-anchor-init.patch
+      changed_when: false
+      when: reverse_patch_check.rc != 0
+
+    - name: Install the reviewed EasyNano patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - /root/easynano-run/easynano-anchor-init.patch
+      when: reverse_patch_check.rc != 0
+
+    - name: Detect whether the CDR compatibility patch is already applied
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --reverse
+          - --check
+          - /root/easynano-run/easynano-cdr-compat.patch
+      register: reverse_cdr_patch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check the CDR compatibility patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --check
+          - /root/easynano-run/easynano-cdr-compat.patch
+      changed_when: false
+      when: reverse_cdr_patch_check.rc != 0
+
+    - name: Install the CDR compatibility patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - /root/easynano-run/easynano-cdr-compat.patch
+      when: reverse_cdr_patch_check.rc != 0
+
+    - name: Detect whether the Transformers 5 API patch is already applied
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --reverse
+          - --check
+          - /root/easynano-run/easynano-transformers5-api.patch
+      register: reverse_transformers5_patch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check the Transformers 5 API patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --check
+          - /root/easynano-run/easynano-transformers5-api.patch
+      changed_when: false
+      when: reverse_transformers5_patch_check.rc != 0
+
+    - name: Install the Transformers 5 API patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - /root/easynano-run/easynano-transformers5-api.patch
+      when: reverse_transformers5_patch_check.rc != 0
+
+    - name: Detect whether the anchor-cysteine patch is already applied
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --reverse
+          - --check
+          - /root/easynano-run/easynano-anchor-cys-init.patch
+      register: reverse_anchor_cys_patch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check the anchor-cysteine patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --check
+          - /root/easynano-run/easynano-anchor-cys-init.patch
+      changed_when: false
+      when: reverse_anchor_cys_patch_check.rc != 0
+
+    - name: Install the anchor-cysteine patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - /root/easynano-run/easynano-anchor-cys-init.patch
+      when: reverse_anchor_cys_patch_check.rc != 0
+
+    - name: Detect whether the gradient-checkpoint patch is already applied
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --reverse
+          - --check
+          - /root/easynano-run/easynano-gradient-checkpoint.patch
+      register: reverse_gradient_checkpoint_patch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check the gradient-checkpoint patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - --check
+          - /root/easynano-run/easynano-gradient-checkpoint.patch
+      changed_when: false
+      when: reverse_gradient_checkpoint_patch_check.rc != 0
+
+    - name: Install the gradient-checkpoint patch
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - /root/easynano-source
+          - apply
+          - /root/easynano-run/easynano-gradient-checkpoint.patch
+      when: reverse_gradient_checkpoint_patch_check.rc != 0
+
+    - name: Copy experiment sources
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - src: "{{ local_root }}/experiment.json"
+          dest: /root/easynano-run/input/experiment.json
+        - src: "{{ local_root }}/run_p20809.py"
+          dest: /root/easynano-run/run_p20809.py
+        - src: "{{ local_root }}/rerank_mc.py"
+          dest: /root/easynano-run/rerank_mc.py
+        - src: "{{ local_root }}/download_models.py"
+          dest: /root/easynano-run/download_models.py
+        - src: "{{ local_root }}/smoke_model.py"
+          dest: /root/easynano-run/smoke_model.py
+        - src: "{{ local_root }}/pixi.toml"
+          dest: /root/easynano-run/pixi.toml
+        - src: "{{ local_root }}/pixi.lock"
+          dest: /root/easynano-run/pixi.lock
+        - src: "{{ playbook_dir }}/../external_tools/fast_nanobody_scorer/refdesign/0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif"
+          dest: /root/easynano-run/input/P20809_input.cif
+
+    - name: Install the locked EasyNano Pixi environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - install
+          - --locked
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+      no_log: true
+
+    - name: Verify the GPU runtime through Pixi
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+          - check-gpu
+      register: pixi_gpu
+      changed_when: false
+
+    - name: Download public revision-pinned model snapshots
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+          - python
+          - /root/easynano-run/download_models.py
+      no_log: true
+
+    - name: Read allowlisted model download metadata
+      ansible.builtin.slurp:
+        src: /root/easynano-models/download-status.json
+      register: model_status_file
+
+    - name: Require all three model snapshots
+      ansible.builtin.assert:
+        that:
+          - (model_status_file.content | b64decode | from_json).stage == 'complete'
+          - ((model_status_file.content | b64decode | from_json).models | length) == 3
+
+    - name: Load the ESMFold2-Fast and ESMC-6B stack on the GPU
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+          - python
+          - /root/easynano-run/smoke_model.py
+      no_log: true
+
+    - name: Read bounded model smoke metadata
+      ansible.builtin.slurp:
+        src: /root/easynano-run/output/model-smoke.json
+      register: model_smoke_file
+
+    - name: Require the real model stack to load on CUDA
+      ansible.builtin.assert:
+        that:
+          - (model_smoke_file.content | b64decode | from_json).stage == 'complete'
+          - (model_smoke_file.content | b64decode | from_json).device == 'cuda:0'
+
+    - name: Prepare and validate P20809 through Pixi
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/pixi
+          - run
+          - --manifest-path
+          - /root/easynano-run/pixi.toml
+          - prepare
+      register: prepared
+      changed_when: true
+
+    - name: Read bounded P20809 preparation metadata
+      ansible.builtin.slurp:
+        src: /root/easynano-run/output/prepared.json
+      register: prepared_file
+
+    - name: Require CDR annotation for both basin anchors
+      ansible.builtin.assert:
+        that:
+          - ((prepared_file.content | b64decode | from_json).setups | length) == 2
+          - ((prepared_file.content | b64decode | from_json).setups | map(attribute='cdr_count') | min | int) > 0
+
+    - name: Report bounded provisioning facts
+      ansible.builtin.debug:
+        msg:
+          label: "{{ vast_label }}"
+          gpu: "{{ gpu_capacity.stdout | default('not re-read') }}"
+          pixi_gpu: "{{ pixi_gpu.stdout }}"
+          models: "{{ (model_status_file.content | b64decode | from_json).models }}"
+          model_smoke: "{{ model_smoke_file.content | b64decode | from_json }}"

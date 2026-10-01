@@ -42,6 +42,7 @@ import json
 import math
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -466,6 +467,154 @@ def _default_exact_inputs(score_bank_root: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(paths))
 
 
+def _current_epoch_exact_inputs(
+    score_bank_root: Path, epoch: int
+) -> tuple[Path, ...]:
+    """Return only atomically completed raw scorer aggregates for one epoch.
+
+    Historical evidence is a database concern.  Restricting discovery to the
+    current epoch makes the filesystem an ingestion queue instead of an
+    ever-growing query engine on the publication critical path.
+    """
+    root = score_bank_root / "live" / f"epoch{epoch}"
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(root.glob("**/exact_all.json")))
+
+
+def _exact_run_descriptor(path: Path, target: str) -> dict[str, Any]:
+    """Describe exactly the rows the raw-screen importer must seal."""
+    raw = path.read_bytes()
+    digest = _sha256_bytes(raw)
+    payload = json.loads(raw)
+    if str(payload.get("target")) != target:
+        raise RuntimeError(f"{path} targets {payload.get('target')!r}, not {target}")
+    run_id = str(payload.get("observation_id") or digest)
+    required = set(validator_boltzgen_metrics())
+    observation_ids: set[str] = set()
+    for group, by_sequence in payload.get("per_nanobody_components", {}).items():
+        if not isinstance(by_sequence, dict):
+            continue
+        for sequence, by_target in by_sequence.items():
+            metrics = by_target.get(target) if isinstance(by_target, dict) else None
+            if not isinstance(metrics, dict) or not required.issubset(metrics):
+                continue
+            try:
+                values = (float(metrics[name]) for name in required)
+                if not all(math.isfinite(value) for value in values):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            normalized = str(sequence).strip().upper()
+            observation_ids.add(f"local-exact:{run_id}:{group}:{normalized}")
+    return {
+        "path": path,
+        "run_id": run_id,
+        "file_sha256": digest,
+        "expected_rows": len(observation_ids),
+    }
+
+
+def _exact_run_is_sealed(
+    database: Path, *, target: str, descriptor: Mapping[str, Any]
+) -> bool:
+    if not database.is_file() or not descriptor["expected_rows"]:
+        return False
+    try:
+        connection = sqlite3.connect(
+            f"file:{database}?mode=ro", uri=True, timeout=30
+        )
+        row = connection.execute(
+            """
+            SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
+                   COUNT(x.observation_id)
+            FROM exact_runs r
+            LEFT JOIN exact_run_observations x
+              ON x.target=r.target AND x.run_id=r.run_id
+            WHERE r.target=? AND r.run_id=?
+            GROUP BY r.target, r.run_id
+            """,
+            (target, descriptor["run_id"]),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        if "connection" in locals():
+            connection.close()
+    expected = int(descriptor["expected_rows"])
+    return bool(
+        row
+        and str(row[0]) == descriptor["file_sha256"]
+        and int(row[1]) == expected
+        and int(row[2]) == expected
+        and int(row[3]) == 1
+        and int(row[4]) == expected
+    )
+
+
+def _database_exact_fingerprints(
+    database: Path, target: str
+) -> tuple[str, str, int]:
+    """Fingerprint authoritative sealed raw runs without reading score files."""
+    if not database.is_file():
+        return _sha256_bytes(b"[]"), _sha256_bytes(b"[]"), 0
+    try:
+        connection = sqlite3.connect(
+            f"file:{database}?mode=ro", uri=True, timeout=30
+        )
+        rows = connection.execute(
+            """
+            SELECT r.run_id, r.file_sha256, r.expected_rows, r.scorer_protocol,
+                   COUNT(x.observation_id),
+                   SUM(CASE WHEN a.observation_id IS NOT NULL THEN 1 ELSE 0 END)
+            FROM exact_runs r
+            JOIN exact_run_observations x
+              ON x.target=r.target AND x.run_id=r.run_id
+            LEFT JOIN observation_artifacts a
+              ON a.observation_id=x.observation_id
+            WHERE r.target=? AND r.complete=1
+            GROUP BY r.target, r.run_id
+            HAVING COUNT(x.observation_id)=r.expected_rows
+            ORDER BY r.run_id
+            """,
+            (target,),
+        ).fetchall()
+    except sqlite3.Error:
+        return _sha256_bytes(b"[]"), _sha256_bytes(b"[]"), 0
+    finally:
+        if "connection" in locals():
+            connection.close()
+    manifest = [list(row[:5]) for row in rows]
+    structural = [list(row) for row in rows]
+    return (
+        _sha256_bytes(json.dumps(manifest, separators=(",", ":")).encode()),
+        _sha256_bytes(json.dumps(structural, separators=(",", ":")).encode()),
+        len(rows),
+    )
+
+
+def _import_exact_command(
+    *,
+    bgen_python: Path,
+    nanobody_opt_root: Path,
+    database: Path,
+    target: str,
+    archive: Path,
+    exact_inputs: Sequence[Path],
+) -> list[str]:
+    command = [
+        str(bgen_python),
+        "-m",
+        "nanobody_opt.import_exact_screens",
+        "--database", str(database),
+        "--target", target,
+        "--archive", str(archive),
+    ]
+    for path in exact_inputs:
+        command.extend(["--exact-root", str(path)])
+    return command
+
+
 def _has_new_exact_data(artifact: Path, exact_inputs: tuple[Path, ...]) -> bool:
     """Return whether an atomically completed exact result is newer than publish."""
     try:
@@ -550,6 +699,45 @@ def _fleet_is_current(
     return hotkeys == set(expected_hotkeys)
 
 
+def _covered_current_assignments(
+    payload: dict[str, Any] | None,
+    *,
+    crew: Sequence[fleet_module.FleetMember],
+    target: str,
+    epoch: int,
+) -> list[fleet_module.Assignment]:
+    """Return same-epoch assignments that still map to the current fleet.
+
+    A fresh provisional pass is allowed to improve an artifact, but never to
+    replace a broader fleet with a shortfall.  This deliberately checks only
+    immutable identity and sequence uniqueness: an existing same-epoch fleet
+    may predate the current checkpoint schema, yet its commitments are already
+    live and remain safer than publishing fewer UIDs.
+    """
+    if (
+        not isinstance(payload, dict)
+        or payload.get("epoch") != epoch
+        or str(payload.get("target")) != target
+    ):
+        return []
+    try:
+        assignments = fleet_module.assignments_from_artifact(payload)
+    except (KeyError, TypeError, ValueError):
+        return []
+    held = {int(member.uid): str(member.hotkey) for member in crew}
+    covered: list[fleet_module.Assignment] = []
+    seen: set[str] = set()
+    for assignment in assignments:
+        sequence = str(assignment.sequence).strip().upper()
+        if held.get(int(assignment.uid)) != str(assignment.hotkey):
+            continue
+        if not sequence or sequence in seen:
+            continue
+        seen.add(sequence)
+        covered.append(assignment)
+    return covered
+
+
 def _retire_completed_epoch(
     payload: dict[str, Any] | None, ledger: Path, current_epoch: int
 ) -> list[str]:
@@ -596,10 +784,14 @@ def _rank_command(
     shortlist: int,
     config: Path | None,
     strict: bool,
+    observation_history: Path | None = None,
+    diversity_reserve_count: int = 0,
 ) -> list[str]:
     command = [str(bgen_python), str(nanobody_opt_root / "rank_exact.py")]
     for path in exact_inputs:
         command.extend(["--exact", str(path)])
+    if observation_history is not None:
+        command.extend(["--observation-history", str(observation_history)])
     command.extend([
         "--archive", str(archive),
         "--target", target,
@@ -613,14 +805,18 @@ def _rank_command(
         "--api-field-count", "10",
         "--minimum-api-fields", "3",
     ])
+    if diversity_reserve_count:
+        command.extend([
+            "--diversity-reserve-count", str(diversity_reserve_count)
+        ])
     if strict:
         command.extend(["--pose-config", str(config)])
         command.extend(RANK_QUALIFICATION_ARGUMENTS)
     else:
         # The provisional pass exists so that an epoch always submits something;
         # it applies the evidence floor only, never the quality gates. The
-        # winning threshold is not a quality gate: it is what "win probability"
-        # is measured against, so both passes must order against the same one.
+        # threshold remains a shared diagnostic basis for competitive rates;
+        # fresh-draw field-win probability itself no longer depends on it.
         command.extend([
             "--minimum-observations",
             publication_gates.gate_defaults()["--minimum-observations"],
@@ -826,10 +1022,16 @@ def _publish_fleet(
         gate="Layer-2",
         source=layer2[0],
     )
-    # And the validator's own duplicate gates. Distinctness is not novelty: two
-    # sequences differing by one residue are distinct and are the SAME molecule
-    # to the validator, so a fleet of near-neighbours is a fleet of one ticket
-    # that scores zero times.
+    # And the validator's own duplicate gates. Distinctness is not novelty: a
+    # sequence within 0.95 of a TOP-50 historical sequence (or sharing its CDR3
+    # at >=0.85) is discarded before scoring, which is how the six epoch-25093
+    # tickets died. That is what this gate catches, and it is the only identity
+    # rule the validator applies -- it compares each uid against the historical
+    # index, never our simultaneous tickets against each other. Near-neighbours
+    # that clear THIS gate are separate folds and separate draws: measured on
+    # the leaderboard, 780 same-epoch same-coldkey pairs at 0.98-0.999 identity
+    # score a median 45.5 rank-sum apart, while the 10 pairs at exactly 1.0
+    # share one score. See nanobody_opt/fleet.MAXIMUM_FLEET_IDENTITY.
     payload = _restrict_pool(
         payload,
         _validator_novel_sequences(novelty),
@@ -847,18 +1049,50 @@ def _publish_fleet(
     # distance from what works. A collision costs one ticket; leading with the
     # worst molecule costs the epoch. _recent_field_sequences and
     # fleet.uncrowded are kept for when the pool is no longer degenerate.
-    # One sequence beyond the fleet, so a uid the chain hands us during the
-    # reserve has something distinct to commit instead of sitting idle for the
-    # epoch. One is enough: purchases are staggered ~416 blocks apart to keep
-    # immunity expiries in separate adjustment intervals, and the reserve is 55
-    # blocks, so at most one registration lands inside it. A uid lost at its own
-    # commit block also returns its sequence to the same pool.
+    # The GPU producer does not own registrations.  Always prepare a ranked,
+    # UID-independent pool large enough for the Pi's target fleet, even when
+    # the producer's own chain snapshot temporarily sees fewer uids.  One more
+    # sequence remains reserved for a uid gained inside the commit window.
     SPARE_TICKETS = 1
-    sequences = fleet_module.distinct_sequences(
-        payload, len(crew) + SPARE_TICKETS, cdrs=_annotated_cdrs(cdr_annotations)
+    minimum_pool_size = int(
+        getattr(args, "minimum_sequence_pool_size", len(crew))
     )
+    pool_target = max(len(crew), minimum_pool_size)
+    sequences = fleet_module.distinct_sequences(
+        payload, pool_target + SPARE_TICKETS,
+        cdrs=_annotated_cdrs(cdr_annotations),
+    )
+    # ``distinct_sequences`` is deliberately conservative: it stops before
+    # assigning two tickets above the validator's pairwise identity gate.  A
+    # short compatible fleet must not truncate the handoff artifact, though.
+    # Export the compatible set first, followed by exact-distinct candidates
+    # from the already Layer-2-passed and validator-novel ranked pool.  The Pi
+    # owns the live fleet and makes the final assignment decision.
+    ranked_unique: list[str] = []
+    for candidate in payload.get("candidates") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        sequence = str(candidate.get("sequence") or "").strip().upper()
+        if sequence and sequence not in ranked_unique:
+            ranked_unique.append(sequence)
+    handoff_candidates: list[str] = []
+    for sequence in [*sequences, *ranked_unique]:
+        if sequence not in handoff_candidates:
+            handoff_candidates.append(sequence)
+    if minimum_pool_size > 0 and len(handoff_candidates) < pool_target:
+        raise SystemExit(
+            "nanobody sequence pool shortfall: "
+            f"need at least {pool_target} exact-distinct Layer-2-passed, "
+            "validator-novel sequences, "
+            f"got {len(handoff_candidates)}"
+        )
     fleet_sequences = sequences[: len(crew)]
-    spare_sequences = sequences[len(crew) :]
+    sequence_pool = handoff_candidates[:pool_target]
+    assigned_sequences = set(fleet_sequences)
+    spare_sequences = [
+        sequence for sequence in handoff_candidates
+        if sequence not in assigned_sequences
+    ]
     try:
         blocks = fleet_module.commitment_blocks(
             epoch=epoch,
@@ -951,6 +1185,7 @@ def _publish_fleet(
         assignments=published,
         checkpoints=checkpoints,
         unassigned=fleet_module.uncovered(crew, published),
+        sequence_pool=sequence_pool,
     )
     return artifact, published, CommitContext(
         spares=tuple(spare_sequences),
@@ -967,6 +1202,10 @@ BLOCK_SECONDS = 12.0
 COMMIT_WAIT_POLL_SECONDS = 4.0
 PUBLISH_FLEET_REJECTED = "NANOBODY_FLEET_UID_REJECTED"
 COMMIT_FLEET_FAILED = "COMMIT_FLEET_UID_FAILED"
+# Registration can change after the GPU host's chain snapshot and before the
+# Pi's commit window. Prepare headroom for a 13-member fleet plus churn; the Pi
+# remains the only authority that binds this ranked pool to UIDs.
+MINIMUM_SEQUENCE_POOL_SIZE = 16
 COMMIT_FLEET_INCOMPLETE = "COMMIT_FLEET_INCOMPLETE"
 
 
@@ -1151,6 +1390,43 @@ def _next_reserve_block(args: argparse.Namespace, epoch: int) -> int | None:
     return candidate if candidate < epoch_end else None
 
 
+def load_molecules_by_uid(path: str | None) -> dict[int, str]:
+    """Per-uid compound submissions, keyed by uid, as a comma-separated string.
+
+    FAIL-SAFE BY CONSTRUCTION. A missing file, an unreadable one, or a uid with
+    no entry all yield "", and commit_submission then emits the same "~|<seq>"
+    this fleet has always sent. Compounds must never be able to cost a nanobody
+    submission -- the commitment is ONE message carrying both sections, so a
+    molecule list that arrives malformed would otherwise take the sequence down
+    with it.
+    """
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        print(f"MOLECULES_UNREADABLE path={path} ({error}); "
+              f"committing nanobodies alone", file=sys.stderr, flush=True)
+        return {}
+    mapping: dict[int, str] = {}
+    for key, value in (payload or {}).items():
+        try:
+            uid = int(key)
+        except (TypeError, ValueError):
+            continue
+        names = value.split(",") if isinstance(value, str) else list(value or [])
+        names = [str(name).strip() for name in names if str(name).strip()]
+        if not names or len(set(names)) != len(names):
+            continue
+        if any(any(c.isspace() for c in name) or "|" in name or not name.isascii()
+               for name in names):
+            print(f"MOLECULES_MALFORMED uid={uid}; skipping its compound section",
+                  file=sys.stderr, flush=True)
+            continue
+        mapping[uid] = ",".join(names)
+    return mapping
+
+
 def _commit_fleet(
     assignments: Sequence[fleet_module.Assignment],
     *,
@@ -1223,6 +1499,9 @@ def _commit_fleet(
     # is not mistaken for one the chain just handed us.
     planned = {assignment.uid for assignment in assignments} | set(context.known_uids)
     unused = [str(item).strip().upper() for item in context.spares]
+    molecules_by_uid = load_molecules_by_uid(getattr(args, "molecules_file", None))
+    if molecules_by_uid:
+        print(f"MOLECULES_LOADED uids={sorted(molecules_by_uid)}", flush=True)
     gained: list[fleet_module.Assignment] = []
 
     for index, assignment in enumerate(assignments):
@@ -1231,6 +1510,7 @@ def _commit_fleet(
                 uid=assignment.uid,
                 hotkey=assignment.hotkey,
                 sequence=assignment.sequence,
+                molecules=molecules_by_uid.get(assignment.uid, ""),
                 block=assignment.commit_block,
                 epoch=epoch,
                 artifact=str(artifact),
@@ -1329,6 +1609,7 @@ def _commit_fleet(
         command = [
             part.format(
                 uid=late.uid, hotkey=late.hotkey, sequence=late.sequence,
+                molecules=molecules_by_uid.get(late.uid, ""),
                 block=late.commit_block, epoch=epoch, artifact=str(artifact),
             )
             for part in shlex.split(template)
@@ -1395,6 +1676,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pixi", type=Path, default=Path("/usr/local/bin/pixi"))
     parser.add_argument("--layer2-concurrency", type=int, default=40)
     parser.add_argument(
+        "--shortlist-limit",
+        type=int,
+        default=SHORTLIST_LIMIT,
+        help=(
+            "minimum number of ranked candidates carried into Layer 2; "
+            "fleet-size coverage can raise this floor"
+        ),
+    )
+    parser.add_argument(
         "--layer2-cache-dir", type=Path, default=Path("/root/layer2_cache")
     )
     parser.add_argument(
@@ -1434,10 +1724,26 @@ def _parser() -> argparse.ArgumentParser:
         help="end-of-epoch blocks reserved for commitments, one uid per block",
     )
     parser.add_argument(
+        "--minimum-sequence-pool-size",
+        type=int,
+        default=MINIMUM_SEQUENCE_POOL_SIZE,
+        help=(
+            "minimum UID-independent ranked sequence pool prepared for the "
+            "submit host, regardless of the producer's current crew view"
+        ),
+    )
+    parser.add_argument(
+        "--molecules-file",
+        help=(
+            "JSON {uid: \"name1,name2,...\"} of per-uid compound submissions. "
+            "Absent or unreadable commits nanobodies alone, unchanged."
+        ),
+    )
+    parser.add_argument(
         "--commit-command",
         help=(
             "optional per-uid commitment command; {uid} {hotkey} {sequence} "
-            "{block} {epoch} {artifact} are substituted"
+            "{molecules} {block} {epoch} {artifact} are substituted"
         ),
     )
     parser.add_argument(
@@ -1494,6 +1800,16 @@ def _parser() -> argparse.ArgumentParser:
         help="assert the miner's chain-state epoch equals this; never a substitute",
     )
     parser.add_argument("--exact", action="append", type=Path)
+    parser.add_argument(
+        "--observation-database",
+        type=Path,
+        default=Path("/root/artifacts/nanobody_mutations.sqlite"),
+        help=(
+            "authoritative sealed raw exact-run store; normal publication "
+            "ingests only current-epoch exact_all.json files, then ranks this "
+            "database without scanning historical files"
+        ),
+    )
     parser.add_argument("--historical-layer2", action="append", type=Path)
     parser.add_argument(
         "--watch-interval",
@@ -1569,14 +1885,83 @@ def _publish_once(args: argparse.Namespace) -> None:
             requirements=requirements,
             expected_hotkeys=expected_hotkeys,
         )
-        exact_inputs = tuple(args.exact or _default_exact_inputs(args.score_bank_root))
-        exact_fingerprint, strict_fingerprint = _exact_bank_fingerprints(
-            exact_inputs, target
-        )
         bgen_python = args.runtime_root / ".pixi/envs/bgen/bin/python"
         pixi_manifest = args.runtime_root / "pixi.toml"
         if not bgen_python.is_file() or not pixi_manifest.is_file():
             raise SystemExit("locked nanobody Pixi runtimes are not installed")
+
+        # Normal operation uses SQLite as the sole historical query surface.
+        # Files are considered only inside this epoch's directory, ingested
+        # once, sealed, and then omitted from rank_exact entirely.  Explicit
+        # --exact remains a break-glass/testing path with the old semantics.
+        explicit_exact = tuple(args.exact or ())
+        missing_exact = [str(path) for path in explicit_exact if not path.is_file()]
+        if missing_exact:
+            raise SystemExit(
+                "score-bank inputs named on the command line are missing: "
+                + ", ".join(missing_exact)
+            )
+        archive_ready = False
+        if explicit_exact:
+            exact_inputs = explicit_exact
+            observation_history = None
+            exact_fingerprint, strict_fingerprint = _exact_bank_fingerprints(
+                exact_inputs, target
+            )
+            sealed_run_count = 0
+        else:
+            exact_inputs = ()
+            observation_history = args.observation_database
+            current_inputs = _current_epoch_exact_inputs(
+                args.score_bank_root, epoch
+            )
+            descriptors = [
+                _exact_run_descriptor(path, target) for path in current_inputs
+            ]
+            unsealed = [
+                descriptor
+                for descriptor in descriptors
+                if not _exact_run_is_sealed(
+                    args.observation_database,
+                    target=target,
+                    descriptor=descriptor,
+                )
+            ]
+            if unsealed:
+                _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
+                archive_ready = True
+                _run(_import_exact_command(
+                    bgen_python=bgen_python,
+                    nanobody_opt_root=args.nanobody_opt_root,
+                    database=args.observation_database,
+                    target=target,
+                    archive=archive_path,
+                    exact_inputs=[Path(item["path"]) for item in unsealed],
+                ))
+                incomplete = [
+                    str(item["path"])
+                    for item in unsealed
+                    if not _exact_run_is_sealed(
+                        args.observation_database,
+                        target=target,
+                        descriptor=item,
+                    )
+                ]
+                if incomplete:
+                    raise SystemExit(
+                        "raw exact ingestion did not seal every current run: "
+                        + ", ".join(incomplete)
+                    )
+            (
+                exact_fingerprint,
+                strict_fingerprint,
+                sealed_run_count,
+            ) = _database_exact_fingerprints(args.observation_database, target)
+            if not sealed_run_count:
+                raise SystemExit(
+                    "observation database has no complete sealed raw exact run "
+                    f"for {target}; run import_exact_screens once to backfill it"
+                )
         _archive_and_audit_previous(
             previous,
             current_epoch=epoch,
@@ -1612,7 +1997,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             args.ledger,
             _live_sequences(previous, epoch),
         )
-        _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
+        if not archive_ready:
+            _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
 
         historical_layer2 = tuple(
             args.historical_layer2 or map(Path, DEFAULT_LAYER2_INPUTS)
@@ -1622,27 +2008,27 @@ def _publish_once(args: argparse.Namespace) -> None:
         # are paths from epoch 25021 on a machine that no longer exists, and
         # requiring them meant a rebuilt box deferred publication for ever while
         # sitting on a perfectly good score bank the glob had already found.
-        explicit = [
-            *(args.exact or ()),
-            *(args.historical_layer2 or ()),
-        ]
+        explicit = [*(args.historical_layer2 or ())]
         missing = [str(path) for path in explicit if not path.is_file()]
         if missing:
             raise SystemExit(
                 "score-bank inputs named on the command line are missing: "
                 + ", ".join(missing)
             )
-        exact_inputs = tuple(path for path in exact_inputs if path.is_file())
         historical_layer2 = tuple(path for path in historical_layer2 if path.is_file())
         # Publishing with no evidence at all is the thing to refuse.
-        if not exact_inputs:
+        if explicit_exact and not exact_inputs:
             raise SystemExit(
-                "no exact score-bank inputs found under "
-                f"{args.score_bank_root}: the producer has not written an "
-                "exact_all.json yet, so there is nothing qualified to publish"
+                "no explicit exact score-bank inputs remain after validation"
             )
 
-        shortlist = max(SHORTLIST_LIMIT, len(crew) * SHORTLIST_PER_UID)
+        shortlist_floor = int(getattr(args, "shortlist_limit", SHORTLIST_LIMIT))
+        if shortlist_floor < len(crew):
+            raise SystemExit(
+                "shortlist limit must cover every registered uid: "
+                f"need at least {len(crew)}, got {shortlist_floor}"
+            )
+        shortlist = max(shortlist_floor, len(crew) * SHORTLIST_PER_UID)
         if current_qualified:
             # The provisional pass is the net that keeps an epoch from submitting
             # nothing. A qualified fleet is already live for this epoch, so the
@@ -1676,6 +2062,8 @@ def _publish_once(args: argparse.Namespace) -> None:
                 shortlist=shortlist,
                 config=config_path,
                 strict=False,
+                observation_history=observation_history,
+                diversity_reserve_count=len(crew) * 2 + 1,
             ))
             _run(_layer2_command(
                 pixi_manifest=pixi_manifest,
@@ -1721,6 +2109,24 @@ def _publish_once(args: argparse.Namespace) -> None:
                 novelty=novelty_path,
                 cdr_annotations=cdr_path,
             )
+            previous_assignments = _covered_current_assignments(
+                previous,
+                crew=crew,
+                target=target,
+                epoch=epoch,
+            )
+            if len(previous_assignments) > len(assignments):
+                print(
+                    "NANOBODY_FLEET_RETAINED broader same-epoch artifact: "
+                    f"previous={len(previous_assignments)} "
+                    f"challenger={len(assignments)}",
+                    flush=True,
+                )
+                artifact = previous
+                assignments = previous_assignments
+                commit_context = CommitContext(
+                    known_uids=frozenset(member.uid for member in crew),
+                )
             _atomic_json(args.artifact, artifact)
             _report(artifact, "provisional")
             ledger_fingerprint = _record_fleet(args.ledger, assignments)
@@ -1847,6 +2253,8 @@ def _publish_once(args: argparse.Namespace) -> None:
                 shortlist=shortlist,
                 config=config_path,
                 strict=True,
+                observation_history=observation_history,
+                diversity_reserve_count=len(crew) * 2 + 1,
             ))
         except subprocess.CalledProcessError:
             print(

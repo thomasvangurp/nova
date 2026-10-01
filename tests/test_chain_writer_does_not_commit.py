@@ -20,6 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 MINER = ROOT / "neurons/miner/miner.py"
 SERVICES = ROOT / "ansible/nanobody_services.yml"
+PUBLISHER_CAPTURE = ROOT / "ansible/tasks/capture_artifact_publisher.yml"
 
 
 def _services_text() -> str:
@@ -68,6 +69,19 @@ def test_the_deployed_chain_writer_passes_the_flag():
         "ansible/nanobody_services.yml launches the chain writer; without this "
         "flag it commits example candidates on one of our registered uids"
     )
+
+
+def test_gpu_publisher_is_artifact_only_and_prepares_churn_headroom():
+    services = _services_text()
+    assert "\n          - --commit-command\n" not in services, (
+        "the Pi is the sole commitment writer; a GPU publisher commit can "
+        "overwrite Pi near the validator blackout"
+    )
+    assert "\n          - --minimum-sequence-pool-size\n          - \"16\"" in services
+    assert "tasks/capture_artifact_publisher.yml" in services
+    capture = PUBLISHER_CAPTURE.read_text()
+    assert 'if "--commit-command" in argv' in capture
+    assert 'if int(pool) < 16' in capture
 
 
 def test_the_deploy_restarts_a_writer_whose_command_line_drifted():

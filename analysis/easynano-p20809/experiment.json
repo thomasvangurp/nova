@@ -1,0 +1,51 @@
+{
+  "experiment": "p20809-anchor-seeds-v1",
+  "target": {
+    "accession": "P20809",
+    "structure": "6O4O",
+    "chain": "A",
+    "canonical_residue_range": [2, 169],
+    "configured_epitope_residue_ids": [31, 32, 33, 34, 35, 37, 38, 40, 88, 135, 136, 137, 138, 142],
+    "easynano_epitope_token_indices": [29, 30, 31, 32, 33, 35, 36, 38, 86, 133, 134, 135, 136, 140],
+    "source_config": "nanobody_opt/upstream_config_snapshot.yaml",
+    "source_cif": "external_tools/fast_nanobody_scorer/refdesign/0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif"
+  },
+  "easynano": {
+    "repository": "https://github.com/YueHuLab/EasyNano.git",
+    "revision": "2da3bea2c6a3569a6ad3c6f9fb01b4f48ab22f2e",
+    "private_derivative": {
+      "repository": "https://github.com/thomasvangurp/EasyNano-NOVA.git",
+      "revision": "ac4a53de53e53a879799867da113c7f25674d263"
+    },
+    "steps": 60,
+    "seeds": [0, 1, 2],
+    "full_evaluation_candidates_per_seed": 3,
+    "model_revisions": {
+      "Biohub/ESMFold2": "69869f737beffec5294845ede23db5fc0b4f509e",
+      "Biohub/ESMFold2-Fast": "45fe8656f5b3ef493c17fcf9abe9a2968902e712",
+      "Biohub/ESMC-6B": "af1602ba7406f521b11bf8f81d52af378cde09e4"
+    }
+  },
+  "anchors": [
+    {
+      "id": "ours_epoch25242",
+      "cohort": "ours",
+      "owner": "US",
+      "epoch": 25242,
+      "public_rank": 1,
+      "public_score": 36.0,
+      "selection": "lowest public validator score observed for our coldkey",
+      "sequence": "KWTLVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDSVKGRFTSSRDNAKNSLYGQMNSLRAEDTAVYYCGVFLGAHPCPLEGEHDSFGAGAAVTVGQ"
+    },
+    {
+      "id": "5evpal11_epoch25109",
+      "cohort": "competitor",
+      "owner": "5EvpaL11",
+      "epoch": 25109,
+      "public_rank": 1,
+      "public_score": 35.0,
+      "selection": "lowest public validator score observed for 5EvpaL11",
+      "sequence": "KWALVESGGGLVKPGGSLRLSCAASGFTASRGWYGMSWFRQAPGKEREWVSLISSSGSTWMDYPDSVKGRFTASRDNAKNSLYGQMNSLRAEDTAVYYCGVFLGAHPCPLEGEMDAFGAGATVTVGQ"
+    }
+  ]
+}

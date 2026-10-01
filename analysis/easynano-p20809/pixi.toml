@@ -1,0 +1,46 @@
+[workspace]
+name = "easynano-p20809"
+version = "0.1.0"
+channels = ["conda-forge", "bioconda"]
+platforms = [{ platform = "linux-64", cuda = "12.6", glibc = "2.35" }]
+requires-pixi = ">=0.73,<0.74"
+
+[workspace.conda-pypi-map]
+conda-forge = { mapping = { triton = false, libcublas = "nvidia-cublas-cu12", cuda-nvrtc = "nvidia-cuda-nvrtc-cu12" } }
+
+[dependencies]
+python = "3.12.*"
+git = "*"
+git-lfs = "*"
+pytorch = { version = "==2.7.1", build = "cuda126*" }
+pytorch-gpu = "==2.7.1"
+numpy = "==2.0.2"
+pandas = "==2.2.3"
+biotite = "==1.2.0"
+gemmi = "==0.7.5"
+abnumber = "*"
+anarci = "==2024.05.21"
+matplotlib = "==3.10.9"
+seaborn = "*"
+scipy = "*"
+
+[pypi-dependencies]
+transformers = "==5.16.1"
+huggingface-hub = "==1.8.0"
+logomaker = "==0.8.7"
+
+[activation.env]
+EASYNANO_DEVICE = "cuda"
+EASYNANO_P20809_PDB = "/root/easynano-run/input/P20809.pdb"
+ESMFOLD2_FAST = "/root/easynano-models/ESMFold2-Fast"
+ESMFOLD2_FULL = "/root/easynano-models/ESMFold2"
+ESMC_PATH = "/root/easynano-models/ESMC-6B"
+PYTHONPATH = "/root/easynano-source:/root/easynano-run"
+HF_HOME = "/root/.cache/huggingface"
+
+[tasks]
+check-gpu = "python -c \"import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))\""
+prepare = "python /root/easynano-run/run_p20809.py prepare"
+run-seeds = "python /root/easynano-run/run_p20809.py run"
+rerank-mc = "python /root/easynano-run/rerank_mc.py"
+status = "python /root/easynano-run/run_p20809.py status"
