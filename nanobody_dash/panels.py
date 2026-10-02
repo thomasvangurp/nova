@@ -1,6 +1,7 @@
 """The money and fleet panels: per-subnet yield, infra cost, hotkey expiry."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -31,6 +32,14 @@ SUBNET_COLOURS = {
     107: "#f78fb3",
 }
 
+REACTION_COLOURS = {
+    1: OURS,
+    2: "#b392f0",
+    3: WIN,
+    4: WARN,
+    5: "#f78fb3",
+}
+
 COST_NAMES = {
     "aws:sn2": "SN2 AWS production",
     "aws:sn2:compute": "SN2 compute",
@@ -42,8 +51,11 @@ COST_NAMES = {
     "aws:sn2:tax": "SN2 tax",
     "aws:sn2:other": "SN2 other",
     "aws:sn2:total": "SN2 AWS production",
-    "vast.ai:sn68-prod": "SN68 Vast production",
+    "vast.ai:sn68-prod": "SN68 Vast production (nanobody)",
+    "vast.ai:sn68-compound": "SN68 Vast production (compound)",
     "vast.ai:sn68-research": "SN68 Vast research",
+    "vast.ai:blueprint": "SN68 Vast blueprint",
+    "vast.ai:bank": "SN68 Vast molecule bank",
     "vast.ai:research": "Vast research",
     "vast.ai:unattributed": "Vast unattributed",
 }
@@ -60,7 +72,10 @@ COST_COLOURS = {
     "aws:sn2:other": MUTED,
     "aws:sn2:total": "#b392f0",
     "vast.ai:sn68-prod": WARN,
+    "vast.ai:sn68-compound": "#ef5f6b",
     "vast.ai:sn68-research": "#d8895b",
+    "vast.ai:blueprint": "#f0a04b",
+    "vast.ai:bank": "#7a86b8",
     "vast.ai:research": "#6f7787",
     "vast.ai:unattributed": BAD,
 }
@@ -105,6 +120,76 @@ def fig_subnet_pnl_history(rows) -> go.Figure:
     figure.update_layout(**layout)
     figure.update_yaxes(title="net TAO per day", gridcolor="#242a36")
     figure.update_xaxes(title="day (UTC)", gridcolor="#242a36", type="date")
+    return figure
+
+
+#: Marker symbol per epoch outcome, for the epoch-boundary overlay in
+#: fig_gap_history -- outcome is encoded by SYMBOL, not color, so it never
+#: fights the per-reaction color coding the rest of the chart uses.
+_OUTCOME_SYMBOL = {
+    "won": "diamond",
+    "cleared": "diamond-open",
+    "blocked": "x",
+}
+
+
+def fig_gap_history(gap_rows, recent_history) -> go.Figure:
+    """Each reaction's submission-readiness (selected_score - floor) over
+    time, plus markers for real epoch draws from the Pi's own log. Gap, not
+    raw score: the 5 reactions have different floors (1.61-1.95), so gap
+    gives one shared, zero-anchored axis where 0 always means "at the floor"
+    regardless of reaction -- same zero-line idiom as fig_subnet_pnl_history.
+    """
+    if not gap_rows:
+        return _empty("No gap-check history recorded yet")
+    figure = go.Figure()
+    for reaction in sorted({row["reaction"] for row in gap_rows}):
+        series = [row for row in gap_rows if row["reaction"] == reaction]
+        colour = REACTION_COLOURS.get(reaction)
+        figure.add_trace(go.Scatter(
+            x=[dt.datetime.fromtimestamp(row["checked_at"], dt.timezone.utc)
+               for row in series],
+            y=[row["gap"] for row in series],
+            name=f"rxn {reaction}", mode="lines+markers",
+            line=dict(color=colour, width=2.2), marker=dict(size=5),
+            legendgroup=f"rxn{reaction}",
+            hovertemplate=(
+                "%{x}<br>rxn " + str(reaction) + ": %{y:+.4f}<extra></extra>"
+            ),
+        ))
+        epoch_points = [
+            row for row in recent_history
+            if row.get("reaction") == reaction and row.get("at") is not None
+               and row.get("gap") is not None
+        ]
+        if not epoch_points:
+            continue
+        symbols = [
+            _OUTCOME_SYMBOL["won"] if row.get("real_won")
+            else _OUTCOME_SYMBOL["cleared"] if row.get("outcome") == "cleared"
+            else _OUTCOME_SYMBOL["blocked"]
+            for row in epoch_points
+        ]
+        figure.add_trace(go.Scatter(
+            x=[dt.datetime.fromtimestamp(row["at"], dt.timezone.utc)
+               for row in epoch_points],
+            y=[row["gap"] for row in epoch_points],
+            name=f"rxn {reaction} epochs", mode="markers",
+            marker=dict(color=colour, size=11, symbol=symbols,
+                        line=dict(width=1.5, color=PAPER)),
+            legendgroup=f"rxn{reaction}",
+            customdata=[row["epoch"] for row in epoch_points],
+            hovertemplate=(
+                "%{x}<br>epoch %{customdata}: %{y:+.4f}<extra></extra>"
+            ),
+        ))
+    figure.add_hline(y=0, line=dict(color=MUTED, dash="dash"))
+    layout = dict(LAYOUT)
+    layout["hovermode"] = "closest"
+    layout["hoverdistance"] = -1
+    figure.update_layout(**layout)
+    figure.update_yaxes(title="gap to floor (selected_score - floor)", gridcolor="#242a36")
+    figure.update_xaxes(title="time (UTC)", gridcolor="#242a36", type="date")
     return figure
 
 
@@ -162,7 +247,8 @@ def fig_infrastructure_cost_history(rows) -> go.Figure:
         "aws:sn2:compute", "aws:sn2:storage", "aws:sn2:ec2-other",
         "aws:sn2:data-transfer", "aws:sn2:lightsail", "aws:sn2:vpc",
         "aws:sn2:tax", "aws:sn2:other", "aws:sn2:total",
-        "vast.ai:sn68-prod", "vast.ai:research", "vast.ai:unattributed",
+        "vast.ai:sn68-prod", "vast.ai:sn68-compound", "vast.ai:research",
+        "vast.ai:unattributed",
     ))}
     items = sorted({
         item for row in rows for item in (row.get("infrastructure") or {})
@@ -243,15 +329,23 @@ def fig_cloud_costs(state: dict) -> go.Figure:
         "sn68_research_usd_per_day", "research_usd_per_day",
         "unattributed_usd_per_day",
     ))
+    # Compound's five dedicated reaction boxes (see infra.py's
+    # _COMPOUND_LABEL) used to fall into the generic "research" bucket above,
+    # silently inflating it to ~$750/day when compound's real isolated cost
+    # is ~$220/day -- fixed 2026-10-02 by giving compound its own scope.
+    vast_compound = float(vast.get("sn68_compound_usd_per_day") or 0)
+    vast_blueprint = float(vast.get("blueprint_usd_per_day") or 0)
+    vast_bank = float(vast.get("bank_usd_per_day") or 0)
     cells = [
-        ["AWS Bills", "AWS operations", "Vast.ai", "Funding guard"],
-        ["SN2 · Ohio", "SN2 · Ohio", "SN68 + research", "cloud bills"],
+        ["AWS Bills", "AWS operations", "Vast.ai", "Vast.ai compound", "Funding guard"],
+        ["SN2 · Ohio", "SN2 · Ohio", "SN68 prod + research", "SN68 compound (5 reaction boxes)", "cloud bills"],
         [
             (f"${float(aws_actual):,.2f} accrued bill" if aws_actual is not None
              else "daily detail pending API access"),
             (f"${float(aws_operating):,.2f} operating MTD"
              if aws_operating is not None else "operating cost unavailable"),
             f"${vast_production:,.2f}/day production",
+            f"${vast_compound:,.2f}/day",
             str(payments.get("cloud_funding_source") or "not configured"),
         ],
         [
@@ -259,7 +353,10 @@ def fig_cloud_costs(state: dict) -> go.Figure:
              else f"{aws_period} to date"),
             (f"${float(aws_projection):,.2f} projected month-end"
              if aws_projection is not None else "forecast unavailable"),
-            f"${vast_research:,.2f}/day research",
+            (f"${vast_research:,.2f}/day research"
+             f"<br>${vast_blueprint:,.2f}/day blueprint"
+             f"<br>${vast_bank:,.2f}/day bank"),
+            "still net-negative, under active optimization",
             "agent cannot charge a real card"
             if payments.get("real_card_allowed") is False
             else "payment guard not set",
@@ -274,6 +371,7 @@ def fig_cloud_costs(state: dict) -> go.Figure:
              + f"${float(aws_excluded or 0):,.2f} one-time excluded"),
             (f"{vast.get('status') or 'not collected'} · "
              f"{int(vast.get('running_instances') or 0)} running"),
+            "see Compound tab for win rate and real wins",
             "read-only collectors",
         ],
     ]
@@ -447,17 +545,34 @@ def fig_hotkey_expiry(path: Path, life_epochs: float = 17.0,
 def fig_projection(net_tao_per_day: float, tao_usd: float,
                    win_rate: float, entries: int, per_entry_win: float = 0.019,
                    tao_per_win: float = 1.87, days: int = 30) -> go.Figure:
-    """Where the balance goes at the current rate, and at 12 entries."""
+    """Where the balance goes at the current rate, and -- only while the
+    fleet is still smaller than 12 -- at a hypothetical 12-entry fleet.
+
+    extra_entries is 0 once entries >= 12, which makes uplift exactly 0 and
+    the second line IDENTICAL to the first: a real bug confirmed live
+    2026-10-02 once the fleet actually reached 12 -- the chart kept drawing
+    a second, perfectly-overlapping trace as if it still meant something,
+    which read as a flat/broken line next to the real one. Once at or past
+    12, that comparison is simply no longer meaningful; drop the trace
+    instead of plotting a degenerate duplicate.
+    """
     x = list(range(days + 1))
     base = [net_tao_per_day * d for d in x]
     extra_entries = max(0, 12 - entries)
-    uplift = extra_entries * per_entry_win * 20 * tao_per_win - extra_entries * 0.34
-    better = [(net_tao_per_day + uplift) * d for d in x]
     figure = go.Figure()
     figure.add_trace(go.Scatter(x=x, y=base, name=f"current ({entries} entries)",
                                 line=dict(color=OURS, width=2)))
-    figure.add_trace(go.Scatter(x=x, y=better, name="at 12 entries",
-                                line=dict(color=WIN, width=2, dash="dot")))
+    if extra_entries > 0:
+        uplift = extra_entries * per_entry_win * 20 * tao_per_win - extra_entries * 0.34
+        better = [(net_tao_per_day + uplift) * d for d in x]
+        figure.add_trace(go.Scatter(x=x, y=better, name="at 12 entries",
+                                    line=dict(color=WIN, width=2, dash="dot")))
+    else:
+        figure.add_annotation(
+            text=f"fleet already at {entries} entries -- no further-growth scenario to show",
+            xref="paper", yref="paper", x=0.5, y=0.95, showarrow=False,
+            font=dict(color=MUTED, size=11),
+        )
     figure.add_hline(y=0, line=dict(color=MUTED, dash="dash"))
     figure.update_layout(**LAYOUT)
     figure.update_yaxes(title="cumulative TAO", gridcolor="#242a36")

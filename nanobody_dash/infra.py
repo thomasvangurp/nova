@@ -30,6 +30,13 @@ from pathlib import Path
 
 ROOT = "https://console.vast.ai/api/v0"
 KEYCHAIN_CANDIDATES = ("vast.ai", "vastai-api")
+# Confirmed 2026-10-02: these are two DIFFERENT Vast.ai accounts, not one
+# account under two label patterns. "vastai-api" is production (SN68
+# nanobody/compound/blueprint boxes); "vast.ai" is a separate account for
+# unrelated bank/signal boxes. vast_key() picking only the first available
+# (alphabetically "vast.ai") silently dropped production's ~$70/day entirely.
+PRODUCTION_VAST_SERVICE = "vastai-api"
+BANK_BOXES_VAST_SERVICE = "vast.ai"
 AWS_ACCOUNT = "668100850015"
 AWS_BILLING_REGION = "us-east-1"
 AWS_WORKLOAD_REGION = "us-east-2"
@@ -373,6 +380,25 @@ def vast_key(services=KEYCHAIN_CANDIDATES) -> tuple[str, str]:
     raise InfraError(f"no Keychain item among {services}")
 
 
+def vast_keys(services=KEYCHAIN_CANDIDATES) -> dict[str, str]:
+    """Return {service_name: key} for every candidate Keychain item that
+    resolves. Unlike vast_key() (stops at the first hit), this reads ALL
+    available accounts: confirmed 2026-10-02 "vastai-api" and "vast.ai" are
+    two genuinely different Vast.ai accounts (production SN68 boxes vs.
+    unrelated bank/signal boxes), not one account under two label patterns,
+    so vast_key() picking only the first one silently dropped the other
+    account's spend entirely (undercounted production by ~$70/day since the
+    bank-boxes account happened to resolve first)."""
+    found = {}
+    for service in services:
+        key = _keychain(service)
+        if key:
+            found[service] = key
+    if not found:
+        raise InfraError(f"no Keychain item among {services}")
+    return found
+
+
 def vast_get(path: str, key: str, timeout: int = 45):
     request = urllib.request.Request(
         f"{ROOT}/{path.lstrip('/')}",
@@ -436,6 +462,22 @@ def funding_events(key: str, days: int = 14) -> list[dict]:
     return [dict(day=d, funded_usd=v) for d, v in sorted(daily.items())]
 
 
+#: SN68 compound: five dedicated per-reaction boxes, confirmed 2026-10-02
+#: against the live Vast.ai instance list -- each is labelled
+#: "nova-rxn{1-5}-nim-4x4090" (some with a "-v2" suffix from a later
+#: redeploy). The label is Vast.ai account metadata, not visible from inside
+#: the container itself, so this must match the API's own `label` field, not
+#: anything read off the box. Deliberately anchored ("nova-rxn[1-5]-nim-"
+#: at the start) rather than a loose substring match, so a one-off same-
+#: numbered experiment box (e.g. "nova-rxn3-enrichment-control-20260924",
+#: seen running alongside the real production boxes) does NOT get counted
+#: as production compound cost.
+import re as _re
+
+_COMPOUND_LABEL = _re.compile(r"^nova-rxn[1-5]-nim-4x4090(-v\d+)?$")
+_BLUEPRINT_LABEL = _re.compile(r"^blueprint-")
+
+
 def cost_scope(label: str | None,
                production_labels: tuple[str, ...] = ("nova-nanobody-pixi",),
                nanobody_research_labels: tuple[str, ...] = ()) -> str:
@@ -449,6 +491,10 @@ def cost_scope(label: str | None,
     }
     if text in research_exact:
         return "sn68-research"
+    if _COMPOUND_LABEL.match(text):
+        return "sn68-compound"
+    if _BLUEPRINT_LABEL.match(text):
+        return "blueprint"
     if text:
         return "research"
     return "unattributed"
@@ -457,17 +503,26 @@ def cost_scope(label: str | None,
 def record_vast_runtime(connection, live: dict,
                         production_labels: tuple[str, ...],
                         nanobody_research_labels: tuple[str, ...] = (),
+                        extra_research_live: dict | None = None,
                         sampled_at: float | None = None) -> dict:
     """Sample scoped burn and publish a per-day rate for each scope.
 
     Samples are the authoritative spend record going forward.  The daily
     figure is the mean observed hourly rate times 24, matching the dashboard's
     revenue-rate units.  Funding payments are deliberately not consulted.
+
+    extra_research_live: a SECOND Vast.ai account's live instance list (the
+    bank-boxes account, confirmed 2026-10-02 to be a genuinely different
+    account from production) whose spend counts as the "bank" scope. Read
+    directly rather than through cost_scope(): that classifier's label
+    patterns are SN68/nanobody-specific, and a loose "bank" label match would
+    misclassify these just because their names happen to also contain "bank".
     """
     stamp = int((sampled_at or time.time()) // 60 * 60)
     totals: dict[str, dict] = {
         scope: dict(usd_per_hour=0.0, running_instances=0, gpus=0)
-        for scope in ("sn68-prod", "sn68-research", "research", "unattributed")
+        for scope in ("sn68-prod", "sn68-research", "sn68-compound",
+                      "blueprint", "bank", "research", "unattributed")
     }
     for machine in live.get("instances") or []:
         if machine.get("state") not in ("running", "loading"):
@@ -476,6 +531,13 @@ def record_vast_runtime(connection, live: dict,
             machine.get("label"), production_labels, nanobody_research_labels,
         )
         bucket = totals[scope]
+        bucket["usd_per_hour"] += float(machine.get("dph") or 0)
+        bucket["running_instances"] += 1
+        bucket["gpus"] += int(machine.get("num_gpus") or 0)
+    for machine in (extra_research_live or {}).get("instances") or []:
+        if machine.get("state") not in ("running", "loading"):
+            continue
+        bucket = totals["bank"]
         bucket["usd_per_hour"] += float(machine.get("dph") or 0)
         bucket["running_instances"] += 1
         bucket["gpus"] += int(machine.get("num_gpus") or 0)
@@ -532,7 +594,11 @@ def load_cloud_config(path: Path) -> dict:
     aws.setdefault("project", "SN2")
     aws.setdefault("billing_region", AWS_BILLING_REGION)
     aws.setdefault("workload_region", AWS_WORKLOAD_REGION)
-    aws.setdefault("history_days", 90)
+    # Cap the Cost Explorer history window: get-cost-and-usage with
+    # --group-by SERVICE,USAGE_TYPE truncates past ~80 days (the provider
+    # group limit), silently dropping the most recent month's EC2 compute and
+    # zeroing the bill cell. 60 days stays well under that ceiling.
+    aws.setdefault("history_days", 60)
     aws.setdefault("refresh_hours", 6)
     payments = config.setdefault("payments", {})
     payments.setdefault("cloud_funding_source", "Krak virtual card")
@@ -584,15 +650,44 @@ def main() -> int:
     state["payments"] = config.get("payments") or {}
     report: dict = {}
     try:
-        key, service = vast_key()
-        report["keychain_service"] = service
-        live = running_cost(key)
+        keys = vast_keys()
+        production_service = (
+            PRODUCTION_VAST_SERVICE if PRODUCTION_VAST_SERVICE in keys
+            else next(iter(keys)))
+        production_key = keys[production_service]
+        report["keychain_service"] = production_service
+        live = running_cost(production_key)
         report["vast_usd_per_day_now"] = live["usd_per_day"]
         report["vast_instances"] = len(live["instances"])
         report["vast_running"] = sum(1 for i in live["instances"]
                                      if i["state"] in ("running", "loading"))
-        funding = funding_events(key, arguments.days)
+        funding = funding_events(production_key, arguments.days)
         report["vast_funding_days"] = len(funding)
+
+        # Bank-boxes account, tracked separately but folded into the
+        # "research" scope (see record_vast_runtime's extra_research_live).
+        # Missing/unreachable is non-fatal -- production tracking must not
+        # break because the second account's Keychain item is absent.
+        #
+        # Verified 2026-10-02: after refreshing the stale "vastai-api" item,
+        # the two Keychain items turned out to be byte-identical -- one
+        # real account, not two. Guard against double-counting the SAME
+        # instances into both the normal scope AND "research" if that is
+        # ever true again (whether because they're the same key, or two
+        # different keys that happen to resolve to the same account).
+        bank_boxes_key = keys.get(BANK_BOXES_VAST_SERVICE)
+        bank_boxes_live = None
+        if bank_boxes_key and bank_boxes_key == production_key:
+            report["bank_boxes_same_account_as_production"] = True
+        elif bank_boxes_key:
+            try:
+                bank_boxes_live = running_cost(bank_boxes_key)
+                report["bank_boxes_usd_per_day_now"] = bank_boxes_live["usd_per_day"]
+                report["bank_boxes_running"] = sum(
+                    1 for i in bank_boxes_live["instances"]
+                    if i["state"] in ("running", "loading"))
+            except InfraError as error:
+                report["bank_boxes_error"] = str(error)[:200]
         # Remove only the derived rows created by the former incorrect
         # invoice-as-spend interpretation. The raw provider response was never
         # stored, and no payment or provider data is changed.
@@ -612,6 +707,7 @@ def main() -> int:
         )
         scoped = record_vast_runtime(
             connection, live, production_labels, nanobody_research_labels,
+            extra_research_live=bank_boxes_live,
         )
         by_project = cost_by_project(
             live, production_labels, nanobody_research_labels,
@@ -631,11 +727,30 @@ def main() -> int:
             sn68_research_usd_per_day=round(
                 float(scoped["sn68-research"]["usd_per_hour"]) * 24, 2
             ),
+            sn68_compound_usd_per_day=round(
+                float(scoped["sn68-compound"]["usd_per_hour"]) * 24, 2
+            ),
             research_usd_per_day=round(
                 float(scoped["research"]["usd_per_hour"]) * 24, 2
             ),
             unattributed_usd_per_day=round(
                 float(scoped["unattributed"]["usd_per_hour"]) * 24, 2
+            ),
+            blueprint_usd_per_day=round(
+                float(scoped["blueprint"]["usd_per_hour"]) * 24, 2
+            ),
+            bank_usd_per_day=round(
+                float(scoped["bank"]["usd_per_hour"]) * 24, 2
+            ),
+            # The bank-boxes ACCOUNT (separate from the "bank" label-scope
+            # above, which is machines within the production account whose
+            # label happens to contain "bank"). Already folded into
+            # research_usd_per_day; kept here too so it's visible as its own
+            # line per the 2026-10-02 "track both accounts separately"
+            # decision.
+            bank_boxes_account_usd_per_day=(
+                round(float(bank_boxes_live["usd_per_day"]), 2)
+                if bank_boxes_live is not None else 0.0
             ),
             funding_mtd_usd=round(sum(
                 float(row["funded_usd"]) for row in funding

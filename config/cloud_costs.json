@@ -2,7 +2,7 @@
   "aws": {
     "account_id": "668100850015",
     "billing_region": "us-east-1",
-    "history_days": 90,
+    "history_days": 60,
     "profile": "polymarket",
     "project": "SN2",
     "refresh_hours": 6,
