@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -411,6 +413,101 @@ def cached_nanobody_available(a) -> bool:
     return cached.returncode == 0
 
 
+
+# 2026-10-03 (user decision): each reaction's release floor is the median of
+# that reaction's last FLOOR_WINDOW winning final_scores on the public
+# leaderboard, not a static map. Winners are cached per epoch in
+# archive/winner_cache.json (an epoch is cached only once it has a scored
+# winner), so a warm cache costs ~1 fetch per epoch. Falls back to the static
+# --minimum-compound-score-map value with fewer than FLOOR_MIN_SAMPLES winners
+# or when the API is unreachable; the network walk is time-boxed so it can
+# never eat the epoch's commit window.
+LEADERBOARD_API = "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/{epoch}/molecules?limit=10000"
+FLOOR_WINDOW = 5
+FLOOR_MIN_SAMPLES = 3
+FLOOR_LOOKBACK_EPOCHS = 150
+FLOOR_FETCH_BUDGET_SECONDS = 60
+FLOOR_BURST_LOOKBACK = 5
+FLOOR_BURST_MIN = 3
+FLOOR_OPTIMISM_MARGIN = 0.10  # user 2026-10-03: our predictions run ~0.1 above realized
+# User-pinned floors override the rolling rule (2026-10-03: rxn4 recent realized
+# winners ~1.64, so submit at 1.64 + 0.10 = 1.74).
+FLOOR_PINNED: dict = {}
+
+
+def _epoch_winner(epoch: int, cache: dict, deadline: float):
+    key = str(epoch)
+    if key in cache:
+        return cache[key]
+    if time.time() > deadline:
+        return None
+    import urllib.request
+    try:
+        request = urllib.request.Request(LEADERBOARD_API.format(epoch=epoch),
+                                         headers={"User-Agent": "nova-pi-loop/1"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            rows = json.load(response).get("data") or []
+    except Exception:
+        return None
+    scored = [r for r in rows if (r.get("final_score") or -999) > -999]
+    reactions = {}
+    for row in rows:
+        for molecule in row.get("molecules") or []:
+            parts = str(molecule.get("name", "")).split(":")
+            if len(parts) > 1 and parts[0] == "rxn" and parts[1].isdigit():
+                reactions[int(parts[1])] = reactions.get(int(parts[1]), 0) + 1
+    if not scored or not reactions:
+        return None  # not scored yet -- do not cache, look again next time
+    entry = {"reaction": max(reactions, key=reactions.get),
+             "winner": max(float(r["final_score"]) for r in scored)}
+    cache[key] = entry
+    return entry
+
+
+def dynamic_floor(reaction: int, epoch: int, static: float) -> tuple[float, dict]:
+    if reaction in FLOOR_PINNED:
+        return FLOOR_PINNED[reaction], {"source": "user_pinned", "static": static}
+    import statistics
+    cache_path = ROOT / "archive" / "winner_cache.json"
+    try:
+        cache = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    deadline = time.time() + FLOOR_FETCH_BUDGET_SECONDS
+    burst_hits = 0
+    for past in range(epoch - 1, epoch - 1 - FLOOR_BURST_LOOKBACK, -1):
+        if past < 0:
+            break
+        entry = _epoch_winner(past, cache, deadline)
+        if entry and entry["reaction"] == reaction:
+            burst_hits += 1
+    winners = []
+    for past in range(epoch - 1, max(0, epoch - 1 - FLOOR_LOOKBACK_EPOCHS), -1):
+        entry = _epoch_winner(past, cache, deadline)
+        if entry and entry["reaction"] == reaction:
+            winners.append((past, entry["winner"]))
+            if len(winners) >= FLOOR_WINDOW:
+                break
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cache))
+        tmp.replace(cache_path)
+    except OSError:
+        pass
+    info = {"window": FLOOR_WINDOW, "samples": len(winners), "static": static,
+            "winners": [[e, round(w, 4)] for e, w in winners]}
+    if len(winners) < FLOOR_MIN_SAMPLES:
+        return static, {**info, "source": "static_fallback"}
+    if burst_hits >= FLOOR_BURST_MIN:
+        last = winners[0][1]
+        return round(last + FLOOR_OPTIMISM_MARGIN, 4), {**info, "last": round(last, 4),
+               "margin": FLOOR_OPTIMISM_MARGIN, "source": "burst_last_plus_margin"}
+    median = statistics.median(w for _, w in winners)
+    return round(median + FLOOR_OPTIMISM_MARGIN, 4), {**info, "median": round(median, 4),
+           "margin": FLOOR_OPTIMISM_MARGIN, "source": "rolling_median_plus_margin"}
+
+
 def handle_epoch(a, view, epoch, block, end, covered, state):
     if True:
         producer_stopped = state["producer_stopped"]
@@ -421,7 +518,9 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         # molecules only when we actually hold a rescored bank for this reaction
         have_molecules = False
         if view["reaction"] in covered:
-            floor = a.score_floor.get(view["reaction"], a.minimum_compound_score)
+            floor, floor_info = dynamic_floor(
+                view["reaction"], epoch, a.score_floor.get(view["reaction"], a.minimum_compound_score))
+            say(event="dynamic_floor", epoch=epoch, reaction=view["reaction"], floor=floor, **floor_info)
             made = subprocess.run(
                 [sys.executable, str(ROOT / "tools/make_fleet.py"),
                  "--epoch", str(epoch), "--reaction", str(view["reaction"]),
@@ -437,6 +536,59 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
             have_molecules = made.returncode == 0
         else:
             say(event="reaction_not_covered", reaction=view["reaction"])
+
+        # A one-shot check at window-open misses later improvement: the bank
+        # keeps growing (nova-bank-pull.timer, every 5 minutes) during the ~9
+        # minutes the Pi then spends only waiting on the nanobody producer,
+        # and nothing ever looks again. Confirmed live: epoch 25474 missed its
+        # floor here by 0.093 (1.4668 vs 1.56), then the box's own bank read
+        # 1.565 just seven minutes later -- a result that would have cleared.
+        # Re-run the same check once more in the BACKGROUND rather than
+        # serially before commit: the final commit already sits inside a
+        # ~120s margin before the chain deadline (late_commit_margin_seconds),
+        # and make_fleet.py alone took ~2 minutes above, so doing this inline
+        # would itself risk missing the deadline. Write to a per-epoch
+        # directory, never the shared release/ path, so this can never race a
+        # write against the primary check above (make_fleet.py's own output
+        # write is a plain json.dump, not atomic) if the thread is still
+        # running when the NEXT epoch starts its own first check.
+        recheck_thread = None
+        recheck_result: dict = {}
+        recheck_out = ROOT / f"release-recheck-{epoch}"
+        if not have_molecules and view["reaction"] in covered and a.on_submit_host:
+            # A SINGLE fixed-delay recheck is not enough: confirmed live
+            # 2026-10-02, epoch 25477 (reaction 3) -- one recheck at a fixed
+            # 5-minute delay found the bank still below baseline, logged
+            # nothing (no "cleared", but also no "still didn't clear" event
+            # existed to say so -- fixed below too), and the bank crossed
+            # the floor sometime in the ~3 minutes AFTER that single check,
+            # unseen, right before commit. Retry on a cadence instead,
+            # roughly matching nova-bank-pull.timer's 5-minute refresh, for
+            # as long as the epoch's own deadline safely allows.
+            def _recheck(reaction=view["reaction"], floor=floor):
+                reserve = commit_reserve(len(view["crew"]))
+                recheck_deadline = time.time() + max(0, end - reserve - block) * 12
+                safety_margin = 90  # stop attempting this long before commit
+                attempt = 0
+                time.sleep(150)  # first look: give one bank-pull cycle a head start
+                while time.time() < recheck_deadline - safety_margin:
+                    attempt += 1
+                    r = subprocess.run(
+                        [sys.executable, str(ROOT / "tools/make_fleet.py"),
+                         "--epoch", str(epoch), "--reaction", str(reaction),
+                         "--crew", str(crew_path), "--python", a.rdkit_python,
+                         "--minimum-score", str(floor),
+                         "--bank", str(ROOT / "bank.sqlite"),
+                         "--out", str(recheck_out), "--fleet-tree", str(ROOT)],
+                        capture_output=True, text=True, timeout=1200)
+                    recheck_result["returncode"] = r.returncode
+                    recheck_result["stdout"] = r.stdout
+                    recheck_result["attempts"] = attempt
+                    if r.returncode == 0:
+                        return
+                    time.sleep(150)
+            recheck_thread = threading.Thread(target=_recheck, daemon=True)
+            recheck_thread.start()
 
         # crew.json is the LIVE metagraph view and must be published EVERY
         # epoch. Publishing it only alongside a molecule release meant that on
@@ -534,11 +686,64 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         else:
             start_command = None
 
+        # Collect the background recheck started above, non-blocking: use it
+        # only if it already finished by now (it has had the whole producer
+        # wait, typically ~9 minutes, against its own 300s delay + ~2 minute
+        # run -- comfortably done). If it is still running this close to
+        # commit, leave it running and leave have_molecules as the original
+        # decision; never delay the chain commit waiting on it.
+        if recheck_thread is not None:
+            recheck_thread.join(timeout=0)
+            if recheck_thread.is_alive():
+                # Still running its own subprocess inside recheck_out -- never
+                # rmtree a directory a live process is writing into. Leave it;
+                # it is daemon and per-epoch-named, so it cannot collide with
+                # any later epoch's own recheck directory.
+                say(event="release_recheck_still_running", epoch=epoch)
+            else:
+                if recheck_result.get("returncode") == 0:
+                    for line in recheck_result.get("stdout", "").strip().splitlines():
+                        if line.startswith("{"):
+                            say(**json.loads(line))
+                    recheck_fleet = recheck_out / "compound_fleet.json"
+                    if recheck_fleet.is_file():
+                        shutil.copy(recheck_fleet, ROOT / "release" / "compound_fleet.json")
+                        have_molecules = True
+                        publish(a, ["compound_fleet.json"])
+                        say(event="release_recheck_cleared", epoch=epoch,
+                            reaction=view["reaction"],
+                            why="bank improved during the producer wait")
+                elif "attempts" in recheck_result:
+                    # Previously silent -- made this case undiagnosable
+                    # without inferring it from an absence of log lines
+                    # (confirmed live 2026-10-02, epoch 25477: ran, found
+                    # nothing, logged nothing, looked identical to "never
+                    # ran" from the log alone).
+                    say(event="release_recheck_no_change", epoch=epoch,
+                        reaction=view["reaction"],
+                        attempts=recheck_result["attempts"])
+                shutil.rmtree(recheck_out, ignore_errors=True)
+
         code, _ = stream(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
                              f"--epoch {epoch} --reaction {view['reaction']}"
                              + (" --allow-stale-nanobody" if stale_ok else ""), timeout=900)
         commit = type("R", (), {"returncode": code})()
         say(event="committed", epoch=epoch, rc=code, molecules=have_molecules)
+        # nanobody_result.json (per-uid ex-ante score_p90), crew.json and
+        # compound_fleet.json are overwritten every epoch, so nothing recorded
+        # what we actually believed about each uid at commit time -- only 1 of
+        # 361 epochs could be backtested for fleet size (2026-10-02). Keep the
+        # exact committed inputs per epoch.
+        if a.on_submit_host:
+            archived = ROOT / "archive" / f"epoch{epoch}"
+            archived.mkdir(parents=True, exist_ok=True)
+            names = ["nanobody_result.json", "crew.json"] + (
+                ["compound_fleet.json"] if have_molecules else [])
+            for name in names:
+                source = Path("/opt/nova-submit") / name
+                if source.is_file():
+                    shutil.copy2(source, archived / name)
+            say(event="archived", epoch=epoch, files=names)
 
         if commit.returncode and start_command:
             import shlex
