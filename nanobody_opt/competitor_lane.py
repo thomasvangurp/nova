@@ -48,12 +48,19 @@ def _load_pool(archive: Path) -> list[str]:
 def generate(archive: Path, positions: list[int], limit: int | None,
              pool_limit: int = 2000) -> dict[str, Any]:
     pool = _load_pool(archive)
+    # Nanobodies vary in length; the hot positions are measured against the
+    # modal-length sequence, so restrict the pool to that length (a single
+    # allowed-residue table must match every parent).
+    from collections import Counter
+
+    modal_length = Counter(len(s) for s in pool).most_common(1)[0][0]
+    pool = [s for s in pool if len(s) == modal_length]
     # The archive is append-only (oldest -> newest) and ~130k sequences; the
     # recent tail is the current field. Sample it down so the single-edit
     # fan-out (pool x positions x residues) stays bounded.
     if pool_limit and len(pool) > pool_limit:
         pool = pool[-pool_limit:]
-    length = len(pool[0])
+    length = modal_length
     # Any standard residue is a valid single substitution at a hot position;
     # the downstream layer2/dedup gates do the actual quality filtering.
     allowed = [sorted(gates.ALLOWED_AAS) for _ in range(length)]
