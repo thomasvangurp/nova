@@ -134,11 +134,10 @@ _OUTCOME_SYMBOL = {
 
 
 def fig_gap_history(gap_rows, recent_history) -> go.Figure:
-    """Each reaction's submission-readiness (selected_score - floor) over
-    time, plus markers for real epoch draws from the Pi's own log. Gap, not
-    raw score: the 5 reactions have different floors (1.61-1.95), so gap
-    gives one shared, zero-anchored axis where 0 always means "at the floor"
-    regardless of reaction -- same zero-line idiom as fig_subnet_pnl_history.
+    """Each reaction's submission-readiness in ABSOLUTE score: solid line =
+    selected_score over time, dashed line (same colour) = the required margin
+    (floor). Where the solid crosses above the dashed we clear the bar. Plus
+    markers for real epoch draws from the Pi's own log.
     """
     if not gap_rows:
         return _empty("No gap-check history recorded yet")
@@ -146,21 +145,31 @@ def fig_gap_history(gap_rows, recent_history) -> go.Figure:
     for reaction in sorted({row["reaction"] for row in gap_rows}):
         series = [row for row in gap_rows if row["reaction"] == reaction]
         colour = REACTION_COLOURS.get(reaction)
+        xs = [dt.datetime.fromtimestamp(row["checked_at"], dt.timezone.utc)
+              for row in series]
         figure.add_trace(go.Scatter(
-            x=[dt.datetime.fromtimestamp(row["checked_at"], dt.timezone.utc)
-               for row in series],
-            y=[row["gap"] for row in series],
+            x=xs, y=[row["selected_score"] for row in series],
             name=f"rxn {reaction}", mode="lines+markers",
             line=dict(color=colour, width=2.2), marker=dict(size=5),
             legendgroup=f"rxn{reaction}",
             hovertemplate=(
-                "%{x}<br>rxn " + str(reaction) + ": %{y:+.4f}<extra></extra>"
+                "%{x}<br>rxn " + str(reaction) + " score: %{y:.4f}<extra></extra>"
+            ),
+        ))
+        # required margin as a separate same-colour dashed line
+        figure.add_trace(go.Scatter(
+            x=xs, y=[row["floor"] for row in series],
+            name=f"rxn {reaction} margin", mode="lines",
+            line=dict(color=colour, width=1.4, dash="dash"),
+            legendgroup=f"rxn{reaction}", showlegend=False,
+            hovertemplate=(
+                "%{x}<br>rxn " + str(reaction) + " margin: %{y:.4f}<extra></extra>"
             ),
         ))
         epoch_points = [
             row for row in recent_history
             if row.get("reaction") == reaction and row.get("at") is not None
-               and row.get("gap") is not None
+               and row.get("selected_score") is not None
         ]
         if not epoch_points:
             continue
@@ -173,14 +182,52 @@ def fig_gap_history(gap_rows, recent_history) -> go.Figure:
         figure.add_trace(go.Scatter(
             x=[dt.datetime.fromtimestamp(row["at"], dt.timezone.utc)
                for row in epoch_points],
-            y=[row["gap"] for row in epoch_points],
+            y=[row["selected_score"] for row in epoch_points],
             name=f"rxn {reaction} epochs", mode="markers",
             marker=dict(color=colour, size=11, symbol=symbols,
                         line=dict(width=1.5, color=PAPER)),
             legendgroup=f"rxn{reaction}",
             customdata=[row["epoch"] for row in epoch_points],
             hovertemplate=(
-                "%{x}<br>epoch %{customdata}: %{y:+.4f}<extra></extra>"
+                "%{x}<br>epoch %{customdata}: %{y:.4f}<extra></extra>"
+            ),
+        ))
+    layout = dict(LAYOUT)
+    layout["hovermode"] = "closest"
+    layout["hoverdistance"] = -1
+    figure.update_layout(**layout)
+    figure.update_yaxes(title="score (solid) vs required margin (dashed)", gridcolor="#242a36")
+    figure.update_xaxes(title="time (UTC)", gridcolor="#242a36", type="date")
+    return figure
+
+
+def fig_proxy_accuracy(rows) -> go.Figure:
+    """Each reaction's proxy model accuracy (Spearman rho on a held-out
+    split) across retrain cycles. Separate from fig_gap_history: that is
+    submission readiness (is the selected portfolio good enough), this is
+    whether the model DRIVING candidate search is actually getting more
+    accurate as it retrains -- no accuracy metric existed anywhere in the
+    retraining pipeline before 2026-10-02, so this starts empty and
+    accumulates one point per reaction per ~4h retrain cycle going forward.
+    """
+    if not rows:
+        return _empty("No proxy accuracy history recorded yet")
+    figure = go.Figure()
+    for reaction in sorted({row["reaction"] for row in rows}):
+        series = [row for row in rows if row["reaction"] == reaction]
+        colour = REACTION_COLOURS.get(reaction)
+        figure.add_trace(go.Scatter(
+            x=[dt.datetime.fromtimestamp(row["at"], dt.timezone.utc)
+               for row in series],
+            y=[row["rho"] for row in series],
+            name=f"rxn {reaction}", mode="lines+markers",
+            line=dict(color=colour, width=2.2), marker=dict(size=6),
+            customdata=[[row.get("mae"), row.get("n"), row.get("train_rows")]
+                        for row in series],
+            hovertemplate=(
+                "%{x}<br>rxn " + str(reaction) + " rho: %{y:.4f}"
+                "<br>mae: %{customdata[0]:.4f} · n: %{customdata[1]} · "
+                "train_rows: %{customdata[2]}<extra></extra>"
             ),
         ))
     figure.add_hline(y=0, line=dict(color=MUTED, dash="dash"))
@@ -188,7 +235,7 @@ def fig_gap_history(gap_rows, recent_history) -> go.Figure:
     layout["hovermode"] = "closest"
     layout["hoverdistance"] = -1
     figure.update_layout(**layout)
-    figure.update_yaxes(title="gap to floor (selected_score - floor)", gridcolor="#242a36")
+    figure.update_yaxes(title="held-out Spearman rho", gridcolor="#242a36")
     figure.update_xaxes(title="time (UTC)", gridcolor="#242a36", type="date")
     return figure
 

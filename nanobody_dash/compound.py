@@ -456,38 +456,33 @@ FLOOR_BURST_MIN = 3  # must match pi_epoch_loop.py
 
 
 def _dynamic_floors(next_epoch: int) -> dict:
-    """Same rule as the Pi (pi_epoch_loop.dynamic_floor): track the RECENT
-    field, not the multi-day field. Non-burst: median of the reaction's last
-    FLOOR_WINDOW winning scores before next_epoch. Burst (the reaction was the
-    challenge in >= FLOOR_BURST_MIN of the last FLOOR_BURST_LOOKBACK epochs --
-    rivals are draining their banks): use the most recent winner ("threshold of
-    the last one"), which in an exhausted field sits below the median and lets
-    us submit when the field has nothing left. Plus FLOOR_OPTIMISM_MARGIN (our
-    offline predictions run ~0.10 above realized). Falls back to the static
-    REACTION_BOXES floor per reaction."""
+    """Required margin per reaction from the rival-supply model, the same rule
+    the Pi's dynamic_floor enforces (rival_margin.required_margin): per-rival
+    projected winner + curse + z*residual + per-reaction bias. Reads the Pi's
+    rival_cache.json. Falls back to the static REACTION_BOXES floor."""
     floors = {r: REACTION_BOXES[r][2] for r in REACTION_BOXES}
-    text = _ssh(PI_HOST, "cat", "/opt/nova-submit/archive/winner_cache.json", timeout=30)
+    text = _ssh(PI_HOST, "cat", "/opt/nova-submit/archive/rival_cache.json", timeout=60)
     try:
         cache = json.loads(text) if text else {}
     except ValueError:
         cache = {}
-    import statistics
-    entries = sorted(((int(k), v) for k, v in cache.items()
-                      if isinstance(v, dict) and v.get("reaction") is not None),
-                     key=lambda kv: kv[0])
-    recent_reactions = [v["reaction"] for e, v in entries
-                        if next_epoch - FLOOR_BURST_LOOKBACK <= e < next_epoch]
+    if not cache:
+        return floors
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import rival_margin
+    rows = []
+    for ep, arr in cache.items():
+        for r in arr:
+            rows.append({"epoch": int(ep), "coldkey": r["coldkey"],
+                         "reaction": r["reaction"], "score": r["score"]})
     for reaction in REACTION_BOXES:
-        winners = [v["winner"] for e, v in entries
-                   if e < next_epoch and v.get("reaction") == reaction][-FLOOR_WINDOW:]
         if reaction in FLOOR_PINNED:
             floors[reaction] = FLOOR_PINNED[reaction]
-        elif len(winners) >= FLOOR_MIN_SAMPLES:
-            in_burst = recent_reactions.count(reaction) >= FLOOR_BURST_MIN
-            if in_burst:
-                floors[reaction] = round(winners[-1] + FLOOR_OPTIMISM_MARGIN, 4)
-            else:
-                floors[reaction] = round(statistics.median(winners) + FLOOR_OPTIMISM_MARGIN, 4)
+            continue
+        margin, _ = rival_margin.required_margin(reaction, rows, next_epoch)
+        if margin is not None:
+            floors[reaction] = margin
     return floors
 
 

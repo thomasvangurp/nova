@@ -726,9 +726,16 @@ TABS = [
         ("Infrastructure charges per day", "Daily operational cloud charges by provider and cost category. The one-time Ohio migration is retained in the AWS bill reconciliation but excluded here and from net operating economics.", "cloud_daily"),
         ("Money history", "Daily mining revenue, registration burn, total infrastructure spend, and net result. Provider and service detail is kept in the infrastructure panels above.", "money_history"),
         ("Current yield rate", "Whole-window daily rate by subnet, retained as the current summary beside the daily history.", "pnl"),
-        ("Infrastructure against revenue", "vast.ai burn per project versus what that project earns. Compound is an investment that has not paid off yet.", "infra"),
+        ("Infrastructure against revenue", "vast.ai burn per project versus what that project earns, both as a 5-day trailing average (not a single current snapshot, which swings with whatever happens to be running at build time). Compound's real cost is split out separately from nanobody (5 dedicated per-reaction boxes); its revenue bar reads $0 because SN68's balance tracking cannot separate compound-track alpha from nanobody-track alpha, not because compound has actually earned nothing -- it has won 3 times on real on-chain data (see the Compound tab), those wins just are not yet quantifiable in this dollar figure.", "infra"),
         ("Projection", "Forward cumulative TAO at the current net rate, and at a 12-entry fleet.", "projection"),
         ("Slot purchases", "Every purchase grouped by UTC day: actual spend, median unit price and registration count.", "slots"),
+    ]),
+    ("compound", "Compound", [
+        ("Submission readiness", "Per-reaction real historical clear rate against the Pi's actual submission log, real win count (rank 1 on the live leaderboard, not just clearing the local gate), and the live gate check: the Pi's actual release gate (same code, byte-identical) run against each reaction's current bank for the next epoch -- novelty vs the public archive, recently-submitted molecules excluded, >=3 rescore passes, entropy-constrained top-20. Rechecked every ~10 min (time of the check shown per row); the score only moves when a box ingests new rescored molecules, so an unchanged number usually means the bank has not changed, not that the check is stale.", "compound_status"),
+        ("Submission readiness growth", "Each reaction's absolute score over time (solid line) against its required margin (dashed line, same colour) -- where the solid crosses above the dashed we clear the bar. The margin is the rival-supply floor (per-rival projected winner + curse + z*residual). Markers for real epoch draws from the Pi's own log (filled diamond = cleared and won, open diamond = cleared, x = blocked). The score line only accumulates forward from first deploy; the epoch markers do not have that limit -- see 'Reading this tab' below.", "gap_history"),
+        ("Proxy model accuracy", "Held-out Spearman correlation between each reaction's proxy model and real scores, measured fresh after every ~4h retrain cycle (held_out_proxy_eval.py, wired into the live retrain loop 2026-10-02 -- no accuracy metric existed anywhere before this). Answers whether the model driving candidate search is actually getting more accurate over time, separately from whether the selected portfolio clears the floor. Starts empty and accumulates one point per reaction per retrain cycle going forward.", "proxy_accuracy"),
+        ("Recent submission history", "Every unique epoch drawn for compound, most recent first: cleared and won, cleared and lost, or blocked by the baseline gate. For epochs we submitted, the validator's realized score (our best uid's final_score, same 20-molecule-sum scale as our prediction) next to our predicted selection score and the epoch winner's score, plus our real on-chain rank.", "compound_history"),
+        ("Reading this tab", "Context for interpreting the numbers above -- particularly why clearing a reaction's baseline is not the same as a likely win.", "compound_caveat"),
     ]),
 ]
 
@@ -808,7 +815,7 @@ def main() -> int:
         print(json.dumps(dict(error="no epochs collected; run nanobody_dash.collect")))
         return 1
 
-    from . import economics, money, panels
+    from . import compound, economics, money, panels, proxy_accuracy
     connection = sqlite3.connect(arguments.database)
     tao_usd = economics.resolve_tao_usd(connection, arguments.tao_usd)
     burn = money.registration_burn(connection, 8)
@@ -822,11 +829,63 @@ def main() -> int:
     cloud_state_path = Path("data/cloud_costs.json")
     cloud_state = json.loads(cloud_state_path.read_text()) \
         if cloud_state_path.is_file() else {}
-    # revenue is attributed to the project that produced it, not the subnet:
-    # the nanobody box earns SN68, the compound boxes have earned nothing yet
+    # revenue is attributed to the project that produced it, not the subnet.
+    # SN68's balance-delta revenue tracking (money.subnet_pnl*) cannot
+    # currently separate nanobody-track alpha from compound-track alpha --
+    # both land in the same netuid-68 balance, with no on-chain field that
+    # attributes a specific emission to one submission track or the other.
+    # Compound is NOT actually revenue-zero: confirmed 2026-10-02 against the
+    # real leaderboard, compound has won (rank 1) 3 times historically
+    # (epochs 25382/rxn3, 25425/rxn2, 25455/rxn5) out of roughly 226 tracked
+    # draws -- see the Compound tab for the real win history. Shown as 0.0
+    # here because that win value isn't separably quantifiable with the
+    # current balance-based tracking, not because it is actually zero --
+    # do not read the Money tab's compound bar as "earns nothing."
     revenue = {"sn68-prod": next((r["net_usd_per_day"] for r in pnl
                                   if r["netuid"] == 68), 0.0),
-               "research": 0.0, "unattributed": 0.0}
+               "sn68-compound": 0.0, "research": 0.0, "unattributed": 0.0}
+
+    # "Infrastructure against revenue" shows a 5-day TRAILING AVERAGE, not a
+    # single current snapshot -- a live instantaneous read swings with
+    # whatever happens to be running at build time and read as a confusing,
+    # noisy chart from one rebuild to the next (flagged 2026-10-02). Reuses
+    # the same daily-bucketed data the "Infrastructure cost, daily" and
+    # "Daily yield" panels already compute (infrastructure_history,
+    # pnl_history), not a new query. Also renames "sn68-prod" to "nanobody"
+    # here -- it was reading as "all of SN68", easy to confuse with the
+    # pnl chart's "SN68 NOVA" row, when it specifically means the nanobody
+    # track (compound has its own bar right next to it).
+    recent_cost_days = sorted({row["day"] for row in infrastructure_history})[-5:]
+    cost_5d: dict[str, list[float]] = {"nanobody": [], "compound": []}
+    for row in infrastructure_history:
+        if row["day"] not in recent_cost_days:
+            continue
+        cost_5d["nanobody"].append(float(row["infrastructure"].get("vast.ai:sn68-prod", 0)))
+        cost_5d["compound"].append(float(row["infrastructure"].get("vast.ai:sn68-compound", 0)))
+    recent_pnl_days = sorted({row["day"] for row in pnl_history if row["netuid"] == 68})[-5:]
+    revenue_68 = [row["net_usd_per_day"] for row in pnl_history
+                  if row["netuid"] == 68 and row["day"] in recent_pnl_days]
+    split_5d = {
+        "nanobody": dict(
+            usd_per_day=(sum(cost_5d["nanobody"]) / len(cost_5d["nanobody"]))
+                        if cost_5d["nanobody"] else 0.0,
+            boxes=split.get("sn68-prod", {}).get("boxes", 1),
+            gpus=split.get("sn68-prod", {}).get("gpus", 8),
+        ),
+        "compound": dict(
+            usd_per_day=(sum(cost_5d["compound"]) / len(cost_5d["compound"]))
+                        if cost_5d["compound"] else 0.0,
+            boxes=split.get("sn68-compound", {}).get("boxes", 5),
+            gpus=split.get("sn68-compound", {}).get("gpus", 20),
+        ),
+    }
+    revenue_5d = {
+        "nanobody": (sum(revenue_68) / len(revenue_68)) if revenue_68 else 0.0,
+        # Still not separably quantifiable from nanobody's alpha -- see the
+        # note in the panel description. Real, just not $0.
+        "compound": 0.0,
+    }
+
     net_tao = money.portfolio_tao_per_day(connection)
     vast_tao = sum(v["usd_per_day"] for v in split.values()) / tao_usd if tao_usd else 0
     entries = len(data["by_epoch"].get(max(data["epochs"]), []))
@@ -842,11 +901,19 @@ def main() -> int:
         cloud_daily=lambda: panels.fig_infrastructure_cost_history(
             infrastructure_history),
         money_history=lambda: panels.fig_money_history(money_history),
-        infra=lambda: panels.fig_infra(split, revenue),
+        infra=lambda: panels.fig_infra(split_5d, revenue_5d),
         expiry=lambda: panels.fig_hotkey_expiry(arguments.hotkeys,
                                                 current_total=current_held),
         projection=lambda: panels.fig_projection(net_tao - vast_tao, tao_usd,
-                                                 0.21, entries))
+                                                 0.21, entries),
+        compound_status=lambda: compound.compound_status_table(),
+        gap_history=lambda: panels.fig_gap_history(
+            compound.gap_history_rows(connection),
+            compound.load().get("recent_history") or []),
+        proxy_accuracy=lambda: panels.fig_proxy_accuracy(
+            proxy_accuracy.proxy_accuracy_rows(connection)),
+        compound_history=lambda: compound.compound_history_table(),
+        compound_caveat=lambda: compound.compound_caveat_note())
     out = render(data, arguments.out, extra=extra)
     print(json.dumps(dict(
         written=str(out), bytes=out.stat().st_size, epochs=len(data["epochs"]),
