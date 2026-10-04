@@ -489,33 +489,20 @@ def _run_iteration(
             "--epochs", "40",
             "--output", str(winner_priors),
         ])
-    elite_parents = producer_root / "elite_parents.json"
+    # Broad single-edit parent lane (the winning competitor's own strategy:
+    # single framework edits across the unfiltered public pool) REPLACES the
+    # elite-centric select_elite_parents bank. The single-edits flow through
+    # filter_layer2 and local_neighborhood exactly as the elite parents did.
+    elite_parents = producer_root / "competitor_parents.json"
     if not elite_parents.is_file():
         _run([
             sys.executable,
-            "-m", "nanobody_opt.select_elite_parents",
-            "--target", target,
-            "--before-epoch", str(epoch),
-            "--epochs", str(args.parent_epochs),
-            "--per-epoch", str(args.parents_per_epoch),
-            "--limit", str(args.parent_limit),
-            "--neighbor-per-epoch", str(args.neighbor_parents_per_epoch),
-            "--neighbor-distance", str(args.neighbor_parent_distance),
-            "--neighbor-limit", str(args.neighbor_parent_limit),
-            "--terminal-variants-per-residue", str(
-                args.terminal_variants_per_residue
-            ),
-            "--recent-epoch-window", str(args.recent_parent_epoch_window),
-            "--recent-anchor-limit", str(args.recent_anchor_parent_limit),
-            "--recent-neighbor-limit", str(args.recent_neighbor_parent_limit),
-            "--basin-core-limit", str(args.basin_core_limit),
-            "--basin-parent-limit", str(args.basin_parent_limit),
-            "--priority-coldkeys", str(args.priority_coldkeys),
-            "--scan-limit", str(args.parent_scan_limit),
-            "--observation-database", str(args.mutation_database),
+            "-m", "nanobody_opt.competitor_lane",
+            "--archive", str(archive),
+            "--limit", "500",
             "--output", str(elite_parents),
         ])
-    seed = producer_root / "elite_parents_layer2.json"
+    seed = producer_root / "competitor_parents_layer2.json"
     if not seed.is_file():
         _run([
             "/usr/local/bin/pixi", "run",
@@ -1180,8 +1167,8 @@ def _parser() -> argparse.ArgumentParser:
 #: Per-epoch inputs computed from the leaderboard before the epoch. A prescreen
 #: builds them one epoch early, before the previous epoch is scored, so they
 #: are rebuilt once the epoch really starts.
-PRESCREEN_STALE_INPUTS = ("winner_priors.json", "elite_parents.json",
-                          "elite_parents_layer2.json")
+PRESCREEN_STALE_INPUTS = ("winner_priors.json", "competitor_parents.json",
+                          "competitor_parents_layer2.json")
 
 
 def run_prescreen(args: argparse.Namespace, state: dict[str, Any]) -> bool:
