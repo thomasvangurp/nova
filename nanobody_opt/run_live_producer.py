@@ -609,11 +609,34 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
+        # Pre-GPU near-duplicate gate: drop candidates that are near-dups of the
+    # fresh top-50 (whole-seq >=0.95 or CDR3 >=0.85) before the race spends GPU
+    # on them. Runs under metanano (extract_cdrs for the CDR3 tier).
+    top50 = iteration_root / "top50_index.json"
+    if not top50.is_file():
+        _run([
+            "/usr/local/bin/pixi", "run",
+            "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked", "--environment", "metanano",
+            "python", "-m", "nanobody_opt.build_top50_index",
+            str(epoch), str(top50),
+        ])
+    layer2_dedup = iteration_root / "layer2_dedup.json"
+    if not layer2_dedup.is_file():
+        _run([
+            "/usr/local/bin/pixi", "run",
+            "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked", "--environment", "metanano",
+            "python", "-m", "nanobody_opt.pre_gpu_dedup",
+            "--top50", str(top50),
+            "--input", str(layer2),
+            "--output", str(layer2_dedup),
+        ])
     _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
     _run_race(args=args, state=state, iteration=iteration,
               config=config, archive=archive, target=target,
               producer_root=producer_root, iteration_root=iteration_root,
-              layer2=layer2)
+              layer2=layer2_dedup)
 
 
 def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
