@@ -538,7 +538,6 @@ def _run_iteration(
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
             "--priority-parents", str(top50),
-            "--double-edit-pairs", "5",
             "--limit", "2000",
             "--output", str(elite_parents),
         ])
