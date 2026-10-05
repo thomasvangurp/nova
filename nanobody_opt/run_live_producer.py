@@ -538,7 +538,7 @@ def _run_iteration(
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
             "--priority-parents", str(top50),
-            "--limit", "4000",
+            "--limit", "2000",
             "--output", str(elite_parents),
         ])
     seed = producer_root / "competitor_parents_layer2.json"
