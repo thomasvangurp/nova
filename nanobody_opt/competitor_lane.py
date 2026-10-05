@@ -135,7 +135,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     return {
         "source": "competitor_position_lane",
         "positions": positions,
-        "pool_size": len(parents),
+        "pool_size": len(priority_pool) + len(pool),
         "priority_pool_size": len(priority_pool),
         "sequences": [item["sequence"] for item in items],
         "candidates": items,

@@ -74,6 +74,37 @@ def rank_binders(df: pd.DataFrame, k: int = 50) -> pd.DataFrame:
     return work.sort_values("algo2_score", ascending=True).head(k)
 
 
+def _live_top50_from_db(db_path: str, *, limit: int = 50, min_obs: int = 8) -> list[str]:
+    """Our own multi-pass top-50 from the replay observations DB.
+
+    The validator's leaderboard final_score is a single-pass, one-fold score
+    (noisy); our race replays the validator scorer 20x, so the mean of those
+    replay rank-sums is the stable quality read. Lower rank sum = better.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT n.sequence, AVG(o.score) AS mean_score, COUNT(*) AS n_obs
+            FROM observations o JOIN nodes n ON o.node_id = n.id
+            WHERE n.target = 'P20809'
+              AND o.score_kind IN ('local_validator_replay_rank_sum',
+                                   'local_exact_validator_replay_rank_sum')
+            GROUP BY n.sequence
+            HAVING n_obs >= ?
+            ORDER BY mean_score ASC
+            LIMIT ?
+            """,
+            (min_obs, limit),
+        )
+        return [str(r[0]).strip().upper() for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -81,6 +112,7 @@ def main() -> int:
     current_epoch = int(sys.argv[1])
     out_path = sys.argv[2]
     epochs = int(sys.argv[3]) if len(sys.argv) > 3 else 15
+    obs_db = sys.argv[4] if len(sys.argv) > 4 else None
 
     from metanano.utils.cdr_utils import extract_cdrs  # noqa: E402
 
@@ -130,12 +162,15 @@ def main() -> int:
     frame = pd.DataFrame(rows).drop_duplicates("sequence", keep="last").reset_index(drop=True)
     top = rank_binders(frame, k=50)
     sequences = [str(s).upper() for s in top.sequence.tolist()]
-    # The live top-50 by the validator's own leaderboard score (lower final_score
-    # = higher rank): these are the current winners, and single/double edits of
-    # them still clear the dedup (the dedup reference is the full-history HF
+    # Our own multi-pass top-50 (from the replay DB): the stable quality read,
+    # not the noisy single-pass leaderboard final_score. Single/double edits of
+    # these still clear the dedup (the dedup reference is the full-history HF
     # top-50, ~30 edits from the live field).
-    live_top50 = frame.sort_values("final_score").head(50)
-    live_sequences = [str(s).upper() for s in live_top50.sequence.tolist()]
+    if obs_db:
+        live_sequences = _live_top50_from_db(obs_db)
+    else:
+        live_top50 = frame.sort_values("final_score").head(50)
+        live_sequences = [str(s).upper() for s in live_top50.sequence.tolist()]
 
     cdr3s, missed = [], 0
     for seq in sequences:

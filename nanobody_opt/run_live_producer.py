@@ -500,7 +500,7 @@ def _run_iteration(
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
             "--locked", "--environment", "metanano",
             "python", "-m", "nanobody_opt.build_top50_index",
-            str(epoch), str(top50),
+            str(epoch), str(top50), "15", str(args.mutation_database),
         ])
     # Children pool (breadth): the multi-edit elite parents, generated alongside
     # the single-edit competitor lane. Both are scored and the source column
