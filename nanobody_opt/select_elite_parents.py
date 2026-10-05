@@ -693,16 +693,7 @@ def main() -> None:
         max(args.before_epoch - args.scan_limit - 1, 0),
         -1,
     )
-    payloads: dict[int, Any] = (
-        _database_payloads(
-            args.observation_database,
-            target=args.target,
-            before_epoch=args.before_epoch,
-        )
-        if args.observation_database is not None
-        and args.observation_database.is_file()
-        else {}
-    )
+    payloads: dict[int, Any] = {}  # DB read skipped: frontier uses the API only
     api_payloads: dict[int, Any] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [executor.submit(_fetch, args.api_root, epoch) for epoch in epochs]
@@ -738,24 +729,29 @@ def main() -> None:
     complete_epochs = (
         ordered_epochs[: args.epochs] if args.epochs else ordered_epochs
     )
-    selected = select_elite_parents(
-        {epoch: payloads[epoch] for epoch in complete_epochs},
-        target=args.target,
-        per_epoch=args.per_epoch,
-        limit=args.limit,
-        neighbor_per_epoch=args.neighbor_per_epoch,
-        neighbor_distance=args.neighbor_distance,
-        neighbor_limit=args.neighbor_limit,
-        terminal_variants_per_residue=args.terminal_variants_per_residue,
-        recent_epoch_window=args.recent_epoch_window,
-        recent_anchor_limit=args.recent_anchor_limit,
-        recent_neighbor_limit=args.recent_neighbor_limit,
-        basin_core_limit=args.basin_core_limit,
-        basin_parent_limit=args.basin_parent_limit,
-        priority_coldkeys=tuple(
-            ck.strip() for ck in args.priority_coldkeys.split(",") if ck.strip()
-        ),
+    # Frontier selection: the competitive frontier (validator_final_score >= 100)
+    # instead of the slow dedup-locked basin. The score selection above is
+    # skipped (it read the DB + basin allocation, ~3 min); select from the full
+    # API pool instead.
+    _pool = {}
+    for _epoch in complete_epochs:
+        for _cand in _epoch_candidates(payloads[_epoch], target=args.target):
+            _pool.setdefault(_cand["sequence"], _cand)
+    _frontier = sorted(
+        (c for c in _pool.values() if c["validator_final_score"] >= 100),
+        key=lambda c: (c["validator_final_score"], c["sequence"]),
     )
+    selected = _frontier[: args.limit]
+    for _cand in selected:
+        _cand.setdefault("parent_source", "public_leaderboard_api")
+        _cand["parent_selection_lane"] = "frontier"
+        _cand.setdefault("nearest_elite_distance", 0)
+        _cand.setdefault("public_observations", [{
+            "epoch": 0, "epoch_rank": 0,
+            "validator_final_score": _cand["validator_final_score"],
+        }])
+    print(f"frontier selection: pool={len(_pool)} frontier={len(_frontier)} "
+          f"selected={len(selected)}", flush=True)
     if not selected:
         raise SystemExit("no complete public nanobody parents were available")
     _atomic_json(args.output, {
