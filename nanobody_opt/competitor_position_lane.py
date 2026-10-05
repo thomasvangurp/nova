@@ -100,3 +100,37 @@ def competitor_position_candidates(
         ).items():
             results.setdefault(candidate, {"parent": parent, "position": position})
     return results
+
+
+def double_position_candidates(
+    parent: str,
+    *,
+    allowed: list[list[str]],
+    positions: list[int],
+    pair_limit: int,
+) -> dict[str, tuple[int, int]]:
+    """Two-substitution candidates at pairs of the given 1-indexed positions.
+
+    Two edits still clear the validator's dedup (the dedup reference is the
+    full-history HF top-50, ~30 edits from the live field), and landing both at
+    the rival's measured framework positions keeps the edit set concentrated.
+    ``pair_limit`` caps the number of (position, position) pairs so the
+    residues^2 fan-out stays bounded.
+    """
+    if len(allowed) != len(parent):
+        raise ValueError("allowed residue table has the wrong length")
+    candidates: dict[str, tuple[int, int]] = {}
+    pairs = [(a, b) for i, a in enumerate(positions) for b in positions[i + 1:]]
+    for pos1, pos2 in pairs[:pair_limit]:
+        i1, i2 = pos1 - 1, pos2 - 1
+        if not (0 <= i1 < len(parent) and 0 <= i2 < len(parent)):
+            continue
+        for r1 in allowed[i1]:
+            if r1 == parent[i1] or r1 not in gates.ALLOWED_AAS:
+                continue
+            for r2 in allowed[i2]:
+                if r2 == parent[i2] or r2 not in gates.ALLOWED_AAS:
+                    continue
+                seq = parent[:i1] + r1 + parent[i1 + 1:i2] + r2 + parent[i2 + 1:]
+                candidates.setdefault(seq, (pos1, pos2))
+    return candidates

@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from nanobody_opt import gates
-from nanobody_opt.competitor_position_lane import competitor_position_candidates
+from nanobody_opt.competitor_position_lane import (
+    competitor_position_candidates,
+    double_position_candidates,
+)
 
 # 1-indexed hot positions, from the measured edit-position distribution (see
 # analysis/nanobody-gap/parent-selection-20260929/reconstruct_results.json).
@@ -66,7 +69,9 @@ def _eligible_parents(pool: list[str], top50: list[str], min_distance: int) -> l
 
 def generate(archive: Path, positions: list[int], limit: int | None,
              pool_limit: int = 2000, top50: list[str] | None = None,
-             min_parent_distance: int = 6) -> dict[str, Any]:
+             min_parent_distance: int = 6,
+             priority: list[str] | None = None,
+             double_edit_pairs: int = 0) -> dict[str, Any]:
     pool = _load_pool(archive)
     # Nanobodies vary in length; the hot positions are measured against the
     # modal-length sequence, so restrict the pool to that length (a single
@@ -75,28 +80,51 @@ def generate(archive: Path, positions: list[int], limit: int | None,
 
     modal_length = Counter(len(s) for s in pool).most_common(1)[0][0]
     pool = [s for s in pool if len(s) == modal_length]
-    # Only keep parents far enough from the top-50 that a single-edit can clear
-    # the whole-seq 0.95 dedup: a parent at distance D yields single-edits at
-    # D-1..D+1, and 0.95 identity == <=6 edits is a dup, so D>=6 is the eligible
-    # band (the exact survivor count is decided later by pre_gpu_dedup).
     if top50:
         pool = _eligible_parents(pool, top50, min_parent_distance)
-    # Shuffle so the pool_limit cap and the later candidate cap sample a DIVERSE
-    # set of parents, not a single tight lineage of the first few.
     import random
 
+    # The live top-50 are the strongest parents: their single/double edits are
+    # closest to the current winners AND still clear the dedup (the validator's
+    # reference is the full-history HF top-50, ~30 edits from the live field).
+    priority_pool: list[str] = []
+    if priority:
+        priority_pool = [s.upper() for s in priority if len(s) == modal_length]
+        priority_set = set(priority_pool)
+        pool = [s for s in pool if s not in priority_set]
+    # Shuffle so the pool_limit cap samples a DIVERSE set of the remaining
+    # broad-pool parents, not a single tight lineage of the first few.
     random.shuffle(pool)
-    # Sample down so the single-edit fan-out (pool x positions x residues)
-    # stays bounded.
     if pool_limit and len(pool) > pool_limit:
         pool = pool[:pool_limit]
+
     length = modal_length
-    # Any standard residue is a valid single substitution at a hot position;
-    # the downstream layer2/dedup gates do the actual quality filtering.
+    # Any standard residue is a valid substitution at a hot position; the
+    # downstream layer2/exact-validator gates do the quality filtering.
     allowed = [sorted(gates.ALLOWED_AAS) for _ in range(length)]
-    candidates = competitor_position_candidates(
-        pool, allowed=allowed, positions=positions
-    )
+
+    def _merge(target: dict[str, dict[str, Any]],
+               source: dict[str, dict[str, Any]]) -> None:
+        for seq, meta in source.items():
+            target.setdefault(seq, meta)
+
+    candidates: dict[str, dict[str, Any]] = {}
+    # 1. single edits of the live top-50 (priority) — always first
+    _merge(candidates, competitor_position_candidates(
+        priority_pool, allowed=allowed, positions=positions))
+    # 2. double edits of the live top-50 — before the broad pool so they survive --limit
+    if double_edit_pairs:
+        for parent in priority_pool:
+            for seq, (p1, p2) in double_position_candidates(
+                parent, allowed=allowed, positions=positions,
+                pair_limit=double_edit_pairs,
+            ).items():
+                candidates.setdefault(
+                    seq, {"parent": parent, "position": p1, "position2": p2}
+                )
+    # 3. single edits of the broad pool
+    _merge(candidates, competitor_position_candidates(
+        pool, allowed=allowed, positions=positions))
     items = [
         {"sequence": seq, "parent": meta["parent"], "position": meta["position"],
          "source": "competitor_position_lane"}
@@ -107,7 +135,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     return {
         "source": "competitor_position_lane",
         "positions": positions,
-        "pool_size": len(pool),
+        "pool_size": len(parents),
+        "priority_pool_size": len(priority_pool),
         "sequences": [item["sequence"] for item in items],
         "candidates": items,
     }
@@ -127,14 +156,24 @@ def main() -> None:
                         help="build_top50_index.json; when given, only parents >= min-parent-distance edits from the top-50 are kept")
     parser.add_argument("--min-parent-distance", type=int, default=6,
                         help="minimum Hamming distance from the top-50 a parent must have (default 6)")
+    parser.add_argument("--priority-parents", type=Path, default=None,
+                        help="top50_index.json; its `live_sequences` (final_score top-50) are edited first and always kept")
+    parser.add_argument("--double-edit-pairs", type=int, default=0,
+                        help="generate 2-substitution candidates of the priority parents, using this many position pairs (0 = off)")
     args = parser.parse_args()
     positions = [int(p) for p in args.positions.split(",") if p.strip()]
     top50 = None
     if args.top50 is not None:
         top50 = [str(s).strip().upper() for s in
                  (json.loads(args.top50.read_text()).get("sequences") or [])]
+    priority = None
+    if args.priority_parents is not None:
+        blob = json.loads(args.priority_parents.read_text())
+        priority = [str(s).strip().upper() for s in
+                    (blob.get("live_sequences") or blob.get("sequences") or [])]
     payload = generate(args.archive, positions, args.limit, pool_limit=args.pool_limit,
-                       top50=top50, min_parent_distance=args.min_parent_distance)
+                       top50=top50, min_parent_distance=args.min_parent_distance,
+                       priority=priority, double_edit_pairs=args.double_edit_pairs)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
     print(
