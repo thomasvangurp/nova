@@ -74,14 +74,25 @@ def rank_binders(df: pd.DataFrame, k: int = 50) -> pd.DataFrame:
     return work.sort_values("algo2_score", ascending=True).head(k)
 
 
-def _live_top50_from_db(db_path: str, *, limit: int = 50, min_obs: int = 8) -> list[str]:
-    """Our own multi-pass top-50 from the replay observations DB.
+def _live_top50_from_db(
+    db_path: str, *, limit: int = 50, min_obs: int = 8, min_distance: int = 6,
+    extra: int = 15,
+) -> list[str]:
+    """Our own multi-pass parents: the top-50 plus a few diverse fillers.
 
     The validator's leaderboard final_score is a single-pass, one-fold score
     (noisy); our race replays the validator scorer 20x, so the mean of those
     replay rank-sums is the stable quality read. Lower rank sum = better.
+
+    The top-50 are the strongest parents (their single-edits are the optimal
+    fleet). Their single-edits crowd into one family, so the fleet selector's
+    0.95 dedup leaves a few UIDs unfilled; append `extra` parents that are
+    >= min_distance edits from the top-50 so those slots get distinct edits.
     """
     import sqlite3
+    from collections import Counter
+
+    import numpy as np
 
     conn = sqlite3.connect(db_path)
     try:
@@ -98,11 +109,38 @@ def _live_top50_from_db(db_path: str, *, limit: int = 50, min_obs: int = 8) -> l
             ORDER BY mean_score ASC
             LIMIT ?
             """,
-            (min_obs, limit),
+            (min_obs, limit + extra * 4),
         )
-        return [str(r[0]).strip().upper() for r in cur.fetchall()]
+        candidates = [str(r[0]).strip().upper() for r in cur.fetchall()]
     finally:
         conn.close()
+
+    if not candidates:
+        return []
+
+    mlen = Counter(len(s) for s in candidates).most_common(1)[0][0]
+    candidates = [s for s in candidates if len(s) == mlen]
+    arr = np.frombuffer("".join(candidates).encode(), dtype=np.uint8).reshape(
+        len(candidates), mlen
+    )
+
+    top = candidates[:limit]
+    top_arr = arr[:limit]
+
+    filler: list[str] = []
+    for i in range(limit, len(candidates)):
+        seq = candidates[i]
+        if int((top_arr != arr[i]).sum(axis=1).min()) < min_distance:
+            continue
+        if filler and any(
+            int((arr[j] != arr[i]).sum()) < min_distance
+            for j in range(limit, limit + len(filler))
+        ):
+            continue
+        filler.append(seq)
+        if len(filler) >= extra:
+            break
+    return top + filler
 
 
 def main() -> int:
