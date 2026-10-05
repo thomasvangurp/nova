@@ -81,11 +81,15 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     # band (the exact survivor count is decided later by pre_gpu_dedup).
     if top50:
         pool = _eligible_parents(pool, top50, min_parent_distance)
-    # The archive is append-only (oldest -> newest) and ~130k sequences; the
-    # recent tail is the current field. Sample it down so the single-edit
-    # fan-out (pool x positions x residues) stays bounded.
+    # Shuffle so the pool_limit cap and the later candidate cap sample a DIVERSE
+    # set of parents, not a single tight lineage of the first few.
+    import random
+
+    random.shuffle(pool)
+    # Sample down so the single-edit fan-out (pool x positions x residues)
+    # stays bounded.
     if pool_limit and len(pool) > pool_limit:
-        pool = pool[-pool_limit:]
+        pool = pool[:pool_limit]
     length = modal_length
     # Any standard residue is a valid single substitution at a hot position;
     # the downstream layer2/dedup gates do the actual quality filtering.
