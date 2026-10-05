@@ -493,12 +493,22 @@ def _run_iteration(
     # single framework edits across the unfiltered public pool) REPLACES the
     # elite-centric select_elite_parents bank. The single-edits flow through
     # filter_layer2 and local_neighborhood exactly as the elite parents did.
+    top50 = iteration_root / "top50_index.json"
+    if not top50.is_file():
+        _run([
+            "/usr/local/bin/pixi", "run",
+            "--manifest-path", str(args.runtime_root / "pixi.toml"),
+            "--locked", "--environment", "metanano",
+            "python", "-m", "nanobody_opt.build_top50_index",
+            str(epoch), str(top50),
+        ])
     elite_parents = producer_root / "competitor_parents.json"
     if not elite_parents.is_file():
         _run([
             sys.executable,
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
+            "--top50", str(top50),
             "--limit", "500",
             "--output", str(elite_parents),
         ])
@@ -609,18 +619,9 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
-        # Pre-GPU near-duplicate gate: drop candidates that are near-dups of the
+    # Pre-GPU near-duplicate gate: drop candidates that are near-dups of the
     # fresh top-50 (whole-seq >=0.95 or CDR3 >=0.85) before the race spends GPU
     # on them. Runs under metanano (extract_cdrs for the CDR3 tier).
-    top50 = iteration_root / "top50_index.json"
-    if not top50.is_file():
-        _run([
-            "/usr/local/bin/pixi", "run",
-            "--manifest-path", str(args.runtime_root / "pixi.toml"),
-            "--locked", "--environment", "metanano",
-            "python", "-m", "nanobody_opt.build_top50_index",
-            str(epoch), str(top50),
-        ])
     layer2_dedup = iteration_root / "layer2_dedup.json"
     if not layer2_dedup.is_file():
         _run([
