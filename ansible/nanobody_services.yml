@@ -803,7 +803,7 @@
       ansible.builtin.shell: |
         set -eu
         grep -q 'def submission_message' /root/nanobody_opt/commit_submission.py
-        grep -q 'submission_message(args.sequence)' /root/nanobody_opt/commit_submission.py
+        grep -q 'submission_message(args.sequence, args.molecules)' /root/nanobody_opt/commit_submission.py
         grep -q 'NULL_TOKEN = "~"' /root/neurons/validator/commitments.py
         echo SUBMISSION_FORMAT_PRESENT
       args:
