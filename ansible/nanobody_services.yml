@@ -668,12 +668,13 @@
           - "{{ nanobody_reserve_blocks }}"
           - --minimum-sequence-pool-size
           - "16"
-          # Strict qualification currently takes longer than an epoch and can
-          # delay the next provisional fleet even though this epoch committed
-          # first. Keep the reserve configured for when the pass is fast enough
-          # to re-enable, but do not start it from the live publisher.
+          # Strict qualification re-enabled 2026-10-05: the strict rank_exact
+          # was re-measured at ~67s (down from 25+ min after the Sept 28-29
+          # vectorise/bisect/parallelise work). The reserve only needs to cover
+          # the now-cheap rank plus the layer-2/novelty/CDR passes after it.
+          - --strict-qualification
           - --strict-qualification-reserve-blocks
-          - "{{ nanobody_strict_qualification_reserve_blocks | default(220) }}"
+          - "{{ nanobody_strict_qualification_reserve_blocks | default(60) }}"
           # Artifact-only by design. The Pi owns the fresh roster and is the
           # sole on-chain commitment writer. A second writer here can overwrite
           # Pi's earlier commitment near the validator blackout and silently
