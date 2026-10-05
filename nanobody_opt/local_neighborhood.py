@@ -1534,7 +1534,7 @@ def main() -> None:
     reserved_sequences = {item[1] for item in reserved_seeds}
     legacy_seeds = [
         item for item in eligible
-        if item[5] == "epoch_elite" and item[1] not in reserved_sequences
+        if item[5] in ("epoch_elite", "frontier") and item[1] not in reserved_sequences
     ]
     core_seeds = round_robin_families(
         [*reserved_seeds, *legacy_seeds], args.seed_count
