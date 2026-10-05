@@ -542,53 +542,18 @@ def _run_iteration(
     )
     candidates = iteration_root / "candidates.csv"
     if not candidates.is_file():
-        command = [
-            sys.executable,
-            "-m", "nanobody_opt.local_neighborhood",
-            "--archive", str(archive),
-            "--config", str(config),
-            "--layer2-seeds", str(seed),
-            "--winner-priors", str(winner_priors),
-            "--output", str(candidates),
-            "--seed-count", str(args.seed_count),
-            "--neighbor-seed-count", str(args.neighbor_seed_count),
-            "--minimum-seeds", str(args.minimum_seeds),
-            "--per-seed", str(args.per_seed),
-            "--generation-workers", str(args.generation_workers),
-            "--generation-workers-minimum-candidates",
-            str(args.generation_workers_minimum_candidates),
-            "--proposal-limit", str(args.proposal_limit),
-            "--basin-fraction", str(basin_fraction),
-            "--basin-routes-per-core", str(args.basin_routes_per_core),
-            "--basin-evidence-fraction", str(args.basin_evidence_fraction),
-            "--basin-evidence-core-limit", str(basin_evidence_core_limit),
-            "--basin-top-core-weight", str(args.basin_top_core_weight),
-            "--basin-exploration-residues-per-position", str(
-                args.basin_exploration_residues_per_position
-            ),
-            "--framework-fraction", str(args.framework_fraction),
-            "--haplotype-lane-fraction", str(args.haplotype_lane_fraction),
-            "--framework-per-seed", str(args.framework_per_seed),
-            "--terminal-width", str(args.terminal_width),
-            "--maximum-terminal-haplotype-mutations", str(
-                args.maximum_terminal_haplotype_mutations
-            ),
-            "--mutation-observations", str(args.mutation_database),
-            "--motif-fraction", str(args.motif_fraction),
-            "--single-mutation-fraction", str(args.single_mutation_fraction),
-            "--maximum-motif-mutations", str(args.maximum_motif_mutations),
-            *(
-                ["--maximum-exhaustive-singles", str(args.maximum_exhaustive_singles)]
-                if args.maximum_exhaustive_singles is not None
-                else []
-            ),
-            "--settled-deviation-policy", str(args.settled_deviation_policy),
-            "--random-seed", str(epoch * 100 + iteration),
-        ]
-        for previous in sorted(producer_root.glob("iteration_*/candidates.csv")):
-            if previous != candidates:
-                command.extend(["--exclude", str(previous)])
-        _run(command)
+        # Feed the validated single-edits straight through as candidates: the
+        # winning rival submits single-edits directly, so skip the multi-edit
+        # neighbourhood expansion and pass the igblast-validated seeds on.
+        seed_rows = json.loads(seed.read_text()).get("candidates", [])
+        with candidates.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["sequence"])
+            writer.writeheader()
+            for row in seed_rows:
+                seq = str(row.get("sequence", "")).strip().upper()
+                if seq:
+                    writer.writerow({"sequence": seq})
+
         if args.public_neighbourhood_distance:
             # Every winner in the leakage-free replay sat one substitution from
             # a sequence another hotkey had already published, and about forty
