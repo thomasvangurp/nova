@@ -172,7 +172,11 @@ def main() -> None:
         "input_count": len(results),
         "pass_count": len(passed),
         "sequences": [item["sequence"] for item in passed],
-        "candidates": results,
+        # `candidates` = the survivors, so a downstream race reads the filtered
+        # set the same way pre_gpu_dedup emitted it. Full per-candidate detail
+        # (including rejects + `validator_novel`) stays in `all_results`.
+        "candidates": passed,
+        "all_results": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
