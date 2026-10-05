@@ -27,6 +27,26 @@ from nanobody_opt.competitor_position_lane import (
 # analysis/nanobody-gap/parent-selection-20260929/reconstruct_results.json).
 HOT_POSITIONS = [1, 3, 114, 122, 121, 124, 116, 123, 31, 100, 126, 111, 73, 115, 127]
 
+# 1-indexed position -> residues in descending rival-usage frequency, so the
+# winning substitution at each hot position is emitted before the alphabetical
+# remainder. Mined from 5GhREcsK's 924 single-edits; positions with <10 observed
+# edits are left alphabetical (noise). The parent's own residue is skipped later
+# regardless of order.
+POSITION_RESIDUE_ORDER = {
+    3: ["T", "V", "A", "H", "M", "L"],
+    1: ["D", "Q", "K", "N", "R"],
+    121: ["T", "A", "V", "S", "C"],
+    124: ["P", "T", "V", "S", "A"],
+    122: ["S", "T", "A", "P", "G"],
+    119: ["T", "A", "P", "V", "S"],
+    116: ["A", "S"],
+    126: ["A", "G", "S"],
+    114: ["H", "M", "F"],
+    127: ["Q", "P", "G"],
+    123: ["T", "A", "V", "S"],
+    31: ["R"],
+}
+
 
 def _load_pool(archive: Path) -> list[str]:
     """Every public sequence in the archive, deduped, order preserved."""
@@ -100,8 +120,17 @@ def generate(archive: Path, positions: list[int], limit: int | None,
 
     length = modal_length
     # Any standard residue is a valid substitution at a hot position; the
-    # downstream layer2/exact-validator gates do the quality filtering.
-    allowed = [sorted(gates.ALLOWED_AAS) for _ in range(length)]
+    # downstream layer2/exact-validator gates do the quality filtering. Order
+    # residues by the rival's measured usage frequency at each hot position so
+    # the winning substitution is emitted before the alphabetical remainder.
+    allowed = []
+    for i in range(length):
+        order = POSITION_RESIDUE_ORDER.get(i + 1)
+        if order:
+            rest = [r for r in sorted(gates.ALLOWED_AAS) if r not in order]
+            allowed.append(order + rest)
+        else:
+            allowed.append(sorted(gates.ALLOWED_AAS))
 
     def _merge(target: dict[str, dict[str, Any]],
                source: dict[str, dict[str, Any]]) -> None:
