@@ -537,7 +537,6 @@ def _run_iteration(
             sys.executable,
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
-            "--top50", str(top50),
             "--limit", "2000",
             "--output", str(elite_parents),
         ])
