@@ -1136,7 +1136,7 @@ def _parser() -> argparse.ArgumentParser:
             "sequence; 0 disables the filter"
         ),
     )
-    parser.add_argument("--layer2-concurrency", type=int, default=40)
+    parser.add_argument("--layer2-concurrency", type=int, default=128)
     parser.add_argument(
         "--igblast-batch-size",
         type=int,
