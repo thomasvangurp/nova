@@ -721,13 +721,18 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
-    # Pre-GPU near-duplicate gate: drop candidates that are near-dups of the
-    # The validator's EXACT novelty gate (Algorithm-2 top-50 + SearchEngine
-    # fine alignment + is_duplicate), not a whole-seq proxy. The old pre_gpu_dedup
-    # dropped candidates <=6 edits from the top-50 (whole-seq), which the
-    # validator demonstrably accepts (5GhREcsK wins with such edits). This
-    # replays the validator's own gate so the race only spends GPU on molecules
-    # the validator would actually score. Runs under metanano (SearchEngine).
+    # The validator's EXACT novelty gate (Algorithm-2 top-50 + SearchEngine fine
+    # alignment + is_duplicate), indexed from the FULL HF archive (all history),
+    # not the live leaderboard. Our old gates ranked the last 15 API epochs, a
+    # different basin ~30 edits from the validator's reference, so they over-
+    # filtered molecules the validator accepts (5GhREcsK wins with such edits).
+    hf_archive = iteration_root / "hf_archive.csv"
+    if not hf_archive.is_file():
+        _run([
+            sys.executable,
+            "-m", "nanobody_opt.fetch_hf_archive",
+            str(hf_archive),
+        ])
     layer2_dedup = iteration_root / "layer2_dedup.json"
     if not layer2_dedup.is_file():
         _run([
@@ -735,7 +740,7 @@ def _run_iteration(
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
             "--locked", "--environment", "metanano",
             "python", "-m", "nanobody_opt.check_validator_novelty",
-            "--archive", str(archive),
+            "--archive", str(hf_archive),
             "--target", target,
             "--input", str(layer2),
             "--output", str(layer2_dedup),
