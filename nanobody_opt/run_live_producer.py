@@ -26,6 +26,8 @@ from urllib.request import Request, urlopen
 
 import yaml
 
+from nanobody_opt import db
+
 
 CONFIG_URL = "https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml"
 ARCHIVE_URL = (
@@ -58,12 +60,10 @@ def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
     sealed with all expected observations, and has the structure/sample audit
     row extracted by the importer. Any ambiguity fails closed.
     """
-    if not paths or not database.is_file():
+    if not paths:
         return False
     try:
-        connection = sqlite3.connect(
-            f"file:{database}?mode=ro", uri=True, timeout=60
-        )
+        connection = db.connect()
         rows = connection.execute(
             """
             SELECT r.source_path, r.file_sha256, r.expected_rows,
@@ -79,7 +79,7 @@ def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
             GROUP BY r.target, r.run_id
             """
         ).fetchall()
-    except sqlite3.Error:
+    except Exception:
         return False
     finally:
         if "connection" in locals():

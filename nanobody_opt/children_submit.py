@@ -100,7 +100,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nanobody_opt import fleet  # noqa: E402
+from nanobody_opt import db, fleet  # noqa: E402
 
 TARGET = "P20809"
 DEFAULT_SOURCE = "children_8x"
@@ -147,13 +147,11 @@ def discover_crew(chain: dict[str, Any], coldkey: str, netuid: int) -> list[flee
     return fleet.discover_fleet(chain.get("neurons"), address, netuid=netuid)
 
 
-def _open_readonly(database: Path) -> sqlite3.Connection:
-    if not database.is_file():
-        raise SystemExit(f"mutation database is missing: {database}")
+def _open_readonly(database: Path) -> db.Connection:
     try:
-        return sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
-    except sqlite3.Error as error:
-        raise SystemExit(f"cannot open {database} read-only: {error}") from error
+        return db.connect()
+    except Exception as error:
+        raise SystemExit(f"cannot open the mutation database: {error}") from error
 
 
 #: Number of most-recent ledger entries treated as the validator's live top-50
@@ -224,10 +222,10 @@ def top_children(
                    SUM(o.observation_count)
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = ?
-              AND o.score_kind = ?
+            WHERE o.source = %s
+              AND o.score_kind = %s
             GROUP BY n.id
-            HAVING SUM(o.observation_count) >= ?
+            HAVING SUM(o.observation_count) >= %s
             ORDER BY AVG(o.score) ASC, n.sequence ASC
             """,
             (source, score_kind, MINIMUM_OBSERVATION_COUNT),
@@ -243,7 +241,7 @@ def top_children(
                 """
                 SELECT metrics_json, provenance_json, score
                 FROM observations
-                WHERE node_id = ? AND source = ? AND score_kind = ?
+                WHERE node_id = %s AND source = %s AND score_kind = %s
                 ORDER BY observation_id ASC
                 LIMIT 1
                 """,
@@ -507,9 +505,9 @@ def measured_means(
             """
             SELECT n.sequence, AVG(o.score), SUM(o.observation_count)
             FROM observations o JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = ? AND o.score_kind = ?
+            WHERE o.source = %s AND o.score_kind = %s
             GROUP BY n.id
-            HAVING SUM(o.observation_count) >= ?
+            HAVING SUM(o.observation_count) >= %s
             """,
             (source, score_kind, MINIMUM_OBSERVATION_COUNT),
         ).fetchall()
@@ -521,7 +519,7 @@ def measured_means(
                 """
                 SELECT o.metrics_json
                 FROM observations o JOIN nodes n ON n.id = o.node_id
-                WHERE n.sequence = ? AND o.source = ? AND o.score_kind = ?
+                WHERE n.sequence = %s AND o.source = %s AND o.score_kind = %s
                 ORDER BY o.observation_id ASC LIMIT 1
                 """,
                 (sequence, source, score_kind),

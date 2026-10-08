@@ -30,6 +30,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from nanobody_opt import db
+
 DEFAULT_TARGET = "P20809"
 DEFAULT_FRACTION = 0.12
 DEFAULT_SINGLE_KIND = "validator_final_rank_sum"
@@ -49,8 +51,8 @@ def basin_id(sequence: str) -> str:
     return hashlib.sha256(core.encode("ascii")).hexdigest()[:16]
 
 
-def _connect(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+def _connect(path: Path) -> db.Connection:
+    return db.connect()
 
 
 def load_public(path: Path, target: str, single_kind: str) -> dict[str, dict[str, Any]]:
@@ -64,7 +66,7 @@ def load_public(path: Path, target: str, single_kind: str) -> dict[str, dict[str
             SELECT n.sequence, o.score, o.epoch, o.metrics_json
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE n.target = ? AND o.score_kind = ?
+            WHERE n.target = %s AND o.score_kind = %s
             ORDER BY o.epoch, o.score, n.sequence
             """,
             (target, single_kind),
@@ -90,7 +92,7 @@ def load_replay_means(path: Path, target: str, replay_kind: str) -> dict[str, fl
             SELECT n.sequence, AVG(o.score), COUNT(*)
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE n.target = ? AND o.score_kind = ?
+            WHERE n.target = %s AND o.score_kind = %s
             GROUP BY n.sequence
             """,
             (target, replay_kind),

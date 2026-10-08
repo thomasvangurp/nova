@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from nanobody_opt import gates
+from nanobody_opt import db, gates
 from nanobody_opt.competitor_lane import POSITION_RESIDUE_ORDER
 from nanobody_opt.competitor_position_lane import (
     competitor_position_candidates,
@@ -30,7 +30,7 @@ def top_children(db_path: str, ledger_path: str, k: int) -> list[tuple[str, floa
     Prefers ``local_exact_validator_replay_rank_sum`` over the fast replay when
     both exist for the same sequence. Lower rank-sum = better.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = db.connect()
     rows = conn.execute(
         """
         SELECT n.sequence, o.score, o.score_kind
