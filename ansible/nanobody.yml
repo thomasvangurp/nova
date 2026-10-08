@@ -1282,6 +1282,9 @@
           PIXI_COLOR: never
       when: nanobody_producer_activate | bool
 
+    - name: Verify the box reaches the central MySQL (Tailscale)
+      ansible.builtin.include_tasks: tasks/verify_mysql_reachability.yml
+
     - name: Stop prior autonomous nanobody producer before activation
       ansible.builtin.command:
         argv: [tmux, kill-session, -t, "{{ nanobody_producer_session }}"]

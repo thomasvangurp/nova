@@ -6,8 +6,12 @@ provider output in memory and emits only a small operational status record, so
 credentials and provider responses never enter the journal.
 
 An operator can intentionally suppress automatic recovery by creating the
-configured disable marker.  Destruction is never automated: a missing instance
-or an ambiguous label fails closed and requires a human decision.
+configured disable marker.  When the labelled instance is *destroyed* -- a
+vast.ai preemption removes its row from the account entirely -- the guard rents
+a replacement: it searches for an 8x4090 offer, creates it under the same
+label, and waits for it to reach ``running``.  An *ambiguous* label (more than
+one instance) still fails closed, because two boxes claiming the label needs a
+human decision, not a guess.
 """
 from __future__ import annotations
 
@@ -37,13 +41,118 @@ def _instances(binary: str) -> list[dict]:
     return [row for row in body if isinstance(row, dict)]
 
 
+# The replacement rental is pinned to the 8x4090 class the producer was sized
+# for.  The offer query is the same one a human operator pastes; the selection
+# below re-checks the same floors so a stale listing cannot slip a 4x or a
+# low-reliability machine through.
+OFFER_QUERY = ("num_gpus=8 gpu_name=RTX_4090 reliability>0.97 "
+               "disk_space>220 rentable=true verified=true")
+OFFER_IMAGE = "nvidia/cuda:12.6.0-devel-ubuntu22.04"
+OFFER_DISK = 220
+OFFER_MIN_RELIABILITY = 0.97
+OFFER_MIN_DIRECT_PORTS = 1
+OFFER_GPU_COUNT = 8
+
+
+def _matching(rows: list[dict], label: str) -> list[dict]:
+    return [row for row in rows if str(row.get("label") or "") == label]
+
+
 def matching_instance(rows: list[dict], label: str) -> dict:
-    matches = [row for row in rows if str(row.get("label") or "") == label]
+    matches = _matching(rows, label)
     if len(matches) != 1:
         raise RuntimeError(
             f"expected one instance labelled {label!r}, found {len(matches)}"
         )
     return matches[0]
+
+
+def _search_offer(binary: str) -> int:
+    """Return the offer id of the best 8x4090 rental, or raise.
+
+    Selection prefers the most compute per dollar (``dlperf_per_dphtotal``),
+    then reliability, then price -- a preempted box costs an epoch, so a cheap
+    machine behind a dead host is not a saving.  Provider output is parsed in
+    memory and never printed; the failure strings carry no provider text.
+    """
+    completed = subprocess.run(
+        [binary, "search", "offers", OFFER_QUERY, "--raw"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120,
+    )
+    if completed.returncode:
+        raise RuntimeError("vast offer search failed")
+    try:
+        body = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("vast offer search was not valid JSON") from None
+    offers = body if isinstance(body, list) else body.get("offers", [])
+    candidates: list[dict] = []
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        if int(offer.get("num_gpus") or 0) != OFFER_GPU_COUNT:
+            continue
+        if float(offer.get("disk_space") or 0) < OFFER_DISK:
+            continue
+        if float(offer.get("reliability2") or 0) < OFFER_MIN_RELIABILITY:
+            continue
+        if int(offer.get("direct_port_count") or 0) < OFFER_MIN_DIRECT_PORTS:
+            continue
+        candidates.append(offer)
+    if not candidates:
+        raise RuntimeError("no 8x4090 offer meets the reliability/port floor")
+    candidates.sort(key=lambda o: (
+        -float(o.get("dlperf_per_dphtotal") or 0),
+        -float(o.get("reliability2") or 0),
+        float(o.get("dph_total") or 1e9),
+    ))
+    offer_id = candidates[0].get("id")
+    if offer_id is None:
+        raise RuntimeError("selected offer has no id")
+    return int(offer_id)
+
+
+def _provision(binary: str, label: str, wait_seconds: int,
+               poll_seconds: int) -> dict:
+    """Rent a replacement and wait for it to reach ``running``.
+
+    The create response carries a fresh instance API key; it is parsed only for
+    the new contract id and the raw body never leaves this function.
+    """
+    offer_id = _search_offer(binary)
+    created = subprocess.run(
+        [binary, "create", "instance", str(offer_id),
+         "--image", OFFER_IMAGE, "--disk", str(OFFER_DISK),
+         "--label", label, "--ssh", "--direct", "--cancel-unavail"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=300,
+    )
+    if created.returncode:
+        raise RuntimeError("vast refused to create the replacement instance")
+    new_contract: int | None = None
+    raw = created.stdout.strip()
+    if raw.startswith("Started."):
+        raw = raw[len("Started."):].strip()
+    try:
+        new_contract = int(json.loads(raw).get("new_contract"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        new_contract = None
+
+    deadline = time.monotonic() + max(0, wait_seconds)
+    while True:
+        matches = _matching(_instances(binary), label)
+        if len(matches) == 1:
+            row = matches[0]
+            if str(row.get("actual_status") or "unknown") == "running":
+                return {
+                    "event": "producer_reprovisioned",
+                    "id": int(row["id"]),
+                    "state": "running",
+                    "offer": offer_id,
+                    "created_contract": new_contract,
+                }
+        if time.monotonic() >= deadline:
+            raise RuntimeError("replacement instance did not become running in time")
+        time.sleep(max(1, poll_seconds))
 
 
 def producer_endpoints(instance: dict) -> list[tuple[str, str, int]]:
@@ -200,15 +309,23 @@ def _touch(path: Path) -> None:
 
 def ensure_running(binary: str, label: str, wait_seconds: int = 240,
                    poll_seconds: int = 10) -> dict:
-    row = matching_instance(_instances(binary), label)
+    matches = _matching(_instances(binary), label)
+    if not matches:
+        # Destroyed/preempted: the row is gone from the account entirely, so a
+        # restart is impossible.  Rent a replacement under the same label.
+        return _provision(binary, label, wait_seconds, poll_seconds)
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"expected one instance labelled {label!r}, found {len(matches)}")
+    row = matches[0]
     instance_id = int(row["id"])
     state = str(row.get("actual_status") or "unknown")
     if state == "running":
         return {"event": "producer_healthy", "id": instance_id, "state": state}
 
-    # A stopped rental retains its disk and can be recovered.  Anything else
-    # (destroyed/missing/ambiguous) must not cause this guard to rent or choose a
-    # new machine automatically.
+    # A stopped rental retains its disk and can be recovered by a restart.
+    # Anything else (an exited-but-not-stopped state) fails closed rather than
+    # guessing at a half-alive rental.
     if state not in {"exited", "stopped", "offline"}:
         raise RuntimeError(f"production instance is in non-startable state {state!r}")
     started = subprocess.run(
@@ -248,6 +365,13 @@ def main(argv=None) -> int:
         result = ensure_running(
             arguments.vastai, arguments.label, wait_seconds=arguments.wait_seconds
         )
+        if result.get("event") == "producer_reprovisioned":
+            # A fresh rental has no code, producer or publisher yet -- the
+            # deploy is a separate Mac-side ansible step.  Report the provision
+            # and stop; later ticks keep the box alive while the deploy catches
+            # up (the freshness check below would fail against a blank box).
+            print(json.dumps(result, sort_keys=True))
+            return 0
         row = matching_instance(_instances(arguments.vastai), arguments.label)
         result["runtime_route"] = ensure_remote_runtime(row)
         freshness = producer_freshness(row)

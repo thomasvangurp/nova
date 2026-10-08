@@ -1,0 +1,48 @@
+---
+# A box that cannot reach the central SN68 MySQL mines blind: every observation
+# the producer/scorer writes is dropped, and nothing surfaces until the
+# leaderboard stops moving.  Fail the deploy here rather than discover it an
+# epoch later.
+#
+# This is a reachability check, not a credential check.  Only SN68_MYSQL_HOST
+# and SN68_MYSQL_PORT are read from the credential file; the password line is
+# never parsed, so it cannot reach stdout or the ansible log.
+- name: Require the central MySQL credential file
+  ansible.builtin.stat:
+    path: /root/.sn68_mysql_creds
+    get_checksum: false
+  register: mysql_creds
+
+- name: Refuse to deploy without the central MySQL credential file
+  ansible.builtin.assert:
+    that: mysql_creds.stat.exists | default(false)
+    fail_msg: >-
+      /root/.sn68_mysql_creds is absent. Copy it onto the box first (it is not
+      committed; deploy/slot_host/backup_artifacts.sh or a manual scp carries
+      it). Set SN68_MYSQL_HOST to the Tailscale address (100.83.239.6) unless
+      this box's IP is allowlisted on the Hetzner firewall.
+
+- name: Verify the central MySQL endpoint is reachable
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import socket
+        host = port = None
+        for line in open('/root/.sn68_mysql_creds'):
+            line = line.strip()
+            if line.startswith('SN68_MYSQL_HOST='):
+                host = line.split('=', 1)[1]
+            elif line.startswith('SN68_MYSQL_PORT='):
+                port = line.split('=', 1)[1]
+        assert host and port, 'creds missing SN68_MYSQL_HOST/PORT'
+        s = socket.create_connection((host, int(port)), timeout=10)
+        s.close()
+        print('MYSQL_REACHABLE', host, port)
+  register: mysql_reach
+  changed_when: false
+
+- name: Report the endpoint this box reached
+  ansible.builtin.debug:
+    msg: "{{ mysql_reach.stdout | trim }}"
