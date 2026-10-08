@@ -20,14 +20,18 @@ TOKEN_PATH = Path("/root/.hftoken")
 
 def main() -> int:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/root/P20809_nanobodies.csv")
-    token = TOKEN_PATH.read_text().strip()
-    if not token:
-        raise SystemExit("no HF token at /root/.hftoken")
+    # The archive is a public dataset; the token is optional and only sent when
+    # a /root/.hftoken exists. A gated dataset would need a real read token, but
+    # Submission-Archive resolves anonymously (user_id=public).
+    token = None
+    if TOKEN_PATH.is_file():
+        token = TOKEN_PATH.read_text().strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     data: bytes | None = None
     for attempt in range(1, 4):
         try:
-            req = urllib.request.Request(URL, headers={"Authorization": f"Bearer {token}"})
+            req = urllib.request.Request(URL, headers=headers)
             with urllib.request.urlopen(req, timeout=90) as resp:
                 data = resp.read()
             break
