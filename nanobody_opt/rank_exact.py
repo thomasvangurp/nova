@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nanobody_opt import consensus_policy, publication_gates, shrinkage
+from nanobody_opt import consensus_policy, db, publication_gates, shrinkage
 from nanobody_opt.local_neighborhood import (
     FIELD_CONSENSUS_THRESHOLD,
     field_consensus,
@@ -433,9 +433,8 @@ def _historical_observations(database: Path, target: str,
     found: dict[str, list[dict[str, float]]] = defaultdict(list)
     added = 0
     try:
-        connection = sqlite3.connect(
-            f"file:{database}?mode=ro", uri=True, timeout=60)
-    except sqlite3.Error:
+        connection = db.connect()
+    except Exception:
         return found, 0
     try:
         rows = connection.execute(
@@ -446,7 +445,7 @@ def _historical_observations(database: Path, target: str,
             "ON x.observation_id=o.observation_id AND x.target=n.target "
             "JOIN exact_runs r ON r.target=x.target "
             "AND r.run_id=x.run_id AND r.complete=1 "
-            "WHERE n.target = ? AND o.source='local_exact_raw' "
+            "WHERE n.target = %s AND o.source='local_exact_raw' "
             "AND o.metrics_json IS NOT NULL",
             (target,))
         for sequence, blob, run_id in rows:
@@ -466,7 +465,7 @@ def _historical_observations(database: Path, target: str,
                 continue
             found[str(sequence)].append(values)
             added += 1
-    except sqlite3.Error:
+    except Exception:
         return found, 0
     finally:
         connection.close()
