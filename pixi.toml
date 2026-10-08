@@ -290,6 +290,7 @@ bittensor = "==10.4.1"
 timelock = "==0.0.1.dev0"
 async-substrate-interface = "==2.0.4"
 cyscale = "==0.4.0"
+mysqlclient = ">=2.3.0, <3"
 
 [feature.chain310.tasks]
 check = "python -c \"import bittensor,timelock; from async_substrate_interface.sync_substrate import SubstrateInterface; print(bittensor.__version__)\""
