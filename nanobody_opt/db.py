@@ -169,5 +169,12 @@ def connect(_path: str | None = None) -> Connection:
             # zlib protocol compression (CLIENT_COMPRESS): the metrics/provenance
             # JSON is text and compresses ~5-10x over the public wire.
             compress=True,
+            # Socket-level timeouts so a half-dead connection (server closed but
+            # the client is still waiting) fails fast instead of hanging a write
+            # indefinitely; the deadlock_retry wrapper then re-runs the whole
+            # transaction on a fresh connection.
+            connect_timeout=10,
+            read_timeout=60,
+            write_timeout=60,
         )
     )
