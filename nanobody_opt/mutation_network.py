@@ -5,7 +5,6 @@ import json
 import math
 import pickle
 import os
-import sqlite3
 import tempfile
 import time
 from collections import defaultdict
@@ -16,6 +15,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from nanobody_opt import db
 from nanobody_opt.regions import find_regions
 
 
@@ -555,129 +555,40 @@ class MutationNetwork:
             raise
 
 
-def _connect(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=30)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS nodes (
-            id INTEGER PRIMARY KEY,
-            target TEXT NOT NULL,
-            sequence TEXT NOT NULL,
-            length INTEGER NOT NULL,
-            residue_vector BLOB NOT NULL,
-            UNIQUE(target, sequence)
-        );
-        CREATE TABLE IF NOT EXISTS observations (
-            observation_id TEXT PRIMARY KEY,
-            node_id INTEGER NOT NULL REFERENCES nodes(id),
-            epoch INTEGER,
-            source TEXT NOT NULL,
-            score_kind TEXT NOT NULL,
-            score REAL NOT NULL,
-            observation_count INTEGER NOT NULL DEFAULT 1,
-            metrics_json TEXT NOT NULL DEFAULT '{}',
-            pose_json TEXT,
-            provenance_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS observations_node_epoch
-            ON observations(node_id, epoch);
-        CREATE TABLE IF NOT EXISTS exact_runs (
-            target TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            epoch INTEGER,
-            source_path TEXT NOT NULL,
-            file_sha256 TEXT NOT NULL,
-            scorer_protocol TEXT,
-            expected_rows INTEGER NOT NULL,
-            ingested_rows INTEGER NOT NULL,
-            complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
-            ingested_at REAL NOT NULL,
-            PRIMARY KEY(target, run_id)
-        );
-        CREATE TABLE IF NOT EXISTS exact_run_observations (
-            target TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            observation_id TEXT NOT NULL
-                REFERENCES observations(observation_id) ON DELETE CASCADE,
-            PRIMARY KEY(target, run_id, observation_id),
-            FOREIGN KEY(target, run_id)
-                REFERENCES exact_runs(target, run_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS exact_run_observations_observation
-            ON exact_run_observations(observation_id);
-        CREATE TABLE IF NOT EXISTS observation_artifacts (
-            observation_id TEXT PRIMARY KEY
-                REFERENCES observations(observation_id) ON DELETE CASCADE,
-            confidence_path TEXT,
-            writer_path TEXT,
-            structure_json TEXT NOT NULL DEFAULT '{}',
-            sample_selection_json TEXT
-        );
-        CREATE TABLE IF NOT EXISTS edges (
-            source_node_id INTEGER NOT NULL REFERENCES nodes(id),
-            target_node_id INTEGER NOT NULL REFERENCES nodes(id),
-            distance INTEGER NOT NULL,
-            mutations_json TEXT NOT NULL,
-            context_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(source_node_id, target_node_id)
-        );
-        CREATE TABLE IF NOT EXISTS mutation_effects (
-            target TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            from_residue TEXT NOT NULL,
-            to_residue TEXT NOT NULL,
-            region TEXT NOT NULL,
-            contact_class TEXT NOT NULL,
-            support INTEGER NOT NULL,
-            median_score_delta REAL NOT NULL,
-            uncertainty REAL NOT NULL,
-            graph_version TEXT NOT NULL,
-            PRIMARY KEY(
-                target, position, from_residue, to_residue,
-                region, contact_class, graph_version
-            )
-        );
-        CREATE TABLE IF NOT EXISTS proposal_scores (
-            epoch INTEGER NOT NULL,
-            node_id INTEGER NOT NULL REFERENCES nodes(id),
-            graph_version TEXT NOT NULL,
-            prospective_score REAL NOT NULL,
-            prospective_rank INTEGER NOT NULL,
-            features_json TEXT NOT NULL,
-            PRIMARY KEY(epoch, node_id, graph_version)
-        );
-        CREATE TABLE IF NOT EXISTS lineage_edges (
-            parent_node_id INTEGER NOT NULL REFERENCES nodes(id),
-            child_node_id INTEGER NOT NULL REFERENCES nodes(id),
-            epoch INTEGER NOT NULL DEFAULT -1,
-            source TEXT NOT NULL,
-            proposal_type TEXT NOT NULL DEFAULT 'unknown',
-            mutations_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(parent_node_id, child_node_id, epoch, source)
-        );
-        CREATE INDEX IF NOT EXISTS lineage_edges_child
-            ON lineage_edges(child_node_id, epoch);
-        """
-    )
-    connection.execute(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '4')"
-    )
-    return connection
+def _connect(path: Path | None = None) -> db.Connection:
+    """Open the central MySQL connection.
+
+    ``path`` is retained for call-site compatibility with the previous
+    sqlite3 backend and is ignored -- all nodes share the one ``sn68`` schema
+    on Hetzner.
+    """
+    return db.connect()
 
 
+@db.deadlock_retry()
 def update_observation_store(
-    path: Path, observations: Iterable[dict[str, Any]]
+    path: Path,
+    observations: Iterable[dict[str, Any]],
+    commit_every: int = 1000,
+    commit_interval: float = 5.0,
 ) -> int:
-    """Transactionally upsert uniquely identified scored VHH observations."""
+    """Transactionally upsert uniquely identified scored VHH observations.
+
+    Commits every ``commit_every`` writes or ``commit_interval`` seconds
+    (whichever comes first) so a slow/lazy ``observations`` iterable can never
+    hold an open transaction -- and its row locks -- for minutes and stall
+    every other writer.  The upserts are idempotent (``ON DUPLICATE KEY
+    UPDATE``), so an intermediate commit is safe to re-run.
+
+    A MySQL deadlock (1213) rolls back this whole transaction; the
+    ``@db.deadlock_retry()`` decorator re-runs the entire function, so
+    ``observations`` must be re-iterable. It is materialized up front because
+    ``select_elite_parents`` passes a generator expression.
+    """
+    if not isinstance(observations, (list, tuple)):
+        observations = list(observations)
     written = 0
+    last_commit = time.monotonic()
     with _connect(path) as connection:
         for observation in observations:
             observation_id = str(observation.get("observation_id", "")).strip()
@@ -699,15 +610,15 @@ def update_observation_store(
             connection.execute(
                 """
                 INSERT INTO nodes(target, sequence, length, residue_vector)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(target, sequence) DO UPDATE SET
-                    length=excluded.length,
-                    residue_vector=excluded.residue_vector
+                VALUES(%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    length=VALUES(length),
+                    residue_vector=VALUES(residue_vector)
                 """,
                 (target, sequence, len(sequence), vector),
             )
             node_id = int(connection.execute(
-                "SELECT id FROM nodes WHERE target=? AND sequence=?",
+                "SELECT id FROM nodes WHERE target=%s AND sequence=%s",
                 (target, sequence),
             ).fetchone()[0])
             excluded = {
@@ -723,17 +634,17 @@ def update_observation_store(
                 INSERT INTO observations(
                     observation_id, node_id, epoch, source, score_kind, score,
                     observation_count, metrics_json, pose_json, provenance_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(observation_id) DO UPDATE SET
-                    node_id=excluded.node_id,
-                    epoch=excluded.epoch,
-                    source=excluded.source,
-                    score_kind=excluded.score_kind,
-                    score=excluded.score,
-                    observation_count=excluded.observation_count,
-                    metrics_json=excluded.metrics_json,
-                    pose_json=excluded.pose_json,
-                    provenance_json=excluded.provenance_json
+                ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    node_id=VALUES(node_id),
+                    epoch=VALUES(epoch),
+                    source=VALUES(source),
+                    score_kind=VALUES(score_kind),
+                    score=VALUES(score),
+                    observation_count=VALUES(observation_count),
+                    metrics_json=VALUES(metrics_json),
+                    pose_json=VALUES(pose_json),
+                    provenance_json=VALUES(provenance_json)
                 """,
                 (
                     observation_id,
@@ -761,12 +672,12 @@ def update_observation_store(
                     INSERT INTO observation_artifacts(
                         observation_id, confidence_path, writer_path,
                         structure_json, sample_selection_json
-                    ) VALUES(?, ?, ?, ?, ?)
-                    ON CONFLICT(observation_id) DO UPDATE SET
-                        confidence_path=excluded.confidence_path,
-                        writer_path=excluded.writer_path,
-                        structure_json=excluded.structure_json,
-                        sample_selection_json=excluded.sample_selection_json
+                    ) VALUES(%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        confidence_path=VALUES(confidence_path),
+                        writer_path=VALUES(writer_path),
+                        structure_json=VALUES(structure_json),
+                        sample_selection_json=VALUES(sample_selection_json)
                     """,
                     (
                         observation_id,
@@ -790,15 +701,15 @@ def update_observation_store(
                 connection.execute(
                     """
                     INSERT INTO nodes(target, sequence, length, residue_vector)
-                    VALUES(?, ?, ?, ?)
-                    ON CONFLICT(target, sequence) DO UPDATE SET
-                        length=excluded.length,
-                        residue_vector=excluded.residue_vector
+                    VALUES(%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        length=VALUES(length),
+                        residue_vector=VALUES(residue_vector)
                     """,
                     (target, parent_sequence, len(parent_sequence), parent_vector),
                 )
                 parent_node_id = int(connection.execute(
-                    "SELECT id FROM nodes WHERE target=? AND sequence=?",
+                    "SELECT id FROM nodes WHERE target=%s AND sequence=%s",
                     (target, parent_sequence),
                 ).fetchone()[0])
                 lineage_excluded = {
@@ -822,12 +733,11 @@ def update_observation_store(
                     INSERT INTO lineage_edges(
                         parent_node_id, child_node_id, epoch, source,
                         proposal_type, mutations_json, metadata_json
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(parent_node_id, child_node_id, epoch, source)
-                    DO UPDATE SET
-                        proposal_type=excluded.proposal_type,
-                        mutations_json=excluded.mutations_json,
-                        metadata_json=excluded.metadata_json
+                    ) VALUES(%s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        proposal_type=VALUES(proposal_type),
+                        mutations_json=VALUES(mutations_json),
+                        metadata_json=VALUES(metadata_json)
                     """,
                     (
                         parent_node_id,
@@ -846,9 +756,16 @@ def update_observation_store(
                     ),
                 )
             written += 1
+            now = time.monotonic()
+            if (commit_every > 0 and written % commit_every == 0) or (
+                now - last_commit
+            ) >= commit_interval:
+                connection.commit()
+                last_commit = now
     return written
 
 
+@db.deadlock_retry()
 def record_exact_run(
     path: Path,
     *,
@@ -876,7 +793,7 @@ def record_exact_run(
                 SELECT o.observation_id
                 FROM observations o
                 JOIN nodes n ON n.id=o.node_id
-                WHERE o.observation_id=? AND n.target=?
+                WHERE o.observation_id=%s AND n.target=%s
                 """,
                 (observation_id, target),
             )
@@ -889,16 +806,16 @@ def record_exact_run(
                 target, run_id, epoch, source_path, file_sha256,
                 scorer_protocol, expected_rows, ingested_rows, complete,
                 ingested_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(target, run_id) DO UPDATE SET
-                epoch=excluded.epoch,
-                source_path=excluded.source_path,
-                file_sha256=excluded.file_sha256,
-                scorer_protocol=excluded.scorer_protocol,
-                expected_rows=excluded.expected_rows,
-                ingested_rows=excluded.ingested_rows,
-                complete=excluded.complete,
-                ingested_at=excluded.ingested_at
+            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                epoch=VALUES(epoch),
+                source_path=VALUES(source_path),
+                file_sha256=VALUES(file_sha256),
+                scorer_protocol=VALUES(scorer_protocol),
+                expected_rows=VALUES(expected_rows),
+                ingested_rows=VALUES(ingested_rows),
+                complete=VALUES(complete),
+                ingested_at=VALUES(ingested_at)
             """,
             (
                 target, run_id, epoch, str(source_path), file_sha256,
@@ -906,13 +823,13 @@ def record_exact_run(
             ),
         )
         connection.execute(
-            "DELETE FROM exact_run_observations WHERE target=? AND run_id=?",
+            "DELETE FROM exact_run_observations WHERE target=%s AND run_id=%s",
             (target, run_id),
         )
         connection.executemany(
             """
             INSERT INTO exact_run_observations(target, run_id, observation_id)
-            VALUES(?, ?, ?)
+            VALUES(%s, %s, %s)
             """,
             ((target, run_id, observation_id) for observation_id in present_ids),
         )
@@ -934,27 +851,22 @@ def exact_run_is_complete(
     expected_rows: int,
 ) -> bool:
     """Whether the database holds a sealed, byte-matched raw exact run."""
-    if not path.is_file():
-        return False
     try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
-        row = connection.execute(
-            """
-            SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
-                   COUNT(x.observation_id)
-            FROM exact_runs r
-            LEFT JOIN exact_run_observations x
-              ON x.target=r.target AND x.run_id=r.run_id
-            WHERE r.target=? AND r.run_id=?
-            GROUP BY r.target, r.run_id
-            """,
-            (target, run_id),
-        ).fetchone()
-    except sqlite3.Error:
+        with db.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
+                       COUNT(x.observation_id)
+                FROM exact_runs r
+                LEFT JOIN exact_run_observations x
+                  ON x.target=r.target AND x.run_id=r.run_id
+                WHERE r.target=%s AND r.run_id=%s
+                GROUP BY r.target, r.run_id
+                """,
+                (target, run_id),
+            ).fetchone()
+    except Exception:
         return False
-    finally:
-        if "connection" in locals():
-            connection.close()
     return bool(
         row
         and str(row[0]) == file_sha256
@@ -969,30 +881,26 @@ def load_exact_artifacts(
     path: Path, *, target: str
 ) -> dict[str, list[dict[str, Any]]]:
     """Load retained structure/sample metadata for authoritative raw folds."""
-    if not path.is_file():
-        return {}
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
     try:
-        rows = connection.execute(
-            """
-            SELECT n.sequence, o.observation_id, x.run_id, a.confidence_path,
-                   a.writer_path, a.structure_json, a.sample_selection_json
-            FROM observations o
-            JOIN nodes n ON n.id=o.node_id
-            JOIN exact_run_observations x
-              ON x.observation_id=o.observation_id AND x.target=n.target
-            JOIN exact_runs r
-              ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
-            JOIN observation_artifacts a ON a.observation_id=o.observation_id
-            WHERE n.target=? AND o.source='local_exact_raw'
-            ORDER BY o.observation_id
-            """,
-            (target,),
-        ).fetchall()
-    except sqlite3.Error:
+        with db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT n.sequence, o.observation_id, x.run_id, a.confidence_path,
+                       a.writer_path, a.structure_json, a.sample_selection_json
+                FROM observations o
+                JOIN nodes n ON n.id=o.node_id
+                JOIN exact_run_observations x
+                  ON x.observation_id=o.observation_id AND x.target=n.target
+                JOIN exact_runs r
+                  ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
+                JOIN observation_artifacts a ON a.observation_id=o.observation_id
+                WHERE n.target=%s AND o.source='local_exact_raw'
+                ORDER BY o.observation_id
+                """,
+                (target,),
+            ).fetchall()
+    except Exception:
         return {}
-    finally:
-        connection.close()
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (
         sequence, observation_id, run_id, confidence, writer, structure, selection
@@ -1026,21 +934,12 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
     database's own (mtime, size): a real change is a miss, a rerun on an
     unchanged database is not.
     """
-    if not path.is_file():
-        return []
-    # A cheap COUNT+MAX as the cache key, not file mtime/size: the store runs
-    # in WAL mode (_connect below), where a write can leave the main file's
-    # mtime and size untouched until the next checkpoint, and PRAGMA
-    # data_version proved unreliable across short-lived connections in
-    # testing. Counting rows and the newest observation_id is a fraction of
-    # the cost of decoding every row's JSON, and changes exactly when new
-    # observations for this target actually land.
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as probe:
+    with db.connect() as probe:
         cache_key = probe.execute(
             """
             SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
             FROM observations o JOIN nodes n ON n.id=o.node_id
-            WHERE n.target=?
+            WHERE n.target=%s
             """,
             (target,),
         ).fetchone()
@@ -1075,7 +974,7 @@ def _load_observations_uncached(path: Path, *, target: str) -> list[dict[str, An
                    o.provenance_json
             FROM observations o
             JOIN nodes n ON n.id=o.node_id
-            WHERE n.target=?
+            WHERE n.target=%s
             ORDER BY o.epoch, o.observation_id
             """,
             (target,),
@@ -1098,8 +997,6 @@ def _load_observations_uncached(path: Path, *, target: str) -> list[dict[str, An
 
 def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
     """Load observed proposal parent-child relationships without inference."""
-    if not path.is_file():
-        return []
     with _connect(path) as connection:
         rows = connection.execute(
             """
@@ -1108,7 +1005,7 @@ def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
             FROM lineage_edges edge
             JOIN nodes parent ON parent.id=edge.parent_node_id
             JOIN nodes child ON child.id=edge.child_node_id
-            WHERE child.target=?
+            WHERE child.target=%s
             ORDER BY edge.epoch, parent.sequence, child.sequence
             """,
             (target,),
@@ -1129,11 +1026,9 @@ def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
 
 def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
     """Load the latest complete directional-effect snapshot for a target."""
-    if not path.is_file():
-        return []
     with _connect(path) as connection:
         row = connection.execute(
-            "SELECT value FROM metadata WHERE key=?",
+            "SELECT value FROM metadata WHERE `key`=%s",
             (f"graph_version:{target}",),
         ).fetchone()
         if row is None:
@@ -1144,7 +1039,7 @@ def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
             SELECT position, from_residue, to_residue, region, contact_class,
                    support, median_score_delta, uncertainty, graph_version
             FROM mutation_effects
-            WHERE target=? AND graph_version=?
+            WHERE target=%s AND graph_version=%s
             """,
             (target, graph_version),
         ).fetchall()
@@ -1165,7 +1060,7 @@ def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
 
 
 def _robust_node_scores(
-    connection: sqlite3.Connection,
+    connection: db.Connection,
     *,
     target: str,
     sequence_length: int,
@@ -1176,7 +1071,7 @@ def _robust_node_scores(
                o.epoch, o.source, o.observation_count
         FROM nodes n
         JOIN observations o ON o.node_id=n.id
-        WHERE n.target=? AND n.length=?
+        WHERE n.target=%s AND n.length=%s
         ORDER BY n.id, o.observation_id
         """,
         (target, sequence_length),
@@ -1208,6 +1103,7 @@ def _robust_node_scores(
     return node_ids, sequences, vectors, score_by_sequence
 
 
+@db.deadlock_retry()
 def rebuild_nearest_edges(
     path: Path,
     *,
@@ -1226,7 +1122,7 @@ def rebuild_nearest_edges(
             """
             SELECT n.id, o.pose_json FROM nodes n
             JOIN observations o ON o.node_id=n.id
-            WHERE n.target=? AND o.pose_json IS NOT NULL
+            WHERE n.target=%s AND o.pose_json IS NOT NULL
             """,
             (target,),
         ).fetchall()
@@ -1243,7 +1139,7 @@ def rebuild_nearest_edges(
         lengths = connection.execute(
             """
             SELECT length, COUNT(*) FROM nodes
-            WHERE target=? GROUP BY length ORDER BY length
+            WHERE target=%s GROUP BY length ORDER BY length
             """,
             (target,),
         ).fetchall()
@@ -1311,7 +1207,7 @@ def rebuild_nearest_edges(
         connection.execute(
             """
             DELETE FROM edges
-            WHERE source_node_id IN (SELECT id FROM nodes WHERE target=?)
+            WHERE source_node_id IN (SELECT id FROM nodes WHERE target=%s)
             """,
             (target,),
         )
@@ -1320,7 +1216,7 @@ def rebuild_nearest_edges(
             INSERT INTO edges(
                 source_node_id, target_node_id, distance,
                 mutations_json, context_json
-            ) VALUES(?, ?, ?, ?, ?)
+            ) VALUES(%s, %s, %s, %s, %s)
             """,
             edge_rows.values(),
         )
@@ -1330,7 +1226,7 @@ def rebuild_nearest_edges(
             SELECT n.id, o.epoch, o.score_kind, o.source, o.score
             FROM nodes n
             JOIN observations o ON o.node_id=n.id
-            WHERE n.target=? AND o.epoch IS NOT NULL
+            WHERE n.target=%s AND o.epoch IS NOT NULL
             """,
             (target,),
         ).fetchall()
@@ -1377,7 +1273,7 @@ def rebuild_nearest_edges(
                 effects[forward].append(delta)
                 effects[reverse].append(-delta)
         connection.execute(
-            "DELETE FROM mutation_effects WHERE target=? AND graph_version=?",
+            "DELETE FROM mutation_effects WHERE target=%s AND graph_version=%s",
             (target, graph_version),
         )
         effect_rows = []
@@ -1393,12 +1289,12 @@ def rebuild_nearest_edges(
                 target, position, from_residue, to_residue, region,
                 contact_class, support, median_score_delta, uncertainty,
                 graph_version
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             effect_rows,
         )
         connection.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+            "REPLACE INTO metadata(`key`, value) VALUES(%s, %s)",
             (f"graph_version:{target}", graph_version),
         )
     return {
