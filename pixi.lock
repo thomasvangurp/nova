@@ -879,6 +879,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/urllib3-2.7.0-pyhd8ed1ab_0.conda
       - pypi: git+https://github.com/oxpig/ImmuneBuilder.git?rev=0df4e2ad82a1aa60f37ea9dae335d1198159ef78#0df4e2ad82a1aa60f37ea9dae335d1198159ef78
       - pypi: git+https://github.com/oxpig/TNP.git?rev=29dcac72f1380e8538e8870f45a699d3c6156162#29dcac72f1380e8538e8870f45a699d3c6156162
+      - pypi: https://files.pythonhosted.org/packages/ef/8f/b9488795d21a76c1520905feba5afb6233f16510797a28b51f2b2688c93e/mysqlclient-2.3.0.tar.gz
   validator-bgen:
     channels:
     - url: https://conda.anaconda.org/conda-forge/

@@ -222,6 +222,7 @@ igblast = "==1.22.0"
 [feature.metanano.pypi-dependencies]
 immunebuilder = { git = "https://github.com/oxpig/ImmuneBuilder.git", rev = "0df4e2ad82a1aa60f37ea9dae335d1198159ef78" }
 theraprofnano = { git = "https://github.com/oxpig/TNP.git", rev = "29dcac72f1380e8538e8870f45a699d3c6156162" }
+mysqlclient = ">=2.3.0, <3"
 
 # MetaNano is vendored and its GPU-spreading TNP entrypoint is an explicit
 # runtime shim. Keep all discovery in Pixi so direct tasks and spawned Python
