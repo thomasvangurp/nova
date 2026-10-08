@@ -64,6 +64,7 @@ from compound_miner.nanobody_provider import (  # noqa: E402
 )
 from nanobody_opt import fleet as fleet_module  # noqa: E402
 from nanobody_opt import publication_gates  # noqa: E402
+from nanobody_opt import db  # noqa: E402
 
 
 CONFIG_URL = "https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml"
@@ -518,12 +519,10 @@ def _exact_run_descriptor(path: Path, target: str) -> dict[str, Any]:
 def _exact_run_is_sealed(
     database: Path, *, target: str, descriptor: Mapping[str, Any]
 ) -> bool:
-    if not database.is_file() or not descriptor["expected_rows"]:
+    if not descriptor["expected_rows"]:
         return False
     try:
-        connection = sqlite3.connect(
-            f"file:{database}?mode=ro", uri=True, timeout=30
-        )
+        connection = db.connect()
         row = connection.execute(
             """
             SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
@@ -531,12 +530,12 @@ def _exact_run_is_sealed(
             FROM exact_runs r
             LEFT JOIN exact_run_observations x
               ON x.target=r.target AND x.run_id=r.run_id
-            WHERE r.target=? AND r.run_id=?
+            WHERE r.target=%s AND r.run_id=%s
             GROUP BY r.target, r.run_id
             """,
             (target, descriptor["run_id"]),
         ).fetchone()
-    except sqlite3.Error:
+    except Exception:
         return False
     finally:
         if "connection" in locals():
@@ -556,12 +555,8 @@ def _database_exact_fingerprints(
     database: Path, target: str
 ) -> tuple[str, str, int]:
     """Fingerprint authoritative sealed raw runs without reading score files."""
-    if not database.is_file():
-        return _sha256_bytes(b"[]"), _sha256_bytes(b"[]"), 0
     try:
-        connection = sqlite3.connect(
-            f"file:{database}?mode=ro", uri=True, timeout=30
-        )
+        connection = db.connect()
         rows = connection.execute(
             """
             SELECT r.run_id, r.file_sha256, r.expected_rows, r.scorer_protocol,
@@ -572,14 +567,14 @@ def _database_exact_fingerprints(
               ON x.target=r.target AND x.run_id=r.run_id
             LEFT JOIN observation_artifacts a
               ON a.observation_id=x.observation_id
-            WHERE r.target=? AND r.complete=1
+            WHERE r.target=%s AND r.complete=1
             GROUP BY r.target, r.run_id
             HAVING COUNT(x.observation_id)=r.expected_rows
             ORDER BY r.run_id
             """,
             (target,),
         ).fetchall()
-    except sqlite3.Error:
+    except Exception:
         return _sha256_bytes(b"[]"), _sha256_bytes(b"[]"), 0
     finally:
         if "connection" in locals():
