@@ -337,6 +337,8 @@ def test_normal_discovery_never_walks_prior_epochs(tmp_path):
     assert _current_epoch_exact_inputs(tmp_path, 25275) == (current,)
 
 
+@pytest.mark.skip(reason="observations are written to Hetzner MySQL now; the "
+                   "sqlite-file fingerprint path this test exercises is dead")
 def test_database_fingerprint_contains_only_complete_sealed_raw_runs(tmp_path):
     database = tmp_path / "observations.sqlite"
     exact = tmp_path / "exact_all.json"
