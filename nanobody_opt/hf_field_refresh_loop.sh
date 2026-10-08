@@ -19,6 +19,16 @@ if pgrep -f "backfill_topup.py" >/dev/null 2>&1 \
   exit 0
 fi
 
+# Never compete with the producer's children scoring: skip while the GPUs are
+# busy (the children lane runs the exact scorer at ~100% util). The refresh
+# only runs in the idle gaps, so the 20x parent pool never steals GPU from a
+# live children submission.
+MAXUTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
+if [ -n "$MAXUTIL" ] && [ "$MAXUTIL" -gt 40 ]; then
+  echo "$(date -u +%FT%TZ) SKIP gpu busy $MAXUTIL%" >> "$LOGDIR/loop.log"
+  exit 0
+fi
+
 # Lock: no overlapping refreshes.
 if ! mkdir "$LOCK" 2>/dev/null; then
   echo "$(date -u +%FT%TZ) SKIP lock held" >> "$LOGDIR/loop.log"
