@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Compute local_validator_replay_rank_sum from 8x scorer results and upsert
 into the mutation DB. Runs on the production box (single writer)."""
-import sqlite3, json, math, sys, os
+import json, math, sys, os
 from pathlib import Path
 import numpy as np
 import pandas as pd
+
+_here = Path(__file__).resolve().parent
+for _cand in (_here, _here.parent):
+    if (_cand / "nanobody_opt").is_dir():
+        sys.path.insert(0, str(_cand))
+        break
+from nanobody_opt import db
 
 METRICS = {"design_iiptm":"max","design_ptm":"max","design_to_target_iptm":"max",
            "min_design_to_target_pae":"min","interaction_pae":"min",
@@ -45,20 +52,20 @@ def replay_distribution(metrics, fields):
 def upsert_observation(conn, obs):
     seq = obs["sequence"]; target = obs["target"]
     vector = bytes(AA_INDEX[aa] for aa in seq)
-    conn.execute("INSERT INTO nodes(target, sequence, length, residue_vector) VALUES(?,?,?,?) "
-                 "ON CONFLICT(target, sequence) DO UPDATE SET length=excluded.length, residue_vector=excluded.residue_vector",
+    conn.execute("INSERT INTO nodes(target, sequence, length, residue_vector) VALUES(%s,%s,%s,%s) "
+                 "ON DUPLICATE KEY UPDATE length=VALUES(length), residue_vector=VALUES(residue_vector)",
                  (target, seq, len(seq), vector))
-    node_id = conn.execute("SELECT id FROM nodes WHERE target=? AND sequence=?", (target, seq)).fetchone()[0]
+    node_id = conn.execute("SELECT id FROM nodes WHERE target=%s AND sequence=%s", (target, seq)).fetchone()[0]
     provenance = {k: v for k, v in obs.items() if k not in
                   {"observation_id","sequence","target","epoch","source","score_kind","score",
                    "observation_count","metrics","pose_stability","structure"}}
     conn.execute("""INSERT INTO observations(observation_id,node_id,epoch,source,score_kind,score,
                     observation_count,metrics_json,pose_json,provenance_json)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(observation_id) DO UPDATE SET node_id=excluded.node_id, epoch=excluded.epoch,
-                    source=excluded.source, score_kind=excluded.score_kind, score=excluded.score,
-                    observation_count=excluded.observation_count, metrics_json=excluded.metrics_json,
-                    pose_json=excluded.pose_json, provenance_json=excluded.provenance_json""",
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE node_id=VALUES(node_id), epoch=VALUES(epoch),
+                    source=VALUES(source), score_kind=VALUES(score_kind), score=VALUES(score),
+                    observation_count=VALUES(observation_count), metrics_json=VALUES(metrics_json),
+                    pose_json=VALUES(pose_json), provenance_json=VALUES(provenance_json)""",
                  (obs["observation_id"], node_id, obs["epoch"], obs["source"], obs["score_kind"],
                   obs["score"], obs["observation_count"],
                   json.dumps(obs["metrics"], sort_keys=True), None,
@@ -76,8 +83,7 @@ def main():
 
     fields = load_fields(archive_path)
     print(f"fields={len(fields)}", flush=True)
-    conn = sqlite3.connect(str(db_path), timeout=120)
-    conn.execute("PRAGMA busy_timeout=120000")
+    conn = db.connect()
     # Merge every per-box + steal result file by hash (union of passes), so a
     # child whose 8 passes are split across its home box and a work-stealer is
     # still counted complete. The stale old-shard box*.json files are skipped.

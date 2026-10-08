@@ -14,18 +14,18 @@ TARGET = "P20809"
 # Position 114 is deliberately ABSENT: its best residue (D, 221.5) scores worse
 # than most positions' worst, so it only wastes candidates.
 HOT = {
-    0:   "AD",   # was QR - R was 12th of 20
-    2:   "AM",   # was TH - H was 13th of 20
-    72:  "AT",   # new
-    110: "ED",   # new
-    113: "HM",   # was HF - H correct, F was 68 worse
-    115: "AS",   # unchanged - the only position the old set had right
-    120: "AT",   # was TS
-    121: "AP",   # was ST
-    122: "VA",   # new
-    123: "AS",   # was TP - T was 8th of 20
-    125: "GA",   # new - G is the 2nd best single combo overall
-    126: "AP",   # new
+    0:   "ADQGN",
+    2:   "AMVEK",
+    72:  "ATDVQ",
+    110: "EDQKA",
+    113: "HMFVY",
+    115: "ASTEH",
+    120: "ATSVP",
+    121: "APSVG",
+    122: "VATIL",
+    123: "ASPGV",
+    125: "GASPT",
+    126: "APGES",
 }
 
 def main():

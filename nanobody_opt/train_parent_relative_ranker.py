@@ -34,6 +34,9 @@ MODEL_SPECS = (
     ("extra_trees_leaf4", "extra_trees", 4, 0.50),
     ("random_forest_leaf2", "random_forest", 2, 0.35),
     ("random_forest_leaf4", "random_forest", 4, 0.50),
+    # sklearn's HistGradientBoosting = the LightGBM-equivalent the compound
+    # track found beat ExtraTrees (min_samples_leaf/max_features are unused).
+    ("hist_gradient_boosting", "hist_gradient_boosting", 63, 0.0),
 )
 PROPOSAL_TYPES = (
     "exhaustive_single_substitution",
@@ -314,6 +317,17 @@ def _fit(spec: ModelSpec, x: np.ndarray, y: np.ndarray, workers: int, seed: int)
         model = ExtraTreesRegressor(**common)
     elif spec.family == "random_forest":
         model = RandomForestRegressor(bootstrap=True, max_samples=0.85, **common)
+    elif spec.family == "hist_gradient_boosting":
+        from sklearn.ensemble import HistGradientBoostingRegressor
+
+        # Compound-track config that beat ExtraTrees (modelclass.py): max_iter
+        # 400, learning_rate 0.06, max_leaf_nodes 63.
+        model = HistGradientBoostingRegressor(
+            max_iter=400,
+            learning_rate=0.06,
+            max_leaf_nodes=63,
+            random_state=seed,
+        )
     else:
         raise ValueError(f"unknown model family {spec.family}")
     model.fit(x, y)
@@ -321,7 +335,13 @@ def _fit(spec: ModelSpec, x: np.ndarray, y: np.ndarray, workers: int, seed: int)
 
 
 def prediction_distribution(model: Any, x: np.ndarray) -> tuple[np.ndarray, ...]:
-    tree_predictions = np.vstack([tree.predict(x) for tree in model.estimators_])
+    if hasattr(model, "estimators_"):
+        tree_predictions = np.vstack([tree.predict(x) for tree in model.estimators_])
+    else:
+        # HistGradientBoosting has no .estimators_; use the per-iteration
+        # staged predictions as the ensemble distribution (analogous to the
+        # per-tree predictions above).
+        tree_predictions = np.vstack(list(model.staged_predict(x)))
     mean = tree_predictions.mean(axis=0)
     standard_deviation = tree_predictions.std(axis=0)
     probability_improves = (tree_predictions > 0).mean(axis=0)

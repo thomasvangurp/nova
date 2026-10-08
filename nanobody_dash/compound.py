@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import subprocess
 import time
 import urllib.error
@@ -81,10 +82,10 @@ PI_LOOP_LOG = "/opt/nova-submit/loop.log"
 # against the Pi's actual running pi_epoch_loop.py process args
 # (--minimum-compound-score-map).
 REACTION_BOXES = {
-    1: ("root@ssh3.vast.ai", 18856, 1.61),
+    1: ("root@ssh6.vast.ai", 38762, 1.61),  # 54154421 (replaced dead 53168856, 2026-10-04)
     2: ("root@ssh1.vast.ai", 13786, 1.93),
-    3: ("root@ssh1.vast.ai", 12794, 1.56),
-    4: ("root@ssh9.vast.ai", 14362, 1.87),
+    3: ("root@ssh3.vast.ai", 34868, 1.56),  # 54556994 (replaced broken 53172464, 2026-10-07)
+    4: ("root@ssh7.vast.ai", 23482, 1.87),  # 54163340 (replaced unreachable 53174363, 2026-10-04)
     5: ("root@ssh5.vast.ai", 30358, 1.95),
 }
 
@@ -120,6 +121,9 @@ def _ssh_port(user_host: str, port: int, *args: str, timeout: int = 60) -> str |
     try:
         completed = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             # rebuilt producer boxes come with new proxy ports; accept-new adds
+             # an unseen host key but still refuses a CHANGED one
+             "-o", "StrictHostKeyChecking=accept-new",
              "-p", str(port), user_host, *args],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
@@ -169,6 +173,36 @@ def _parse_loop_log(text: str) -> dict:
         ))
     # de-dupe by epoch (a retried commit can log the same allocation twice)
     allocated = list({row["epoch"]: row for row in allocated}.values())
+
+    # Since 2026-10-06, ``allocated`` means only that candidate portfolios
+    # were constructed. A second, exact post-allocation gate decides whether
+    # those portfolios are safe to submit. Associate that decision with the
+    # current window and do not count a rejected allocation as a clear.
+    final_gates: dict[int, dict] = {}
+    current_window = None
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if event.get("event") == "window_open":
+            current_window = {
+                "epoch": int(event["epoch"]), "reaction": int(event["reaction"]),
+            }
+            continue
+        if event.get("event") not in ("fleet_gate_passed", "fleet_below_baseline") \
+                or current_window is None:
+            continue
+        final_gates[current_window["epoch"]] = {
+            **current_window,
+            "passed": event["event"] == "fleet_gate_passed",
+            **{key: event.get(key) for key in (
+                "raw_floor", "worst_raw", "prediction_offset", "realized_floor",
+                "worst_predicted_realized",
+            )},
+        }
+    rejected_epochs = {epoch for epoch, gate in final_gates.items() if not gate["passed"]}
+    allocated = [row for row in allocated if row["epoch"] not in rejected_epochs]
 
     blocked: list[dict] = []
     for match in re.finditer(
@@ -230,6 +264,21 @@ def _parse_loop_log(text: str) -> dict:
     blocked_with_epoch = list({
         (row["epoch"], row["reaction"]): row for row in blocked_with_epoch
     }.values())
+    for epoch in sorted(rejected_epochs):
+        gate = final_gates[epoch]
+        blocked_with_epoch.append({
+            "epoch": epoch,
+            "reaction": gate["reaction"],
+            "selected_score": gate.get("worst_raw"),
+            "baseline": gate.get("raw_floor"),
+            "prediction_offset": gate.get("prediction_offset"),
+            "predicted_realized": gate.get("worst_predicted_realized"),
+            "realized_floor": gate.get("realized_floor"),
+            "final_gate": True,
+        })
+    blocked_with_epoch = list({
+        (row["epoch"], row["reaction"]): row for row in blocked_with_epoch
+    }.values())
 
     # (at, epoch, reaction) in log order -- epochs only ever increase, so
     # sorting by epoch reproduces file/chronological order without needing
@@ -247,6 +296,7 @@ def _parse_loop_log(text: str) -> dict:
         window_epoch_reaction=window_epoch_reaction,
         allocated=allocated,
         blocked=blocked_with_epoch,
+        final_gates=final_gates,
         ordered_window_events=ordered_window_events,
     )
 
@@ -389,6 +439,11 @@ def _real_outcome(epoch: int, uids: list[int]) -> dict | None:
 # (2026-10-02). Never re-replicate the gate here; redeploy the copy instead.
 GATE_REMOTE = "tools/dash_release_gate.py"
 ARCHIVE_REMOTE = "artifacts/rxn3-extratrees-20260924/P40261_molecules.csv"
+SEARCH_ARTIFACTS_REMOTE = "artifacts/rxn3-extratrees-20260924"
+SEARCH_BANK_REMOTE = f"{SEARCH_ARTIFACTS_REMOTE}/rxn3-bank-live.sqlite"
+AB_PERFORMANCE_REMOTE = "tools/competitor_motif_ab_performance.py"
+LANE_PERFORMANCE_REMOTE = "tools/lane_performance.py"
+STRATEGY_POLICY_VERSION = "uplift-v1"
 
 
 def _gate_events(text: str) -> dict:
@@ -453,40 +508,107 @@ FLOOR_OPTIMISM_MARGIN = 0.10  # must match pi_epoch_loop.py
 FLOOR_PINNED: dict = {}  # must match pi_epoch_loop.py
 FLOOR_BURST_LOOKBACK = 5  # must match pi_epoch_loop.py
 FLOOR_BURST_MIN = 3  # must match pi_epoch_loop.py
+FLOOR_LOOKBACK_EPOCHS = 150  # must match pi_epoch_loop.py
 
 
-def _dynamic_floors(next_epoch: int) -> dict:
+def _calibrated_optimism(evidence: list[dict], prior: float,
+                         prior_epochs: int = 2) -> tuple[float, dict]:
+    """Mirror the Pi's empirical-Bayes raw-minus-realised calibration."""
+    by_epoch: dict[int, list[float]] = {}
+    for row in evidence:
+        try:
+            by_epoch.setdefault(int(row["epoch"]), []).append(float(row["optimism"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    epoch_values = [statistics.median(by_epoch[epoch]) for epoch in sorted(by_epoch)][-8:]
+    if not epoch_values:
+        return prior, {"own_evidence_epochs": 0, "own_evidence_portfolios": 0}
+    observed = statistics.median(epoch_values)
+    n = len(epoch_values)
+    estimate = min(0.30, max(0.0, (n * observed + prior_epochs * prior) /
+                                 (n + prior_epochs)))
+    return estimate, {
+        "own_evidence_epochs": n,
+        "own_evidence_portfolios": len(evidence),
+        "observed_optimism": round(observed, 4),
+    }
+
+
+def _dynamic_floors_from_cache(cache: dict, next_epoch: int) -> tuple[dict, dict]:
+    """Pure mirror of the Pi's calibrated external-rival floor calculation."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import rival_margin
+
+    floors = {r: REACTION_BOXES[r][2] for r in REACTION_BOXES}
+    details: dict[int, dict] = {}
+    calibration = cache.get("_self_calibration") or {}
+    owned = {str(value) for value in calibration.get("coldkeys") or []}
+    evidence = calibration.get("evidence") or []
+    rows = []
+    for epoch, entries in cache.items():
+        if not str(epoch).isdigit() or not isinstance(entries, list):
+            continue
+        epoch_number = int(epoch)
+        if not max(0, next_epoch - FLOOR_LOOKBACK_EPOCHS) <= epoch_number < next_epoch:
+            continue
+        for row in entries:
+            try:
+                rows.append({
+                    "epoch": epoch_number, "coldkey": str(row["coldkey"]),
+                    "reaction": int(row["reaction"]), "score": float(row["score"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+    external_rows = [row for row in rows if row["coldkey"] not in owned]
+    for reaction in REACTION_BOXES:
+        if reaction in FLOOR_PINNED:
+            floors[reaction] = FLOOR_PINNED[reaction]
+            details[reaction] = {"source": "user_pinned", "margin": floors[reaction]}
+            continue
+        reaction_evidence = [row for row in evidence
+                             if str(row.get("reaction")) == str(reaction)]
+        optimism, own = _calibrated_optimism(reaction_evidence, rival_margin.CURSE)
+        optimism_by_epoch: dict[int, list[float]] = {}
+        for row in reaction_evidence:
+            try:
+                optimism_by_epoch.setdefault(int(row["epoch"]), []).append(
+                    float(row["optimism"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        optimism_samples = [
+            statistics.median(optimism_by_epoch[epoch])
+            for epoch in sorted(optimism_by_epoch)
+        ][-8:]
+        margin, info = rival_margin.required_margin(
+            reaction, external_rows, next_epoch, optimism=optimism,
+            optimism_samples=optimism_samples)
+        if margin is not None:
+            floors[reaction] = margin
+        details[reaction] = {
+            **info, **own, "source": "rival_projection" if margin is not None else "static_fallback",
+            "owned_coldkeys_excluded": len(owned), "external_rows": len(external_rows),
+            "floor": floors[reaction],
+        }
+    return floors, details
+
+
+def _dynamic_floors(next_epoch: int) -> tuple[dict, dict]:
     """Required margin per reaction from the rival-supply model, the same rule
-    the Pi's dynamic_floor enforces (rival_margin.required_margin): per-rival
-    projected winner + curse + z*residual + per-reaction bias. Reads the Pi's
-    rival_cache.json. Falls back to the static REACTION_BOXES floor."""
+    the Pi's dynamic_floor enforces: external-rival projected winner, corrected
+    rival bias, plus our calibrated raw-minus-realised optimism. Reads the Pi's
+    rival_cache.json and excludes our own coldkey. Falls back to static floors."""
     floors = {r: REACTION_BOXES[r][2] for r in REACTION_BOXES}
     text = _ssh(PI_HOST, "cat", "/opt/nova-submit/archive/rival_cache.json", timeout=60)
     try:
         cache = json.loads(text) if text else {}
     except ValueError:
         cache = {}
-    if not cache:
-        return floors
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-    import rival_margin
-    rows = []
-    for ep, arr in cache.items():
-        for r in arr:
-            rows.append({"epoch": int(ep), "coldkey": r["coldkey"],
-                         "reaction": r["reaction"], "score": r["score"]})
-    for reaction in REACTION_BOXES:
-        if reaction in FLOOR_PINNED:
-            floors[reaction] = FLOOR_PINNED[reaction]
-            continue
-        margin, _ = rival_margin.required_margin(reaction, rows, next_epoch)
-        if margin is not None:
-            floors[reaction] = margin
-    return floors
+    return _dynamic_floors_from_cache(cache, next_epoch) if cache else (floors, {})
 
 
 DYNAMIC_FLOORS: dict = {}
+DYNAMIC_FLOOR_DETAILS: dict = {}
 
 
 def _live_gap_check(reaction: int, epoch: int = 0) -> dict | None:
@@ -529,6 +651,163 @@ def _live_gap_check(reaction: int, epoch: int = 0) -> dict | None:
                 entropy=selection.get("selected_entropy"))
 
 
+def _refresh_boxes_from_pi() -> None:
+    """Override REACTION_BOXES host:port with the producer watchdog's live addresses
+    (/opt/nova-submit/producer_boxes.json on the Pi, vast API + identity check, every
+    5 min), so a rebuilt box is picked up without editing this file. Floors and any
+    reaction missing from a fresh (<30 min) file keep their static entries."""
+    text = _ssh(PI_HOST, "cat", "/opt/nova-submit/producer_boxes.json", timeout=30)
+    try:
+        data = json.loads(text or "")
+        if time.time() - float(data.get("updated_unix", 0)) > 1800:
+            return
+        for key, box in (data.get("boxes") or {}).items():
+            reaction = int(key)
+            if reaction in REACTION_BOXES and box.get("host") and box.get("port"):
+                REACTION_BOXES[reaction] = (f"root@{box['host']}", int(box["port"]),
+                                            REACTION_BOXES[reaction][2])
+    except (ValueError, TypeError, AttributeError):
+        return
+
+
+def _last_json_object(text: str | None) -> dict | None:
+    for line in reversed((text or "").splitlines()):
+        try:
+            value = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _strategy_verdict(ab: dict, lanes: dict) -> dict:
+    """Separate relative selection signal from absolute chemistry progress."""
+    lane_metrics = (lanes.get("lanes") or {}) if isinstance(lanes, dict) else {}
+    active_strategy = str(lanes.get("active_strategy") or "")
+    if active_strategy.startswith("field-recombination-"):
+        control = lane_metrics.get("block_bandit/field_recombination/random") or {}
+        treatment = lane_metrics.get("block_bandit/field_recombination/proxy") or {}
+        control_n = int(control.get("scored") or 0)
+        treatment_n = int(treatment.get("scored") or 0)
+        relative_lift = (
+            float(treatment["mean"]) - float(control["mean"])
+            if isinstance(treatment.get("mean"), (int, float)) and
+            isinstance(control.get("mean"), (int, float)) else None
+        )
+        if min(control_n, treatment_n) < 20:
+            status, label = "collecting", "collecting field A/B"
+        elif int(treatment.get("ge_entry") or 0) > 0:
+            status, label = "breakthrough", "working: bank-entry hit"
+        elif relative_lift is not None and relative_lift > 0:
+            status, label = "relative_only", "field ranker beats random"
+        elif relative_lift is not None:
+            status, label = "worse", "field ranker trails random"
+        else:
+            status, label = "inconclusive", "inconclusive"
+        base_lanes = [(name, values) for name, values in lane_metrics.items()
+                      if "/" not in name and isinstance(values, dict)
+                      and isinstance(values.get("max"), (int, float))]
+        best_name, best = max(base_lanes, key=lambda item: item[1]["max"],
+                              default=(None, {}))
+        return {
+            "mode": "field_recombination", "status": status, "label": label,
+            "relative_lift": relative_lift, "control_n": control_n,
+            "treatment_n": treatment_n, "entry_hits": treatment.get("ge_entry"),
+            "treatment_max": treatment.get("max"), "entry_score": lanes.get("entry_score"),
+            "geometry": lanes.get("active_geometry"), "block_share": lanes.get("block_share"),
+            "motif_share": lanes.get("motif_share"), "best_lane": best_name,
+            "best_lane_max": best.get("max"),
+        }
+
+    arms = ab.get("arms") or {}
+    control = arms.get("control") or {}
+    treatment = arms.get("treatment") or {}
+    comparison = arms.get("comparison") or {}
+    minimum = int((ab.get("verdict") or {}).get("minimum_per_arm", 20))
+    if min(int(control.get("n") or 0), int(treatment.get("n") or 0)) < minimum:
+        status = "collecting"
+        label = "collecting exact A/B"
+    elif int(treatment.get("ge_entry") or 0) > 0:
+        status = "breakthrough"
+        label = "working: bank-entry hit"
+    elif (comparison.get("mean_source_delta_difference") or 0) > 0:
+        status = "relative_only"
+        label = "relative signal; no entry hit"
+    elif (ab.get("verdict") or {}).get("status") == "worse":
+        status = "worse"
+        label = "worse than control"
+    else:
+        status = "inconclusive"
+        label = "inconclusive"
+
+    base_lanes = [(name, values) for name, values in lane_metrics.items()
+                  if "/" not in name and isinstance(values, dict)
+                  and isinstance(values.get("max"), (int, float))]
+    best_name, best = max(base_lanes, key=lambda item: item[1]["max"],
+                          default=(None, {}))
+    return {
+        "mode": "legacy_motif", "status": status,
+        "label": label,
+        "relative_lift": comparison.get("mean_source_delta_difference"),
+        "treatment_source_delta": treatment.get("mean_source_delta"),
+        "entry_hits": treatment.get("ge_entry"),
+        "control_n": int(control.get("n") or 0),
+        "treatment_n": int(treatment.get("n") or 0),
+        "treatment_max": treatment.get("max"), "entry_score": ab.get("entry_score"),
+        "best_lane": best_name,
+        "best_lane_max": best.get("max"),
+    }
+
+
+def _search_strategy_check(reaction: int) -> dict | None:
+    user_host, port, _ = REACTION_BOXES[reaction]
+    common = (f"--art {SEARCH_ARTIFACTS_REMOTE} --bank {SEARCH_BANK_REMOTE} "
+              f"--reaction {reaction}")
+    ab_command = (
+        f"cd ~/search && uv run --no-project python {AB_PERFORMANCE_REMOTE} {common} "
+        f"--last-files 20 --policy-version {STRATEGY_POLICY_VERSION} --minimum-per-arm 20"
+    )
+    lane_command = (
+        f"cd ~/search && uv run --no-project python {LANE_PERFORMANCE_REMOTE} {common} "
+        "--rounds 10"
+    )
+    lanes = _last_json_object(_ssh_port(user_host, port, lane_command, timeout=180))
+    # The old motif experiment had its own treatment/control tags.  The field
+    # lane uses the producer's uniform random arm as its true online control,
+    # which lane_performance reports directly.
+    ab = None
+    if not lanes or not str(lanes.get("active_strategy") or "").startswith(
+            "field-recombination-"):
+        ab = _last_json_object(_ssh_port(user_host, port, ab_command, timeout=180))
+    if ab is None and lanes is None:
+        return None
+    ab = ab or {}
+    lanes = lanes or {}
+    return {
+        "checked_at": time.time(), "reaction": reaction,
+        "ab": ab, "lanes": lanes, "verdict": _strategy_verdict(ab, lanes),
+    }
+
+
+def refresh_strategy_only() -> dict:
+    """Atomically refresh the lightweight strategy panel without rerunning gates."""
+    status = load() or {}
+    _refresh_boxes_from_pi()
+    checks = dict(status.get("search_strategy") or {})
+    with ThreadPoolExecutor(max_workers=len(REACTION_BOXES)) as pool:
+        current = dict(zip(REACTION_BOXES, pool.map(
+            _search_strategy_check, REACTION_BOXES)))
+    for reaction, result in current.items():
+        if result is not None:
+            checks[str(reaction)] = result
+    status["search_strategy"] = checks
+    temporary = STATUS_PATH.with_suffix(".json.tmp-strategy")
+    temporary.write_text(json.dumps(status))
+    temporary.replace(STATUS_PATH)
+    return checks
+
+
 def collect(live_gap_check: bool = True) -> dict:
     """One full snapshot. live_gap_check=False skips the expensive per-box
     SELECT (useful for a quick/forced refresh); the rendered page falls back
@@ -541,6 +820,7 @@ def collect(live_gap_check: bool = True) -> dict:
         except (OSError, json.JSONDecodeError):
             previous = {}
 
+    _refresh_boxes_from_pi()
     log_text = _ssh(PI_HOST, "cat", PI_LOOP_LOG, timeout=30)
     if log_text is None:
         status = dict(previous)
@@ -552,6 +832,7 @@ def collect(live_gap_check: bool = True) -> dict:
     window = parsed["window_epoch_reaction"]
     allocated = parsed["allocated"]
     blocked = parsed["blocked"]
+    final_gates = parsed.get("final_gates") or {}
 
     draws_by_reaction: dict[int, int] = {}
     for reaction in window.values():
@@ -582,18 +863,26 @@ def collect(live_gap_check: bool = True) -> dict:
         entry = history.setdefault(row["epoch"], dict(epoch=row["epoch"], reaction=row["reaction"]))
         entry["outcome"] = "cleared"
         entry["selected_score"] = row["best"]
-        # Unlike blocked entries (whose gap is against the real logged
-        # baseline AT THAT MOMENT), the "allocated" log event never logs a
-        # baseline -- this falls back to the CURRENT REACTION_BOXES floor
-        # constant. A pre-existing asymmetry in the data, not papered over;
-        # see compound_caveat_note().
-        entry["gap"] = row["best"] - REACTION_BOXES[row["reaction"]][2]
+        gate = final_gates.get(row["epoch"]) or {}
+        baseline = gate.get("raw_floor")
+        if baseline is None:
+            baseline = REACTION_BOXES[row["reaction"]][2]
+        entry["baseline"] = baseline
+        entry["gap"] = row["best"] - baseline
+        if gate:
+            entry["prediction_offset"] = gate.get("prediction_offset")
+            entry["predicted_realized"] = gate.get("worst_predicted_realized")
+            entry["realized_floor"] = gate.get("realized_floor")
+            entry["final_gate"] = True
     for row in blocked:
         entry = history.setdefault(row["epoch"], dict(epoch=row["epoch"], reaction=row["reaction"]))
         if entry.get("outcome") != "cleared":
             entry["outcome"] = "blocked"
             entry["selected_score"] = row.get("selected_score")
             entry["baseline"] = row.get("baseline")
+            for key in ("prediction_offset", "predicted_realized", "realized_floor", "final_gate"):
+                if key in row:
+                    entry[key] = row[key]
             entry["gap"] = (
                 row["selected_score"] - row["baseline"]
                 if "selected_score" in row and "baseline" in row else None
@@ -615,15 +904,26 @@ def collect(live_gap_check: bool = True) -> dict:
     recent = sorted(history.values(), key=lambda row: -row["epoch"])[:30]
 
     gap_checks = dict(previous.get("gap_checks") or {})
+    strategy_checks = dict(previous.get("search_strategy") or {})
+    floor_details = dict(previous.get("dynamic_floor_details") or {})
     if live_gap_check:
         _pull_submitted_archive()
-        DYNAMIC_FLOORS.update(_dynamic_floors((max(window) + 1) if window else 0))
+        floors, details = _dynamic_floors((max(window) + 1) if window else 0)
+        DYNAMIC_FLOORS.update(floors)
+        DYNAMIC_FLOOR_DETAILS.update(details)
+        floor_details = {str(key): value for key, value in details.items()}
         with ThreadPoolExecutor(max_workers=len(REACTION_BOXES)) as pool:
             # The next epoch to be drawn, so the gate also excludes molecules
             # submitted in epochs not yet in the local archive copy.
             next_epoch = (max(window) + 1) if window else 0
             checked = dict(zip(REACTION_BOXES, pool.map(
                 lambda reaction: _live_gap_check(reaction, next_epoch), REACTION_BOXES)))
+        with ThreadPoolExecutor(max_workers=len(REACTION_BOXES)) as pool:
+            strategy = dict(zip(REACTION_BOXES, pool.map(
+                _search_strategy_check, REACTION_BOXES)))
+        for reaction, result in strategy.items():
+            if result is not None:
+                strategy_checks[str(reaction)] = result
         gap_db = connect()
         try:
             for reaction in REACTION_BOXES:
@@ -655,6 +955,8 @@ def collect(live_gap_check: bool = True) -> dict:
         wins_by_reaction=wins_by_reaction,
         recent_history=recent,
         gap_checks=gap_checks,
+        dynamic_floor_details=floor_details,
+        search_strategy=strategy_checks,
         winners_curse_gap=WINNERS_CURSE_GAP,
     )
     return status
@@ -700,6 +1002,7 @@ def compound_status_table(status: dict | None = None) -> str:
     clears = status.get("clears_by_reaction") or {}
     wins = status.get("wins_by_reaction") or {}
     gaps = status.get("gap_checks") or {}
+    floor_details = status.get("dynamic_floor_details") or {}
     floors = {str(r): (gaps.get(str(r)) or {}).get("floor", REACTION_BOXES[r][2]) for r in REACTION_BOXES}
 
     rows = []
@@ -717,7 +1020,8 @@ def compound_status_table(status: dict | None = None) -> str:
                 gap_cell += (f"; {gap['pool_size']} eligible "
                              f"({gap.get('non_novel_refused') or 0} non-novel, "
                              f"{gap.get('recently_submitted_refused') or 0} recently submitted, "
-                             f"{gap.get('undenoised_dropped') or 0} <3 passes excluded)")
+                             f"{gap.get('undenoised_dropped') or 0} single/partial-pass records "
+                             "outside the gate—not a queued backlog)")
             # Absolute time, never "Nm ago": the page is static, so a relative
             # age is frozen at build time and reads fresh forever.
             if gap.get("checked_at"):
@@ -730,14 +1034,97 @@ def compound_status_table(status: dict | None = None) -> str:
         # never for past wins (that coloured 3 not-ready reactions green).
         ready = bool(gap and gap.get("clears_now"))
         css = ' class="us"' if ready else ""
+        floor_cell = f"{floors[key]:.4f}"
+        detail = floor_details.get(key) or floor_details.get(reaction) or {}
+        if isinstance(detail.get("winner"), (int, float)):
+            floor_cell += (
+                f"<br><small>rival {detail['winner']:.3f}; own gap "
+                f"{float(detail.get('optimism') or 0):.3f}; "
+                f"{int(detail.get('own_evidence_epochs') or 0)} epochs</small>"
+            )
         rows.append(
-            f"<tr{css}><td>rxn {reaction}</td><td>{floors[key]:.2f}</td>"
+            f"<tr{css}><td>rxn {reaction}</td><td>{floor_cell}</td>"
             f"<td>{c}/{d}</td><td>{rate}</td><td>{w}</td><td>{_safe(gap_cell)}</td></tr>"
         )
     return (
         '<table class="grid"><thead><tr><th>reaction</th><th>floor</th>'
         '<th>cleared/drawn</th><th>clear rate</th><th>real wins</th>'
         '<th>live gate check (right now, not tied to any epoch below)</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+    )
+
+
+def compound_strategy_table(status: dict | None = None) -> str:
+    """Exact-score verdict for the active public-field recombination lane."""
+    status = status if status is not None else load()
+    checks = (status or {}).get("search_strategy") or {}
+    if not checks:
+        return '<p class="note">Search-strategy A/B evidence has not been collected yet.</p>'
+
+    def number(value, signed=False):
+        if not isinstance(value, (int, float)):
+            return "—"
+        return f"{value:+.4f}" if signed else f"{value:.4f}"
+
+    rows = []
+    relative_positive = entry_hits = measured = active_field = 0
+    newest = None
+    for reaction in range(1, 6):
+        check = checks.get(str(reaction), checks.get(reaction)) or {}
+        ab = check.get("ab") or {}
+        lane_report = check.get("lanes") or {}
+        verdict = check.get("verdict") or _strategy_verdict(ab, lane_report)
+        control_n = int(verdict.get("control_n") or 0)
+        treatment_n = int(verdict.get("treatment_n") or 0)
+        active_field += int(verdict.get("mode") == "field_recombination")
+        if control_n and treatment_n:
+            measured += 1
+            relative_positive += int((verdict.get("relative_lift") or 0) > 0)
+            entry_hits += int(verdict.get("entry_hits") or 0)
+        checked_at = check.get("checked_at")
+        if isinstance(checked_at, (int, float)):
+            newest = max(newest or checked_at, checked_at)
+        best_lane = verdict.get("best_lane") or "—"
+        best_lane = best_lane.replace("competitor_motif", "motif")
+        best_lane_cell = best_lane
+        if isinstance(verdict.get("best_lane_max"), (int, float)):
+            best_lane_cell += f" {verdict['best_lane_max']:.4f}"
+        max_entry = f"{number(verdict.get('treatment_max'))} / {number(verdict.get('entry_score'))}"
+        policy = verdict.get("geometry") or verdict.get("mode") or "—"
+        if verdict.get("block_share") is not None:
+            policy += f"; {int(verdict['block_share'])}/500"
+        rows.append(
+            f"<tr><td>rxn {reaction}</td><td>{_safe(verdict.get('label') or 'unavailable')}</td>"
+            f"<td>{_safe(policy)}</td><td>{control_n} / {treatment_n}</td>"
+            f"<td>{number(verdict.get('relative_lift'), True)}</td>"
+            f"<td>{int(verdict.get('entry_hits') or 0)}</td><td>{max_entry}</td>"
+            f"<td>{_safe(best_lane_cell)}</td></tr>"
+        )
+    if measured:
+        verdict_text = (
+            f'Field selection beats its uniform-random control on {relative_positive}/{measured} '
+            f'measured reactions and has {entry_hits} bank-entry hits.'
+        )
+    else:
+        verdict_text = (
+            'The cutover is active; the first verdict waits for 20 exact random-arm and 20 exact '
+            'field-selected scores per reaction.'
+        )
+    headline = (
+        f'<p class="note"><b>Public-field recombination active on {active_field}/5 reactions.</b> '
+        f'{verdict_text} The comparison uses exact scores; the random arm is sampled before proxy '
+        'selection, so it measures the new block/affinity ranker rather than its own shortlist.'
+    )
+    if newest:
+        headline += f' Checked {_safe(_local_hhmm(newest))}.'
+    headline += '</p>'
+    return (
+        headline +
+        '<table class="grid"><thead><tr><th>reaction</th><th>verdict</th>'
+        '<th>active geometry; pool share</th><th>exact n random/proxy</th>'
+        '<th>proxy − random mean</th><th>entry hits</th>'
+        '<th>proxy max / bank entry</th><th>best recent lane</th>'
+        '</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table>'
     )
 
@@ -817,6 +1204,7 @@ def main() -> int:
         total_clears=status.get("total_clears"),
         wins_by_reaction=status.get("wins_by_reaction"),
         gap_checks_collected=len(status.get("gap_checks") or {}),
+        strategy_checks_collected=len(status.get("search_strategy") or {}),
     )))
     return 0
 
@@ -838,14 +1226,26 @@ def compound_caveat_note(status: dict | None = None) -> str:
         'Remaining difference from the Pi: the boxes lack the validator tree, so the Pi also '
         'applies the validator\'s non-similarity validity gates, and its bank is synced every 5 '
         'minutes.</p>'
+        '<p class="note"><b>The single/partial-pass count is a discovery pool, not a rescore '
+        'queue.</b> The live policy now purchases one confirmation observation at a time and '
+        're-evaluates after each result. A molecule reaches the 3-pass release gate only when '
+        'its posterior chance of improving the constrained top 20—or its information value—'
+        'still justifies another full Boltz call. This avoids spending two more passes on every '
+        'initially noisy high score.</p>'
         '<p class="note">Separately: clearing a reaction\'s baseline offline is NOT the same as '
-        'being likely to win live. Measured 2026-10-02 across '
+        'being likely to win live. The live floor now excludes our own coldkey from the rival '
+        'forecast, collapses each rival to its best UID per epoch, corrects the forecast-bias '
+        'sign, and adds a per-reaction empirical-Bayes estimate of our raw-to-realized optimism. '
+        'The final decision is rerun on the exact allocated portfolio; an intermediate '
+        '<code>allocated</code> event is not counted as a clear if that final gate rejects it. '
+        'The starting calibration was measured 2026-10-02 across '
         f'{gap["n"]} epochs with clean on-chain data: offline (de-noised) selected_score runs a '
         f'median {gap["median"]:.3f} above what actually lands on-chain (mean {gap["mean"]:.3f}, '
-        f'stdev {gap["stdev"]:.3f} -- nearly as large as the mean, so this is residual '
-        'winner\'s-curse selection bias, not a fixed offset you can just subtract and trust). A '
-        'reaction that nominally clears by less than roughly that median gap should not be read '
-        'as "ready." '
+        f'stdev {gap["stdev"]:.3f}). The displayed floor uses reaction-specific live evidence '
+        'rather than treating that historical median as an immutable offset. Reactions 1 and 3 '
+        'use an aggressive opportunity floor calibrated to a 25% estimated win probability from '
+        'no-lookahead rival forecast errors and our own realized optimism; reactions 2, 4, and 5 '
+        'retain the approximately 50% point-estimate floor. '
         'Compound is winner-take-all: only rank 1 earns anything; every other submission just '
         'burns a slot and permanently burns that chemical space\'s novelty for nothing. '
         f'Snapshot collected {age}.</p>'
@@ -855,10 +1255,9 @@ def compound_caveat_note(status: dict | None = None) -> str:
         'not a data problem. The epoch-boundary markers on the SAME chart are NOT subject to that '
         'limit: they are re-derived from the Pi\'s own submission log on every refresh and can '
         'already show up to the ~30 most recent real epochs on first load. Also note: a cleared '
-        'epoch\'s marker plots its gap against the CURRENT reaction floor (the "allocated" log '
-        'event never records a baseline), while a blocked epoch\'s marker uses the real baseline '
-        'logged at that exact moment -- two different ground truths for the same field, not a '
-        'computation bug.</p>'
+        'epoch\'s marker uses the exact floor logged by the final gate from 2026-10-06 onward. '
+        'Older <code>allocated</code> events did not record a baseline and retain the static-floor '
+        'approximation; blocked epochs use the real floor logged at that moment.</p>'
     )
 
 

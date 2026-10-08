@@ -693,7 +693,9 @@ PAGE = """<!doctype html>
 TABS = [
     ("progress", "Our progress", [
         ("Are we getting better?", "Trailing 20-epoch field-beating-entry rate and top-10 rate per entry, with fleet size on the right axis. An entry wins when it beats the best molecule from every rival coldkey.", "progress"),
-        ("Us against the strongest rivals", "Top-10 per entry on a 30-epoch trailing window. Rivals are the four best on this rate over the last 60 epochs (at least 60 entries); a window with under 20 entries is left blank.", "vsrivals"),
+        ("Us against the strongest rivals", "Trailing 10-epoch mean of the multi-pass rank-sum for us versus the four strongest rivals (lowest all-time mean), per epoch from the first replay-scored epoch. Lower is better.", "vsrivals"),
+        ("Multi-pass vs rivals", "Multi-pass replay mean rank-sum for us versus every rival coldkey, per epoch. Lower is better. Error bars are the fleet stdev and the hover shows fleet size. Read from multipass_comparison.json, so only epochs that have been replay-scored appear.", "multipass"),
+        ("Multi-pass distribution", "Per-sequence multi-pass rank-sum distribution for us and every rival that recorded a scores list, as a grouped box per epoch. Lower is better. Empty until scores arrays are added to multipass_comparison.json.", "multipass_distribution"),
     ]),
     ("performance", "Performance", [
         ("Score per epoch", "Our best entry against the winner, the top-10 cut and the field median. Lower is better.", "scores"),
@@ -731,8 +733,9 @@ TABS = [
         ("Slot purchases", "Every purchase grouped by UTC day: actual spend, median unit price and registration count.", "slots"),
     ]),
     ("compound", "Compound", [
-        ("Submission readiness", "Per-reaction real historical clear rate against the Pi's actual submission log, real win count (rank 1 on the live leaderboard, not just clearing the local gate), and the live gate check: the Pi's actual release gate (same code, byte-identical) run against each reaction's current bank for the next epoch -- novelty vs the public archive, recently-submitted molecules excluded, >=3 rescore passes, entropy-constrained top-20. Rechecked every ~10 min (time of the check shown per row); the score only moves when a box ingests new rescored molecules, so an unchanged number usually means the bank has not changed, not that the check is stale.", "compound_status"),
-        ("Submission readiness growth", "Each reaction's absolute score over time (solid line) against its required margin (dashed line, same colour) -- where the solid crosses above the dashed we clear the bar. The margin is the rival-supply floor (per-rival projected winner + curse + z*residual). Markers for real epoch draws from the Pi's own log (filled diamond = cleared and won, open diamond = cleared, x = blocked). The score line only accumulates forward from first deploy; the epoch markers do not have that limit -- see 'Reading this tab' below.", "gap_history"),
+        ("Submission readiness", "Per-reaction real historical clear rate against the Pi's actual submission log, real win count (rank 1 on the live leaderboard, not just clearing the local gate), and the live gate check: the Pi's actual release gate (same code, byte-identical) run against each reaction's current bank for the next epoch -- novelty vs the public archive, recently-submitted molecules excluded, >=3 rescore passes, entropy-constrained top-20. Rechecked every ~10 min (time of the check shown per row); the score moves only when the eligible constrained top 20 changes. New single-pass discoveries intentionally do not move this line until adaptive confirmation promotes them, so a flat line is not evidence that discovery stopped.", "compound_status"),
+        ("Submission readiness growth", "Each reaction's absolute score over time (solid line) against its required margin (dashed line, same colour) -- where the solid crosses above the dashed we clear the bar. The margin projects the best external rival, corrects rival-model bias, and adds our empirically calibrated raw-to-realized optimism gap. Markers for real epoch draws from the Pi's own log (filled diamond = cleared and won, open diamond = cleared, x = blocked). The score line only accumulates forward from first deploy; the epoch markers do not have that limit -- see 'Reading this tab' below.", "gap_history"),
+        ("Search strategy verdict", "Exact-score online evidence for the active public-field block-recombination policy. It compares field-selected candidates with the uniform random arm sampled before proxy selection, reports bank-entry hits, and shows the reaction-specific recombination geometry and live allocation. The recent all-lane maximum prevents a locally positive A/B label from hiding a stronger lane.", "compound_strategy"),
         ("Proxy model accuracy", "Held-out Spearman correlation between each reaction's proxy model and real scores, measured fresh after every ~4h retrain cycle (held_out_proxy_eval.py, wired into the live retrain loop 2026-10-02 -- no accuracy metric existed anywhere before this). Answers whether the model driving candidate search is actually getting more accurate over time, separately from whether the selected portfolio clears the floor. Starts empty and accumulates one point per reaction per retrain cycle going forward.", "proxy_accuracy"),
         ("Recent submission history", "Every unique epoch drawn for compound, most recent first: cleared and won, cleared and lost, or blocked by the baseline gate. For epochs we submitted, the validator's realized score (our best uid's final_score, same 20-molecule-sum scale as our prediction) next to our predicted selection score and the epoch winner's score, plus our real on-chain rank.", "compound_history"),
         ("Reading this tab", "Context for interpreting the numbers above -- particularly why clearing a reaction's baseline is not the same as a likely win.", "compound_caveat"),
@@ -751,7 +754,9 @@ def render(data, out: Path, extra=None) -> Path:
         table=lambda: progress.competitor_table(competitor_stats(data)),
         selector_replay=selector_replay_table,
         progress=lambda: progress.fig_our_progress(data, _DATABASE),
-        vsrivals=lambda: progress.fig_rates_vs_rivals(data),
+        vsrivals=lambda: progress.fig_multipass_strongest(),
+        multipass=lambda: progress.fig_multipass_vs_rival(),
+        multipass_distribution=lambda: progress.fig_multipass_distribution(),
         slots=lambda: fig_slots(data))
     builders.update(extra)
 
@@ -910,6 +915,7 @@ def main() -> int:
         gap_history=lambda: panels.fig_gap_history(
             compound.gap_history_rows(connection),
             compound.load().get("recent_history") or []),
+        compound_strategy=lambda: compound.compound_strategy_table(),
         proxy_accuracy=lambda: panels.fig_proxy_accuracy(
             proxy_accuracy.proxy_accuracy_rows(connection)),
         compound_history=lambda: compound.compound_history_table(),

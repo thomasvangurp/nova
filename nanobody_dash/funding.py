@@ -47,7 +47,7 @@ def build_target(
     tao_usd: float,
     *,
     now: dt.datetime | None = None,
-    maximum_tao: float = 0.5,
+    maximum_tao: float = 1.5,  # matches the Pi cap in /etc/nova/infra-sweep.json (2026-10-03)
     earnings_days: int = 7,
 ) -> dict:
     """Return today's cost-sized instruction, capped by measured earnings.
@@ -75,11 +75,15 @@ def build_target(
     days_in_month = calendar.monthrange(year, month)[1]
     aws_usd = float(aws.get("operating_usd_per_day")
                     or projected / days_in_month)
-    # Research remains visible in cost accounting but is not a production
-    # expense funded from mining earnings.  The explicit field avoids folding
-    # SN68 research into the aggregate compatibility value.
-    if vast.get("sn68_production_usd_per_day") is not None:
-        vast_usd = float(vast.get("sn68_production_usd_per_day") or 0)
+    # 2026-10-03 (user decision): the card must cover ALL running Vast spend --
+    # the compound boxes and research included, not only labelled production
+    # capacity -- so every per-category Vast cost is summed.
+    vast_categories = ("sn68_production_usd_per_day", "sn68_compound_usd_per_day",
+                       "sn68_research_usd_per_day", "research_usd_per_day",
+                       "blueprint_usd_per_day", "bank_usd_per_day",
+                       "bank_boxes_account_usd_per_day", "unattributed_usd_per_day")
+    if any(vast.get(key) is not None for key in vast_categories):
+        vast_usd = sum(float(vast.get(key) or 0) for key in vast_categories)
     else:
         vast_usd = float(vast.get("sn68_usd_per_day") or 0)
     cost_usd = max(0.0, aws_usd + vast_usd)
@@ -111,10 +115,10 @@ def build_target(
         "authorized_tao": round(max(0.0, authorized), 9),
         "breakdown_usd": {
             "aws_operating_projection_per_day": round(aws_usd, 2),
-            "vast_production_live_per_day": round(vast_usd, 2),
+            "vast_all_running_per_day": round(vast_usd, 2),
         },
-        "policy": ("production cost capped by trailing net mining earnings "
-                   "and hard daily limit; research excluded"),
+        "policy": ("all running Vast + AWS operating cost, capped by trailing "
+                   "net mining earnings and hard daily limit"),
     }
 
 

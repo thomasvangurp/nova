@@ -1,77 +1,52 @@
 #!/usr/bin/env python3
-"""Build the fresh top-50 index from the leaderboard API, not the stale archive.
+"""Build the validator's exact top-50 index from the FULL HF archive.
 
-The local archive lags the chain by ~4 epochs (newest ``archive.csv`` ends at
-epoch25452 while the chain is at 25456), so our own recent winners are absent
-from it and the whole-sequence / clonotype gate under-blocks -- exactly why
-epochs 25454 and 25455 submitted single-edit siblings of the 25453 winners and
-were rejected wholesale.
-
-The public leaderboard API returns every scored submission with full sequence
-plus all six BoltzGen metrics and the liability fields, so we rebuild the
-validator's exact ``index_top_sequences`` (``rank_binders``, k=50,
-max_liability_violations=50) fresh each epoch from the API instead.
+The validator builds its dedup top-50 with ``rank_binders`` (Algorithm 2) over
+Metanova/Submission-Archive's ``P20809_nanobodies.csv`` -- ALL history,
+refreshed every epoch -- NOT the live leaderboard. A previous builder ranked
+only the last N API epochs, which indexes a different (current-basin) fifty and
+over-filters: the cause of the 25454/25455 wholesale single-edit rejections.
+This rebuilds the reference from the archive ``fetch_hf_archive.py`` downloads,
+using the validator's OWN ``rank_binders`` source (loaded by path), so the
+indexed fifty is exactly what the validator compares against.
 
 Output JSON::
 
-    {"sequences": [top-50 seqs], "cdr3s": [distinct cdr3s], "n": 50,
-     "ranked": int, "epochs_scanned": int, "source": "api"}
+    {"sequences": [top-50], "cdr3s": [...], "n": 50, "ranked": int,
+     "live_sequences": [...], "source": "hf_archive", "archive_count": int}
 
-Invocation (runs under the metanano env)::
+Invocation (metanano env)::
 
-    python build_top50_index.py <current_epoch> <out.json> [epochs_to_scan=15]
+    python build_top50_index.py <archive.csv> <out.json> [obs_db]
+
+``obs_db``, when given, supplies ``live_sequences`` -- our own multi-pass replay
+top-50, the stable quality read for frontier parents -- instead of the archive
+top-50 fallback.
 """
+from __future__ import annotations
+
+import importlib.util
 import json
 import sys
-import urllib.request
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-API = "https://compound-api.metanova-labs.ai"
-TARGET = "P20809"
 
-METRIC_DEFS = {
-    "design_iiptm": "max",
-    "design_ptm": "max",
-    "min_design_to_target_pae": "min",
-    "plip_hbonds_refolded": "max",
-    "plip_saltbridge_refolded": "max",
-    "delta_sasa_refolded": "max",
-}
-PROTEIN_WEIGHTS = {
-    "design_iiptm": 1.0,
-    "design_ptm": 2.0,
-    "min_design_to_target_pae": 1.0,
-    "plip_hbonds_refolded": 2.0,
-    "plip_saltbridge_refolded": 2.0,
-    "delta_sasa_refolded": 2.0,
-}
-# Columns the ranker must receive, in every metric.
-REQUIRED = list(METRIC_DEFS)
+def _validator_rank_binders():
+    """Load utils/minmax_weighted_rank.rank_binders by path (validator's source).
 
-
-def fetch_epoch(epoch: int) -> dict:
-    req = urllib.request.Request(
-        f"{API}/api/competitions/leaderboard/{epoch}/nanobodies",
-        headers={"User-Agent": "nova-top50-index/1"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
-
-
-def rank_binders(df: pd.DataFrame, k: int = 50) -> pd.DataFrame:
-    """Exact mirror of utils/minmax_weighted_rank.rank_binders (Algorithm 2)."""
-    work = df[df["liability_num_violations"] <= 50].copy()
-    rank_cols = {}
-    for metric, weight in PROTEIN_WEIGHTS.items():
-        ascending = METRIC_DEFS[metric] == "min"
-        rank_cols[f"wrank_{metric}"] = (
-            work[metric].rank(ascending=ascending, method="average") / weight
-        )
-    rank_df = pd.DataFrame(rank_cols, index=work.index)
-    work = work.assign(algo2_score=rank_df.max(axis=1))
-    return work.sort_values("algo2_score", ascending=True).head(k)
+    Not ``from utils import rank_binders``: utils/__init__.py imports rdkit,
+    which the metanano environment does not carry. Loading the file directly is
+    still the validator's own source, not a reimplementation of it.
+    """
+    source = Path(__file__).resolve().parent.parent / "utils" / "minmax_weighted_rank.py"
+    spec = importlib.util.spec_from_file_location("_nova_minmax_weighted_rank", source)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load the validator's ranking from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.rank_binders
 
 
 def _live_top50_from_db(
@@ -89,15 +64,18 @@ def _live_top50_from_db(
     0.95 dedup leaves a few UIDs unfilled; append `extra` parents that are
     >= min_distance edits from the top-50 so those slots get distinct edits.
     """
-    import sqlite3
     from collections import Counter
 
     import numpy as np
 
-    conn = sqlite3.connect(db_path)
-    try:
-        cur = conn.cursor()
-        cur.execute(
+    # Read the LIVE central MySQL DB (the producer writes there since ~25558),
+    # NOT the stale per-machine sqlite file. sqlite froze at the migration and
+    # left the priority-parent read on a dead snapshot.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from nanobody_opt import db  # noqa: E402
+
+    with db.connect() as conn:
+        rows = conn.execute(
             """
             SELECT n.sequence, AVG(o.score) AS mean_score, COUNT(*) AS n_obs
             FROM observations o JOIN nodes n ON o.node_id = n.id
@@ -105,15 +83,13 @@ def _live_top50_from_db(
               AND o.score_kind IN ('local_validator_replay_rank_sum',
                                    'local_exact_validator_replay_rank_sum')
             GROUP BY n.sequence
-            HAVING n_obs >= ?
+            HAVING n_obs >= %s
             ORDER BY mean_score ASC
-            LIMIT ?
+            LIMIT %s
             """,
             (min_obs, limit + extra * 4),
-        )
-        candidates = [str(r[0]).strip().upper() for r in cur.fetchall()]
-    finally:
-        conn.close()
+        ).fetchall()
+    candidates = [str(r[0]).strip().upper() for r in rows]
 
     if not candidates:
         return []
@@ -147,70 +123,38 @@ def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
-    current_epoch = int(sys.argv[1])
+    archive_path = Path(sys.argv[1])
     out_path = sys.argv[2]
-    epochs = int(sys.argv[3]) if len(sys.argv) > 3 else 15
-    obs_db = sys.argv[4] if len(sys.argv) > 4 else None
+    obs_db = sys.argv[3] if len(sys.argv) > 3 else None
+
+    if not archive_path.is_file() or archive_path.stat().st_size == 0:
+        raise SystemExit(
+            f"HF archive missing or empty at {archive_path}; "
+            "run fetch_hf_archive.py first"
+        )
 
     from metanano.utils.cdr_utils import extract_cdrs  # noqa: E402
 
-    rows: list[dict] = []
-    seen: set[str] = set()
-    scanned = 0
-    for epoch in range(current_epoch - 1, current_epoch - 1 - epochs, -1):
-        try:
-            payload = fetch_epoch(epoch)
-        except Exception:
-            continue
-        scanned += 1
-        for submission in payload.get("data") or []:
-            for nb in submission.get("nanobodies") or []:
-                if nb.get("protein_name") != TARGET:
-                    continue
-                seq = str(nb.get("sequence") or "").strip().upper()
-                if len(seq) != 127 or seq in seen:
-                    continue
-                values = {"sequence": seq}
-                ok = True
-                for metric in REQUIRED:
-                    try:
-                        values[metric] = float(nb[metric])
-                    except (KeyError, TypeError, ValueError):
-                        ok = False
-                        break
-                try:
-                    values["liability_num_violations"] = float(nb["liability_num_violations"])
-                except (KeyError, TypeError, ValueError):
-                    values["liability_num_violations"] = 0.0
-                try:
-                    values["final_score"] = float(nb["final_score"])
-                except (KeyError, TypeError, ValueError):
-                    values["final_score"] = float("inf")
-                if not ok:
-                    continue
-                seen.add(seq)
-                rows.append(values)
+    frame = pd.read_csv(archive_path)
+    if "sequence" not in frame.columns or frame.empty:
+        raise SystemExit(f"HF archive has no sequence column: {archive_path}")
 
-    if not rows:
-        json.dump({"sequences": [], "cdr3s": [], "n": 0, "ranked": 0,
-                   "epochs_scanned": scanned, "source": "api"}, open(out_path, "w"))
-        print(f"TOP50_EMPTY scanned={scanned} rows=0", flush=True)
-        return 1
+    rank_binders = _validator_rank_binders()
+    top = rank_binders(frame, k=50, max_liability_violations=50).head(50)
+    hf_sequences = [str(s).strip().upper() for s in top["sequence"].tolist()]
 
-    frame = pd.DataFrame(rows).drop_duplicates("sequence", keep="last").reset_index(drop=True)
-    top = rank_binders(frame, k=50)
-    sequences = [str(s).upper() for s in top.sequence.tolist()]
-    # Our own multi-pass top-50 (from the replay DB): the stable quality read,
-    # not the noisy single-pass leaderboard final_score. Single/double edits of
-    # these still clear the dedup (the dedup reference is the full-history HF
-    # top-50, ~30 edits from the live field).
     if obs_db:
         live_sequences = _live_top50_from_db(obs_db)
     else:
-        live_top50 = frame.sort_values("final_score").head(50)
-        live_sequences = [str(s).upper() for s in live_top50.sequence.tolist()]
+        live_sequences = hf_sequences
 
-    cdr3s, missed = [], 0
+    # The dedup reference (`sequences`) is OUR OWN multiscored top-50, not the
+    # HF archive: the full-history rank_binders set is ~30 edits from the live
+    # field and proved a bad selection reference. Use our stable 20x replay read.
+    sequences = live_sequences
+
+    cdr3s: list[str] = []
+    missed = 0
     for seq in sequences:
         try:
             cdrs = extract_cdrs(seq)
@@ -222,17 +166,24 @@ def main() -> int:
         else:
             missed += 1
 
-    json.dump(
-        {"sequences": sequences, "cdr3s": sorted(set(cdr3s)), "n": 50,
-         "ranked": int(len(sequences)), "unextractable": missed,
-         "epochs_scanned": scanned, "source": "api",
-         "live_sequences": live_sequences},
-        open(out_path, "w"),
-    )
+    payload = {
+        "sequences": sequences,
+        "cdr3s": sorted(set(cdr3s)),
+        "n": 50,
+        "ranked": int(len(sequences)),
+        "unextractable": missed,
+        "archive_count": int(len(frame)),
+        "source": "our_top50",
+        "live_sequences": live_sequences,
+    }
+    with open(out_path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+
     print(
-        f"TOP50_OK rows={len(frame)} top={len(sequences)} "
+        f"TOP50_OK archive_rows={len(frame)} top={len(sequences)} "
         f"unextractable={missed} distinct_cdr3={len(set(cdr3s))} "
-        f"epochs_scanned={scanned}",
+        f"source=hf_archive",
         flush=True,
     )
     return 0

@@ -25,6 +25,10 @@ import sqlite3
 import statistics as st
 
 SUBNET_NAMES = {68: "SN68 NOVA", 2: "SN2 DSperse", 62: "SN62", 85: "SN85", 107: "SN107"}
+#: A DELEGATE transfer-in above this many alpha is a one-time swept event (e.g.
+#: an unrelated blueprint win) rather than the normal compound/nanobody reward
+#: churn; it is treated as not-earned so it can't spike the daily yield.
+LARGE_TRANSFER_ALPHA = 1000.0
 
 
 def _block_clock(connection: sqlite3.Connection):
@@ -97,6 +101,8 @@ def subnet_pnl_history(connection: sqlite3.Connection,
     block_time = _block_clock(connection)
     out: list[dict] = []
     for netuid, series in balances.items():
+        if netuid != 68:
+            continue  # SN68 (compound + nanobody) only; skip SN2/SN62/SN85/SN107 noise
         for before, after in zip(series, series[1:]):
             b0, a0, _, _ = before
             b1, a1, price, free = after
@@ -109,7 +115,8 @@ def subnet_pnl_history(connection: sqlite3.Connection,
                     continue
                 if action == "UNDELEGATE":
                     sold += alpha
-                elif action == "DELEGATE" and not transfer:
+                elif action == "DELEGATE" and (
+                        not transfer or alpha > LARGE_TRANSFER_ALPHA):
                     bought += alpha
             earned_alpha = (a1 - a0) + sold - bought
             # This is the alpha-stake delta (a "stake" view, not the headline):
@@ -141,52 +148,78 @@ def subnet_pnl_history(connection: sqlite3.Connection,
 
 
 def daily_money_history(connection: sqlite3.Connection, tao_usd: float) -> list[dict]:
-    """Daily portfolio (free + staked) change, the headline net income.
+    """Daily mining income vs cost, per day.
 
-    The per-subnet alpha stake oscillates because the slot manager recycles its
-    own registrations (alpha <-> free TAO); that is a change of asset, not
-    income, and it cancels when free + staked are summed.  The portfolio delta
-    is therefore the genuine daily income: it nets the registration burn (a
-    free-TAO outflow) against the emission, so it cannot read as a fake
-    burn-down.
+    Income is the stake transferred in from our mining hotkeys (DELEGATE
+    transfer-in), excluding one-time large swept events such as the blueprint
+    win.  Costs are the registration burn (TAO) plus the fiat infra (AWS/Vast,
+    from the costs table).  TAO or alpha moved out to *fund* infra is funding,
+    not a cost, so it is not subtracted -- only the actual AWS/Vast/registration
+    spend is.  This replaces the old portfolio-delta view, which wrongly read
+    infra funding and mark-to-market as losses.
     """
-    rows = connection.execute(
-        "SELECT block, netuid, alpha, alpha_price_tao, free_tao FROM balances "
-        "ORDER BY block"
-    ).fetchall()
-    by_block: dict[int, dict[str, float]] = {}
-    for block, netuid, alpha, price, free in rows:
-        bucket = by_block.setdefault(int(block), {"free": 0.0, "staked": 0.0})
-        bucket["free"] = float(free or 0.0)
-        bucket["staked"] += float(alpha or 0.0) * float(price or 0.0)
-    blocks = sorted(by_block)
-    block_time = _block_clock(connection)
-    out: list[dict] = []
-    for before, after in zip(blocks, blocks[1:]):
-        elapsed = (after - before) / 7200.0
-        if elapsed <= 0:
-            continue
-        prev = by_block[before]
-        cur = by_block[after]
-        delta = (cur["free"] + cur["staked"]) - (prev["free"] + prev["staked"])
-        out.append({
-            "day": block_time(after).date().isoformat(),
-            "gross_tao": delta / elapsed,
-            "holding_tao": cur["staked"],
-            "free_tao": cur["free"],
-            "portfolio_tao": cur["free"] + cur["staked"],
-            "infra_usd": 0.0, "infrastructure": {},
-        })
-    by_day = {row["day"]: row for row in out}
+    clock = _block_clock(connection)
+
+    income_by_day: dict[str, float] = {}
+    for block, action, alpha, tao, transfer in connection.execute(
+        "SELECT block, action, alpha, tao, is_transfer FROM delegations "
+        "WHERE block IS NOT NULL"
+    ):
+        day = clock(block).date().isoformat()
+        if action == "DELEGATE" and transfer and (alpha or 0.0) <= LARGE_TRANSFER_ALPHA:
+            income_by_day[day] = income_by_day.get(day, 0.0) + (tao or 0.0)
+
+    reg_by_day: dict[str, float] = {}
+    for block, cost, recycle in connection.execute(
+        "SELECT block, decision_recycle_tao, recycle_tao FROM slots "
+        "WHERE executed = 1 AND block IS NOT NULL"
+    ):
+        day = clock(block).date().isoformat()
+        reg_by_day[day] = reg_by_day.get(day, 0.0) + (
+            float(cost) if cost is not None else float(recycle or 0.0))
+
+    infra_by_day: dict[str, float] = {}
+    infra_items_by_day: dict[str, dict[str, float]] = {}
     for day, item, usd in connection.execute(
         "SELECT day, item, COALESCE(usd, 0) FROM costs ORDER BY day, item"
     ):
-        if day in by_day:
-            by_day[day]["infra_usd"] += float(usd or 0)
-            by_day[day]["infrastructure"][str(item)] = float(usd or 0)
-    for row in out:
-        row["gross_usd"] = row["gross_tao"] * tao_usd
-        row["net_usd"] = row["gross_usd"]
+        key = str(day)
+        infra_by_day[key] = infra_by_day.get(key, 0.0) + float(usd or 0.0)
+        infra_items_by_day.setdefault(key, {})[str(item)] = float(usd or 0.0)
+
+    # Total holdings (free + staked) per day, for the portfolio-TAO overlay.
+    portfolio_by_day: dict[str, dict[str, float]] = {}
+    for block, netuid, alpha, price, free in connection.execute(
+        "SELECT block, netuid, alpha, alpha_price_tao, free_tao FROM balances "
+        "ORDER BY block"
+    ):
+        day = clock(block).date().isoformat()
+        p = portfolio_by_day.setdefault(day, {"free": 0.0, "staked": 0.0})
+        p["free"] = float(free or 0.0)
+        p["staked"] += float(alpha or 0.0) * float(price or 0.0)
+
+    days = sorted(set(income_by_day) | set(reg_by_day)
+                  | set(infra_by_day) | set(portfolio_by_day))
+    out: list[dict] = []
+    for day in days:
+        income = income_by_day.get(day, 0.0)
+        reg = reg_by_day.get(day, 0.0)
+        infra_usd = infra_by_day.get(day, 0.0)
+        net_tao = income - reg - (infra_usd / tao_usd)
+        p = portfolio_by_day.get(day, {"free": 0.0, "staked": 0.0})
+        out.append({
+            "day": day,
+            "gross_tao": income,
+            "registration_tao": reg,
+            "net_tao": net_tao,
+            "gross_usd": income * tao_usd,
+            "infra_usd": infra_usd,
+            "net_usd": net_tao * tao_usd,
+            "infrastructure": infra_items_by_day.get(day, {}),
+            "holding_tao": p["staked"],
+            "free_tao": p["free"],
+            "portfolio_tao": p["free"] + p["staked"],
+        })
     return out
 
 
@@ -228,12 +261,15 @@ def subnet_pnl(connection: sqlite3.Connection, tao_usd: float,
         if action == "UNDELEGATE":
             f["sold"] += alpha or 0.0
             f["sold_tao"] += tao or 0.0
-        elif action == "DELEGATE" and not transfer:
-            # bought with TAO; a transfer-in is a swept reward, not a purchase
+        elif action == "DELEGATE" and (
+                not transfer or (alpha or 0.0) > LARGE_TRANSFER_ALPHA):
+            # bought with TAO, or a one-time swept reward unrelated to mining
             f["bought"] += alpha or 0.0
 
     out = []
     for netuid, series in balances.items():
+        if netuid != 68:
+            continue  # SN68 (compound + nanobody) only
         if len(series) < 2:
             continue
         (b0, a0, _), (b1, a1, p1) = series[0], series[-1]

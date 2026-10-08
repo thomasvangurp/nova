@@ -96,6 +96,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nanobody_opt import fleet  # noqa: E402
@@ -154,6 +156,47 @@ def _open_readonly(database: Path) -> sqlite3.Connection:
         raise SystemExit(f"cannot open {database} read-only: {error}") from error
 
 
+#: Number of most-recent ledger entries treated as the validator's live top-50
+#: whole-sequence dedup set.  The archive used to build the CDR3 index lags the
+#: chain by ~4 epochs (it ends at epoch25452 while the chain is at 25456), so our
+#: 25453 winners -- now in the top-50 -- are NOT in it and their single-edit
+#: siblings pass the CDR3 gate.  The ledger is append-ordered (record_published
+#: opens "a"), so its tail is exactly our recent submissions.  ~13/epoch over
+#: five epochs is 65; this drops children of the ~13 already-won parents and lets
+#: the selector fall through to the next tier of parents, whose children are >=7
+#: edits (0.945 identity) from the winners and therefore not duplicates.
+RECENT_PUBLISHED_N = 65
+
+
+def _published_array(published: Sequence[str], length: int) -> np.ndarray:
+    """Recent published sequences of `length`, as a uint8 matrix."""
+    if not published:
+        return np.zeros((0, length), dtype=np.uint8)
+    rows = [[ord(c) for c in s] for s in published if len(s) == length]
+    return np.array(rows, dtype=np.uint8) if rows else np.zeros((0, length), dtype=np.uint8)
+
+
+def _near_duplicate(sequence: str, published: np.ndarray, *, limit: float = 0.95) -> bool:
+    """True when `sequence` is >=limit identical to a recent published sequence.
+
+    Mirrors utils/nanobodies.is_duplicate tier 1 (whole-sequence identity >= 0.95),
+    which the validator enforces against the top-50 historical -- a set that now
+    contains our own prior winners.  A child one edit from a parent we already
+    won with is therefore a certain drop next epoch, even though it is not an
+    EXACT ledger match.  Hamming <= (1-limit)*len catches it.  `published` is the
+    RECENT ledger tail (RECENT_PUBLISHED_N), not the full history: filtering
+    against every sequence we ever published over-blocks, because the archive
+    (and hence the top-50) only lags by a few epochs, not our whole history.
+    """
+    if published.size == 0:
+        return False
+    seq = np.frombuffer(sequence.encode(), dtype=np.uint8)
+    if seq.shape[0] != published.shape[1]:
+        return False
+    max_mismatch = int((1.0 - limit) * seq.shape[0])
+    return bool((published != seq).sum(axis=1).min() <= max_mismatch)
+
+
 def top_children(
     database: Path,
     *,
@@ -161,6 +204,7 @@ def top_children(
     score_kind: str,
     top_n: int,
     exclude: set[str],
+    published: np.ndarray,
 ) -> list[dict[str, Any]]:
     """Top-N children by mean replay rank sum (lower is better), deduped.
 
@@ -192,6 +236,8 @@ def top_children(
         for node_id, sequence, mean_score, first_epoch, rows, observation_count in aggregate:
             sequence = str(sequence).strip().upper()
             if not sequence or sequence in exclude:
+                continue
+            if _near_duplicate(sequence, published):
                 continue
             representative = connection.execute(
                 """
@@ -344,6 +390,22 @@ def _load_cdr3_index(path: Path) -> list[str]:
             elif str(value).strip():
                 cdr3s.append(str(value).strip().upper())
     return cdr3s
+
+
+def _load_top50_sequences(path: Path) -> list[str]:
+    """Load the top-50 whole sequences from a ``build_top50_index.py`` JSON.
+
+    The validator's ``is_duplicate`` tier 1 is whole-sequence identity >= 0.95
+    against these exact sequences, so the whole-sequence gate needs the
+    sequences themselves, not just their CDR3s.  Returns [] when the file has no
+    ``sequences`` field (e.g. the older CDR3-only index), so the caller falls
+    back to the recent-ledger tail.
+    """
+    payload = _read_json(path)
+    raw = payload.get("sequences") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip().upper() for item in raw if str(item).strip()]
 
 
 def cdr3_novelty_filter(
@@ -774,7 +836,15 @@ def main(argv: list[str] | None = None) -> int:
     top_n = args.top_n if args.top_n is not None else len(crew)
     if top_n < 1:
         raise SystemExit("--top-n must be positive")
-    exclude = set(fleet.read_ledger(args.ledger))
+    ledger = fleet.read_ledger(args.ledger)
+    exclude = set(ledger)
+    # Whole-sequence dedup runs against the validator's live top-50, reconstructed
+    # as the FRESH API index (build_top50_index.py) UNION our recent ledger tail.
+    # The API index is fresh but may lag one epoch; the recent tail covers that.
+    whole_seq_dedup = list(ledger[-RECENT_PUBLISHED_N:])
+    if args.cdr3_index is not None and Path(args.cdr3_index).is_file():
+        whole_seq_dedup.extend(_load_top50_sequences(args.cdr3_index))
+    published = _published_array(whole_seq_dedup, args.model_length)
     model_mode = args.rank_model is not None and not args.no_rank_model
     if model_mode:
         if args.children_dataset is None:
@@ -816,6 +886,7 @@ def main(argv: list[str] | None = None) -> int:
             score_kind=args.score_kind,
             top_n=top_n,
             exclude=exclude,
+            published=published,
         )
     if not children:
         raise SystemExit(

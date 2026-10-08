@@ -19,7 +19,9 @@ but a failed commit restarts it so an unattended failure is not an empty epoch.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import statistics
 import shutil
 import subprocess
 import sys
@@ -464,30 +466,165 @@ def _epoch_winner(epoch: int, cache: dict, deadline: float):
     return entry
 
 
+def _portfolio_digest(molecules) -> str:
+    names = sorted(str(m.get("name") or "") for m in molecules)
+    return hashlib.sha256("\n".join(names).encode()).hexdigest()[:16]
+
+
+def _epoch_rival_rows(epoch: int, cache: dict, deadline: float,
+                      require_identity: bool = False):
+    """Per-submission public rows, optionally with exact portfolio identity."""
+    key = str(epoch)
+    cached = cache.get(key)
+    if cached is not None and (not require_identity or not cached or all(
+            "uid" in row and "names_sha256" in row for row in cached)):
+        return cached
+    if time.time() > deadline:
+        return None
+    import urllib.request
+    try:
+        request = urllib.request.Request(LEADERBOARD_API.format(epoch=epoch),
+                                         headers={"User-Agent": "nova-pi-loop/1"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            rows = json.load(response).get("data") or []
+    except Exception:
+        return None
+    out = []
+    for row in rows:
+        coldkey = row.get("coldkey")
+        score = row.get("final_score")
+        if not coldkey or (score or -999) <= -999:
+            continue
+        for molecule in row.get("molecules") or []:
+            parts = str(molecule.get("name", "")).split(":")
+            if len(parts) > 1 and parts[0] == "rxn" and parts[1].isdigit():
+                out.append({"coldkey": coldkey, "reaction": int(parts[1]),
+                            "score": float(score), "uid": row.get("uid"),
+                            "names_sha256": _portfolio_digest(row.get("molecules") or [])})
+                break
+    cache[key] = out
+    return out
+
+
+def _owned_score_evidence(reaction: int, cache: dict, deadline: float,
+                          archive_root: Path | None = None) -> tuple[set[str], list[dict]]:
+    """Match our archived exact portfolios to public results.
+
+    This provides both the coldkey(s) to exclude from the rival model and a
+    direct estimate of raw offline minus realised score. Matching uses epoch,
+    reaction, UID, and the exact 20-name digest, so UID recycling cannot label
+    somebody else's submission as ours.
+    """
+    archive_root = archive_root or ROOT / "archive"
+    saved = cache.get("_self_calibration") or {}
+    owned: set[str] = {str(value) for value in saved.get("coldkeys") or []}
+    saved_evidence = saved.get("evidence") or []
+    evidence_by_key = {
+        (int(row["reaction"]), int(row["epoch"]), str(row["portfolio"])): row
+        for row in saved_evidence
+        if all(key in row for key in ("reaction", "epoch", "portfolio", "optimism"))
+    }
+    artifacts = sorted(
+        archive_root.glob("epoch*/compound_fleet.json"),
+        key=lambda path: int(path.parent.name.removeprefix("epoch")),
+        reverse=True,
+    )
+    matched_epochs = 0
+    for path in artifacts:
+        if matched_epochs >= 12 or time.time() > deadline:
+            break
+        try:
+            artifact = json.loads(path.read_text())
+            artifact_reaction = int(artifact.get("reaction", -1))
+            artifact_epoch = int(artifact.get("epoch", -1))
+        except (OSError, ValueError, TypeError):
+            continue
+        if artifact_reaction != reaction:
+            continue
+        public = _epoch_rival_rows(artifact_epoch, cache, deadline,
+                                   require_identity=True) or []
+        index = {
+            (int(row["reaction"]), int(row["uid"]), row["names_sha256"]): row
+            for row in public if row.get("uid") is not None
+        }
+        found = False
+        for submission in artifact.get("submissions") or []:
+            key = (reaction, int(submission["uid"]),
+                   _portfolio_digest(submission.get("molecules") or []))
+            row = index.get(key)
+            if row is None:
+                continue
+            found = True
+            owned.add(str(row["coldkey"]))
+            raw = float(submission.get("selection_score") or 0.0)
+            evidence_by_key[(reaction, artifact_epoch, key[2])] = {
+                "reaction": reaction,
+                "epoch": artifact_epoch,
+                "portfolio": key[2],
+                "optimism": raw - float(row["score"]),
+            }
+        if found:
+            matched_epochs += 1
+    saved_evidence = sorted(
+        evidence_by_key.values(), key=lambda row: (row["epoch"], row["portfolio"]))[-256:]
+    cache["_self_calibration"] = {
+        "coldkeys": sorted(owned),
+        "evidence": saved_evidence,
+    }
+    evidence = [row for row in saved_evidence if int(row["reaction"]) == reaction]
+    return owned, evidence
+
+
+def _calibrated_optimism(evidence: list[dict], prior: float,
+                         prior_epochs: int = 2) -> tuple[float, dict]:
+    """Empirical-Bayes estimate of our raw-minus-realised portfolio gap."""
+    by_epoch: dict[int, list[float]] = {}
+    for row in evidence:
+        by_epoch.setdefault(int(row["epoch"]), []).append(float(row["optimism"]))
+    epoch_values = [statistics.median(by_epoch[epoch]) for epoch in sorted(by_epoch)][-8:]
+    if not epoch_values:
+        return prior, {"own_evidence_epochs": 0, "own_evidence_portfolios": 0}
+    observed = statistics.median(epoch_values)
+    n = len(epoch_values)
+    estimate = (n * observed + prior_epochs * prior) / (n + prior_epochs)
+    estimate = min(0.30, max(0.0, estimate))
+    return estimate, {
+        "own_evidence_epochs": n,
+        "own_evidence_portfolios": len(evidence),
+        "observed_optimism": round(observed, 4),
+    }
+
+
 def dynamic_floor(reaction: int, epoch: int, static: float) -> tuple[float, dict]:
+    """Calibrated own score needed to beat the projected external winner."""
     if reaction in FLOOR_PINNED:
         return FLOOR_PINNED[reaction], {"source": "user_pinned", "static": static}
-    import statistics
-    cache_path = ROOT / "archive" / "winner_cache.json"
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "tools"))
+    import rival_margin
+    cache_path = ROOT / "archive" / "rival_cache.json"
     try:
         cache = json.loads(cache_path.read_text())
     except (OSError, ValueError):
         cache = {}
     deadline = time.time() + FLOOR_FETCH_BUDGET_SECONDS
-    burst_hits = 0
-    for past in range(epoch - 1, epoch - 1 - FLOOR_BURST_LOOKBACK, -1):
-        if past < 0:
-            break
-        entry = _epoch_winner(past, cache, deadline)
-        if entry and entry["reaction"] == reaction:
-            burst_hits += 1
-    winners = []
+    owned, own_evidence = _owned_score_evidence(reaction, cache, deadline)
+    optimism, calibration = _calibrated_optimism(
+        own_evidence, rival_margin.CURSE)
+    optimism_by_epoch: dict[int, list[float]] = {}
+    for row in own_evidence:
+        optimism_by_epoch.setdefault(int(row["epoch"]), []).append(float(row["optimism"]))
+    optimism_samples = [
+        statistics.median(optimism_by_epoch[past])
+        for past in sorted(optimism_by_epoch)
+    ][-8:]
+    rows = []
     for past in range(epoch - 1, max(0, epoch - 1 - FLOOR_LOOKBACK_EPOCHS), -1):
-        entry = _epoch_winner(past, cache, deadline)
-        if entry and entry["reaction"] == reaction:
-            winners.append((past, entry["winner"]))
-            if len(winners) >= FLOOR_WINDOW:
-                break
+        r = _epoch_rival_rows(past, cache, deadline)
+        if r:
+            # rival_margin needs each row's epoch (KeyError 'epoch' killed 25501/25502)
+            rows.extend({**x, "epoch": past} for x in r)
+    external_rows = [row for row in rows if str(row.get("coldkey")) not in owned]
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(".json.tmp")
@@ -495,17 +632,17 @@ def dynamic_floor(reaction: int, epoch: int, static: float) -> tuple[float, dict
         tmp.replace(cache_path)
     except OSError:
         pass
-    info = {"window": FLOOR_WINDOW, "samples": len(winners), "static": static,
-            "winners": [[e, round(w, 4)] for e, w in winners]}
-    if len(winners) < FLOOR_MIN_SAMPLES:
-        return static, {**info, "source": "static_fallback"}
-    if burst_hits >= FLOOR_BURST_MIN:
-        last = winners[0][1]
-        return round(last + FLOOR_OPTIMISM_MARGIN, 4), {**info, "last": round(last, 4),
-               "margin": FLOOR_OPTIMISM_MARGIN, "source": "burst_last_plus_margin"}
-    median = statistics.median(w for _, w in winners)
-    return round(median + FLOOR_OPTIMISM_MARGIN, 4), {**info, "median": round(median, 4),
-           "margin": FLOOR_OPTIMISM_MARGIN, "source": "rolling_median_plus_margin"}
+    try:
+        margin, info = rival_margin.required_margin(
+            reaction, external_rows, epoch, optimism=optimism,
+            optimism_samples=optimism_samples)
+    except Exception as error:  # a floor bug must never block the commit
+        return static, {"static": static, "source": "static_fallback_error",
+                        "err": f"{type(error).__name__}: {error}"[:160]}
+    if margin is None:
+        return static, {**info, "static": static, "source": "static_fallback"}
+    return margin, {**info, **calibration, "own_coldkeys_excluded": len(owned),
+                    "static": static, "source": "rival_margin"}
 
 
 def handle_epoch(a, view, epoch, block, end, covered, state):
@@ -518,14 +655,22 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         # molecules only when we actually hold a rescored bank for this reaction
         have_molecules = False
         if view["reaction"] in covered:
-            floor, floor_info = dynamic_floor(
-                view["reaction"], epoch, a.score_floor.get(view["reaction"], a.minimum_compound_score))
-            say(event="dynamic_floor", epoch=epoch, reaction=view["reaction"], floor=floor, **floor_info)
+            static_floor = a.score_floor.get(view["reaction"], a.minimum_compound_score)
+            try:
+                floor, floor_info = dynamic_floor(view["reaction"], epoch, static_floor)
+            except Exception as error:  # the floor must never cost the epoch (25501-25503)
+                floor, floor_info = static_floor, {"source": "static_fallback_error",
+                                                   "err": f"{type(error).__name__}: {error}"[:160]}
+            # explicit fields win: rival_margin's info carries its own 'reaction' key,
+            # which made say() raise TypeError at 25503
+            say(**{**floor_info, "event": "dynamic_floor", "epoch": epoch,
+                   "reaction": view["reaction"], "floor": floor})
             made = subprocess.run(
                 [sys.executable, str(ROOT / "tools/make_fleet.py"),
                  "--epoch", str(epoch), "--reaction", str(view["reaction"]),
                  "--crew", str(crew_path), "--python", a.rdkit_python,
-                 "--minimum-score", str(floor)]
+                 "--minimum-score", str(floor),
+                 "--prediction-offset", str(floor_info.get("optimism", 0.0))]
                 + (["--bank", str(ROOT / "bank.sqlite"),
                     "--out", str(ROOT / "release"),
                     "--fleet-tree", str(ROOT)] if a.on_submit_host else []),
@@ -570,23 +715,34 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 recheck_deadline = time.time() + max(0, end - reserve - block) * 12
                 safety_margin = 90  # stop attempting this long before commit
                 attempt = 0
+                # Every attempt must FINISH before the commit step collects this
+                # thread (join(timeout=0) just before hold_until); an attempt
+                # takes ~5 min, so the old loop was always mid-attempt at
+                # collection and every result was discarded (25490-25500 all
+                # logged release_recheck_still_running; 25497/25500 missed
+                # their floors by 0.007).
+                collect_at = recheck_deadline - getattr(a, "late_commit_margin_seconds", 120) - 30
+                last_duration = 330.0
                 time.sleep(150)  # first look: give one bank-pull cycle a head start
-                while time.time() < recheck_deadline - safety_margin:
+                while time.time() + last_duration * 1.15 < min(collect_at, recheck_deadline - safety_margin):
                     attempt += 1
+                    started = time.time()
                     r = subprocess.run(
                         [sys.executable, str(ROOT / "tools/make_fleet.py"),
                          "--epoch", str(epoch), "--reaction", str(reaction),
                          "--crew", str(crew_path), "--python", a.rdkit_python,
                          "--minimum-score", str(floor),
+                         "--prediction-offset", str(floor_info.get("optimism", 0.0)),
                          "--bank", str(ROOT / "bank.sqlite"),
                          "--out", str(recheck_out), "--fleet-tree", str(ROOT)],
                         capture_output=True, text=True, timeout=1200)
                     recheck_result["returncode"] = r.returncode
                     recheck_result["stdout"] = r.stdout
                     recheck_result["attempts"] = attempt
+                    last_duration = time.time() - started
                     if r.returncode == 0:
                         return
-                    time.sleep(150)
+                    time.sleep(60)
             recheck_thread = threading.Thread(target=_recheck, daemon=True)
             recheck_thread.start()
 

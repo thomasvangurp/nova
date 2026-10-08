@@ -34,6 +34,33 @@ SAFE_SLOT_FIELDS = {
 MONEY_REFRESH_SECONDS = 3600
 MONEY_MARKER = ROOT / "data" / "money_refresh.marker"
 
+# Compound status requires one SSH round to the Pi plus the real release-gate
+# SELECT and two lightweight read-only strategy summaries on each of the 5
+# dedicated mining boxes -- measured ~140s total. Running that every 60s would mean
+# the collector is effectively always running and would keep those 5 live
+# mining boxes under constant (if cheap) extra SSH load. 20 minutes keeps the
+# "ready to submit" numbers reasonably fresh without that.
+COMPOUND_REFRESH_SECONDS = 600
+# How soon to retry after a failed/unreachable attempt, instead of waiting
+# out the full cadence above. Confirmed live 2026-10-02: the Pi went down
+# for a reboot right as a refresh attempt landed; compound.py's main()
+# always exits 0 even when pi_reachable is False (it falls back to the
+# previous snapshot rather than erroring), so the marker was getting touched
+# on failure too -- the dashboard then sat on a stale snapshot for a FULL
+# extra 20 minutes after the Pi was already back up, rather than catching it
+# on the very next cycle.
+COMPOUND_RETRY_SECONDS = 180
+COMPOUND_MARKER = ROOT / "data" / "compound_refresh.marker"
+COMPOUND_STATUS_PATH = ROOT / "data" / "compound_status.json"
+
+# Proxy accuracy only changes once per ~4h retrain cycle per reaction box
+# (proxy_refit_loop.sh), so there is no point checking every 20 minutes like
+# compound -- hourly is already far more often than the data can change.
+PROXY_ACCURACY_REFRESH_SECONDS = 3600
+PROXY_ACCURACY_RETRY_SECONDS = 300
+PROXY_ACCURACY_MARKER = ROOT / "data" / "proxy_accuracy_refresh.marker"
+PROXY_ACCURACY_STATUS_PATH = ROOT / "data" / "proxy_accuracy_status.json"
+
 
 def sync_slot_snapshot() -> int:
     """Fetch the Pi's public operational log and persist only allowed fields.
@@ -86,6 +113,78 @@ def _should_refresh_money() -> bool:
 def _touch_money_marker() -> None:
     MONEY_MARKER.parent.mkdir(parents=True, exist_ok=True)
     MONEY_MARKER.write_text(str(int(time.time())) + "\n")
+
+
+def _should_refresh_compound() -> bool:
+    try:
+        return time.time() - COMPOUND_MARKER.stat().st_mtime >= COMPOUND_REFRESH_SECONDS
+    except OSError:
+        return True
+
+
+def _touch_compound_marker(success: bool = True) -> None:
+    COMPOUND_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    COMPOUND_MARKER.write_text(str(int(now)) + "\n")
+    if not success:
+        # Backdate the mtime so _should_refresh_compound() goes true again
+        # after COMPOUND_RETRY_SECONDS rather than the full cadence.
+        backdated = now - (COMPOUND_REFRESH_SECONDS - COMPOUND_RETRY_SECONDS)
+        os.utime(COMPOUND_MARKER, (backdated, backdated))
+
+
+def refresh_compound_status() -> bool:
+    """Collect and save a fresh compound-fleet status snapshot, as a bounded-
+    timeout subprocess (matching refresh_money_sources()'s isolation) so a
+    hung SSH call to the Pi or a mining box can never block the rest of the
+    dashboard refresh. Worst case is ~5 boxes x 90s + the Pi call, so the
+    timeout here is generous; on any failure or timeout the previous
+    snapshot is left in place (compound.py's collect() reads it as a
+    fallback base), so the tab degrades to "stale" rather than empty.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-m", "nanobody_dash.compound"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=600,
+    )
+    return completed.returncode == 0
+
+
+def _should_refresh_proxy_accuracy() -> bool:
+    try:
+        return time.time() - PROXY_ACCURACY_MARKER.stat().st_mtime \
+            >= PROXY_ACCURACY_REFRESH_SECONDS
+    except OSError:
+        return True
+
+
+def _touch_proxy_accuracy_marker(success: bool = True) -> None:
+    PROXY_ACCURACY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    PROXY_ACCURACY_MARKER.write_text(str(int(now)) + "\n")
+    if not success:
+        backdated = now - (PROXY_ACCURACY_REFRESH_SECONDS - PROXY_ACCURACY_RETRY_SECONDS)
+        os.utime(PROXY_ACCURACY_MARKER, (backdated, backdated))
+
+
+def refresh_proxy_accuracy_status() -> bool:
+    """Collect and save a fresh proxy-accuracy snapshot, same bounded-
+    timeout subprocess isolation as refresh_compound_status() -- a hung SSH
+    call to one reaction box must never block the rest of the dashboard
+    refresh. Only 5 small `cat` reads, so the timeout is generous but much
+    shorter than compound's (no per-box SELECT to run)."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "nanobody_dash.proxy_accuracy"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=180,
+    )
+    return completed.returncode == 0
 
 
 def refresh_money_sources() -> dict[str, bool]:
@@ -163,6 +262,48 @@ def main() -> int:
         else:
             money_status = {"economics": "skipped", "infrastructure": "skipped"}
             funding_target = "skipped"
+        if _should_refresh_compound():
+            try:
+                compound_ok = refresh_compound_status()
+            except subprocess.TimeoutExpired:
+                compound_ok = False
+            except Exception as exc:
+                print(f"compound refresh failed: {type(exc).__name__}", file=sys.stderr)
+                compound_ok = False
+            # main() always exits 0 even when the Pi was unreachable, so the
+            # subprocess returncode alone can't tell a real refresh from a
+            # fallback -- check the saved snapshot's own pi_reachable field.
+            pi_reachable = True
+            if compound_ok:
+                try:
+                    pi_reachable = bool(
+                        json.loads(COMPOUND_STATUS_PATH.read_text())
+                        .get("pi_reachable", True))
+                except Exception:
+                    pi_reachable = True
+            _touch_compound_marker(success=bool(compound_ok) and pi_reachable)
+        else:
+            compound_ok = "skipped"
+        if _should_refresh_proxy_accuracy():
+            try:
+                proxy_accuracy_ok = refresh_proxy_accuracy_status()
+            except subprocess.TimeoutExpired:
+                proxy_accuracy_ok = False
+            except Exception as exc:
+                print(f"proxy accuracy refresh failed: {type(exc).__name__}", file=sys.stderr)
+                proxy_accuracy_ok = False
+            reachable_boxes = 0
+            if proxy_accuracy_ok:
+                try:
+                    reachable_boxes = int(
+                        json.loads(PROXY_ACCURACY_STATUS_PATH.read_text())
+                        .get("reachable_boxes", 0))
+                except Exception:
+                    reachable_boxes = 0
+            _touch_proxy_accuracy_marker(
+                success=bool(proxy_accuracy_ok) and reachable_boxes > 0)
+        else:
+            proxy_accuracy_ok = "skipped"
         subprocess.run(
             [sys.executable, "-m", "nanobody_dash.build", "--out", str(NEXT)],
             cwd=ROOT,
@@ -181,7 +322,7 @@ def main() -> int:
         print(
             f"dashboard operational snapshot: {slot_rows} Pi rows; "
             f"money={money_status}; funding_target={funding_target}; "
-            f"vercel_publish_attempted={published}"
+            f"compound={compound_ok}; vercel_publish_attempted={published}"
         )
     return 0
 

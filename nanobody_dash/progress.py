@@ -7,6 +7,7 @@ like-for-like.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import statistics as st
 from pathlib import Path
@@ -135,6 +136,315 @@ def fig_rates_vs_rivals(data, top: int = 4, window: int = 30,
     figure.update_yaxes(title=f"top-10 per entry % ({window}-epoch)",
                         gridcolor="#242a36", rangemode="tozero")
     figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+MULTIPASS_COMPARISON = Path(__file__).resolve().parent / "multipass_comparison.json"
+
+
+def _normalize_multipass_actor(value):
+    """Return ``{"mean", "stdev", "fleet_size", "scores"}`` or None.
+
+    Accepts both the new dict shape and the legacy flat float, so an old
+    ``multipass_comparison.json`` keeps rendering.  A zero or null ``stdev`` is
+    normalised to None so error bars are simply omitted.
+    """
+    if isinstance(value, dict):
+        try:
+            mean = float(value.get("mean"))
+        except (TypeError, ValueError):
+            return None
+        stdev = value.get("stdev")
+        try:
+            stdev = float(stdev) if stdev not in (None, "") else None
+        except (TypeError, ValueError):
+            stdev = None
+        if stdev in (None, 0):
+            stdev = None
+        return dict(mean=mean, stdev=stdev,
+                    fleet_size=value.get("fleet_size"),
+                    scores=value.get("scores"))
+    try:
+        return dict(mean=float(value), stdev=None, fleet_size=None, scores=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _multipass_rivals(row, rival):
+    """Yield only the target rival (5GhREcsK), ignoring the noisy rest.
+
+    The legacy ``{"rival": <float>}`` shape becomes a single rival keyed by
+    the ``rival`` parameter's coldkey prefix; the new ``rivals`` mapping is
+    filtered to the coldkey that starts with ``rival`` so the panel stays a
+    clean us-vs-them comparison.  Rivals without a usable ``mean`` are dropped.
+    """
+    rivals = row.get("rivals")
+    if not isinstance(rivals, dict):
+        rivals = {rival: row.get("rival")} if "rival" in row else {}
+    for coldkey, value in rivals.items():
+        if not str(coldkey).startswith(rival):
+            continue
+        actor = _normalize_multipass_actor(value)
+        if actor is None:
+            continue
+        yield str(coldkey), actor
+
+
+def _multipass_all_rivals(row):
+    """Yield every rival with a usable mean, unfiltered by coldkey."""
+    rivals = row.get("rivals")
+    if not isinstance(rivals, dict):
+        return
+    for coldkey, value in rivals.items():
+        actor = _normalize_multipass_actor(value)
+        if actor is None:
+            continue
+        yield str(coldkey), actor
+
+
+def _multipass_hover(actor) -> str:
+    """``fleet=13 · σ=88`` for the hover text, ``fleet n/a`` when empty."""
+    parts = []
+    fleet = actor.get("fleet_size")
+    if fleet is not None:
+        parts.append(f"fleet={int(fleet)}")
+    if actor.get("stdev") is not None:
+        parts.append(f"σ={actor['stdev']:,.0f}")
+    return " · ".join(parts) if parts else "fleet n/a"
+
+
+def _trailing_mean(xs, ys, window=10):
+    """Trailing-window mean of ``ys`` over the last ``window`` non-None values.
+
+    A per-epoch multi-pass rank-sum is noisy (one epoch's sample is only ~10-20
+    sequences), so the strongest-rivals chart plots this smoothed value instead
+    of the raw per-epoch point.  Missing (``None``) values are kept as gaps and
+    are not fed into the window.
+    """
+    out_x, out_y, win = [], [], []
+    for x, y in zip(xs, ys):
+        if y is None:
+            out_x.append(x)
+            out_y.append(None)
+            continue
+        win.append(y)
+        if len(win) > window:
+            win.pop(0)
+        out_x.append(x)
+        out_y.append(sum(win) / len(win))
+    return out_x, out_y
+
+
+def _empty_multipass(figure, note, ytitle) -> go.Figure:
+    figure.update_layout(**LAYOUT)
+    figure.add_annotation(text=note, xref="paper", yref="paper", x=0.5, y=0.5,
+                          showarrow=False, font=dict(color=MUTED))
+    figure.update_yaxes(title=ytitle, gridcolor="#242a36")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+def fig_multipass_vs_rival(path: Path | None = None,
+                           rival: str = "5GhREcsK") -> go.Figure:
+    """US vs every rival's multi-pass mean rank-sum per epoch (lower = better).
+
+    The values come from multi-pass replay scoring, which is too expensive for
+    the collector to keep in the dashboard database, so they are read from
+    ``multipass_comparison.json`` instead.  Missing epochs (or a missing file)
+    are skipped rather than crashing the build.  Each rival is one line with
+    its fleet stdev as error bars; a rival without a ``mean`` is skipped.
+    """
+    path = path or MULTIPASS_COMPARISON
+    figure = go.Figure()
+    if not path.is_file():
+        return _empty_multipass(figure, "No multi-pass comparison data yet",
+                                "multi-pass mean rank-sum (lower = better)")
+
+    payload = json.loads(path.read_text())
+    epochs = sorted(int(key) for key in payload)
+    if not epochs:
+        return _empty_multipass(figure, "No multi-pass comparison data yet",
+                                "multi-pass mean rank-sum (lower = better)")
+
+    ours_x, ours_y, ours_err, ours_hover = [], [], [], []
+    rival_buckets: dict[str, dict] = {}
+    for epoch in epochs:
+        row = payload.get(str(epoch))
+        if not isinstance(row, dict):
+            continue
+        ours = _normalize_multipass_actor(row.get("ours"))
+        ours_x.append(epoch)
+        if ours is None:
+            ours_y.append(None); ours_err.append(None); ours_hover.append("")
+        else:
+            ours_y.append(ours["mean"]); ours_err.append(ours["stdev"])
+            ours_hover.append(_multipass_hover(ours))
+        for coldkey, actor in _multipass_rivals(row, rival):
+            bucket = rival_buckets.setdefault(
+                coldkey, dict(x=[], y=[], err=[], hover=[]))
+            bucket["x"].append(epoch)
+            bucket["y"].append(actor["mean"])
+            bucket["err"].append(actor["stdev"])
+            bucket["hover"].append(_multipass_hover(actor))
+
+    figure.add_trace(go.Scatter(
+        x=ours_x, y=ours_y, name="US", line=dict(color=OURS, width=3),
+        error_y=dict(type="data", array=ours_err, color=OURS, thickness=1.4,
+                     visible=any(v is not None for v in ours_err)),
+        customdata=ours_hover,
+        hovertemplate=("US · epoch %{x}<br>mean rank-sum %{y:,.0f}"
+                       "<br>%{customdata}<extra></extra>")))
+    for shown, coldkey in enumerate(rival_buckets):
+        bucket = rival_buckets[coldkey]
+        colour = RIVALS[shown % len(RIVALS)]
+        figure.add_trace(go.Scatter(
+            x=bucket["x"], y=bucket["y"], name=coldkey[:8] + "...",
+            line=dict(color=colour, width=1.6),
+            error_y=dict(type="data", array=bucket["err"], color=colour,
+                         thickness=1.4,
+                         visible=any(v is not None for v in bucket["err"])),
+            customdata=bucket["hover"],
+            hovertemplate=(coldkey[:8] + "... · epoch %{x}"
+                           "<br>mean rank-sum %{y:,.0f}<br>%{customdata}"
+                           "<extra></extra>")))
+    figure.update_layout(**LAYOUT)
+    figure.update_yaxes(title="multi-pass mean rank-sum (lower = better)",
+                        gridcolor="#242a36")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure:
+    """US vs the strongest rivals' multi-pass mean rank-sum per epoch.
+
+    Each line is a trailing 10-epoch mean of the per-epoch rank-sum (the raw
+    point is one ~10-20 sequence sample and is noisy).  The ``top`` rivals are
+    chosen by lowest all-time mean (lower is better) and plotted over the full
+    replay-scored history.
+    """
+    path = path or MULTIPASS_COMPARISON
+    figure = go.Figure()
+    if not path.is_file():
+        return _empty_multipass(figure, "No multi-pass comparison data yet",
+                                "multi-pass mean rank-sum (lower = better)")
+
+    payload = json.loads(path.read_text())
+    epochs = sorted(int(key) for key in payload)
+    if not epochs:
+        return _empty_multipass(figure, "No multi-pass comparison data yet",
+                                "multi-pass mean rank-sum (lower = better)")
+
+    ours_x, ours_y, ours_hover = [], [], []
+    rival_buckets: dict[str, dict] = {}
+    for epoch in epochs:
+        row = payload.get(str(epoch))
+        if not isinstance(row, dict):
+            continue
+        ours = _normalize_multipass_actor(row.get("ours"))
+        ours_x.append(epoch)
+        if ours is None:
+            ours_y.append(None); ours_hover.append("")
+        else:
+            ours_y.append(ours["mean"]); ours_hover.append(_multipass_hover(ours))
+        for coldkey, actor in _multipass_all_rivals(row):
+            bucket = rival_buckets.setdefault(
+                coldkey, dict(x=[], y=[], hover=[]))
+            bucket["x"].append(epoch)
+            bucket["y"].append(actor["mean"])
+            bucket["hover"].append(_multipass_hover(actor))
+
+    def _mean(bucket: dict) -> float:
+        return sum(bucket["y"]) / len(bucket["y"])
+
+    strongest = sorted(rival_buckets, key=lambda ck: _mean(rival_buckets[ck]))[:top]
+
+    ours_x, ours_y = _trailing_mean(ours_x, ours_y)
+    figure.add_trace(go.Scatter(
+        x=ours_x, y=ours_y, name="US", line=dict(color=OURS, width=3),
+        customdata=ours_hover,
+        hovertemplate=("US · epoch %{x}<br>10-epoch mean rank-sum %{y:,.0f}"
+                       "<br>%{customdata}<extra></extra>")))
+    for shown, coldkey in enumerate(strongest):
+        bucket = rival_buckets[coldkey]
+        x, y = _trailing_mean(bucket["x"], bucket["y"])
+        colour = RIVALS[shown % len(RIVALS)]
+        figure.add_trace(go.Scatter(
+            x=x, y=y, name=coldkey[:8] + "...",
+            line=dict(color=colour, width=1.6),
+            customdata=bucket["hover"],
+            hovertemplate=(coldkey[:8] + "... · epoch %{x}"
+                           "<br>10-epoch mean rank-sum %{y:,.0f}<br>%{customdata}"
+                           "<extra></extra>")))
+    figure.update_layout(**LAYOUT)
+    figure.update_yaxes(title="10-epoch mean rank-sum (lower = better)",
+                        gridcolor="#242a36")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36")
+    return figure
+
+
+def fig_multipass_distribution(path: Path | None = None,
+                               rival: str = "5GhREcsK") -> go.Figure:
+    """Per-sequence multi-pass rank-sum distribution for us and every rival.
+
+    Only actors (and epochs) that carry a non-empty ``scores`` list appear,
+    as a grouped box plot -- one box per actor per epoch.  Lower is better.
+    """
+    path = path or MULTIPASS_COMPARISON
+    figure = go.Figure()
+    if not path.is_file():
+        return _empty_multipass(figure, "No multi-pass distribution data yet",
+                                "multi-pass rank-sum (lower = better)")
+
+    payload = json.loads(path.read_text())
+    ours_epochs: dict[str, list] = {}
+    rival_epochs: dict[str, dict] = {}
+    for key, row in payload.items():
+        if not isinstance(row, dict):
+            continue
+        epoch = str(key)
+        ours = _normalize_multipass_actor(row.get("ours"))
+        if ours and isinstance(ours.get("scores"), list) and ours["scores"]:
+            ours_epochs[epoch] = ours["scores"]
+        for coldkey, actor in _multipass_rivals(row, rival):
+            if isinstance(actor.get("scores"), list) and actor["scores"]:
+                rival_epochs.setdefault(coldkey, {})[epoch] = actor["scores"]
+
+    epoch_order = sorted(
+        set(ours_epochs) | {e for m in rival_epochs.values() for e in m},
+        key=int)
+    if not epoch_order:
+        return _empty_multipass(figure, "No per-sequence multi-pass scores yet",
+                                "multi-pass rank-sum (lower = better)")
+
+    def _add_boxes(label, per_epoch, colour, offset):
+        xs, ys = [], []
+        for epoch in epoch_order:
+            scores = per_epoch.get(epoch)
+            if not scores:
+                continue
+            xs.extend([epoch] * len(scores))
+            ys.extend(float(s) for s in scores)
+        if not ys:
+            return
+        figure.add_trace(go.Box(
+            x=xs, y=ys, name=label, offsetgroup=offset, legendgroup=label,
+            marker_color=colour, line=dict(color=colour),
+            boxpoints="outliers", hoveron="boxes+points"))
+
+    _add_boxes("US", ours_epochs, OURS, 0)
+    for shown, coldkey in enumerate(rival_epochs, start=1):
+        _add_boxes(coldkey[:8] + "...", rival_epochs[coldkey],
+                   RIVALS[(shown - 1) % len(RIVALS)], shown)
+
+    layout = dict(LAYOUT)
+    layout["boxmode"] = "group"
+    layout["boxgap"] = 0.25
+    layout["boxgroupgap"] = 0.05
+    figure.update_layout(**layout)
+    figure.update_yaxes(title="multi-pass rank-sum (lower = better)",
+                        gridcolor="#242a36")
+    figure.update_xaxes(title="epoch", gridcolor="#242a36", type="category",
+                        categoryorder="array", categoryarray=epoch_order)
     return figure
 
 

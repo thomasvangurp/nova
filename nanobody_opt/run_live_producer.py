@@ -157,6 +157,20 @@ def maintain_runtime_storage(
                 exact_files = sorted(epoch_root.glob("**/exact_all.json"))
                 if not _sealed_exact_files(observation_database, exact_files):
                     continue
+                # Preserve per-residue structures (.cif) before deleting the
+                # epoch tree: they are the only source of per-residue contact
+                # topology (the observations DB stores only aggregate metrics)
+                # and are not cheaply regenerable. The .cif sync loop ships
+                # these to Hetzner for persistence.
+                structures_root = live_root / "structures"
+                structures_root.mkdir(parents=True, exist_ok=True)
+                for cif in epoch_root.rglob("*.cif"):
+                    if not cif.is_file() or cif.is_symlink():
+                        continue
+                    try:
+                        shutil.move(str(cif), str(structures_root / cif.name))
+                    except (FileNotFoundError, shutil.Error):
+                        pass
                 for path in epoch_root.rglob("*"):
                     try:
                         if path.is_file() and not path.is_symlink():
@@ -494,13 +508,20 @@ def _run_iteration(
     # elite-centric select_elite_parents bank. The single-edits flow through
     # filter_layer2 and local_neighborhood exactly as the elite parents did.
     top50 = iteration_root / "top50_index.json"
+    # The dedup top-50 is rank_binders over the FULL HF archive (all history),
+    # not the live leaderboard -- a 15-epoch API window indexes a different
+    # basin and over-filters (the 25454/25455 wholesale rejections). Fetch the
+    # archive once here; the layer-2 novelty gate below reuses the same file.
+    hf_archive = iteration_root / "hf_archive.csv"
+    if not hf_archive.is_file():
+        _run([sys.executable, "-m", "nanobody_opt.fetch_hf_archive", str(hf_archive)])
     if not top50.is_file():
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
             "--locked", "--environment", "metanano",
             "python", "-m", "nanobody_opt.build_top50_index",
-            str(epoch), str(top50), "15", str(args.mutation_database),
+            str(hf_archive), str(top50), str(args.mutation_database),
         ])
     # Children pool (breadth): the multi-edit elite parents, generated alongside
     # the single-edit competitor lane. Both are scored and the source column
@@ -533,14 +554,18 @@ def _run_iteration(
         ])
     elite_parents = producer_root / "competitor_parents.json"
     if not elite_parents.is_file():
-        _run([
+        lane_argv = [
             sys.executable,
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
             "--priority-parents", str(top50),
+            "--rival-coldkey", args.rival_coldkey,
             "--limit", "2000",
             "--output", str(elite_parents),
-        ])
+        ]
+        if args.ranker_model.is_file():
+            lane_argv += ["--ranker-model", str(args.ranker_model)]
+        _run(lane_argv)
     seed = producer_root / "competitor_parents_layer2.json"
     if not seed.is_file():
         _run([
@@ -602,12 +627,18 @@ def _run_iteration(
         # and multi-edit children (elite parents + neighbourhood, breadth).
         single_rows = json.loads(seed.read_text()).get("candidates", [])
         with candidates.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["sequence", "source"])
+            writer = csv.DictWriter(
+                handle, fieldnames=["sequence", "source", "parent_sequence"]
+            )
             writer.writeheader()
             for row in single_rows:
                 seq = str(row.get("sequence", "")).strip().upper()
                 if seq:
-                    writer.writerow({"sequence": seq, "source": "single_edit"})
+                    writer.writerow({
+                        "sequence": seq,
+                        "source": "single_edit",
+                        "parent_sequence": str(row.get("parent", "")).strip().upper(),
+                    })
 
         children_candidates = iteration_root / "children_candidates.csv"
         if not children_candidates.is_file():
@@ -660,12 +691,20 @@ def _run_iteration(
             _run(command)
         # Append the children pool to candidates.csv with its source tag.
         with candidates.open("a", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["sequence", "source"])
+            writer = csv.DictWriter(
+                handle, fieldnames=["sequence", "source", "parent_sequence"]
+            )
             with children_candidates.open(newline="") as ch:
                 for row in csv.DictReader(ch):
                     seq = str(row.get("sequence", "")).strip().upper()
                     if seq:
-                        writer.writerow({"sequence": seq, "source": "children"})
+                        writer.writerow({
+                            "sequence": seq,
+                            "source": "children",
+                            "parent_sequence": str(
+                                row.get("parent_sequence", "")
+                            ).strip().upper(),
+                        })
 
         if args.public_neighbourhood_distance:
             # Every winner in the leakage-free replay sat one substitution from
@@ -971,6 +1010,20 @@ def _parser() -> argparse.ArgumentParser:
         "--mutation-database",
         type=Path,
         default=Path("/root/artifacts/nanobody_mutations.sqlite"),
+    )
+    parser.add_argument(
+        "--ranker-model",
+        type=Path,
+        default=Path("/root/artifacts/parent_relative_ranker/model.joblib"),
+        help="model.joblib from train_parent_relative_ranker; when present, the "
+             "competitor_lane single-edits are ordered by predicted improvement",
+    )
+    parser.add_argument(
+        "--rival-coldkey",
+        type=str,
+        default="5GhREcsK",
+        help="coldkey prefix of the top competitor; their recent submissions "
+             "become the competitor_lane parent pool (proven-good source)",
     )
     parser.add_argument("--maximum-chain-state-age", type=float, default=90)
     parser.add_argument("--reserve-blocks", type=int, default=55)
