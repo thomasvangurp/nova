@@ -579,8 +579,15 @@ def _database_exact_fingerprints(
     finally:
         if "connection" in locals():
             connection.close()
-    manifest = [list(row[:5]) for row in rows]
-    structural = [list(row) for row in rows]
+
+    def _jsonable(value: Any) -> Any:
+        # MySQL returns COUNT/SUM as Decimal; json.dumps cannot serialise that.
+        from decimal import Decimal
+
+        return int(value) if isinstance(value, Decimal) else value
+
+    manifest = [[_jsonable(v) for v in row[:5]] for row in rows]
+    structural = [[_jsonable(v) for v in row] for row in rows]
     return (
         _sha256_bytes(json.dumps(manifest, separators=(",", ":")).encode()),
         _sha256_bytes(json.dumps(structural, separators=(",", ":")).encode()),
