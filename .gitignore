@@ -15,3 +15,15 @@ data/public/*.csv
 data/public/*.csv.gz
 *.sqlite-shm
 *.sqlite-wal
+
+# Runtime/output artifacts and one-off diagnostic scripts (not deployable source)
+data/
+analysis/
+state/
+public/
+*.bak
+/0
+/root@hetzner*
+scoring_backfill/
+nanobody_dash/multipass_comparison.json
+nanobody_dash/funding.py.pre-*
