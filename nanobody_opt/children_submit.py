@@ -105,6 +105,9 @@ from nanobody_opt import db, fleet  # noqa: E402
 TARGET = "P20809"
 DEFAULT_SOURCE = "children_8x"
 DEFAULT_SCORE_KIND = "local_validator_replay_rank_sum"
+# Fetch this many extra children past --top-n so the corrected-score re-ranking
+# (which uses the exact replay's interaction_pae) has a pool to reorder from.
+CORRECTED_FETCH_MARGIN = 5
 DEFAULT_OUTPUT = "/root/artifacts/nanobody_children_result.json"
 DEFAULT_RESERVE_BLOCKS = 55
 MINIMUM_OBSERVATION_COUNT = 8
@@ -285,6 +288,79 @@ def top_children(
     finally:
         connection.close()
     return chosen
+
+
+def _corrected_score_map(database: Path) -> dict[str, float]:
+    """Per-sequence corrected validator ``final_score`` from exact-scorer metrics.
+
+    The stored exact score sums all ten metric dense ranks; the validator actually
+    ranks each of the three metric categories within the field and sums those three
+    ranks (see ``simulate_round.validator_final_scores``).  Recompute it over the
+    exact observations' ``metrics_json``, which carries ``interaction_pae`` that the
+    fast replay cannot emit.  Returns ``{}`` when no exact rows exist, so callers
+    fall back to the stored replay score.
+    """
+    from nanobody_opt.simulate_round import METRICS, validator_final_scores
+
+    connection = _open_readonly(database)
+    try:
+        rows = connection.execute(
+            """
+            SELECT n.sequence, o.metrics_json, o.epoch
+            FROM observations o JOIN nodes n ON n.id = o.node_id
+            WHERE n.target = %s
+              AND o.source = 'local_exact_raw'
+              AND o.score_kind = 'local_exact_validator_replay_rank_sum'
+              AND o.metrics_json IS NOT NULL
+            """,
+            (TARGET,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    by_epoch: dict[int, list[tuple[str, dict[str, float]]]] = {}
+    for sequence, raw, epoch in rows:
+        try:
+            metrics = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(metrics, dict) or any(metrics.get(m) is None for m in METRICS):
+            continue
+        by_epoch.setdefault(int(epoch or 0), []).append(
+            (str(sequence).strip().upper(), {m: float(metrics[m]) for m in METRICS})
+        )
+    if not by_epoch:
+        return {}
+
+    import pandas as pd
+
+    merged: dict[str, list[float]] = {}
+    for group in by_epoch.values():
+        frame = pd.DataFrame([m for _, m in group])
+        scores = validator_final_scores(frame)
+        for (seq, _m), score in zip(group, scores):
+            if not np.isnan(score):
+                merged.setdefault(seq, []).append(float(score))
+    return {seq: float(np.mean(v)) for seq, v in merged.items()}
+
+
+def reorder_children_by_corrected_score(
+    children: list[dict[str, Any]], corrected: dict[str, float]
+) -> list[dict[str, Any]]:
+    """Overwrite each child's score with the corrected value where available, re-sort.
+
+    Only children present in ``corrected`` are re-scored; the rest keep their stored
+    replay score, so a partial exact-coverage DB degrades rather than errors.
+    """
+    if not corrected:
+        return children
+    for child in children:
+        value = corrected.get(child["sequence"])
+        if value is not None:
+            child["mean_score"] = value
+            child["median_score"] = value
+            child["p90_score"] = value
+    return sorted(children, key=lambda child: (child["mean_score"], child["sequence"]))
 
 
 def _extract_cdrs_like_validator(sequence: str) -> dict[str, str] | None:
@@ -878,14 +954,17 @@ def main(argv: list[str] | None = None) -> int:
             f"(source={args.source}); ledger holds {len(exclude)} published sequence(s)",
             flush=True,
         )
+        corrected = _corrected_score_map(args.database)
         children = top_children(
             args.database,
             source=args.source,
             score_kind=args.score_kind,
-            top_n=top_n,
+            top_n=top_n * CORRECTED_FETCH_MARGIN,
             exclude=exclude,
             published=published,
         )
+        children = reorder_children_by_corrected_score(children, corrected)
+        children = children[:top_n]
     if not children:
         raise SystemExit(
             f"no eligible {args.source} children in {args.database} after "
