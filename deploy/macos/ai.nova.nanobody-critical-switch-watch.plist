@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.nova.nanobody-critical-switch-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/tvgdeena/nova-nanobody/tools/watch_critical_switches.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Master box SSH endpoint. Update both if master is reprovisioned. -->
+    <key>NOVA_MASTER_HOST</key>
+    <string>root@ssh9.vast.ai</string>
+    <key>NOVA_MASTER_PORT</key>
+    <string>10616</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/tvgdeena/nova-nanobody</string>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/tvgdeena/nova-nanobody/data/critical-switch-watch.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tvgdeena/nova-nanobody/data/critical-switch-watch.stderr.log</string>
+</dict>
+</plist>
