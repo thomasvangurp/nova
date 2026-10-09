@@ -23,10 +23,23 @@ fi
 # busy (the children lane runs the exact scorer at ~100% util). The refresh
 # only runs in the idle gaps, so the 20x parent pool never steals GPU from a
 # live children submission.
+#
+# Starvation guard: the gate is a single instantaneous sample per 30-min tick,
+# so a box whose GPUs are busy at most ticks (master, once the children lane
+# scores continuously) could skip forever and the parent pool would go stale
+# silently. If the last completed refresh is older than MAX_SKIP_HOURS, run
+# anyway. Baked-in default (the daemon passes no env).
+MAX_SKIP_HOURS=${HF_REFRESH_MAX_SKIP_HOURS:-3}
 MAXUTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
-if [ -n "$MAXUTIL" ] && [ "$MAXUTIL" -gt 40 ]; then
-  echo "$(date -u +%FT%TZ) SKIP gpu busy $MAXUTIL%" >> "$LOGDIR/loop.log"
-  exit 0
+if [ -n "$MAXUTIL" ] && [ "$MAXUTIL" -gt 40 ] 2>/dev/null; then
+  LAST_DONE=$(grep ' DONE$' "$LOGDIR/loop.log" 2>/dev/null | tail -1 | cut -d' ' -f1)
+  LAST_DONE_S=$(date -u -d "$LAST_DONE" +%s 2>/dev/null || echo 0)
+  AGE_H=$(( ( $(date -u +%s) - LAST_DONE_S ) / 3600 ))
+  if [ "$AGE_H" -lt "$MAX_SKIP_HOURS" ]; then
+    echo "$(date -u +%FT%TZ) SKIP gpu busy $MAXUTIL% (last DONE ${AGE_H}h ago)" >> "$LOGDIR/loop.log"
+    exit 0
+  fi
+  echo "$(date -u +%FT%TZ) OVERRIDE gpu busy $MAXUTIL% but last DONE ${AGE_H}h ago >= ${MAX_SKIP_HOURS}h" >> "$LOGDIR/loop.log"
 fi
 
 # Lock: no overlapping refreshes.
