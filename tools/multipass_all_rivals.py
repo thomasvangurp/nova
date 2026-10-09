@@ -26,6 +26,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Corrected validator final_score (3-category-rank sum) lives in the package;
+# this script runs from the box's repo root, so make the package importable.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from nanobody_opt.simulate_round import validator_final_scores  # noqa: E402
+
 API = "https://compound-api.metanova-labs.ai"
 TARGET = "P20809"
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
@@ -41,7 +46,17 @@ METRIC_DEFS = {
     "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
     "delta_sasa_refolded": "max",
 }
-METRICS_NEEDED = sorted(set(PROTEIN_WEIGHTS) | {"liability_num_violations"})
+# All ten validator metrics. The corrected 3-category final_score needs
+# interaction_pae / design_to_target_iptm / liability_score that the old
+# minmax proxy never ranked. The fast scorer and the historical archive may
+# both omit interaction_pae, so score_pass falls back to the minmax proxy when
+# the full set is not present.
+METRICS_NEEDED = sorted({
+    "design_iiptm", "design_ptm", "design_to_target_iptm",
+    "min_design_to_target_pae", "interaction_pae",
+    "plip_hbonds_refolded", "plip_saltbridge_refolded",
+    "delta_sasa_refolded", "liability_score", "liability_num_violations",
+})
 
 
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
@@ -126,13 +141,21 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
         rows[seq] = {k: float(v) for k, v in m.items()
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
     rival = pd.DataFrame(rows).T  # index = sequence
-    archive_s = archive.set_index("sequence")[METRICS_NEEDED]
+    corrected = (set(METRICS_NEEDED) <= set(archive.columns)
+                 and set(METRICS_NEEDED) <= set(rival.columns))
+    use_metrics = METRICS_NEEDED if corrected else sorted(
+        set(PROTEIN_WEIGHTS) | {"liability_num_violations"}
+    )
+    archive_s = archive.set_index("sequence")[use_metrics]
     field = pd.concat([archive_s, rival])  # index = sequence
-    # A rival sequence that is also in the archive appears twice; algo2_score
-    # then returns a multi-row Series for it and float(scores[seq]) blows up.
+    # A rival sequence that is also in the archive appears twice; the rankers
+    # then return a multi-row Series for it and float(scores[seq]) blows up.
     # Keep the rival's (last) row so the fresh multipass score wins the overlap.
     field = field[~field.index.duplicated(keep="last")]
-    scores = algo2_score(field)  # index = sequence (liability-filtered)
+    if corrected:
+        scores = pd.Series(validator_final_scores(field), index=field.index)
+    else:
+        scores = algo2_score(field)  # index = sequence (liability-filtered)
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.
