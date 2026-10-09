@@ -136,19 +136,18 @@ def build_command(
         command.append("--require-structures")
 
     reference = settings.get("synth_reference")
-    if reference:
-        lengths = _sequence_lengths(Path(args.sequences))
-        if len(lengths) == 1:
-            command.extend(["--synth-reference", str(reference)])
-        else:
-            # Grafting needs a reference whose designed chain matches the
-            # candidates.  A mixed-length wave is rare, and running the real
-            # design stage is the correct fallback rather than a failure.
-            print(
-                "FAST_SCORER_SYNTH_REFERENCE_SKIPPED "
-                f"candidate_lengths={sorted(lengths)}",
-                flush=True,
-            )
+    if not reference:
+        raise SystemExit(
+            "fast scorer config lacks synth_reference; refusing to fall back "
+            "to the slow diffusion design stage"
+        )
+    lengths = _sequence_lengths(Path(args.sequences))
+    if len(lengths) != 1:
+        raise SystemExit(
+            f"fast scorer wave has mixed candidate lengths {sorted(lengths)}; "
+            "refusing to fall back to the slow diffusion design stage"
+        )
+    command.extend(["--synth-reference", str(reference)])
     for key, flag in (
         ("fold_sampling_steps", "--fold-sampling-steps"),
         ("fold_diffusion_samples", "--fold-diffusion-samples"),
