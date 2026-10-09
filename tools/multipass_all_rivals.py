@@ -128,6 +128,10 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
     rival = pd.DataFrame(rows).T  # index = sequence
     archive_s = archive.set_index("sequence")[METRICS_NEEDED]
     field = pd.concat([archive_s, rival])  # index = sequence
+    # A rival sequence that is also in the archive appears twice; algo2_score
+    # then returns a multi-row Series for it and float(scores[seq]) blows up.
+    # Keep the rival's (last) row so the fresh multipass score wins the overlap.
+    field = field[~field.index.duplicated(keep="last")]
     scores = algo2_score(field)  # index = sequence (liability-filtered)
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
     # Preserve the captured .cif reference per sequence (--capture-structures),
