@@ -277,7 +277,28 @@ def main() -> int:
     ap.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     ap.add_argument("--epoch", type=int, default=None,
                     help="explicit epoch; default = latest completed")
+    ap.add_argument("--allow-unconsumed", action="store_true",
+                    help="run even though no production code reads this pool "
+                         "(see the disable note below)")
     args = ap.parse_args()
+
+    # DISABLED BY DEFAULT (2026-10-09, ARCHITECTURE_REDESIGN P3). Nothing in
+    # production reads hf_field_20x_rank_sum or hf_field_sum10_20x_rank_sum
+    # (re-checked: repo, master /root, dashboard /root, Pi /opt). The sum-of-10
+    # label rename made already_scored() return 0 and started a ~10 h,
+    # ~80 GPU-hour re-fold of 2,908 sequences, 99% of which the dashboard had
+    # already 10x-scored with the identical scorer, competing with the
+    # producer on all 8 GPUs; the operator killed it. Do not restart this on
+    # the same terms. It should come back only as a consumer-backed,
+    # read-only aggregator over stored raw per-pass metrics (R1/R2), never as
+    # a second GPU scorer. --allow-unconsumed or HF_FIELD_REFRESH_ENABLED=1
+    # overrides, deliberately.
+    import os
+    if not (args.allow_unconsumed or os.environ.get("HF_FIELD_REFRESH_ENABLED") == "1"):
+        print("HF_FIELD_REFRESH_DISABLED: no production consumer reads this pool; "
+              "see docs/ARCHITECTURE_REDESIGN.md P3. Pass --allow-unconsumed "
+              "or set HF_FIELD_REFRESH_ENABLED=1 to override.", flush=True)
+        return 2
 
     sys.path.insert(0, "/root")
     from nanobody_opt import db

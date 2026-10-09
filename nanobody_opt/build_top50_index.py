@@ -49,6 +49,25 @@ def _validator_rank_binders():
     return module.rank_binders
 
 
+#: Writers whose rows under the two replay kinds are on the producer's ~20-370
+#: rank-sum scale (ARCHITECTURE_AUDIT §3a). ``public_multipass_rivals``
+#: (~2e4-1.8e5, sum-of-10/algo2 vs the full HF field) and ``hf_archive_top200``
+#: (~5.8e4) share the score_kind but not the scale: pooling them into one
+#: AVG(score) pushed 887 of our own sequences to rank ~44,000 and swapped 2 of
+#: the 50 (measured on the live DB 2026-10-09). A new writer must be added here
+#: deliberately, with its scale checked -- never picked up by default.
+REPLAY_SCALE_SOURCES = (
+    "live_exact_screen",
+    "live_exact_repeat",
+    "local_exact_raw",
+    "children_8x",
+    "children_20x",
+    "children_40x",
+    "backfill_8x",
+    "exhaustive_8x",
+)
+
+
 def _live_top50_from_db(
     db_path: str, *, limit: int = 50, min_obs: int = 8, min_distance: int = 6,
     extra: int = 15,
@@ -82,17 +101,24 @@ def _live_top50_from_db(
             WHERE n.target = 'P20809'
               AND o.score_kind IN ('local_validator_replay_rank_sum',
                                    'local_exact_validator_replay_rank_sum')
+              AND o.source IN ({placeholders})
             GROUP BY n.sequence
             HAVING n_obs >= %s
             ORDER BY mean_score ASC
             LIMIT %s
-            """,
-            (min_obs, limit + extra * 4),
+            """.format(placeholders=",".join(["%s"] * len(REPLAY_SCALE_SOURCES))),
+            (*REPLAY_SCALE_SOURCES, min_obs, limit + extra * 4),
         ).fetchall()
     candidates = [str(r[0]).strip().upper() for r in rows]
 
     if not candidates:
-        return []
+        # Fail closed: an empty dedup reference would silently disable the
+        # novelty filter downstream. The producer's iteration fails loudly
+        # instead (failed.json -> check_mining_liveness).
+        raise SystemExit(
+            "TOP50_EMPTY: no P20809 replay rows from sources "
+            f"{REPLAY_SCALE_SOURCES} with >= {min_obs} observations"
+        )
 
     mlen = Counter(len(s) for s in candidates).most_common(1)[0][0]
     candidates = [s for s in candidates if len(s) == mlen]
