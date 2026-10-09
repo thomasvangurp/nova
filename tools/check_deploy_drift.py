@@ -151,8 +151,10 @@ ENTRYPOINTS: dict[str, list[tuple[str, str, bool, str]]] = {
 # Intentional local differences: (box, box path) -> pinned blobs + reason.
 ACCEPTED_VARIANTS: dict[tuple[str, str], dict[str, str]] = {
     ("dashboard", "/root/score_latest_rival_epoch.sh"): {
-        "box_blob": "b07f6cdc3e4936ce452eed1c035b8d69bddad558",   # audited 2026-10-09
-        "repo_blob": "ee374d6aa7dd60c5718e26940ccb9b968abbe812",  # HEAD 629ec0e
+        # Re-pinned 2026-10-09: both sides gained the "done = output has >=1
+        # rival" cache check (rival-less multipass outputs were cached forever).
+        "box_blob": "f06201014cb88bc69d488ccf0f5e1a3e5a742ed0",   # audited 2026-10-09
+        "repo_blob": "a3f3b279863aaee667b9c0c7e6c8bba40402a3ed",
         "reason": "dashboard has no producer: reads current epoch from master's chain_state "
                   "over ssh and passes explicit hf_archive/config args",
     },

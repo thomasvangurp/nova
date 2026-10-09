@@ -85,12 +85,16 @@ def fetch_our_intended(epoch: int) -> list[tuple[str, str]]:
     return pairs
 
 
-def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
+def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
     """Return (coldkey, sequence) for every P20809 nanobody, deduped.
 
-    A not-yet-scored (in-progress) epoch returns HTTP 404 from the API; treat
-    that as "no data" rather than crashing so the quiet-moment loop can skip
-    back to the most recent completed epoch.
+    Returns ``None`` when the leaderboard is NOT AVAILABLE -- HTTP 404 for a
+    not-yet-published epoch (the validator's publish lag is not bound to the
+    72-minute epoch cadence; it has ranged from under an hour to several
+    hours), any other HTTP/network error, or a payload without a ``data``
+    list. ``None`` means "retry later", which is different from ``[]`` (the
+    leaderboard was published but holds no P20809 nanobodies). Callers must
+    not collapse the two: see ``main``.
     """
     req = urllib.request.Request(
         f"{API}/api/competitions/leaderboard/{epoch}/nanobodies",
@@ -100,10 +104,13 @@ def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = json.load(resp)
     except Exception:
-        return []
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
     seen: set[str] = set()
     pairs: list[tuple[str, str]] = []
-    for submission in payload.get("data") or []:
+    for submission in data:
         coldkey = str(submission.get("coldkey") or "").strip()
         if not coldkey:
             continue
@@ -228,6 +235,26 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
 
     pairs = fetch_leaderboard(epoch)
+    # Gate on the PUBLIC leaderboard before merging our local intent. The
+    # our-intended supplement below is available as soon as the Pi archives
+    # the epoch, i.e. long before the validator publishes it; merging it into
+    # an unavailable/empty leaderboard used to "succeed" with only our fleet,
+    # write multipass_<epoch>.json, and the caller's skip-if-exists cache then
+    # never retried the epoch once rivals were published (25616-25618 were
+    # stuck with 0 rivals). Exit non-zero WITHOUT writing output so the
+    # caller retries on a later cycle.
+    if pairs is None:
+        print(f"LEADERBOARD_UNAVAILABLE epoch={epoch} (not published yet or "
+              "API error); no output written, retry later", flush=True)
+        return 3
+    leaderboard_rivals = {ck for ck, _ in pairs if ck != OUR_COLDKEY}
+    if not leaderboard_rivals:
+        # Published but no rival P20809 submissions: on a competitive subnet
+        # this is almost certainly a partial/odd publish, not reality.
+        print(f"NO_RIVALS epoch={epoch} leaderboard published with "
+              f"{len(pairs)} P20809 sequence(s) but zero rival coldkeys; "
+              "suspicious, no output written, retry later", flush=True)
+        return 1
     leaderboard_sequences = {seq for _, seq in pairs}
     supplement = [
         (coldkey, seq) for coldkey, seq in fetch_our_intended(epoch)

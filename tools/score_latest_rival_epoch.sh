@@ -6,7 +6,11 @@
 #   - skip when GPUs are busy (the producer's race owns the GPUs; this
 #     scoring is strictly opportunistic and must not contend)
 #   - try the latest two epoch dirs, because the newest one may still be
-#     in-progress (leaderboard API returns empty -> NO_RIVALS, no JSON).
+#     in-progress (leaderboard API 404 -> LEADERBOARD_UNAVAILABLE, exit 3,
+#     no JSON).
+#   - an epoch counts as done only when its JSON holds at least one rival; a
+#     JSON with only our own fleet (written before multipass_all_rivals.py
+#     refused to) is re-scored rather than cached forever.
 set -u
 # One scoring run at a time (a 10-pass run can outlast the cron interval).
 exec 9>/tmp/score_rival_epoch.lock
@@ -16,6 +20,11 @@ BIN=/root/multipass_all_rivals.py
 OUT=/root/multipass_all_rivals
 LOG="$OUT/score_latest.log"
 mkdir -p "$OUT"
+
+complete() {
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))[sys.argv[2]]; sys.exit(0 if d.get("rivals") else 1)' \
+    "$OUT/$1/multipass_$1.json" "$1" 2>/dev/null
+}
 
 LATEST=$(ls -d /root/live/epoch*/producer 2>/dev/null \
   | sed 's#.*/epoch##;s#/producer##' | sort -n | tail -1)
@@ -29,8 +38,8 @@ if [ -n "$MAXUTIL" ] && [ "$MAXUTIL" -gt 20 ]; then
 fi
 
 for EPOCH in $(seq "$LATEST" -1 $((LATEST - 5))); do
-  [ -f "$OUT/$EPOCH/multipass_$EPOCH.json" ] && continue
+  complete "$EPOCH" && continue
   echo "$(date +%m-%d_%H:%M) scoring epoch $EPOCH" >> "$LOG"
   /root/bgen_python.sh "$BIN" "$EPOCH" 10 >> "$LOG" 2>&1
-  [ -f "$OUT/$EPOCH/multipass_$EPOCH.json" ] && break
+  complete "$EPOCH" && break
 done
