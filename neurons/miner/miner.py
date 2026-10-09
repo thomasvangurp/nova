@@ -641,6 +641,9 @@ async def run_miner(config: argparse.Namespace) -> None:
         include_reaction=config.random_valid_reaction
     )
     challenge_params["epoch"] = block_to_check // epoch_length
+    # The challenge for this epoch is now in hand; the loop below refreshes it
+    # only when the EPOCH NUMBER moves past this one.
+    state["last_challenge_epoch"] = challenge_params["epoch"]
     bt.logging.info(f"Challenge params: {challenge_params}")
     _publish_chain_state(state, current_block)
     # A hot code reload may leave the already-running epoch search in its own
@@ -695,23 +698,44 @@ async def run_miner(config: argparse.Namespace) -> None:
 
             _publish_chain_state(state, current_block)
 
-            # If we are at an epoch boundary, fetch new proteins
-            if current_block % epoch_length == 0:
-                bt.logging.info(f"Found epoch boundary at block {current_block}.")
+            # New epoch: fetch the new challenge and (re)start the search.
+            # Same epoch-number-changed guard as the re-sync above, for the
+            # same two reasons.  `current_block % epoch_length == 0` (a) is
+            # true for every ~1.3 s poll during the ~12 s the boundary block
+            # is the chain head, so this ran ~6 times per boundary -- with
+            # NOVA_LIVE_SEARCH=1 that kills and relaunches the compound search
+            # each time -- and (b) is never true when a slow round-trip or the
+            # 3 s error back-off steps over the boundary block, which left the
+            # previous epoch's challenge in place for the whole epoch.  The
+            # challenge is always derived from the BOUNDARY block's hash, not
+            # the block we happened to observe, so a late detection still
+            # reads the right challenge.
+            if state.get("last_challenge_epoch") != epoch_now:
+                challenge_boundary = epoch_now * epoch_length
+                bt.logging.info(
+                    f"Found epoch boundary {challenge_boundary} (epoch {epoch_now}) "
+                    f"at block {current_block}."
+                )
 
-                block_hash = await subtensor.determine_block_hash(current_block)
-                
+                block_hash = await subtensor.determine_block_hash(challenge_boundary)
+
                 challenge_params = get_challenge_params_from_blockhash(
                     block_hash=block_hash,
                     small_molecule_target=config.small_molecule_target,
                     nanobody_target=config.nanobody_target,
                     include_reaction=config.random_valid_reaction
                 )
-                challenge_params["epoch"] = current_block // epoch_length
+                challenge_params["epoch"] = epoch_now
+                # Mark the epoch handled before anything below can raise: a
+                # failure in the search launch or the submit must not re-run
+                # this branch (and relaunch the search) on the next poll.  A
+                # failure ABOVE (block hash / challenge) leaves it unset, so
+                # the challenge fetch is retried next iteration.
+                state["last_challenge_epoch"] = epoch_now
                 await schedule_compound_search(
                     state,
                     challenge_params,
-                    blocks_remaining=epoch_length,
+                    blocks_remaining=epoch_length - (current_block % epoch_length),
                 )
 
                 # Update state with your results and other relevant info here
