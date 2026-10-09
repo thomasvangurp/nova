@@ -108,7 +108,10 @@ DEFAULT_SOURCE = "children_8x"
 DEFAULT_SCORE_KIND = "local_validator_replay_rank_sum"
 # Fetch this many extra children past --top-n so the corrected-score re-ranking
 # (which uses the exact replay's interaction_pae) has a pool to reorder from.
-CORRECTED_FETCH_MARGIN = 5
+# Kept small: top_children issues one per-child metrics query, so the margin
+# multiplies that latency; 2x is enough because the corrected and stored scores
+# are rank-sum cousins, not orthogonal.
+CORRECTED_FETCH_MARGIN = 2
 DEFAULT_OUTPUT = "/root/artifacts/nanobody_children_result.json"
 DEFAULT_RESERVE_BLOCKS = 55
 MINIMUM_OBSERVATION_COUNT = 8
