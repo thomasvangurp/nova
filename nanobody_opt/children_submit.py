@@ -1,4 +1,4 @@
-"""Wire scored ``children_8x`` candidates into the per-uid fleet submission path.
+"""Wire scored exact-replay candidates into the per-uid fleet submission path.
 
 This is an ADDITIVE lane alongside ``tools/publish_current_nanobody.py``, not a
 replacement for it.  The producer/publisher keeps running unchanged; this module
@@ -10,16 +10,17 @@ existing commit mechanism (``deploy/submit_host/pi_submit.py`` ->
 Data source (production)::
 
     /root/artifacts/nanobody_mutations.sqlite
-      observations  WHERE source='children_8x'
-                     AND score_kind='local_validator_replay_rank_sum'
-                     AND observation_count>=8
+      observations  WHERE source='local_exact_raw'
+                     AND score_kind='local_exact_validator_replay_rank_sum'
       nodes         (sequence)
 
-One observation row per (source, epoch, sequence) carries ``score`` = the
-validator-replay p90 rank sum (LOWER is better), ``metrics_json`` = the mean of
-the 8 pass metrics, and ``provenance_json`` = {score_median, score_p90}.  The
-top-N children are selected by mean ``score`` across every observation row a
-node holds.
+One observation row per (epoch, sequence) carries the ten exact BoltzGen metrics
+in ``metrics_json`` (including ``interaction_pae``), and a stored ``score`` that
+sums those ten metric dense ranks.  The top-N children are re-ranked by the
+corrected validator ``final_score`` (rank each of confidence / physical_interaction
+/ developability within the field and sum the three ranks), via
+``simulate_round.validator_final_scores``; the fast replay is no longer the
+selection source because it cannot emit ``interaction_pae``.
 
 Selection -> uid binding is deterministic and reuses the fleet module's own
 primitives: child rank ``i`` (0-indexed, ascending mean rank sum) binds to
@@ -103,8 +104,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import db, fleet  # noqa: E402
 
 TARGET = "P20809"
-DEFAULT_SOURCE = "children_8x"
-DEFAULT_SCORE_KIND = "local_validator_replay_rank_sum"
+DEFAULT_SOURCE = "local_exact_raw"
+DEFAULT_SCORE_KIND = "local_exact_validator_replay_rank_sum"
 # Fetch this many extra children past --top-n so the corrected-score re-ranking
 # (which uses the exact replay's interaction_pae) has a pool to reorder from.
 CORRECTED_FETCH_MARGIN = 5
