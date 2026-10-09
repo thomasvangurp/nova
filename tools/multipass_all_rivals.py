@@ -251,7 +251,9 @@ def main() -> int:
     print(f"WROTE {out_json}", flush=True)
     print(f"  ours: {result['ours']}", flush=True)
     for ck, e in result["rivals"].items():
-        print(f"  {ck[:12]}...: mean={e['mean']:.1f} stdev={e['stdev']:.1f} "
+        stdev = e.get("stdev")
+        stdev_s = f"{stdev:.1f}" if stdev is not None else "n/a"
+        print(f"  {ck[:12]}...: mean={e['mean']:.1f} stdev={stdev_s} "
               f"fleet={e['fleet_size']}", flush=True)
     return 0
 
