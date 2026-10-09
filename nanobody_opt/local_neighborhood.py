@@ -34,7 +34,7 @@ from nanobody_opt.basins import basin_id, structural_core
 from nanobody_opt.mutation_network import (
     MutationNetwork,
     load_mutation_effects,
-    load_observations,
+    load_network_observations,
     mutation_contexts,
 )
 from nanobody_opt.regions import find_regions
@@ -1601,13 +1601,13 @@ def main() -> None:
     ]
     network_records.extend(_winner_records(args.winner_priors, length))
     if args.mutation_observations is not None:
-        network_records.extend(
-            item for item in load_observations(
-                args.mutation_observations,
-                target=target,
-            )
-            if len(str(item.get("sequence", ""))) == length
-        )
+        # Narrow, length-scoped, streamed read: the full load_observations
+        # pull exceeds the MySQL read timeout on the central store.
+        network_records.extend(load_network_observations(
+            args.mutation_observations,
+            target=target,
+            length=length,
+        ))
     effects = (
         load_mutation_effects(args.mutation_observations, target=target)
         if args.mutation_observations is not None

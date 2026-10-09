@@ -934,6 +934,18 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
     database's own (mtime, size): a real change is a miss, a rerun on an
     unchanged database is not.
     """
+    return _cached_observations(
+        path.with_name(f"{path.name}.obs_cache.{target}.pkl"),
+        target=target,
+        load=lambda: _load_observations_uncached(path, target=target),
+    )
+
+
+def _cached_observations(
+    cache_path: Path, *, target: str, load: Any
+) -> list[dict[str, Any]]:
+    """Serve ``load()`` from a pickle keyed on the target's (row count, max
+    observation id); any write to the target's observations is a miss."""
     with db.connect() as probe:
         cache_key = probe.execute(
             """
@@ -943,7 +955,6 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
             """,
             (target,),
         ).fetchone()
-    cache_path = path.with_name(f"{path.name}.obs_cache.{target}.pkl")
     try:
         with cache_path.open("rb") as handle:
             cached_key, cached_records = pickle.load(handle)
@@ -951,10 +962,10 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
             return cached_records
     except (OSError, EOFError, pickle.UnpicklingError, ValueError):
         pass
-    records = _load_observations_uncached(path, target=target)
+    records = load()
     try:
         handle_fd, temporary = tempfile.mkstemp(
-            prefix=".obs_cache_", suffix=".pkl", dir=path.parent
+            prefix=".obs_cache_", suffix=".pkl", dir=cache_path.parent
         )
         with os.fdopen(handle_fd, "wb") as handle:
             pickle.dump((cache_key, records), handle,
@@ -993,6 +1004,92 @@ def _load_observations_uncached(path: Path, *, target: str) -> list[dict[str, An
         }
         for row in rows
     ]
+
+
+def load_network_observations(
+    path: Path, *, target: str, length: int
+) -> list[dict[str, Any]]:
+    """The observations a MutationNetwork / terminal-prior build reads, and
+    only those: one target, one sequence length, and only the columns those
+    consumers use (sequence, score, epoch, source, score_kind,
+    observation_count, pose_stability).
+
+    ``load_observations`` returns every column of every row and orders the
+    result server side. On the central MySQL store that is ~3.9M rows for
+    P20809, ~3.6 GB of it ``provenance_json`` on ``local_exact_raw`` rows that
+    no generator reads; the ORDER BY makes the server filesort all of it
+    before sending the first byte (measured 182 s to first row), which
+    exceeds ``db.connect``'s 60 s ``read_timeout`` -- every live producer
+    iteration died in ``local_neighborhood`` with MySQL error 2013.
+
+    Here the rows are streamed unordered on a server-side cursor (first row
+    in well under a second; ~76 s and 3.1 GB RSS end to end for the whole
+    target on master, 2026-10-09) and ordered by epoch client side. Row scope is unchanged on purpose: the
+    network's per-sequence robust score, source/epoch sets and contact
+    union are built from every historical observation, so a recency window
+    would change the generator's evidence, not just its cost.
+    """
+    return _cached_observations(
+        path.with_name(f"{path.name}.netobs_cache.{target}.{length}.pkl"),
+        target=target,
+        load=lambda: _load_network_observations_uncached(
+            target=target, length=length
+        ),
+    )
+
+
+def _load_network_observations_uncached(
+    *, target: str, length: int
+) -> list[dict[str, Any]]:
+    with db.connect() as connection:
+        sequences = {
+            int(node_id): str(sequence)
+            for node_id, sequence in connection.execute(
+                "SELECT id, sequence FROM nodes WHERE target=%s AND length=%s",
+                (target, length),
+            ).fetchall()
+        }
+        # Drain the stream into plain tuples first: the server drops an
+        # unbuffered result whose client stops reading for net_write_timeout.
+        rows = list(connection.stream(
+            """
+            SELECT o.node_id, o.score, o.epoch, o.source, o.score_kind,
+                   o.observation_count, o.pose_json
+            FROM observations o
+            JOIN nodes n ON n.id=o.node_id
+            WHERE n.target=%s AND n.length=%s
+            """,
+            (target, length),
+        ))
+    # pose_json repeats heavily (~11k distinct strings over ~3.9M rows on
+    # 2026-10-09); decode each once. The decoded dicts are shared, read-only.
+    poses: dict[str, Any] = {}
+    records: list[dict[str, Any]] = []
+    for node_id, score, epoch, source, score_kind, count, pose_json in rows:
+        sequence = sequences.get(int(node_id))
+        if sequence is None or len(sequence) != length:
+            continue  # node inserted after the node read; picked up next time
+        if pose_json:
+            if pose_json not in poses:
+                poses[pose_json] = json.loads(pose_json)
+            pose = poses[pose_json]
+        else:
+            pose = None
+        records.append({
+            "sequence": sequence,
+            "score": score,
+            "epoch": epoch,
+            "source": source,
+            "score_kind": score_kind,
+            "observation_count": count,
+            "pose_stability": pose,
+        })
+    # Same coarse order as load_observations (MySQL sorts NULL epochs first).
+    records.sort(key=lambda item: (
+        item["epoch"] is not None,
+        item["epoch"] if item["epoch"] is not None else 0,
+    ))
+    return records
 
 
 def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:

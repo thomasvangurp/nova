@@ -17,6 +17,7 @@ from functools import wraps
 from typing import Any, Iterable
 
 import MySQLdb
+import MySQLdb.cursors
 
 DEFAULT_CREDS = "/root/.sn68_mysql_creds"
 
@@ -120,6 +121,29 @@ class Connection:
         cur = self._conn.cursor()
         cur.execute(sql, params)
         return _Cursor(cur)
+
+    def stream(
+        self, sql: str, params: Any = None, *, batch_size: int = 20000
+    ) -> Iterable[Any]:
+        """Run a large read on an unbuffered (server-side) cursor.
+
+        Rows are yielded as the server sends them, so ``read_timeout`` bounds
+        each socket read rather than the time until a fully materialised
+        result is ready. The caller must keep consuming promptly: the server
+        aborts a stalled unbuffered result after ``net_write_timeout`` (60s on
+        the Hetzner server), so do per-row heavy work after the read, not
+        inside it.
+        """
+        cur = self._conn.cursor(MySQLdb.cursors.SSCursor)
+        try:
+            cur.execute(sql, params)
+            while True:
+                rows = cur.fetchmany(batch_size)
+                if not rows:
+                    return
+                yield from rows
+        finally:
+            cur.close()
 
     def executemany(self, sql: str, seq: Any) -> None:
         cur = self._conn.cursor()
