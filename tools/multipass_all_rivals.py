@@ -106,11 +106,14 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
     os.environ.setdefault(
         "PYTHONPATH", "/root/bgen_shim:/root/external_tools/boltzgen/src"
     )
+    # The dashboard box is a 2x4090; the old 8x master ran this with all 8.
+    # MULTIPASS_GPUS lets the host override without editing the script.
+    gpus = os.environ.get("MULTIPASS_GPUS", "0,1")
     subprocess.run(
         [sys.executable, "-m", "nanobody_opt.score_boltzgen_waves",
          "--sequences", str(inp), "--config", str(config),
          "--target", TARGET, "--output-dir", str(out_dir),
-         "--gpus", "0,1,2,3,4,5,6,7", "--wave-size", str(len(sequences)),
+         "--gpus", gpus, "--wave-size", str(len(sequences)),
          "--predict-batch-size", "2", "--limit", str(len(sequences)),
          "--scorer", str(scorer), "--capture-structures"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
