@@ -19,7 +19,7 @@ SLOT_SNAPSHOT = ROOT / "data" / "subnet68_slots.jsonl"
 SLOT_SNAPSHOT_NEXT = ROOT / "data" / "subnet68_slots.jsonl.next"
 # The new dashboard Mac is on the same LAN as the Pi.  Use the direct address;
 # mDNS/Tailscale name resolution has failed independently of Pi health.
-SLOT_HOST = os.environ.get("NOVA_SLOT_ADDRESS", "192.168.1.68")
+SLOT_HOST = os.environ.get("NOVA_SLOT_ADDRESS", "raspberrypi.local")
 SLOT_USER = os.environ.get("NOVA_SLOT_USER", "thomasg")
 SLOT_REMOTE_PATH = "/home/thomasg/.nova/subnet68_slots.jsonl"
 FUNDING_TARGET = ROOT / "data" / "infra_funding_target.json"

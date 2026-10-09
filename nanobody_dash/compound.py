@@ -75,7 +75,7 @@ def gap_history_rows(connection: sqlite3.Connection) -> list[dict]:
     columns = [d[0] for d in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-PI_HOST = os.environ.get("NOVA_PI_SSH", "thomasg@100.64.243.65")
+PI_HOST = os.environ.get("NOVA_PI_SSH", "thomasg@raspberrypi.local")
 PI_LOOP_LOG = "/opt/nova-submit/loop.log"
 
 # host:port and real submission floor per reaction, confirmed live 2026-10-02

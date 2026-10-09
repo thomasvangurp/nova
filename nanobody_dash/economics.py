@@ -381,7 +381,7 @@ def record_deploys(connection, entries) -> int:
 
 
 def collect_current_balances_chain(connection: sqlite3.Connection,
-                                   pi_host: str = "192.168.1.68",
+                                   pi_host: str = "raspberrypi.local",
                                    pi_user: str = "thomasg") -> int:
     """Persist a current per-subnet stake snapshot from the chain, via the Pi.
 
