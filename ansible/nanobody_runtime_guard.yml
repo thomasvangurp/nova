@@ -13,6 +13,31 @@
         group: root
         mode: "0755"
 
+    # The watchdog relaunches sessions FROM these. It was deployed without
+    # them, so for its whole life on the 2026-10-08 box it had nothing to
+    # start (found 2026-10-09). producer_relaunch.sh also needs
+    # /root/artifacts/producer_argv.txt, captured from the live process.
+    - name: Install the scripts the watchdog relaunches sessions from
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../deploy/producer/{{ item }}"
+        dest: "/root/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - miner_relaunch.sh
+        - producer_relaunch.sh
+        - scorer_daemon_supervisor.sh
+        - roster_watch.sh
+
+    - name: Install the hotkey resolver miner_relaunch.sh calls
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../deploy/producer/pick_registered_hotkey.py"
+        dest: /root/deploy/pick_registered_hotkey.py
+        owner: root
+        group: root
+        mode: "0644"
+
     - name: Replace any unmanaged watchdog with the deployed one
       ansible.builtin.shell:
         cmd: |
