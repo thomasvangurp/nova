@@ -20,15 +20,21 @@ INTERVAL=${ROSTER_WATCH_INTERVAL:-60}
 # One epoch of slack. Past this the miner has skipped a boundary, which is the
 # original bug reappearing.
 FAIL_AGE=${ROSTER_WATCH_FAIL_AGE:-420}
+# Whose uids to report. This used to be inferred as the coldkey at
+# chain_state.json's miner_uid, but miner_uid is resolved once when the miner
+# starts and never again: on 2026-10-09 the miner's signing hotkey (slot-330)
+# had deregistered, uid 10 had been re-registered by another coldkey, and this
+# watch was reporting THEIR ten uids as ours. The coldkey is the stable identity.
+COLDKEY=${NOVA_COLDKEY_SS58:-5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ}
 
 echo "$(date -Is) roster watch started (interval ${INTERVAL}s, fail above ${FAIL_AGE} blocks)" >> "$LOG"
 PREV_EPOCH=""
 PREV_ROSTER=""
 while true; do
-    python3 - "$STATE" "$FAIL_AGE" "${PREV_EPOCH:-}" "${PREV_ROSTER:-}" "$CARRY" >> "$LOG" 2>&1 <<'PY'
+    python3 - "$STATE" "$FAIL_AGE" "${PREV_EPOCH:-}" "${PREV_ROSTER:-}" "$CARRY" "$COLDKEY" >> "$LOG" 2>&1 <<'PY'
 import json, sys, time
 
-state_path, fail_age, prev_epoch, prev_roster, carry_path = sys.argv[1:6]
+state_path, fail_age, prev_epoch, prev_roster, carry_path, coldkey = sys.argv[1:7]
 stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 try:
     d = json.load(open(state_path))
@@ -41,8 +47,11 @@ except Exception as error:
 
 epoch = block // length
 age = block - roster
-coldkey = d["neurons"][d["miner_uid"]]["coldkey"]
 uids = sorted(n["uid"] for n in d["neurons"] if n["coldkey"] == coldkey)
+# miner_uid is frozen at miner start. If that uid now belongs to someone else,
+# the miner's signing hotkey has deregistered: harmless while it runs in
+# chain-state-only mode, but worth seeing -- its restart will pick a new signer.
+signer = "ok" if d["miner_uid"] in uids else f"LOST(uid{d['miner_uid']})"
 written = round(time.time() - d["updated_at_unix"], 1)
 
 verdict = "ok"
@@ -55,7 +64,7 @@ elif prev_epoch and prev_epoch != str(epoch):
     verdict = "SYNC-OK" if prev_roster and roster > int(prev_roster) else "SYNC-MISSED"
 
 print(f"{stamp} {verdict} epoch={epoch} block={block} roster={roster} "
-      f"age={age} uids={len(uids)}:{uids} written={written}s")
+      f"age={age} uids={len(uids)}:{uids} signer={signer} written={written}s")
 with open(carry_path, "w") as handle:
     handle.write(f"{epoch}\n{roster}\n")
 PY

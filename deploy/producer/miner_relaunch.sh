@@ -17,8 +17,14 @@ set -a; . /root/nanobody.env; set +a
 
 PYTHON=/root/.pixi/envs/chain310/bin/python
 LOG=/root/artifacts/miner_supervisor.log
-# 2026-10-09: the master box signs with nova68-slot-330 (slot-87 is gone).
-PREFER=${NOVA_MINER_HOTKEY:-nova68-slot-330}
+# No default slot name. Until 2026-10-09 this read
+# PREFER=${NOVA_MINER_HOTKEY:-nova68-slot-330}; slot-330 then deregistered and
+# the "preference" went stale silently. The picker now selects among the
+# hotkeys the live chain lists under our coldkey; NOVA_MINER_HOTKEY remains an
+# explicit override only, and the sticky file keeps restarts on one signer.
+PREFER=${NOVA_MINER_HOTKEY:-}
+COLDKEY=${NOVA_COLDKEY_SS58:-5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ}
+STICKY=/root/artifacts/miner_signer_hotkey
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 
@@ -26,7 +32,7 @@ while true; do
     HOTKEY=$("$PYTHON" /root/deploy/pick_registered_hotkey.py \
         --network finney --netuid 68 \
         --wallet-path /root/.bittensor/wallets --wallet-name mining_ops \
-        --prefer "$PREFER" 2>>"$LOG")
+        --coldkey "$COLDKEY" --prefer "$PREFER" --sticky-file "$STICKY" 2>>"$LOG")
     if [ -z "$HOTKEY" ]; then
         # No registered hotkey, or the chain was unreachable. Restarting on a
         # tight loop would just burn the log; wait and try again.
