@@ -16,8 +16,8 @@ import json
 import subprocess
 from pathlib import Path
 
-BOX = "root@ssh3.vast.ai"
-PORT = "11806"
+BOX = "root@95.3.33.46"
+PORT = "13920"
 REMOTE = "/root/multipass_all_rivals"
 LOCAL = Path(__file__).resolve().parents[1] / "nanobody_dash" / "multipass_comparison.json"
 SSHO = [
