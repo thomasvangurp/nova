@@ -45,7 +45,12 @@ export NANOBODY_SCORER_SOCKET=/root/artifacts/nanobody_scorer.sock
 /root/.pixi/envs/bgen/bin/python /root/import_hf_field_20x.py \
   >> "$LOGDIR/import.log" 2>&1
 
+# Auto-scope the scorer to the host's GPUs (8x master vs 2x dashboard box).
+NGPU=$(nvidia-smi --query-gpu=count --format=csv,noheader,nounits 2>/dev/null | head -1)
+GPUS=$(seq -s, 0 $((NGPU - 1)) 2>/dev/null)
+GPUS=${GPUS:-0,1,2,3,4,5,6,7}
+
 /root/.pixi/envs/bgen/bin/python /root/hf_field_refresh.py \
-  --gpus 0,1,2,3,4,5,6,7 >> "$LOGDIR/refresh.log" 2>&1
+  --gpus "$GPUS" >> "$LOGDIR/refresh.log" 2>&1
 
 echo "$(date -u +%FT%TZ) DONE" >> "$LOGDIR/loop.log"
