@@ -15,6 +15,7 @@ all rivals, not one per rival.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -52,6 +53,18 @@ SUM_OF_TEN_DIRS = {
     "liability_num_violations": "min",
 }
 METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
+
+# Label for the per-pass rows this script writes (ARCHITECTURE_REDESIGN P2/P4).
+# Before 2026-10-09 they went out as ``local_validator_replay_rank_sum`` -- the
+# producer's ~200-scale label -- on a ~2e4-1.8e5 scale with empty metrics, so
+# every generic replay reader pooled two incompatible scales and a formula
+# change could only be repaired by re-folding on a GPU. Each row now carries:
+#   score        sum-of-10 dense rank-sum vs the field recorded in provenance
+#   metrics_json the raw per-pass BoltzGen metrics (formula-independent), so
+#                any later formula/field can be recomputed with no GPU
+#   provenance   formula, field rows + sha256, pass index/count, writer, cohort
+PASS_SCORE_KIND = "multipass_sum10_pass"
+WRITER = "multipass_all_rivals"
 
 
 def fetch_our_intended(epoch: int) -> list[tuple[str, str]]:
@@ -158,10 +171,71 @@ def sum_of_ten(field: pd.DataFrame) -> pd.Series:
     return total
 
 
+def raw_metrics_from_exact_all(payload: dict) -> dict[str, dict[str, float]]:
+    """``{sequence: {metric: value}}`` for every finite numeric metric in one
+    scorer pass's ``exact_all.json`` (wave 0, TARGET). Formula-independent."""
+    wave = (payload.get("per_nanobody_components") or {}).get("0") or {}
+    out: dict[str, dict[str, float]] = {}
+    for seq, comp in wave.items():
+        m = (comp or {}).get(TARGET, {}) or {}
+        values = {k: float(v) for k, v in m.items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool)
+                  and np.isfinite(float(v))}
+        if values:
+            out[str(seq).strip().upper()] = values
+    return out
+
+
+def field_fingerprint(archive_path: Path, archive: pd.DataFrame) -> dict:
+    """What a stored rank-sum was ranked against, so it can be re-derived."""
+    digest = hashlib.sha256()
+    with open(archive_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return {"field": "hf_archive_full", "field_path": str(archive_path),
+            "field_rows": int(len(archive)), "field_sha256": digest.hexdigest()}
+
+
+def pass_observations(*, epoch: int, run: int, passes: int,
+                      ranks: dict[str, float], raw: dict[str, dict[str, float]],
+                      structs: dict[str, dict], cohort_of: dict[str, str],
+                      field: dict, extra_provenance: dict | None = None,
+                      ) -> list[dict]:
+    """One DB observation per scored sequence for one pass (see PASS_SCORE_KIND)."""
+    rows = []
+    for seq, score in ranks.items():
+        row = {
+            "observation_id": f"public_multipass:epoch{epoch}:{seq}:pass{run}",
+            "sequence": seq,
+            "target": TARGET,
+            "epoch": epoch,
+            # `source` stays the writer's population tag for continuity; the
+            # cohort (ours vs rival) is explicit in provenance, because this
+            # source has always included our own intended sequences.
+            "source": "public_multipass_rivals",
+            "score_kind": PASS_SCORE_KIND,
+            "score": float(score),
+            "observation_count": 1,
+            "metrics": raw.get(seq) or {},
+            "structure": structs.get(seq),
+            # Every key below lands in provenance_json.
+            "writer": WRITER,
+            "formula": "sum10",
+            "cohort": cohort_of.get(seq, "rival"),
+            "pass_index": run,
+            "passes": passes,
+            **field,
+            **(extra_provenance or {}),
+        }
+        rows.append(row)
+    return rows
+
+
 def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                config: Path, scorer: Path, out_root: Path
-               ) -> tuple[dict[str, float], dict[str, dict]]:
-    """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref})."""
+               ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
+    """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref},
+    {sequence: raw metrics})."""
     inp = out_root / f"input_{run}.json"
     inp.write_text(json.dumps({"sequences": [{"sequence": s} for s in sequences]}))
     out_dir = out_root / f"score{run}"
@@ -181,12 +255,19 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     payload = json.loads((out_dir / "exact_all.json").read_text())
+    return rank_pass_payload(payload, archive)
+
+
+def rank_pass_payload(payload: dict, archive: pd.DataFrame
+                      ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
+    """Rank one pass's ``exact_all.json`` against ``archive`` (sum-of-10)."""
     wave = payload["per_nanobody_components"]["0"]
     rows = {}
     for seq, comp in wave.items():
         m = comp.get(TARGET, {})
         rows[seq] = {k: float(v) for k, v in m.items()
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
+    raw = raw_metrics_from_exact_all(payload)
     rival = pd.DataFrame(rows).T  # index = sequence
     archive_s = archive.set_index("sequence")[METRICS_NEEDED]
     field = pd.concat([archive_s, rival])  # index = sequence
@@ -207,7 +288,7 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                 "writer_path": rec.get("writer_path"),
                 "sample_selection": rec.get("sample_selection"),
             }
-    return ranks, structures
+    return ranks, structures, raw
 
 
 def main() -> int:
@@ -280,13 +361,19 @@ def main() -> int:
     print(f"epoch={epoch} coldkeys={len(by_coldkey)} seqs={len(sequences)} "
           f"passes={n}", flush=True)
 
+    field = field_fingerprint(archive_path, archive)
+    cohort_of = {seq: ("ours" if coldkey == OUR_COLDKEY else "rival")
+                 for coldkey, seq in pairs}
+
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
+    per_pass_raw: list[dict[str, dict[str, float]]] = []
     for run in range(1, n + 1):
-        ranks, structs = score_pass(sequences, run, archive=archive, config=config,
-                                    scorer=scorer, out_root=out_root)
+        ranks, structs, raw = score_pass(sequences, run, archive=archive, config=config,
+                                         scorer=scorer, out_root=out_root)
         per_pass.append(ranks)
         per_pass_structures.append(structs)
+        per_pass_raw.append(raw)
         print(f"  pass {run}/{n} done", flush=True)
 
     # A sequence can be rejected by the scorer in some passes (liability/fold
@@ -294,35 +381,39 @@ def main() -> int:
     common = sorted(set.intersection(*(set(p) for p in per_pass)))
     seq_means = {s: float(np.mean([p[s] for p in per_pass])) for s in common}
 
-    # Persist the multiscore into the mutation DB: one row per pass per
-    # sequence, so _live_top50_from_db's COUNT(*)/AVG(score) sees public
-    # sequences with a stable multi-pass rank-sum (high-fidelity parents).
-    # The captured .cif reference rides along via the `structure` field, which
-    # update_observation_store persists to observation_artifacts.
+    # Persist every pass into the mutation DB, one row per pass per sequence,
+    # WITH its raw metrics and the field it was ranked against (see
+    # PASS_SCORE_KIND). The captured .cif reference rides along via the
+    # `structure` field, which update_observation_store persists to
+    # observation_artifacts.
+    #
+    # A failed write no longer exits 0: the JSON below is still written (the
+    # dashboard panel needs it, and the raw passes stay on disk for
+    # tools/backfill_multipass_metrics.py), but the run returns
+    # EXIT_DB_WRITE_FAILED and records the failure for the liveness checker.
+    db_failed = False
     try:
         from nanobody_opt.mutation_network import update_observation_store
         observations = []
-        for run, (ranks, structs) in enumerate(
-            zip(per_pass, per_pass_structures), start=1
+        for run, (ranks, structs, raw) in enumerate(
+            zip(per_pass, per_pass_structures, per_pass_raw), start=1
         ):
-            for seq, score in ranks.items():
-                observations.append({
-                    "observation_id": f"public_multipass:epoch{epoch}:{seq}:pass{run}",
-                    "sequence": seq,
-                    "target": TARGET,
-                    "epoch": epoch,
-                    "source": "public_multipass_rivals",
-                    "score_kind": "local_validator_replay_rank_sum",
-                    "score": float(score),
-                    "observation_count": 1,
-                    "structure": structs.get(seq),
-                })
+            observations.extend(pass_observations(
+                epoch=epoch, run=run, passes=n, ranks=ranks, raw=raw,
+                structs=structs, cohort_of=cohort_of, field=field))
         written = update_observation_store(
             Path("/root/artifacts/nanobody_mutations.sqlite"), observations)
-        print(f"DB_WRITE observations={written} sequences={len(seq_means)}",
-              flush=True)
+        print(f"DB_WRITE observations={written} sequences={len(seq_means)} "
+              f"score_kind={PASS_SCORE_KIND}", flush=True)
     except Exception as exc:  # noqa: BLE001
+        db_failed = True
         print(f"DB_WRITE_FAILED {type(exc).__name__}: {exc}", flush=True)
+        try:
+            from nanobody_opt.failure_log import record_failure
+            record_failure(WRITER, "DB_WRITE_FAILED", exc, epoch=epoch, passes=n)
+        except Exception:  # noqa: BLE001 - stale box tree without the helper
+            import traceback
+            traceback.print_exc()
 
     # Preserve the sequence -> mean rank-sum mapping (do NOT drop it) in the
     # artifact alongside the per-coldkey rollup.
@@ -353,7 +444,15 @@ def main() -> int:
         stdev_s = f"{stdev:.1f}" if stdev is not None else "n/a"
         print(f"  {ck[:12]}...: mean={e['mean']:.1f} stdev={stdev_s} "
               f"fleet={e['fleet_size']}", flush=True)
+    if db_failed:
+        print(f"EXIT {EXIT_DB_WRITE_FAILED}: multipass JSON written but the DB "
+              "write failed (see DB_WRITE_FAILED above)", flush=True)
+        return EXIT_DB_WRITE_FAILED
     return 0
+
+
+#: JSON written, DB rows not: the caller must surface this, not cache it as OK.
+EXIT_DB_WRITE_FAILED = 4
 
 
 if __name__ == "__main__":

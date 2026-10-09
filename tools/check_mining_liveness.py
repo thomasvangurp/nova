@@ -150,6 +150,36 @@ try:
     out["artifact"] = {k: d.get(k) for k in ("epoch", "status", "publication_stage", "submission_count")}
 except Exception as e:
     out["artifact_error"] = repr(e)
+# The submitter switch (audit §0.2): which program the watchdog relaunches as
+# the publisher. NUL-separated argv; only the program identity is reported.
+try:
+    argv = open("/root/artifacts/publisher_argv.bin", "rb").read().split(b"\0")
+    words = [a.decode("utf-8", "replace") for a in argv if a]
+    out["publisher_argv"] = {
+        "mtime": os.path.getmtime("/root/artifacts/publisher_argv.bin"),
+        "is_real_publisher": any(("publish-current-nanobody" in w or "publish_current_nanobody" in w)
+                                 for w in words),
+        "mentions_children": any("children" in w for w in words),
+        "head": [w[:60] for w in words[:6]],
+    }
+except Exception as e:
+    out["publisher_argv_error"] = repr(e)
+fl = "/root/artifacts/pipeline_failures.jsonl"
+try:
+    with open(fl, "rb") as h:
+        h.seek(max(0, os.path.getsize(fl) - 65536))
+        recs = []
+        for l in h.read().decode("utf-8", "replace").splitlines():
+            try:
+                recs.append(json.loads(l))
+            except Exception:
+                pass
+    out["failures"] = [{k: r.get(k) for k in ("at", "component", "marker", "error", "context")}
+                       for r in recs[-30:]]
+except FileNotFoundError:
+    out["failures"] = []
+except Exception as e:
+    out["failures_error"] = repr(e)
 print(json.dumps(out))
 '''
 
@@ -194,6 +224,32 @@ except Exception as e:
     out["multipass_error"] = repr(e)
 out["multipass_files"] = files
 out["multipass_tree_newest"] = newest
+# Swallowed-failure markers in the scorer log (P0b): newest occurrence of each.
+try:
+    sl = os.path.join(root, "score_latest.log")
+    with open(sl, "rb") as h:
+        h.seek(max(0, os.path.getsize(sl) - 262144))
+        tail = h.read().decode("utf-8", "replace").splitlines()
+    out["db_write_failed_lines"] = [l[:200] for l in tail if "DB_WRITE_FAILED" in l or "MULTIPASS_FAILED" in l][-5:]
+    out["db_write_ok_lines"] = [l[:120] for l in tail if l.startswith("DB_WRITE ")][-2:]
+except Exception as e:
+    out["score_log_tail_error"] = repr(e)
+fl = "/root/artifacts/pipeline_failures.jsonl"
+try:
+    with open(fl, "rb") as h:
+        h.seek(max(0, os.path.getsize(fl) - 65536))
+        recs = []
+        for l in h.read().decode("utf-8", "replace").splitlines():
+            try:
+                recs.append(json.loads(l))
+            except Exception:
+                pass
+    out["failures"] = [{k: r.get(k) for k in ("at", "component", "marker", "error", "context")}
+                       for r in recs[-30:]]
+except FileNotFoundError:
+    out["failures"] = []
+except Exception as e:
+    out["failures_error"] = repr(e)
 print(json.dumps(out))
 '''
 
@@ -207,7 +263,7 @@ try:
         h.seek(max(0, os.path.getsize(log) - 262144))
         tail = h.read().decode("utf-8", "replace").splitlines()
     now_local = dt.datetime.now()
-    commits, last_event = [], None
+    commits, last_event, identity = [], None, []
     for line in tail:
         try:
             ev = json.loads(line)
@@ -216,6 +272,9 @@ try:
         last_event = ev
         if ev.get("event") == "committed":
             commits.append(ev)
+        if ev.get("event") in ("UNEXPECTED_PRODUCER", "producer_identity_ok",
+                               "unexpected_producer_refused"):
+            identity.append(ev)
     def absolute(at):
         # "at" is HH:MM:SS local time without a date; anchor to today, or
         # yesterday if that would put it in the future.
@@ -226,8 +285,28 @@ try:
     out["commits"] = [{"epoch": c.get("epoch"), "rc": c.get("rc"), "at": c.get("at"),
                        "at_unix": absolute(c["at"]) if c.get("at") else None} for c in commits[-6:]]
     out["last_event"] = {k: last_event.get(k) for k in ("event", "at", "epoch", "block")} if last_event else None
+    out["identity_events"] = [{k: ev.get(k) for k in ("event", "at", "epoch", "publication_stage", "stage",
+                                                      "problems", "refuse_enabled", "using")}
+                              for ev in identity[-6:]]
 except Exception as e:
     out["log_error"] = repr(e)
+# What was actually committed: the archived artifact of each recent committed
+# epoch (independent of the loop's own identity check, so it also covers a Pi
+# still running code without that check).
+committed = []
+# Last two committed epochs: enough to catch a swap within one epoch without
+# re-alerting on an already-handled incident for hours.
+for c in out.get("commits", [])[-2:]:
+    try:
+        d = json.load(open("/opt/nova-submit/archive/epoch%s/nanobody_result.json" % c["epoch"]))
+        committed.append({"epoch": c["epoch"], "kind": d.get("artifact_kind"),
+                          "stage": d.get("publication_stage"), "status": d.get("status"),
+                          "pool": d.get("sequence_pool_size"),
+                          "producer": (d.get("producer") or {}).get("name") if isinstance(d.get("producer"), dict) else None})
+    except Exception as e:
+        committed.append({"epoch": c.get("epoch"), "error": repr(e)[:120]})
+out["committed_artifacts"] = committed
+out["refuse_toggle"] = os.path.exists("/opt/nova-submit/REFUSE_UNEXPECTED_PRODUCER")
 print(json.dumps(out))
 '''
 
@@ -465,6 +544,88 @@ def check_pi(p: dict, now: float, skew: float, chain: Chain | None) -> dict:
                   f"{chain.epoch if chain else '?'}; log {fmt_age(now - log_mtime)} old", None, ev)
 
 
+# --- semantic checks (ARCHITECTURE_REDESIGN P0b + P1) -----------------------
+# Must match tools/pi_epoch_loop.py EXPECTED_PUBLICATION_STAGES.
+EXPECTED_PUBLICATION_STAGES = {"provisional", "qualified"}
+# A swallowed failure recorded in pipeline_failures.jsonl stays alertable this long.
+FAILURE_WINDOW = 3 * 3600
+
+
+def check_submitter_identity(m: dict | None, p: dict | None, now: float) -> dict:
+    """Who wrote what the Pi committed, and who the watchdog will relaunch.
+
+    Epochs 25613-25617 committed the children-lane artifact on every uid while
+    every freshness check stayed green (audit §0.2). This reads the semantic
+    invariant instead: the committed artifact's stage, the master artifact's
+    stage, the publisher argv, and the Pi loop's own UNEXPECTED_PRODUCER events.
+    """
+    problems, ev = [], {}
+    if p and "committed_artifacts" in p:
+        ev["committed"] = p["committed_artifacts"]
+        ev["refuse_toggle_on_pi"] = p.get("refuse_toggle")
+        bad = [c for c in p["committed_artifacts"]
+               if "error" not in c and (c.get("stage") not in EXPECTED_PUBLICATION_STAGES
+                                        or c.get("kind") != "nanobody-fleet"
+                                        or (c.get("producer") not in (None, "publish_current_nanobody")))]
+        if bad:
+            problems.append("COMMITTED NON-PUBLISHER ARTIFACT: " + ", ".join(
+                f"epoch {c['epoch']} stage={c.get('stage')} pool={c.get('pool')}" for c in bad))
+        unexpected = [e for e in (p.get("identity_events") or []) if e.get("event") == "UNEXPECTED_PRODUCER"]
+        latest = (p.get("identity_events") or [None])[-1]
+        if unexpected and latest and latest.get("event") != "producer_identity_ok":
+            problems.append(f"Pi loop logged UNEXPECTED_PRODUCER at {unexpected[-1].get('at')} "
+                            f"epoch {unexpected[-1].get('epoch')}: {unexpected[-1].get('problems')}")
+        ev["pi_identity_events"] = p.get("identity_events")
+    if m:
+        art = m.get("artifact") or {}
+        ev["master_artifact_stage"] = art.get("publication_stage")
+        if art and art.get("publication_stage") not in EXPECTED_PUBLICATION_STAGES:
+            problems.append(f"master nanobody_result.json stage={art.get('publication_stage')!r} "
+                            "(not the real publisher)")
+        pa = m.get("publisher_argv")
+        if pa is not None:
+            ev["publisher_argv"] = pa
+            if not pa.get("is_real_publisher"):
+                problems.append("SUBMITTER_SWAPPED: publisher_argv.bin does not launch "
+                                f"publish-current-nanobody (head={pa.get('head')})")
+        elif m.get("publisher_argv_error"):
+            ev["publisher_argv_error"] = m["publisher_argv_error"]
+    if not m and not p:
+        return result("submitter-identity", "pi+master", None, "UNREACHABLE: no probe data")
+    if problems:
+        return result("submitter-identity", "pi+master", False, "; ".join(problems), None, ev)
+    stages = sorted({c.get("stage") for c in ev.get("committed", []) if c.get("stage")})
+    return result("submitter-identity", "pi+master", True,
+                  f"committed stages {stages}; master stage {ev.get('master_artifact_stage')}; "
+                  "publisher argv is publish-current-nanobody", None, ev)
+
+
+def check_pipeline_failures(host: str, probe: dict, now: float, skew: float) -> dict:
+    """Swallowed-but-recorded failures (nanobody_opt/failure_log.py and the
+    dashboard scorer's MULTIPASS_FAILED/DB_WRITE_FAILED markers)."""
+    name = f"pipeline-failures-{host}"
+    if "failures_error" in probe:
+        return result(name, host, None, f"failure log unreadable: {probe['failures_error']}")
+    recent = [f for f in probe.get("failures", [])
+              if isinstance(f.get("at"), (int, float)) and now - (f["at"] + skew) <= FAILURE_WINDOW]
+    ev = {"recent": recent[-8:], "total_in_tail": len(probe.get("failures", []))}
+    if host == "dashboard":
+        ev["score_log_failure_lines"] = probe.get("db_write_failed_lines")
+        ev["score_log_last_db_write"] = probe.get("db_write_ok_lines")
+    if recent:
+        by = {}
+        for f in recent:
+            key = f"{f.get('component')}:{f.get('marker')}"
+            by[key] = by.get(key, 0) + 1
+        first = min(f["at"] + skew for f in recent)
+        return result(name, host, False,
+                      f"{len(recent)} recorded failure(s) in the last {fmt_age(FAILURE_WINDOW)}: "
+                      + ", ".join(f"{k} x{v}" for k, v in sorted(by.items()))
+                      + f"; latest: {recent[-1].get('error') or ''}"[:200], first, ev)
+    return result(name, host, True, f"no recorded failures in the last {fmt_age(FAILURE_WINDOW)}",
+                  None, ev)
+
+
 def notify(title: str, message: str) -> None:
     script = f'display notification {json.dumps(message[:220])} with title {json.dumps(title)} sound name "Basso"'
     try:
@@ -509,11 +670,13 @@ def main() -> int:
                 chain = None
         results.append(check_producer(master, now, mskew))
         results.append(check_publisher(master, now, mskew, chain, state))
+        results.append(check_pipeline_failures("master", master, now, mskew))
     else:
         for name in ("producer", "publisher"):
             results.append(result(name, "master", None, f"UNREACHABLE: {merr}"))
     if dash:
         results.extend(check_dashboard(dash, now, now - dash["now"], chain))
+        results.append(check_pipeline_failures("dashboard", dash, now, now - dash["now"]))
     else:
         for name in ("dashboard-loop", "dashboard-multipass"):
             results.append(result(name, "dashboard", None, f"UNREACHABLE: {derr}"))
@@ -521,6 +684,7 @@ def main() -> int:
         results.append(check_pi(pi, now, now - pi["now"], chain))
     else:
         results.append(result("pi-submit", "pi", None, f"UNREACHABLE: {perr}"))
+    results.append(check_submitter_identity(master, pi, now))
 
     stamp = dt.datetime.fromtimestamp(now).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     lines = [f"[{stamp}] mining liveness (chain epoch {chain.epoch if chain else '?'})"]

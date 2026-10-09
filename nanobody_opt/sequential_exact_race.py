@@ -1346,6 +1346,13 @@ def _store_ranking(
             f"{type(error).__name__}: {error}",
             flush=True,
         )
+        # ...but it must not be silent either: this marker alone hid ~27
+        # epochs of zero new observations (ARCHITECTURE_AUDIT §0.4). Traceback
+        # to stderr plus a line in the box failure log the liveness checker
+        # alerts on.
+        from nanobody_opt.failure_log import record_failure
+        record_failure("sequential_exact_race", "MUTATION_DB_UPDATE_FAILED",
+                       error, source=source, database=database)
     else:
         print(
             f"MUTATION_DB_UPDATED source={source} observations={count}",

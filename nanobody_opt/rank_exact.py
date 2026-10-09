@@ -409,6 +409,11 @@ def _observations(paths: list[Path], target: str) -> dict[str, list[dict[str, fl
     return found
 
 
+#: Set by _historical_observations when the history read fails; reported in
+#: the rankings payload so a degraded ranking is visible in its own output.
+_HISTORY_READ_ERROR: str | None = None
+
+
 def _historical_observations(database: Path, target: str,
                              known: dict[str, list[dict[str, float]]],
                              excluded_run_ids: set[str] | None = None,
@@ -432,9 +437,19 @@ def _historical_observations(database: Path, target: str,
 
     found: dict[str, list[dict[str, float]]] = defaultdict(list)
     added = 0
+    # A failed read still returns an empty history (a missing history must not
+    # block the provisional publish), but it is no longer silent: the failure
+    # goes to stderr with a traceback, to the box failure log the liveness
+    # checker reads, and into the rankings payload as
+    # observation_history.status=read_failed (ARCHITECTURE_AUDIT §0.4, P0b).
+    global _HISTORY_READ_ERROR
     try:
         connection = db.connect()
-    except Exception:
+    except Exception as error:
+        _HISTORY_READ_ERROR = f"connect: {type(error).__name__}: {error}"[:500]
+        from nanobody_opt.failure_log import record_failure
+        record_failure("rank_exact", "EXACT_OBSERVATION_HISTORY_READ_FAILED",
+                       error, stage="connect", target=target)
         return found, 0
     try:
         rows = connection.execute(
@@ -465,7 +480,11 @@ def _historical_observations(database: Path, target: str,
                 continue
             found[str(sequence)].append(values)
             added += 1
-    except Exception:
+    except Exception as error:
+        _HISTORY_READ_ERROR = f"query: {type(error).__name__}: {error}"[:500]
+        from nanobody_opt.failure_log import record_failure
+        record_failure("rank_exact", "EXACT_OBSERVATION_HISTORY_READ_FAILED",
+                       error, stage="query", target=target, partial_rows=added)
         return found, 0
     finally:
         connection.close()
@@ -1314,6 +1333,15 @@ def main() -> None:
             "qualification stress test"
         ),
         "reference": reference,
+        "observation_history": {
+            "requested": args.observation_history is not None,
+            "status": (
+                "read_failed" if _HISTORY_READ_ERROR
+                else "merged" if args.observation_history is not None
+                else "not_requested"
+            ),
+            "error": _HISTORY_READ_ERROR,
+        },
         "excluded_sequence_count": len(excluded_sequences),
         "candidate_count": len(ranked),
         "sequences": [item["sequence"] for item in selected],

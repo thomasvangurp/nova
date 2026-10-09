@@ -138,8 +138,14 @@ ENTRYPOINTS: dict[str, list[tuple[str, str, bool, str]]] = {
          "dashboard_refresh_loop.sh -> score_latest_rival_epoch.sh"),
         ("/root/nanobody_opt/fetch_hf_archive.py", "nanobody_opt/fetch_hf_archive.py", True,
          "dashboard_refresh_loop.sh"),
-        ("/root/score_latest_rival_epoch.sh", "tools/score_latest_rival_epoch.sh", False,
-         "dashboard_refresh_loop.sh (accepted variant)"),
+        # The dashboard variant now lives in the repo (ARCHITECTURE_REDESIGN
+        # R6/P0b), so it is compared directly instead of pinned as a variant.
+        ("/root/score_latest_rival_epoch.sh", "deploy/dashboard/score_latest_rival_epoch.sh", False,
+         "dashboard_refresh_loop.sh"),
+        ("/root/dashboard_refresh_loop.sh", "deploy/dashboard/dashboard_refresh_loop.sh", False,
+         "tmux dashboard-refresh-loop"),
+        ("/root/nanobody_opt/failure_log.py", "nanobody_opt/failure_log.py", True,
+         "multipass_all_rivals.py (failure recording)"),
         ("/root/bgen_python.sh", "ansible/files/root/bgen_python.sh", False, "bgen env wrapper"),
     ],
     "pi": [
@@ -150,14 +156,8 @@ ENTRYPOINTS: dict[str, list[tuple[str, str, bool, str]]] = {
 
 # Intentional local differences: (box, box path) -> pinned blobs + reason.
 ACCEPTED_VARIANTS: dict[tuple[str, str], dict[str, str]] = {
-    ("dashboard", "/root/score_latest_rival_epoch.sh"): {
-        # Re-pinned 2026-10-09: both sides gained the "done = output has >=1
-        # rival" cache check (rival-less multipass outputs were cached forever).
-        "box_blob": "f06201014cb88bc69d488ccf0f5e1a3e5a742ed0",   # audited 2026-10-09
-        "repo_blob": "a3f3b279863aaee667b9c0c7e6c8bba40402a3ed",
-        "reason": "dashboard has no producer: reads current epoch from master's chain_state "
-                  "over ssh and passes explicit hf_archive/config args",
-    },
+    # ("dashboard", "/root/score_latest_rival_epoch.sh") was pinned here until
+    # 2026-10-09; it is now tracked as deploy/dashboard/score_latest_rival_epoch.sh.
 }
 
 REMOTE_SCRIPT = r'''
