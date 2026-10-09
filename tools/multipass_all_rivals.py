@@ -54,6 +54,37 @@ SUM_OF_TEN_DIRS = {
 METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
 
 
+def fetch_our_intended(epoch: int) -> list[tuple[str, str]]:
+    """Return (OUR_COLDKEY, sequence) for every sequence we intended to submit.
+
+    ``fetch_leaderboard`` only sees what the validator actually published --
+    an epoch where the validator rejected most of our fleet (e.g. as a
+    duplicate resubmission) leaves "ours" built from whichever few survived,
+    even though we generated and committed a full fleet. A local file dropped
+    by the Pi right after each epoch's archive step
+    (``/root/our_intended_sequences/{epoch}.json``, one ``{"uid", "sequence"}``
+    row per committed submission) carries the complete intent regardless of
+    what the validator kept, so merge it in. Missing file -> no supplement,
+    not an error, since most boxes never receive this drop.
+    """
+    path = Path(f"/root/our_intended_sequences/{epoch}.json")
+    if not path.is_file():
+        return []
+    try:
+        rows = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for row in rows if isinstance(rows, list) else []:
+        seq = str((row or {}).get("sequence") or "").strip().upper()
+        if not seq or seq in seen:
+            continue
+        seen.add(seq)
+        pairs.append((OUR_COLDKEY, seq))
+    return pairs
+
+
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
     """Return (coldkey, sequence) for every P20809 nanobody, deduped.
 
@@ -197,6 +228,18 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
 
     pairs = fetch_leaderboard(epoch)
+    leaderboard_sequences = {seq for _, seq in pairs}
+    supplement = [
+        (coldkey, seq) for coldkey, seq in fetch_our_intended(epoch)
+        if seq not in leaderboard_sequences
+    ]
+    if supplement:
+        print(
+            f"epoch={epoch} our-intended supplement: {len(supplement)} "
+            "sequence(s) not on the public leaderboard (e.g. rejected as a "
+            "duplicate resubmission), scored anyway", flush=True,
+        )
+        pairs = pairs + supplement
     by_coldkey: dict[str, list[str]] = defaultdict(list)
     for coldkey, seq in pairs:
         by_coldkey[coldkey].append(seq)
