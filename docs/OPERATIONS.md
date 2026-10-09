@@ -82,6 +82,13 @@ Nine tickets need nine distinct qualifying sequences per epoch, which a
 
 ## 3. Architecture
 
+> **Ground truth as of 2026-10-09:** [ARCHITECTURE_AUDIT.md](ARCHITECTURE_AUDIT.md)
+> inventories what actually runs on master, the dashboard box, the Pi and the Mac.
+> It covers every `observations` label, dead code and hard-coded config.
+> [ARCHITECTURE_REDESIGN.md](ARCHITECTURE_REDESIGN.md) is the prioritised
+> clean-up plan. Where this section disagrees with the audit (for example the
+> branch name), the audit reflects the live boxes.
+
 Three roles, three hosts, one branch (`nanobody-opt`), one runtime root.
 
 **GPU rental — producer, ranker, publisher.** Rented from vast.ai, labelled
