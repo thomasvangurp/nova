@@ -261,6 +261,12 @@ hotkey's twelve-word mnemonic to stdout, which under a systemd unit is the
 journal -- a file that survives reboots. Hotkey creation now runs with stdout
 discarded. Anything that creates keys must be assumed to print them.
 
+**A scoring formula deployed on plausibility.** On 2026-10-09 a reverse-engineered
+"corrected" final_score formula went into live selection unvalidated; against
+our published results it was rho 0.918 vs the existing sum-of-ten's 1.000, and it
+cost epochs 25613/25614. Any scoring, ranking or selection change must now pass
+`tools/validate_scoring_change.py` first -- see `docs/SCORING_CHANGE_VALIDATION.md`.
+
 **Losing the box's only copy.** The fast scorer, the publisher and the mutation
 database all lived only on rented hardware. Snapshots now live in
 `snapshots/vast-20260912/`; the scorer is vendored at
