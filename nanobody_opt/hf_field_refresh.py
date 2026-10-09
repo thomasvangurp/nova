@@ -35,7 +35,12 @@ from pathlib import Path
 import pandas as pd
 
 TARGET = "P20809"
-SCORE_KIND = "hf_field_20x_rank_sum"
+# A distinct label from the pre-sum-of-10 era: "hf_field_20x_rank_sum" rows
+# already in the DB were written under algo2_score (minmax over weighted
+# metric ranks) through epoch ~25610, and mixing sum-of-10 values into that
+# same label would corrupt every comparison that reads it. New rows land
+# under this label instead; the stale ones are untouched, not deleted.
+SCORE_KIND = "hf_field_sum10_20x_rank_sum"
 N_PASSES = 20
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
 API = "https://compound-api.metanova-labs.ai"
