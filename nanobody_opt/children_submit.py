@@ -1,4 +1,4 @@
-"""Wire scored exact-replay candidates into the per-uid fleet submission path.
+"""Wire scored children candidates into the per-uid fleet submission path.
 
 This is an ADDITIVE lane alongside ``tools/publish_current_nanobody.py``, not a
 replacement for it.  The producer/publisher keeps running unchanged; this module
@@ -10,17 +10,17 @@ existing commit mechanism (``deploy/submit_host/pi_submit.py`` ->
 Data source (production)::
 
     /root/artifacts/nanobody_mutations.sqlite
-      observations  WHERE source='local_exact_raw'
-                     AND score_kind='local_exact_validator_replay_rank_sum'
+      observations  WHERE source='children_8x'
+                     AND score_kind='local_validator_replay_rank_sum'
+                     AND observation_count>=8
       nodes         (sequence)
 
-One observation row per (epoch, sequence) carries the ten exact BoltzGen metrics
-in ``metrics_json`` (including ``interaction_pae``), and a stored ``score`` that
-sums those ten metric dense ranks.  The top-N children are re-ranked by the
-corrected validator ``final_score`` (rank each of confidence / physical_interaction
-/ developability within the field and sum the three ranks), via
-``simulate_round.validator_final_scores``; the fast replay is no longer the
-selection source because it cannot emit ``interaction_pae``.
+One observation row per (source, epoch, sequence) carries the ten BoltzGen metrics
+in ``metrics_json`` (including ``interaction_pae`` -- the fast replay emits all ten),
+and a stored ``score`` that sums those ten metric dense ranks.  The top-N children
+are re-ranked by the corrected validator ``final_score`` (rank each of confidence /
+physical_interaction / developability within the field and sum the three ranks), via
+``simulate_round.validator_final_scores``.
 
 Selection -> uid binding is deterministic and reuses the fleet module's own
 primitives: child rank ``i`` (0-indexed, ascending mean rank sum) binds to
@@ -104,8 +104,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt import db, fleet  # noqa: E402
 
 TARGET = "P20809"
-DEFAULT_SOURCE = "local_exact_raw"
-DEFAULT_SCORE_KIND = "local_exact_validator_replay_rank_sum"
+DEFAULT_SOURCE = "children_8x"
+DEFAULT_SCORE_KIND = "local_validator_replay_rank_sum"
 # Fetch this many extra children past --top-n so the corrected-score re-ranking
 # (which uses the exact replay's interaction_pae) has a pool to reorder from.
 CORRECTED_FETCH_MARGIN = 5
@@ -291,15 +291,16 @@ def top_children(
     return chosen
 
 
-def _corrected_score_map(database: Path) -> dict[str, float]:
-    """Per-sequence corrected validator ``final_score`` from exact-scorer metrics.
+def _corrected_score_map(database: Path, source: str, score_kind: str) -> dict[str, float]:
+    """Per-sequence corrected validator ``final_score`` from the selection bank.
 
-    The stored exact score sums all ten metric dense ranks; the validator actually
+    The stored replay score sums all ten metric dense ranks; the validator actually
     ranks each of the three metric categories within the field and sums those three
     ranks (see ``simulate_round.validator_final_scores``).  Recompute it over the
-    exact observations' ``metrics_json``, which carries ``interaction_pae`` that the
-    fast replay cannot emit.  Returns ``{}`` when no exact rows exist, so callers
-    fall back to the stored replay score.
+    same ``source``/``score_kind`` the selection uses, from ``metrics_json``.  The
+    fast replay carries ``interaction_pae`` and the other nine metrics, so this does
+    not need the exact scorer.  Returns ``{}`` when no rows exist, so callers fall
+    back to the stored replay score.
     """
     from nanobody_opt.simulate_round import METRICS, validator_final_scores
 
@@ -310,11 +311,11 @@ def _corrected_score_map(database: Path) -> dict[str, float]:
             SELECT n.sequence, o.metrics_json, o.epoch
             FROM observations o JOIN nodes n ON n.id = o.node_id
             WHERE n.target = %s
-              AND o.source = 'local_exact_raw'
-              AND o.score_kind = 'local_exact_validator_replay_rank_sum'
+              AND o.source = %s
+              AND o.score_kind = %s
               AND o.metrics_json IS NOT NULL
             """,
-            (TARGET,),
+            (TARGET, source, score_kind),
         ).fetchall()
     finally:
         connection.close()
@@ -955,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
             f"(source={args.source}); ledger holds {len(exclude)} published sequence(s)",
             flush=True,
         )
-        corrected = _corrected_score_map(args.database)
+        corrected = _corrected_score_map(args.database, args.source, args.score_kind)
         children = top_children(
             args.database,
             source=args.source,

@@ -40,7 +40,7 @@ while true; do
       --chain-state $CHAIN \
       --coldkey 5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ \
       --ledger /root/artifacts/nanobody_published_sequences.txt \
-      --source local_exact_raw \
+      --source children_8x \
       --top-n 300 \
       $GATE \
       --output $ART 2>&1 | grep -vE 'CHILD_SUBMIT|CHILD_CDR3_DROPPED' >> $LOG
