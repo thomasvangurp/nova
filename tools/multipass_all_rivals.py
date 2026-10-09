@@ -41,7 +41,17 @@ METRIC_DEFS = {
     "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
     "delta_sasa_refolded": "max",
 }
-METRICS_NEEDED = sorted(set(PROTEIN_WEIGHTS) | {"liability_num_violations"})
+# The validator's actual score is the SUM of the ten metric dense ranks
+# (rho=1.000 vs the published final_score), NOT the Algorithm-2 minmax above
+# (~0.56). These ten metrics and directions drive sum_of_ten().
+SUM_OF_TEN_DIRS = {
+    "design_iiptm": "max", "design_ptm": "max", "design_to_target_iptm": "max",
+    "min_design_to_target_pae": "min", "interaction_pae": "min",
+    "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
+    "delta_sasa_refolded": "max", "liability_score": "min",
+    "liability_num_violations": "min",
+}
+METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
 
 
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
@@ -96,6 +106,20 @@ def algo2_score(field: pd.DataFrame) -> pd.Series:
     return pd.DataFrame(rank_cols, index=work.index).max(axis=1)
 
 
+def sum_of_ten(field: pd.DataFrame) -> pd.Series:
+    """Validator's actual score: sum of the ten metric dense ranks (lower=better).
+
+    Empirically rho=1.000 against the published final_score over our own
+    submissions, versus ~0.56 for the Algorithm-2 minmax above.
+    """
+    total = pd.Series(0.0, index=field.index)
+    for metric, direction in SUM_OF_TEN_DIRS.items():
+        if metric not in field.columns:
+            continue
+        total += field[metric].rank(method="dense", ascending=(direction == "min"))
+    return total
+
+
 def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                config: Path, scorer: Path, out_root: Path
                ) -> tuple[dict[str, float], dict[str, dict]]:
@@ -132,7 +156,7 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
     # then returns a multi-row Series for it and float(scores[seq]) blows up.
     # Keep the rival's (last) row so the fresh multipass score wins the overlap.
     field = field[~field.index.duplicated(keep="last")]
-    scores = algo2_score(field)  # index = sequence (liability-filtered)
+    scores = sum_of_ten(field)  # index = sequence (sum-of-10, lower = better)
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.

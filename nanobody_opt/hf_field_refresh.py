@@ -45,14 +45,36 @@ CONFIG = "/root/config/config.yaml"
 SCORER = "/root/nanobody_opt/score_boltzgen_fast_adapter.py"
 OUT_ROOT = Path("/root/hf_field_refresh")
 
-METRICS = ["design_iiptm", "design_ptm", "min_design_to_target_pae",
-           "plip_hbonds_refolded", "plip_saltbridge_refolded", "delta_sasa_refolded"]
+METRICS = ["design_iiptm", "design_ptm", "design_to_target_iptm",
+           "min_design_to_target_pae", "interaction_pae",
+           "plip_hbonds_refolded", "plip_saltbridge_refolded",
+           "delta_sasa_refolded", "liability_score"]
 WEIGHTS = {"design_iiptm": 1.0, "design_ptm": 2.0, "min_design_to_target_pae": 1.0,
            "plip_hbonds_refolded": 2.0, "plip_saltbridge_refolded": 2.0,
            "delta_sasa_refolded": 2.0}
 DIRS = {"design_iiptm": "max", "design_ptm": "max", "min_design_to_target_pae": "min",
         "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
         "delta_sasa_refolded": "max"}
+
+# Validator's actual score is the SUM of the ten metric dense ranks
+# (rho=1.000 vs final_score), not the Algorithm-2 minmax (~0.56).
+SUM_OF_TEN_DIRS = {
+    "design_iiptm": "max", "design_ptm": "max", "design_to_target_iptm": "max",
+    "min_design_to_target_pae": "min", "interaction_pae": "min",
+    "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
+    "delta_sasa_refolded": "max", "liability_score": "min",
+    "liability_num_violations": "min",
+}
+
+
+def sum_of_ten(field: pd.DataFrame) -> pd.Series:
+    """Sum of the ten metric dense ranks (lower = better)."""
+    total = pd.Series(0.0, index=field.index)
+    for metric, direction in SUM_OF_TEN_DIRS.items():
+        if metric not in field.columns:
+            continue
+        total += field[metric].rank(method="dense", ascending=(direction == "min"))
+    return total
 
 # Our top-50: the exact mixed replay read `_live_top50_from_db` used (no
 # fillers), so "our own new top-50" means the same stable quality read.
@@ -186,7 +208,7 @@ def score_pass(sequences: list[str], run: int, archive: pd.DataFrame,
     rival = pd.DataFrame(rows).T
     arch_s = archive.set_index("sequence")[METRICS + ["liability_num_violations"]]
     field = pd.concat([arch_s, rival])
-    scores = algo2_score(field)
+    scores = sum_of_ten(field)  # sum-of-10 (lower = better)
     out = {}
     for s in rival.index:
         mask = scores.index == s
