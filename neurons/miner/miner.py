@@ -62,6 +62,11 @@ def _publish_chain_state(state: Dict[str, Any], block: int) -> None:
             epoch_length=int(state["epoch_length"]),
             nanobody_target=state["config"].nanobody_target,
             miner_uid=int(state["miner_uid"]),
+            # The block the NEURON ROWS were synced at, not the block being
+            # written. Without it build_payload falls back to `block`, so the
+            # roster age read as 0 on every write and a frozen roster was
+            # indistinguishable from a fresh one.
+            roster_block=state.get("roster_block"),
             neurons=chain_state.neuron_rows(
                 getattr(metagraph, "hotkeys", None),
                 getattr(metagraph, "coldkeys", None),
@@ -614,6 +619,13 @@ async def run_miner(config: argparse.Namespace) -> None:
         'last_committed_small_molecules': None,
     }
 
+    # setup_bittensor_objects synced the metagraph moments ago; the roster is
+    # as fresh as the chain head now.  Record it so the loop below re-syncs on
+    # the next EPOCH NUMBER change rather than on an exact block match.
+    startup_block = int(await subtensor.get_current_block())
+    state["roster_block"] = startup_block
+    state["last_epoch_synced"] = startup_block // epoch_length
+
     bt.logging.info("Entering main miner loop...")
 
     # 3) If we start mid-epoch, obtain most recent proteins from block hash
@@ -654,25 +666,39 @@ async def run_miner(config: argparse.Namespace) -> None:
     while True:
         try:
             current_block = await subtensor.get_current_block()
+
+            # Re-sync whenever the EPOCH NUMBER changes, not when the block is
+            # exactly divisible by the epoch length.  The exact-match branch
+            # below can be stepped over (a slow chain round-trip, a 3 s error
+            # back-off), and when it was the only place the metagraph synced,
+            # the roster froze at process start: on 2026-09-16 and again on
+            # 2026-10-09 the publisher kept assigning sequences to a uid that
+            # had been re-registered to another coldkey.  An inequality on the
+            # epoch number fires on the first poll after ANY boundary, however
+            # many blocks the loop skipped.  A failed sync leaves
+            # last_epoch_synced untouched, so it is retried next iteration.
+            epoch_now = current_block // epoch_length
+            if state.get("last_epoch_synced") != epoch_now:
+                try:
+                    await metagraph.sync()
+                except Exception as error:  # a failed sync must not end the epoch
+                    bt.logging.warning(
+                        f"Metagraph epoch re-sync failed at block {current_block}: {error}"
+                    )
+                else:
+                    state["last_epoch_synced"] = epoch_now
+                    state["roster_block"] = int(current_block)
+                    state["last_chain_state_block"] = None
+                    bt.logging.info(
+                        f"Metagraph re-synced for epoch {epoch_now} at block {current_block}"
+                    )
+
             _publish_chain_state(state, current_block)
 
             # If we are at an epoch boundary, fetch new proteins
             if current_block % epoch_length == 0:
                 bt.logging.info(f"Found epoch boundary at block {current_block}.")
 
-                # Re-sync before the boundary's chain-state export.  Without
-                # this the exported neuron rows stay frozen at process start, so
-                # the publisher would keep resolving our fleet from a roster
-                # that predates any (de)registration -- the same staleness the
-                # export exists to eliminate.
-                try:
-                    await metagraph.sync()
-                except Exception as error:  # a failed sync must not end the epoch
-                    bt.logging.warning(f"Metagraph sync failed at boundary: {error}")
-                else:
-                    state["last_chain_state_block"] = None
-                    _publish_chain_state(state, current_block)
-                
                 block_hash = await subtensor.determine_block_hash(current_block)
                 
                 challenge_params = get_challenge_params_from_blockhash(
