@@ -85,7 +85,12 @@ def load_public(path: Path, target: str, single_kind: str) -> dict[str, dict[str
 
 
 def load_replay_means(path: Path, target: str, replay_kind: str) -> dict[str, float]:
-    """Mean multi-pass replay score per sequence (lower is better)."""
+    """Mean multi-pass replay score per sequence (lower is better).
+
+    Replaced by :func:`load_corrected_scores` for the parent ranking: the stored
+    ``score`` sums all ten metric dense ranks, whereas the validator ranks each
+    of the three metric categories and sums those.  Kept for reference.
+    """
     with _connect(path) as connection:
         rows = connection.execute(
             """
@@ -98,6 +103,24 @@ def load_replay_means(path: Path, target: str, replay_kind: str) -> dict[str, fl
             (target, replay_kind),
         ).fetchall()
     return {sequence: float(mean) for sequence, mean, _count in rows}
+
+
+def load_corrected_scores(path: Path, target: str, replay_kind: str) -> dict[str, float]:
+    """Corrected validator ``final_score`` per sequence from the replay metrics.
+
+    The validator does not sum all ten metric dense ranks; it ranks each of the
+    three metric categories within the field and sums those three ranks (see
+    ``simulate_round.validator_final_scores``).  The replay metrics_json already
+    carries ``interaction_pae`` and the other nine metrics, so this recomputes the
+    correct score without re-scoring.  Lower is better.
+    """
+    from nanobody_opt.mutation_network import load_observations
+    from nanobody_opt.simulate_round import validator_scores_from_observations
+
+    observations = load_observations(path, target=target)
+    return validator_scores_from_observations(
+        observations, score_kind=replay_kind, by_epoch=True
+    )
 
 
 def _epoch_rank_table(public: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -226,9 +249,11 @@ def main() -> None:
         parser.error("--limit cannot be negative")
 
     public = load_public(args.database, args.target, args.single_score_kind)
-    replay_means = load_replay_means(args.database, args.target, args.replay_score_kind)
+    corrected_scores = load_corrected_scores(
+        args.database, args.target, args.replay_score_kind
+    )
     candidates, total_public = build_candidates(
-        public, replay_means, fraction=args.fraction, limit=args.limit
+        public, corrected_scores, fraction=args.fraction, limit=args.limit
     )
     if not candidates:
         raise SystemExit("no public leaderboard sequences in database")

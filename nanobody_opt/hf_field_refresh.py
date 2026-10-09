@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from nanobody_opt.simulate_round import validator_final_scores
+
 TARGET = "P20809"
 SCORE_KIND = "hf_field_20x_rank_sum"
 N_PASSES = 20
@@ -45,8 +47,10 @@ CONFIG = "/root/config/config.yaml"
 SCORER = "/root/nanobody_opt/score_boltzgen_fast_adapter.py"
 OUT_ROOT = Path("/root/hf_field_refresh")
 
-METRICS = ["design_iiptm", "design_ptm", "min_design_to_target_pae",
-           "plip_hbonds_refolded", "plip_saltbridge_refolded", "delta_sasa_refolded"]
+METRICS = ["design_iiptm", "design_ptm", "design_to_target_iptm",
+           "min_design_to_target_pae", "interaction_pae",
+           "plip_hbonds_refolded", "plip_saltbridge_refolded",
+           "delta_sasa_refolded", "liability_score"]
 WEIGHTS = {"design_iiptm": 1.0, "design_ptm": 2.0, "min_design_to_target_pae": 1.0,
            "plip_hbonds_refolded": 2.0, "plip_saltbridge_refolded": 2.0,
            "delta_sasa_refolded": 2.0}
@@ -186,7 +190,8 @@ def score_pass(sequences: list[str], run: int, archive: pd.DataFrame,
     rival = pd.DataFrame(rows).T
     arch_s = archive.set_index("sequence")[METRICS + ["liability_num_violations"]]
     field = pd.concat([arch_s, rival])
-    scores = algo2_score(field)
+    field = field[~field.index.duplicated(keep="last")]
+    scores = pd.Series(validator_final_scores(field), index=field.index)
     out = {}
     for s in rival.index:
         mask = scores.index == s
