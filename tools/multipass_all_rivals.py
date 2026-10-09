@@ -26,11 +26,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Corrected validator final_score (3-category-rank sum) lives in the package;
-# this script runs from the box's repo root, so make the package importable.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nanobody_opt.simulate_round import validator_final_scores  # noqa: E402
-
 API = "https://compound-api.metanova-labs.ai"
 TARGET = "P20809"
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
@@ -46,17 +41,7 @@ METRIC_DEFS = {
     "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
     "delta_sasa_refolded": "max",
 }
-# All ten validator metrics. The corrected 3-category final_score needs
-# interaction_pae / design_to_target_iptm / liability_score that the old
-# minmax proxy never ranked. The fast scorer and the historical archive may
-# both omit interaction_pae, so score_pass falls back to the minmax proxy when
-# the full set is not present.
-METRICS_NEEDED = sorted({
-    "design_iiptm", "design_ptm", "design_to_target_iptm",
-    "min_design_to_target_pae", "interaction_pae",
-    "plip_hbonds_refolded", "plip_saltbridge_refolded",
-    "delta_sasa_refolded", "liability_score", "liability_num_violations",
-})
+METRICS_NEEDED = sorted(set(PROTEIN_WEIGHTS) | {"liability_num_violations"})
 
 
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]]:
@@ -113,8 +98,8 @@ def algo2_score(field: pd.DataFrame) -> pd.Series:
 
 def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                config: Path, scorer: Path, out_root: Path
-               ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
-    """One fast-scorer pass -> (rank_sum, cif_ref, raw_metrics) per sequence."""
+               ) -> tuple[dict[str, float], dict[str, dict]]:
+    """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref})."""
     inp = out_root / f"input_{run}.json"
     inp.write_text(json.dumps({"sequences": [{"sequence": s} for s in sequences]}))
     out_dir = out_root / f"score{run}"
@@ -141,21 +126,13 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
         rows[seq] = {k: float(v) for k, v in m.items()
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
     rival = pd.DataFrame(rows).T  # index = sequence
-    corrected = (set(METRICS_NEEDED) <= set(archive.columns)
-                 and set(METRICS_NEEDED) <= set(rival.columns))
-    use_metrics = METRICS_NEEDED if corrected else sorted(
-        set(PROTEIN_WEIGHTS) | {"liability_num_violations"}
-    )
-    archive_s = archive.set_index("sequence")[use_metrics]
+    archive_s = archive.set_index("sequence")[METRICS_NEEDED]
     field = pd.concat([archive_s, rival])  # index = sequence
-    # A rival sequence that is also in the archive appears twice; the rankers
-    # then return a multi-row Series for it and float(scores[seq]) blows up.
+    # A rival sequence that is also in the archive appears twice; algo2_score
+    # then returns a multi-row Series for it and float(scores[seq]) blows up.
     # Keep the rival's (last) row so the fresh multipass score wins the overlap.
     field = field[~field.index.duplicated(keep="last")]
-    if corrected:
-        scores = pd.Series(validator_final_scores(field), index=field.index)
-    else:
-        scores = algo2_score(field)  # index = sequence (liability-filtered)
+    scores = algo2_score(field)  # index = sequence (liability-filtered)
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.
@@ -168,7 +145,7 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                 "writer_path": rec.get("writer_path"),
                 "sample_selection": rec.get("sample_selection"),
             }
-    return ranks, structures, rows
+    return ranks, structures
 
 
 def main() -> int:
@@ -211,14 +188,11 @@ def main() -> int:
 
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
-    per_pass_metrics: list[dict[str, dict[str, float]]] = []
     for run in range(1, n + 1):
-        ranks, structs, metrics = score_pass(sequences, run, archive=archive,
-                                             config=config, scorer=scorer,
-                                             out_root=out_root)
+        ranks, structs = score_pass(sequences, run, archive=archive, config=config,
+                                    scorer=scorer, out_root=out_root)
         per_pass.append(ranks)
         per_pass_structures.append(structs)
-        per_pass_metrics.append(metrics)
         print(f"  pass {run}/{n} done", flush=True)
 
     # A sequence can be rejected by the scorer in some passes (liability/fold
@@ -234,8 +208,8 @@ def main() -> int:
     try:
         from nanobody_opt.mutation_network import update_observation_store
         observations = []
-        for run, (ranks, structs, metrics) in enumerate(
-            zip(per_pass, per_pass_structures, per_pass_metrics), start=1
+        for run, (ranks, structs) in enumerate(
+            zip(per_pass, per_pass_structures), start=1
         ):
             for seq, score in ranks.items():
                 observations.append({
@@ -247,7 +221,6 @@ def main() -> int:
                     "score_kind": "local_validator_replay_rank_sum",
                     "score": float(score),
                     "observation_count": 1,
-                    "metrics": metrics.get(seq),
                     "structure": structs.get(seq),
                 })
         written = update_observation_store(

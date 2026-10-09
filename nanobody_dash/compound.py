@@ -444,6 +444,11 @@ SEARCH_BANK_REMOTE = f"{SEARCH_ARTIFACTS_REMOTE}/rxn3-bank-live.sqlite"
 AB_PERFORMANCE_REMOTE = "tools/competitor_motif_ab_performance.py"
 LANE_PERFORMANCE_REMOTE = "tools/lane_performance.py"
 STRATEGY_POLICY_VERSION = "uplift-v1"
+# Archive growth invalidates the cached Morgan fingerprints.  A legitimate
+# rebuild plus exact novelty filtering has exceeded the old 300-second bound
+# on CPU-constrained boxes.  This is still finite and sits below refresh.py's
+# process-level bound.
+LIVE_GATE_TIMEOUT_SECONDS = 720
 
 
 def _gate_events(text: str) -> dict:
@@ -626,7 +631,8 @@ def _live_gap_check(reaction: int, epoch: int = 0) -> dict | None:
         completed = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-n", "-p", str(port),
              user_host, command],
-            capture_output=True, text=True, timeout=300, check=False,
+            capture_output=True, text=True, timeout=LIVE_GATE_TIMEOUT_SECONDS,
+            check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -824,8 +830,18 @@ def collect(live_gap_check: bool = True) -> dict:
     log_text = _ssh(PI_HOST, "cat", PI_LOOP_LOG, timeout=30)
     if log_text is None:
         status = dict(previous)
-        status["collected_at"] = time.time()
+        failed_at = time.time()
+        status["collected_at"] = failed_at
         status["pi_reachable"] = False
+        status["gap_refresh_attempted_at"] = failed_at
+        status["gap_refresh_failed_reactions"] = list(REACTION_BOXES)
+        status["gap_refresh_complete"] = False
+        for reaction, gap in list((status.get("gap_checks") or {}).items()):
+            if isinstance(gap, dict):
+                marked = dict(gap)
+                marked["refresh_error"] = "pi_unreachable"
+                marked["refresh_failed_at"] = failed_at
+                status["gap_checks"][reaction] = marked
         return status
 
     parsed = _parse_loop_log(log_text)
@@ -924,26 +940,52 @@ def collect(live_gap_check: bool = True) -> dict:
         for reaction, result in strategy.items():
             if result is not None:
                 strategy_checks[str(reaction)] = result
+        gap_refresh_attempted_at = time.time()
+        gap_refresh_failed_reactions = []
         gap_db = connect()
         try:
             for reaction in REACTION_BOXES:
                 result = checked[reaction]
-                if result is not None:
-                    result["checked_at"] = time.time()
-                    gap_checks[str(reaction)] = result
-                    # Skip the error-only branch of _live_gap_check's result
-                    # (dict(pool_size=..., error=...)) -- nothing plottable.
-                    if "selected_score" in result:
-                        gap_db.execute(
-                            "INSERT OR REPLACE INTO gap_history "
-                            "(checked_at, reaction, selected_score, floor, gap, "
-                            "clears_now, pool_size) VALUES (?,?,?,?,?,?,?)",
-                            (result["checked_at"], reaction, result["selected_score"],
-                             result["floor"], result["gap"],
-                             int(bool(result["clears_now"])), result.get("pool_size")))
-                        gap_db.commit()
+                if result is None or "selected_score" not in result:
+                    gap_refresh_failed_reactions.append(reaction)
+                    previous_gap = gap_checks.get(str(reaction))
+                    if isinstance(previous_gap, dict):
+                        previous_gap = dict(previous_gap)
+                        previous_gap["refresh_error"] = (
+                            "gate_error" if isinstance(result, dict)
+                            else "timeout_or_unreachable")
+                        previous_gap["refresh_failed_at"] = gap_refresh_attempted_at
+                        gap_checks[str(reaction)] = previous_gap
+                    elif isinstance(result, dict):
+                        result = dict(result)
+                        result["checked_at"] = gap_refresh_attempted_at
+                        result["refresh_error"] = "gate_error"
+                        result["refresh_failed_at"] = gap_refresh_attempted_at
+                        gap_checks[str(reaction)] = result
+                    continue
+                result["checked_at"] = time.time()
+                # A successful retry must clear the stale marker carried by a
+                # previous partial refresh.
+                result.pop("refresh_error", None)
+                result.pop("refresh_failed_at", None)
+                gap_checks[str(reaction)] = result
+                # Skip the error-only branch of _live_gap_check's result
+                # (dict(pool_size=..., error=...)) -- nothing plottable.
+                if "selected_score" in result:
+                    gap_db.execute(
+                        "INSERT OR REPLACE INTO gap_history "
+                        "(checked_at, reaction, selected_score, floor, gap, "
+                        "clears_now, pool_size) VALUES (?,?,?,?,?,?,?)",
+                        (result["checked_at"], reaction, result["selected_score"],
+                         result["floor"], result["gap"],
+                         int(bool(result["clears_now"])), result.get("pool_size")))
+                    gap_db.commit()
         finally:
             gap_db.close()
+    else:
+        gap_refresh_attempted_at = previous.get("gap_refresh_attempted_at")
+        gap_refresh_failed_reactions = list(
+            previous.get("gap_refresh_failed_reactions") or [])
 
     status = dict(
         collected_at=time.time(),
@@ -955,6 +997,9 @@ def collect(live_gap_check: bool = True) -> dict:
         wins_by_reaction=wins_by_reaction,
         recent_history=recent,
         gap_checks=gap_checks,
+        gap_refresh_attempted_at=gap_refresh_attempted_at,
+        gap_refresh_failed_reactions=gap_refresh_failed_reactions,
+        gap_refresh_complete=not gap_refresh_failed_reactions,
         dynamic_floor_details=floor_details,
         search_strategy=strategy_checks,
         winners_curse_gap=WINNERS_CURSE_GAP,
@@ -1026,6 +1071,10 @@ def compound_status_table(status: dict | None = None) -> str:
             # age is frozen at build time and reads fresh forever.
             if gap.get("checked_at"):
                 gap_cell += ", checked " + _local_hhmm(gap["checked_at"])
+            if gap.get("refresh_error"):
+                failed_at = gap.get("refresh_failed_at")
+                failed_when = (" at " + _local_hhmm(failed_at)) if failed_at else ""
+                gap_cell += f"; STALE — latest refresh failed{failed_when}"
         elif gap and "error" in gap:
             gap_cell = f"blocked before scoring: {_safe(gap['error'])[:100]}"
         else:

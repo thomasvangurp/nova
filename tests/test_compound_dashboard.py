@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -100,3 +101,75 @@ def test_field_recombination_uses_pre_proxy_random_arm_as_control(policy):
     assert verdict["relative_lift"] == pytest.approx(0.01)
     assert verdict["control_n"] == 25
     assert verdict["treatment_n"] == 100
+
+
+def test_live_gate_table_makes_reused_value_visibly_stale():
+    status = {
+        "pi_reachable": True,
+        "gap_checks": {
+            "5": {
+                "selected_score": 2.12,
+                "floor": 2.25,
+                "gap": -0.13,
+                "clears_now": False,
+                "checked_at": 1_700_000_000,
+                "refresh_error": "timeout_or_unreachable",
+                "refresh_failed_at": 1_700_000_300,
+            }
+        },
+    }
+
+    rendered = compound.compound_status_table(status)
+
+    assert "STALE — latest refresh failed" in rendered
+    assert "2.120 vs 2.25" in rendered
+
+
+def test_partial_live_gate_refresh_is_failed_and_reuses_value_visibly(
+        monkeypatch, tmp_path):
+    previous = {
+        "gap_checks": {
+            "5": {
+                "selected_score": 2.12,
+                "floor": 2.25,
+                "gap": -0.13,
+                "clears_now": False,
+                "checked_at": 1_700_000_000,
+            }
+        }
+    }
+    status_path = tmp_path / "compound_status.json"
+    status_path.write_text(json.dumps(previous))
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(compound.SCHEMA)
+
+    monkeypatch.setattr(compound, "STATUS_PATH", status_path)
+    monkeypatch.setattr(compound, "connect", lambda: connection)
+    monkeypatch.setattr(compound, "_refresh_boxes_from_pi", lambda: None)
+    monkeypatch.setattr(compound, "_pull_submitted_archive", lambda: True)
+    monkeypatch.setattr(compound, "_ssh", lambda *args, **kwargs: "loop")
+    monkeypatch.setattr(compound, "_parse_loop_log", lambda _text: {
+        "window_epoch_reaction": {100: 1},
+        "allocated": [], "blocked": [], "final_gates": {},
+        "ordered_window_events": [],
+    })
+    monkeypatch.setattr(compound, "_dynamic_floors", lambda _epoch: (
+        {reaction: values[2] for reaction, values in compound.REACTION_BOXES.items()}, {}))
+    monkeypatch.setattr(compound, "_search_strategy_check", lambda _reaction: None)
+
+    def gap(reaction, _epoch):
+        if reaction == 5:
+            return None
+        return {
+            "selected_score": 1.0, "floor": 1.1, "gap": -0.1,
+            "clears_now": False, "pool_size": 100,
+        }
+
+    monkeypatch.setattr(compound, "_live_gap_check", gap)
+
+    status = compound.collect(live_gap_check=True)
+
+    assert status["gap_refresh_complete"] is False
+    assert status["gap_refresh_failed_reactions"] == [5]
+    assert status["gap_checks"]["5"]["selected_score"] == 2.12
+    assert status["gap_checks"]["5"]["refresh_error"] == "timeout_or_unreachable"

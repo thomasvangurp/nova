@@ -38,7 +38,7 @@ MONEY_MARKER = ROOT / "data" / "money_refresh.marker"
 # SELECT and two lightweight read-only strategy summaries on each of the 5
 # dedicated mining boxes -- measured ~140s total. Running that every 60s would mean
 # the collector is effectively always running and would keep those 5 live
-# mining boxes under constant (if cheap) extra SSH load. 20 minutes keeps the
+# mining boxes under constant (if cheap) extra SSH load. Ten minutes keeps the
 # "ready to submit" numbers reasonably fresh without that.
 COMPOUND_REFRESH_SECONDS = 600
 # How soon to retry after a failed/unreachable attempt, instead of waiting
@@ -46,10 +46,16 @@ COMPOUND_REFRESH_SECONDS = 600
 # for a reboot right as a refresh attempt landed; compound.py's main()
 # always exits 0 even when pi_reachable is False (it falls back to the
 # previous snapshot rather than erroring), so the marker was getting touched
-# on failure too -- the dashboard then sat on a stale snapshot for a FULL
-# extra 20 minutes after the Pi was already back up, rather than catching it
+# on failure too -- the dashboard then sat on a stale snapshot for a full
+# refresh interval after the Pi was already back up, rather than catching it
 # on the very next cycle.
 COMPOUND_RETRY_SECONDS = 180
+# A public-archive update invalidates the per-box fingerprint cache.  Rebuilding
+# it and applying the exact novelty gate can legitimately take more than five
+# minutes on a CPU-constrained producer.  Keep this bounded, but longer than
+# the per-reaction gate timeout in compound.py so the child can save an honest
+# partial/failure status instead of being killed before doing so.
+COMPOUND_PROCESS_TIMEOUT_SECONDS = 1200
 COMPOUND_MARKER = ROOT / "data" / "compound_refresh.marker"
 COMPOUND_STATUS_PATH = ROOT / "data" / "compound_status.json"
 
@@ -136,9 +142,10 @@ def _touch_compound_marker(success: bool = True) -> None:
 def refresh_compound_status() -> bool:
     """Collect and save a fresh compound-fleet status snapshot, as a bounded-
     timeout subprocess (matching refresh_money_sources()'s isolation) so a
-    hung SSH call to the Pi or a mining box can never block the rest of the
-    dashboard refresh. Worst case is ~5 boxes x 90s + the Pi call, so the
-    timeout here is generous; on any failure or timeout the previous
+    hung SSH call to the Pi or a mining box can never block forever. The five
+    live gates run concurrently, but a legitimate public-archive fingerprint
+    rebuild can take several minutes, so the process bound is generous. On any
+    failure or timeout the previous
     snapshot is left in place (compound.py's collect() reads it as a
     fallback base), so the tab degrades to "stale" rather than empty.
     """
@@ -148,7 +155,7 @@ def refresh_compound_status() -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
-        timeout=600,
+        timeout=COMPOUND_PROCESS_TIMEOUT_SECONDS,
     )
     return completed.returncode == 0
 
@@ -274,14 +281,21 @@ def main() -> int:
             # subprocess returncode alone can't tell a real refresh from a
             # fallback -- check the saved snapshot's own pi_reachable field.
             pi_reachable = True
+            gap_refresh_complete = True
             if compound_ok:
                 try:
-                    pi_reachable = bool(
-                        json.loads(COMPOUND_STATUS_PATH.read_text())
-                        .get("pi_reachable", True))
+                    compound_status = json.loads(COMPOUND_STATUS_PATH.read_text())
+                    pi_reachable = bool(compound_status.get("pi_reachable", True))
+                    gap_refresh_complete = bool(
+                        compound_status.get("gap_refresh_complete", True))
                 except Exception:
                     pi_reachable = True
-            _touch_compound_marker(success=bool(compound_ok) and pi_reachable)
+                    gap_refresh_complete = False
+            # A collection where one reaction timed out is not a successful
+            # refresh.  Keep the last good value for continuity, but retry on
+            # the short failure cadence instead of freezing it for ten minutes.
+            _touch_compound_marker(
+                success=bool(compound_ok) and pi_reachable and gap_refresh_complete)
         else:
             compound_ok = "skipped"
         if _should_refresh_proxy_accuracy():
