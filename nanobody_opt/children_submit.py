@@ -971,6 +971,28 @@ def main(argv: list[str] | None = None) -> int:
         f"pool {len(artifact['sequence_pool'])})",
         flush=True,
     )
+    # Mirror tools/publish_current_nanobody.py's _record_fleet: once a sequence
+    # is written into this epoch's artifact it is about to be committed
+    # on-chain, so it must be marked published NOW, not after some later
+    # on-chain confirmation this module never sees. Without this, the ledger
+    # this module reads at the top (`exclude = set(ledger)`) never gains the
+    # sequences this module itself just selected, so the very next epoch
+    # reselects and resubmits the SAME sequences for the SAME still-registered
+    # hotkeys. The validator's own archive-wide duplicate-submission guard
+    # (neurons/validator/nanobody_validity.py: "contains sequences that are
+    # not unique for target") then correctly rejects those resubmissions,
+    # which is how an 11/12-uid fleet collapsed to 1 scored uid at epoch 25614
+    # (the one survivor held a hotkey that had never published before, so the
+    # per-hotkey novelty check still passed for it alone).
+    appended = fleet.record_published(
+        args.ledger, [assignment.sequence for assignment in assignments]
+    )
+    if appended:
+        print(
+            f"children lane: ledger: recorded {len(appended)} newly "
+            "published sequence(s)",
+            flush=True,
+        )
     return 0
 
 
