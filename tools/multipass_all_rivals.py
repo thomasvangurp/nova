@@ -113,8 +113,8 @@ def algo2_score(field: pd.DataFrame) -> pd.Series:
 
 def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                config: Path, scorer: Path, out_root: Path
-               ) -> tuple[dict[str, float], dict[str, dict]]:
-    """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref})."""
+               ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
+    """One fast-scorer pass -> (rank_sum, cif_ref, raw_metrics) per sequence."""
     inp = out_root / f"input_{run}.json"
     inp.write_text(json.dumps({"sequences": [{"sequence": s} for s in sequences]}))
     out_dir = out_root / f"score{run}"
@@ -168,7 +168,7 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
                 "writer_path": rec.get("writer_path"),
                 "sample_selection": rec.get("sample_selection"),
             }
-    return ranks, structures
+    return ranks, structures, rows
 
 
 def main() -> int:
@@ -211,11 +211,14 @@ def main() -> int:
 
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
+    per_pass_metrics: list[dict[str, dict[str, float]]] = []
     for run in range(1, n + 1):
-        ranks, structs = score_pass(sequences, run, archive=archive, config=config,
-                                    scorer=scorer, out_root=out_root)
+        ranks, structs, metrics = score_pass(sequences, run, archive=archive,
+                                             config=config, scorer=scorer,
+                                             out_root=out_root)
         per_pass.append(ranks)
         per_pass_structures.append(structs)
+        per_pass_metrics.append(metrics)
         print(f"  pass {run}/{n} done", flush=True)
 
     # A sequence can be rejected by the scorer in some passes (liability/fold
@@ -231,8 +234,8 @@ def main() -> int:
     try:
         from nanobody_opt.mutation_network import update_observation_store
         observations = []
-        for run, (ranks, structs) in enumerate(
-            zip(per_pass, per_pass_structures), start=1
+        for run, (ranks, structs, metrics) in enumerate(
+            zip(per_pass, per_pass_structures, per_pass_metrics), start=1
         ):
             for seq, score in ranks.items():
                 observations.append({
@@ -244,6 +247,7 @@ def main() -> int:
                     "score_kind": "local_validator_replay_rank_sum",
                     "score": float(score),
                     "observation_count": 1,
+                    "metrics": metrics.get(seq),
                     "structure": structs.get(seq),
                 })
         written = update_observation_store(
