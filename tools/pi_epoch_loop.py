@@ -57,6 +57,137 @@ ASSUMED_MAX_CREW = 20
 MIN_PRODUCER_WAIT_BLOCKS = 20
 
 
+# --- producer identity (ARCHITECTURE_REDESIGN P1 / R4) ----------------------
+#
+# For epochs 25613-25617 this loop committed the children-lane artifact
+# (publication_stage=children, a 300-sequence frozen bank) on every uid and
+# logged rc=0 each time: nothing here read WHO produced the artifact, and the
+# only quality gate (>= 8 observations) was met exactly. The real publisher,
+# tools/publish_current_nanobody.py, only ever writes publication_stage
+# "provisional" or "qualified"; any other writer must use a different stage
+# (children_submit.py writes "children").
+#
+# Phase A (always on): every final pull is checked; a mismatch logs
+# UNEXPECTED_PRODUCER here and in producer_alerts.log, and the liveness
+# checker alerts on it. The commit is NOT changed.
+# Phase B (OFF by default): with the toggle file below present -- or
+# --refuse-unexpected-producer -- an unexpected artifact is not committed; the
+# last artifact that passed this check is committed instead (rebound to the
+# fresh crew through the existing --allow-stale-nanobody path), or, if none
+# exists, no nanobody is committed this epoch. Enable deliberately:
+#     touch /opt/nova-submit/REFUSE_UNEXPECTED_PRODUCER     (off: rm it)
+# It is read every epoch; no restart is needed either way.
+EXPECTED_ARTIFACT_KIND = "nanobody-fleet"
+EXPECTED_PUBLICATION_STAGES = frozenset({"provisional", "qualified"})
+# Layer 1 of R4 (an explicit producer name in the artifact) is not deployed
+# yet; once it is, any value outside this set is unexpected too.
+EXPECTED_PRODUCER_NAMES = frozenset({"publish_current_nanobody"})
+REFUSE_TOGGLE_NAME = "REFUSE_UNEXPECTED_PRODUCER"
+LAST_EXPECTED_NAME = "nanobody_result.last_expected.json"
+PI_ALERTS = Path("/opt/nova-submit/producer_alerts.log")
+
+
+def artifact_provenance(path: Path) -> tuple[bool, dict]:
+    """(expected, evidence) for the nanobody artifact at ``path``."""
+    try:
+        artifact = json.loads(Path(path).read_text())
+    except Exception as error:
+        return False, {"problems": [f"unreadable: {type(error).__name__}: {error}"[:160]]}
+    if not isinstance(artifact, dict):
+        return False, {"problems": ["artifact is not a JSON object"]}
+    submissions = artifact.get("submissions") or []
+    sub_stages = sorted({str(item.get("publication_stage"))
+                         for item in submissions if isinstance(item, dict)})
+    producer = artifact.get("producer")
+    producer_name = producer.get("name") if isinstance(producer, dict) else None
+    evidence = {
+        "artifact_epoch": artifact.get("epoch"),
+        "artifact_kind": artifact.get("artifact_kind"),
+        "publication_stage": artifact.get("publication_stage"),
+        "status": artifact.get("status"),
+        "submission_stages": sub_stages,
+        "sequence_pool_size": artifact.get("sequence_pool_size"),
+        "producer_name": producer_name,
+    }
+    problems = []
+    if artifact.get("artifact_kind") != EXPECTED_ARTIFACT_KIND:
+        problems.append(f"artifact_kind={artifact.get('artifact_kind')!r}")
+    if artifact.get("publication_stage") not in EXPECTED_PUBLICATION_STAGES:
+        problems.append(f"publication_stage={artifact.get('publication_stage')!r}")
+    if artifact.get("status") not in EXPECTED_PUBLICATION_STAGES:
+        problems.append(f"status={artifact.get('status')!r}")
+    odd = [stage for stage in sub_stages if stage not in EXPECTED_PUBLICATION_STAGES]
+    if odd:
+        problems.append(f"submission publication_stage={odd}")
+    if producer is not None and producer_name not in EXPECTED_PRODUCER_NAMES:
+        problems.append(f"producer.name={producer_name!r}")
+    evidence["problems"] = problems
+    return not problems, evidence
+
+
+def refuse_unexpected_enabled(a) -> bool:
+    if getattr(a, "refuse_unexpected_producer", False):
+        return True
+    return (ROOT / REFUSE_TOGGLE_NAME).exists()
+
+
+def pi_alert(level: str, message: str) -> None:
+    try:
+        with PI_ALERTS.open("a") as handle:
+            handle.write(time.strftime("%Y-%m-%d %H:%M:%S %z")
+                         + f" [{level}] {message}\n")
+    except OSError:
+        pass
+
+
+def check_producer_identity(a, epoch: int, nanobody: Path) -> bool:
+    """Phase A always; Phase B only when enabled. Returns True when the
+    artifact was replaced by the last expected one (commit must then pass
+    --allow-stale-nanobody)."""
+    ok, evidence = artifact_provenance(nanobody)
+    if ok:
+        try:
+            shutil.copy2(nanobody, ROOT / LAST_EXPECTED_NAME)
+        except OSError as error:
+            say(event="last_expected_save_failed", err=str(error)[:120])
+        say(event="producer_identity_ok", epoch=epoch,
+            stage=evidence["publication_stage"],
+            pool=evidence["sequence_pool_size"])
+        return False
+    refuse = refuse_unexpected_enabled(a)
+    say(event="UNEXPECTED_PRODUCER", epoch=epoch, refuse_enabled=refuse, **evidence)
+    pi_alert("ERROR", f"UNEXPECTED_PRODUCER epoch={epoch} "
+                      f"problems={evidence['problems']} refuse_enabled={refuse}")
+    if not refuse:
+        return False
+    # Phase B: keep the refused artifact for forensics, then substitute.
+    try:
+        refused_dir = ROOT / "archive" / f"epoch{epoch}"
+        refused_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(nanobody, refused_dir / "nanobody_result.refused.json")
+    except OSError:
+        pass
+    last = ROOT / LAST_EXPECTED_NAME
+    last_ok, last_evidence = artifact_provenance(last) if last.is_file() else (False, {})
+    if last_ok:
+        shutil.copy2(last, nanobody)
+        say(event="unexpected_producer_refused", epoch=epoch, using="last_expected",
+            using_epoch=last_evidence.get("artifact_epoch"))
+        pi_alert("ERROR", f"UNEXPECTED_PRODUCER refused at epoch {epoch}; committing "
+                          f"last expected artifact from epoch {last_evidence.get('artifact_epoch')}")
+        return True
+    nanobody.write_text(json.dumps({
+        "schema_version": 4, "artifact_kind": EXPECTED_ARTIFACT_KIND,
+        "status": "refused", "publication_stage": "refused", "epoch": epoch,
+        "submissions": [], "sequence_pool": [], "sequence_pool_size": 0,
+        "unassigned_uids": []}))
+    say(event="unexpected_producer_refused", epoch=epoch, using="none",
+        why="no previously expected artifact on disk; no nanobody this epoch")
+    pi_alert("ERROR", f"UNEXPECTED_PRODUCER refused at epoch {epoch}; no expected "
+                      "artifact available, committing no nanobody")
+    return True
+
+
 def commit_reserve(uids: int) -> int:
     """How many blocks the commit run itself needs, plus the blackout.
 
@@ -245,6 +376,10 @@ def main() -> int:
                              "the final pull and the crew refresh")
     parser.add_argument("--confirmation-min-observations", type=int, default=8,
                         help="observation depth reported as 'deep' in the late-commit log")
+    parser.add_argument("--refuse-unexpected-producer", action="store_true",
+                        help="Phase B of the producer-identity check: do not commit an "
+                             "artifact the real publisher did not write. Off by default; "
+                             f"the file <root>/{REFUSE_TOGGLE_NAME} enables it too")
     parser.add_argument("--dry-run", action="store_true")
     a = parser.parse_args()
     global PI, ROOT
@@ -817,6 +952,16 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 return
         else:
             say(event="pulled")
+
+        # Who wrote what we are about to commit (P1 / R4). Must never cost the
+        # epoch: any error in the check itself is logged and ignored.
+        try:
+            if a.on_submit_host and check_producer_identity(
+                    a, epoch, Path("/opt/nova-submit/nanobody_result.json")):
+                stale_ok = True
+        except Exception as error:
+            say(event="producer_identity_check_error",
+                err=f"{type(error).__name__}: {error}"[:200])
 
         # The initial roster preceded a provider lookup and an artifact pull.
         # Refresh after both, immediately before planning, so a recycled UID is
