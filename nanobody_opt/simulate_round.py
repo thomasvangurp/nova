@@ -87,8 +87,99 @@ def category_rank_sums(mine: dict, field: pd.DataFrame) -> dict[str, float]:
 
 
 def rank_sum_in_field(mine: dict, field: pd.DataFrame) -> float:
-    """Validator ``rank_sum`` of ``mine`` against a competitor field."""
+    """Validator ``rank_sum`` of ``mine`` against a competitor field.
+
+    NOTE: this sums the three category rank-sums directly (equivalently, all ten
+    metric dense ranks), which skips the validator's per-category rank step.  It
+    is a looser proxy than :func:`validator_final_scores`, which reproduces the
+    published ``final_score`` (rho ~0.92 vs the public API).
+    """
     return float(sum(category_rank_sums(mine, field).values()))
+
+
+def validator_final_scores(
+    frame: pd.DataFrame,
+    categories: dict[str, tuple[str, ...]] = METRIC_CATEGORIES,
+) -> np.ndarray:
+    """Exact validator ``final_score`` for every row: rank each category, sum ranks.
+
+    The validator does NOT sum all ten metric ranks directly. It computes, per
+    category, the sum of that category's dense metric ranks, then ranks that
+    category-sum within the field (dense, lower = better), and sums the three
+    category ranks. This is the ``final_score`` the leaderboard publishes as
+    ``confidence_rank + physical_interaction_rank + developability_rank``,
+    recovered by regression against the public API (rho ~0.92 vs published
+    ``final_score``, versus ~0.56 for the old minmax-weighted proxy).
+
+    Prefer this over :func:`rank_sum_in_field` for anything that must predict a
+    live rank. Requires all ten metrics, including ``interaction_pae`` which the
+    NIM fast adapter cannot emit; use the exact scorer's metrics.
+    """
+    total = np.zeros(len(frame), dtype=np.float64)
+    for category, names in categories.items():
+        directions = {name: METRICS[name] for name in names}
+        category_sum = dense_rank_sums(frame, directions)
+        total += (
+            pd.Series(category_sum)
+            .rank(method="dense", ascending=True, na_option="keep")
+            .to_numpy()
+        )
+    return total
+
+
+def validator_scores_from_observations(
+    observations: list[dict],
+    *,
+    score_kind: str = "local_exact_validator_replay_rank_sum",
+    by_epoch: bool = True,
+) -> dict[str, float]:
+    """Per-sequence validator ``final_score`` from stored exact-scorer metrics.
+
+    ``observations`` is the list returned by
+    ``mutation_network.load_observations(path, target)``; each dict carries
+    ``sequence``, ``score_kind``, ``epoch`` and ``metrics`` (the ten raw BoltzGen
+    metrics). Only rows whose ``score_kind`` matches are kept -- the exact
+    full-BoltzGen replay, which carries ``interaction_pae`` that the fast NIM
+    adapter cannot emit and that the confidence component depends on.
+
+    The validator ranks a submission against the ~50 others in *its* epoch, so
+    with ``by_epoch`` (default) the field is the observations sharing an epoch;
+    otherwise one global field over all observations. Sequences scored multiple
+    times are averaged. Lower is better.
+    """
+    records = []
+    for obs in observations:
+        if obs.get("score_kind") != score_kind:
+            continue
+        metrics = obs.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        if any(metrics.get(name) is None for name in METRICS):
+            continue
+        records.append((str(obs["sequence"]), int(obs.get("epoch") or 0), metrics))
+    if not records:
+        return {}
+
+    def _score_group(group: list[tuple[str, int, dict]]) -> dict[str, float]:
+        frame = pd.DataFrame([m for _, _, m in group])
+        scores = validator_final_scores(frame)
+        out: dict[str, list[float]] = {}
+        for (seq, _epoch, _m), score in zip(group, scores):
+            if not np.isnan(score):
+                out.setdefault(seq, []).append(float(score))
+        return {seq: float(np.mean(v)) for seq, v in out.items()}
+
+    if by_epoch:
+        by_epoch_map: dict[int, list[tuple[str, int, dict]]] = {}
+        for rec in records:
+            by_epoch_map.setdefault(rec[1], []).append(rec)
+        merged: dict[str, list[float]] = {}
+        for group in by_epoch_map.values():
+            for seq, score in _score_group(group).items():
+                merged.setdefault(seq, []).append(score)
+        return {seq: float(np.mean(v)) for seq, v in merged.items()}
+
+    return _score_group(records)
 
 
 def main():
