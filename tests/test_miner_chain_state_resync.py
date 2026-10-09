@@ -80,3 +80,49 @@ def test_export_carries_the_synced_roster_block():
     publish = source[source.index("def _publish_chain_state"):][:2000]
     assert 'roster_block=state.get("roster_block")' in publish
 
+
+
+def test_publisher_refuses_a_frozen_roster(tmp_path):
+    """Ported with the check from 2e299e6: a file that is fresh by every
+    other check, whose neuron rows are far older than two epochs."""
+    import json, time, importlib.util, sys
+    spec = importlib.util.spec_from_file_location(
+        "pub_mod", Path(__file__).resolve().parent.parent
+        / "tools" / "publish_current_nanobody.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pub_mod"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        import pytest
+        pytest.skip("publisher module needs its runtime deps")
+    state = tmp_path / "chain_state.json"
+    base = {"schema_version": 2, "netuid": 68, "block": 9116479,
+            "epoch_length": 361, "epoch": 9116479 // 361,
+            "nanobody_target": "P20809", "miner_uid": 6,
+            "neurons": [{"uid": 6, "hotkey": "hk", "coldkey": "ck"}],
+            "updated_at_unix": time.time()}
+
+    state.write_text(json.dumps({**base, "roster_block": 9116470}))
+    mod._chain_view(state, 68, 600)          # fresh roster: accepted
+
+    limit = mod.MAX_ROSTER_AGE_BLOCKS
+    state.write_text(json.dumps({**base, "roster_block": 9116479 - limit}))
+    mod._chain_view(state, 68, 600)          # exactly at the limit: accepted
+
+    for stale in (9116479 - limit - 1, 9000000):
+        state.write_text(json.dumps({**base, "roster_block": stale}))
+        try:
+            mod._chain_view(state, 68, 600)
+        except RuntimeError as error:
+            assert "roster is stale" in str(error)
+        else:
+            raise AssertionError(f"published against a roster synced at {stale}")
+
+    state.write_text(json.dumps(base))       # no roster_block at all
+    try:
+        mod._chain_view(state, 68, 600)
+    except RuntimeError as error:
+        assert "roster_block" in str(error)
+    else:
+        raise AssertionError("accepted a payload with no roster age at all")

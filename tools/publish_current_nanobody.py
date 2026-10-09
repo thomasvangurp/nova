@@ -157,6 +157,12 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
         yield
 
 
+#: A roster older than this has missed at least one epoch boundary, which is
+#: the signature of a miner that has stopped re-syncing. Two epochs of slack
+#: so a single failed sync warns rather than halts publication.
+MAX_ROSTER_AGE_BLOCKS = 800
+
+
 def _chain_view(chain_state: Path, netuid: int, max_age: float) -> ChainView:
     """Read the chain view exported by the already-connected miner process.
 
@@ -184,6 +190,27 @@ def _chain_view(chain_state: Path, netuid: int, max_age: float) -> ChainView:
         raise RuntimeError("miner chain-state epoch is internally inconsistent")
     if age < -5 or age > max_age:
         raise RuntimeError(f"miner chain-state is stale: age={age:.1f}s")
+    # The FILE being fresh says nothing about the ROSTER being fresh. The
+    # miner re-synced its metagraph only when block % epoch_length == 0, a
+    # condition its loop stepped over every time, so for five days it
+    # exported a roster frozen at process start under an ever-advancing
+    # block. Every freshness check passed and we kept assigning sequences to
+    # a uid that had been re-registered to another coldkey -- two of eight
+    # slots discarded per epoch, silently. Refuse a roster that has not been
+    # re-synced within MAX_ROSTER_AGE_BLOCKS rather than publish against it.
+    roster_block = payload.get("roster_block")
+    if roster_block is None:
+        raise RuntimeError(
+            "miner chain-state carries no roster_block; the miner predates "
+            "roster-age reporting and may be exporting a frozen roster"
+        )
+    roster_age = block - int(roster_block)
+    if roster_age < 0 or roster_age > MAX_ROSTER_AGE_BLOCKS:
+        raise RuntimeError(
+            "miner chain-state roster is stale: synced at block %d, now %d "
+            "(%d blocks); the miner is not re-syncing its metagraph"
+            % (int(roster_block), block, roster_age)
+        )
     try:
         neurons = fleet_module.neuron_rows(payload.get("neurons"))
     except (KeyError, TypeError, ValueError) as error:
