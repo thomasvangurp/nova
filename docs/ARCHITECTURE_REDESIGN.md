@@ -201,6 +201,136 @@ pool is wanted later:
        25630–25632. No `MUTATION_DB_UPDATE_FAILED` has been logged since
        the deploy, and `pipeline_failures.jsonl` was last written at
        02:14Z.
+8. **Local SQLite primary for master's own write path, replicated (2026-10-10).
+   Not live yet.** The write half is commit 33f6e15 (`NOVA_LOCAL_SQLITE=1`,
+   off by default). It removes the master→Hetzner round-trips that finding 5
+   only batched. A local-only store is not safe as a primary on a box that
+   is expected to die (the slave box's 20x data was recovered by hand from
+   leftover files on 2026-10-10). This entry's replication half is what makes
+   it safe. It runs two independent legs:
+   - **Leg 1: Hetzner MySQL, near real time** (`nanobody_opt/replicate_local.py`).
+     - **Node ids are remapped by identity.** `nodes.id` is a surrogate
+       AUTOINCREMENT. It is assigned separately here and on Hetzner, and
+       every other box also advances Hetzner's counter, so local id 17 can
+       be a different sequence remotely. The first-pass replicator copied
+       raw ids. That would have attached observations and lineage to the
+       wrong sequences without raising any error. Now no local id is ever
+       sent. Each local node is resolved to Hetzner's id for the same
+       (target, sequence), inserted if missing, and then `node_id`,
+       `parent_node_id` and `child_node_id` are rewritten. The mapping is
+       cached in `replication_node_map` only after the Hetzner commit that
+       produced it, so an id from a rolled-back insert is never reused. A
+       remote match must be byte-identical. The server collation
+       `utf8mb4_0900_ai_ci` is case-insensitive, so a case variant is
+       quarantined, not merged. Reserving an id range would not have
+       solved this. A sequence another box already wrote still has a
+       different remote id, so remapping is needed either way.
+     - **Rows are marked only after send, and only the version sent.**
+       `replicated_at IS NULL` means dirty. A random `repl_token` is redrawn
+       on every insert (column default) and on every update that changes a
+       data column (triggers in `local_schema.sql`). Rows are marked
+       `WHERE rowid=? AND repl_token=?` after the Hetzner commit. A row the
+       producer rewrites while its old version is in flight therefore stays
+       dirty and is sent again. A crash anywhere costs only a re-send of
+       idempotent upserts.
+     - **One bad row cannot wedge the queue.** If Hetzner refuses a batch
+       with a data error (for example, varchar overflow or a dangling node
+       reference), the batch is split in half repeatedly. Only the bad rows
+       are quarantined (`replicated_at=-1` plus `replication_quarantine`).
+       Lock conflicts (1213/1205) with other writers retry the same batch.
+       Nodes commit in their own short transaction, because holding their
+       locks through the multi-MB upsert deadlocked against concurrent
+       node inserts in the soak.
+     - **The exact-run barrier is preserved.** A run and its observation
+       list replicate as one unit: upsert, then DELETE + INSERT of the
+       members, mirroring `record_exact_run`. The run waits until every
+       member observation is confirmed on Hetzner. So Hetzner never shows
+       `complete=1` with rows missing.
+     - **Not replicated:** `edges`, `mutation_effects`,
+       `metadata(graph_version:*)` and `proposal_scores`. The first three
+       are derived snapshots that `rebuild_nearest_edges` recomputes from
+       nodes and observations. Pushing this box's local snapshot would
+       overwrite the `graph_version` pointer other boxes read.
+       `proposal_scores` has 0 rows and no code. Local deletes do not
+       propagate, except exact-run membership. The write path deletes
+       nothing else.
+     - **Cadence: one long-running loop**
+       (`deploy/producer/replicate_local_loop.sh`, `--loop-interval 30`).
+       It drains back to back while there is a backlog and polls every 30 s
+       when idle. It is single-instance via flock, and failures back off up
+       to 5 min. It is never on the producer's path: the race only writes
+       the local file. Expected staleness is ≤ ~30 s plus the drain time.
+       A per-iteration trigger would tie the producer to Hetzner's health
+       and let staleness grow to 10–18 min. A cron or one-shot run pays
+       ~3 s of connect over the tunnel each time and can overlap.
+       Health is in `<db>.replication_status.json` (`ok`, `last_ok_at`,
+       `dirty`, `quarantined`). A Hetzner restore or renumbering needs
+       `--mark-all-dirty`, which re-sends everything idempotently.
+   - **Leg 2: this Mac, file level** (`tools/pull_local_sqlite_backup.py`,
+     run by `deploy/macos/backup_all.sh`, the existing 30-min
+     `ai.nova.nanobody-backup` LaunchAgent).
+     - It uses SQLite's official `sqlite3_rsync` 3.54.0. It is live-safe
+       on both ends and gives a consistent snapshot as of sync start. Only
+       differing pages travel.
+     - The box is found by vast.ai label. The tool's binary is
+       auto-installed on a fresh box. The script runs `quick_check` and row
+       counts, then keeps 14 daily restore points under
+       `~/nova-backups/local-sqlite/`.
+     - The existing `backup_artifacts.sh` gzip snapshots of the same path
+       (24 × 30 min) are kept as the short point-in-time history.
+     - The sqlite.org Linux build needs glibc 2.38 and master has 2.35, so
+       the master binary was built there from the 3.54.0 sources (recipe in
+       the script's docstring).
+     - Until the write path goes live it reports `remote_absent`, because
+       the file on master is 0 bytes.
+   - **Evidence.** All runs used a sandbox MySQL 8.0 container on Hetzner
+     (127.0.0.1-bound, reached from master through an ssh tunnel with
+     232 ms RTT) and scratch files under `/root/scratch/repl`. No
+     production table or file was touched.
+     - `tools/replication_soak.py` setup:
+       - the real `update_observation_store` with `NOVA_LOCAL_SQLITE=1`
+         wrote 3 × 10,000-row tranches built from 300 real 25631 payloads;
+       - 2,000 in-place rewrites per tranche, one exact run per tranche,
+         and a post-hoc membership rewrite;
+       - 50,500 pre-seeded remote nodes, 500 of them our own sequences
+         under other ids;
+       - a concurrent "other box" inserting ~27.5k remote nodes;
+       - one varchar-overflow poison row.
+     - Soak 1: 38 random SIGKILLs. Soak 2: 28 random SIGKILLs plus 14
+       self-SIGKILLs injected exactly between the Hetzner commit and the
+       local mark (7 nodes, 5 observations, 2 lineage batches). Both
+       passed every check:
+       - all 29,999 observations identical by (target, sequence), the
+         poison row quarantined;
+       - all lineage edges equal on both endpoints' identities (9,056 /
+         9,028), and all artifacts equal;
+       - exact runs and their members identical, with no complete run
+         missing members;
+       - 0 duplicate remote identities, all 34.5k map entries naming the
+         same identity, and 0 entries where the raw local id equals the
+         remote id;
+       - the seeded remote nodes unchanged (CRC check).
+     - Throughput: median 1.2–1.3 s per 1,000-row observation batch
+       (p90 1.7 s), so ~13 s for a 10k tranche. The writer's local write
+       took 0.9–1.5 s per tranche.
+     - `tests/test_replicate_local.py` (9 tests against a real MySQL)
+       covers the colliding-id remap, a crash in the commit window, an
+       in-flight rewrite, an identical re-upsert, poison and dangling rows,
+       a case-variant identity, the exact-run barrier and membership
+       rewrite, and refusal of an old schema.
+     - The Mac leg pulled the soak DB while it was being written: 32.8 MB
+       the first time, then a 57 KB delta, `quick_check` ok.
+   - **Before wiring the live path, the write-path owner must check two
+     things in 33f6e15:**
+     - `record_exact_run` still uses MySQL `%s` SQL. It will fail under
+       `NOVA_LOCAL_SQLITE=1`.
+     - `_LocalCursor` has no `__iter__`, and `record_exact_run` iterates a
+       cursor.
+
+     The replicator must also start in the same change that flips the flag.
+     It refuses a store without `repl_token` and the triggers
+     (`REPLICATE_LOCAL_SCHEMA_REFUSED`). It applies `local_schema.sql`
+     itself, because `LocalConnection` applies the schema only to a new file.
 
 ---
 
