@@ -141,6 +141,85 @@ def fig_rates_vs_rivals(data, top: int = 4, window: int = 30,
 
 MULTIPASS_COMPARISON = Path(__file__).resolve().parent / "multipass_comparison.json"
 
+# How each epoch's multipass numbers were measured. New box output carries a
+# per-epoch ``method`` block (tools/multipass_all_rivals.py). Epochs written
+# before that are classified from the 2026-10-09 audit (docs/OBSERVATION_LABELS.md):
+#
+# * <= 25612: every box JSON was rewritten on 2026-10-09 (17:26-18:13Z) by
+#   one-off API back-fills: sum10 of the VALIDATOR'S PUBLISHED single-pass
+#   metrics vs the HF archive. Verified: rho=1.000 against sum10 of the API
+#   metrics for 25533/25560/25593/25603/25610-25612. All values are integers.
+# * >= 25613: 10-pass means of our local fast scorer, sum10 vs the HF archive.
+#   Against the API metrics rho is only 0.2-0.5.
+#
+# Same formula and the same ~1.2e5 scale, but a different measurement, so
+# the panels never join, smooth or compare across the boundary.
+MULTIPASS_METHOD_LABELS = {
+    "validator_published_single_pass": "validator-published metrics, 1 pass",
+    "local_fast_scorer_multipass_mean": "local fast scorer, multi-pass mean",
+}
+LEGACY_API_BACKFILL_LAST_EPOCH = 25612
+
+
+def _multipass_method(epoch: int, row) -> str:
+    """Measurement regime key for one epoch row (see MULTIPASS_METHOD_LABELS)."""
+    method = row.get("method") if isinstance(row, dict) else None
+    if isinstance(method, dict) and method.get("measurement"):
+        return f"{method.get('formula') or '?'}:{method['measurement']}"
+    if epoch <= LEGACY_API_BACKFILL_LAST_EPOCH:
+        return "sum10:validator_published_single_pass"
+    return "sum10:local_fast_scorer_multipass_mean"
+
+
+def _method_label(method: str) -> str:
+    formula, _, measurement = method.partition(":")
+    return f"{formula} · {MULTIPASS_METHOD_LABELS.get(measurement, measurement)}"
+
+
+def _method_segments(epochs, methods):
+    """``[(method, first_epoch, last_epoch)]`` runs of one method, in order."""
+    out = []
+    for epoch, method in zip(epochs, methods):
+        if out and out[-1][0] == method:
+            out[-1] = (method, out[-1][1], epoch)
+        else:
+            out.append((method, epoch, epoch))
+    return out
+
+
+def _gap_at_method_change(xs, ys, methods_by_x, *extra):
+    """Insert a None point wherever the method changes, so no line crosses a
+    regime boundary. ``extra`` lists are padded in step (with None/"")."""
+    out_x, out_y = [], []
+    out_extra = [[] for _ in extra]
+    previous = None
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        method = methods_by_x.get(x)
+        if previous is not None and method != previous:
+            out_x.append(x - 0.5); out_y.append(None)
+            for lst in out_extra:
+                lst.append(None)
+        previous = method
+        out_x.append(x); out_y.append(y)
+        for lst, src in zip(out_extra, extra):
+            lst.append(src[i])
+    return (out_x, out_y, *out_extra)
+
+
+def _mark_method_boundaries(figure, segments, *, categorical_index=None) -> None:
+    """Dashed line at every boundary plus a label over each regime."""
+    for i, (method, first, last) in enumerate(segments):
+        if categorical_index is not None:
+            x0, x1 = categorical_index[str(first)], categorical_index[str(last)]
+        else:
+            x0, x1 = first, last
+        if i > 0:
+            figure.add_vline(x=x0 - 0.5, line=dict(color=WARN, dash="dash", width=1.5))
+        figure.add_annotation(
+            x=(x0 + x1) / 2, y=1.0, xref="x", yref="paper", yanchor="bottom",
+            text=_method_label(method), showarrow=False,
+            font=dict(color=WARN if len(segments) > 1 else MUTED, size=11))
+
 
 def _normalize_multipass_actor(value):
     """Return ``{"mean", "stdev", "fleet_size", "scores"}`` or None.
@@ -268,24 +347,33 @@ def fig_multipass_vs_rival(path: Path | None = None,
 
     ours_x, ours_y, ours_err, ours_hover = [], [], [], []
     rival_buckets: dict[str, dict] = {}
+    methods: dict[int, str] = {}
     for epoch in epochs:
         row = payload.get(str(epoch))
         if not isinstance(row, dict):
             continue
+        methods[epoch] = _multipass_method(epoch, row)
+        tag = _method_label(methods[epoch])
         ours = _normalize_multipass_actor(row.get("ours"))
         ours_x.append(epoch)
         if ours is None:
             ours_y.append(None); ours_err.append(None); ours_hover.append("")
         else:
             ours_y.append(ours["mean"]); ours_err.append(ours["stdev"])
-            ours_hover.append(_multipass_hover(ours))
+            ours_hover.append(_multipass_hover(ours) + "<br>" + tag)
         for coldkey, actor in _multipass_rivals(row, rival):
             bucket = rival_buckets.setdefault(
                 coldkey, dict(x=[], y=[], err=[], hover=[]))
             bucket["x"].append(epoch)
             bucket["y"].append(actor["mean"])
             bucket["err"].append(actor["stdev"])
-            bucket["hover"].append(_multipass_hover(actor))
+            bucket["hover"].append(_multipass_hover(actor) + "<br>" + tag)
+
+    ours_x, ours_y, ours_err, ours_hover = _gap_at_method_change(
+        ours_x, ours_y, methods, ours_err, ours_hover)
+    for bucket in rival_buckets.values():
+        bucket["x"], bucket["y"], bucket["err"], bucket["hover"] = _gap_at_method_change(
+            bucket["x"], bucket["y"], methods, bucket["err"], bucket["hover"])
 
     figure.add_trace(go.Scatter(
         x=ours_x, y=ours_y, name="US", line=dict(color=OURS, width=3),
@@ -308,6 +396,8 @@ def fig_multipass_vs_rival(path: Path | None = None,
                            "<br>mean rank-sum %{y:,.0f}<br>%{customdata}"
                            "<extra></extra>")))
     figure.update_layout(**LAYOUT)
+    _mark_method_boundaries(figure, _method_segments(
+        sorted(methods), [methods[e] for e in sorted(methods)]))
     figure.update_yaxes(title="multi-pass mean rank-sum (lower = better)",
                         gridcolor="#242a36")
     figure.update_xaxes(title="epoch", gridcolor="#242a36")
@@ -336,10 +426,12 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
 
     ours_x, ours_y, ours_hover = [], [], []
     rival_buckets: dict[str, dict] = {}
+    methods: dict[int, str] = {}
     for epoch in epochs:
         row = payload.get(str(epoch))
         if not isinstance(row, dict):
             continue
+        methods[epoch] = _multipass_method(epoch, row)
         ours = _normalize_multipass_actor(row.get("ours"))
         ours_x.append(epoch)
         if ours is None:
@@ -358,7 +450,21 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
 
     strongest = sorted(rival_buckets, key=lambda ck: _mean(rival_buckets[ck]))[:top]
 
-    ours_x, ours_y = _trailing_mean(ours_x, ours_y)
+    def _smooth(xs, ys, hover):
+        """Trailing mean that restarts at every method boundary, with a gap
+        there: a window never averages two measurement regimes."""
+        out_x, out_y, out_h = [], [], []
+        start = 0
+        for i in range(1, len(xs) + 1):
+            if i == len(xs) or methods.get(xs[i]) != methods.get(xs[start]):
+                sx, sy = _trailing_mean(xs[start:i], ys[start:i])
+                if out_x:
+                    out_x.append(xs[start] - 0.5); out_y.append(None); out_h.append(None)
+                out_x += sx; out_y += sy; out_h += list(hover[start:i])
+                start = i
+        return out_x, out_y, out_h
+
+    ours_x, ours_y, ours_hover = _smooth(ours_x, ours_y, ours_hover)
     figure.add_trace(go.Scatter(
         x=ours_x, y=ours_y, name="US", line=dict(color=OURS, width=3),
         customdata=ours_hover,
@@ -366,16 +472,18 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
                        "<br>%{customdata}<extra></extra>")))
     for shown, coldkey in enumerate(strongest):
         bucket = rival_buckets[coldkey]
-        x, y = _trailing_mean(bucket["x"], bucket["y"])
+        x, y, hover = _smooth(bucket["x"], bucket["y"], bucket["hover"])
         colour = RIVALS[shown % len(RIVALS)]
         figure.add_trace(go.Scatter(
             x=x, y=y, name=coldkey[:8] + "...",
             line=dict(color=colour, width=1.6),
-            customdata=bucket["hover"],
+            customdata=hover,
             hovertemplate=(coldkey[:8] + "... · epoch %{x}"
                            "<br>10-epoch mean rank-sum %{y:,.0f}<br>%{customdata}"
                            "<extra></extra>")))
     figure.update_layout(**LAYOUT)
+    _mark_method_boundaries(figure, _method_segments(
+        sorted(methods), [methods[e] for e in sorted(methods)]))
     figure.update_yaxes(title="10-epoch mean rank-sum (lower = better)",
                         gridcolor="#242a36")
     figure.update_xaxes(title="epoch", gridcolor="#242a36")
@@ -398,10 +506,12 @@ def fig_multipass_distribution(path: Path | None = None,
     payload = json.loads(path.read_text())
     ours_epochs: dict[str, list] = {}
     rival_epochs: dict[str, dict] = {}
+    methods: dict[str, str] = {}
     for key, row in payload.items():
         if not isinstance(row, dict):
             continue
         epoch = str(key)
+        methods[epoch] = _multipass_method(int(epoch), row)
         ours = _normalize_multipass_actor(row.get("ours"))
         if ours and isinstance(ours.get("scores"), list) and ours["scores"]:
             ours_epochs[epoch] = ours["scores"]
@@ -445,6 +555,10 @@ def fig_multipass_distribution(path: Path | None = None,
                         gridcolor="#242a36")
     figure.update_xaxes(title="epoch", gridcolor="#242a36", type="category",
                         categoryorder="array", categoryarray=epoch_order)
+    _mark_method_boundaries(
+        figure, _method_segments([int(e) for e in epoch_order],
+                                 [methods[e] for e in epoch_order]),
+        categorical_index={e: i for i, e in enumerate(epoch_order)})
     return figure
 
 

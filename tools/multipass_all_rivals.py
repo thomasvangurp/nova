@@ -65,6 +65,15 @@ METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
 #   provenance   formula, field rows + sha256, pass index/count, writer, cohort
 PASS_SCORE_KIND = "multipass_sum10_pass"
 WRITER = "multipass_all_rivals"
+# The formula behind PASS_SCORE_KIND. It is registered in
+# nanobody_opt/observation_labels.py, and main() proves that pass_formula()
+# still computes it (golden field) before any GPU work. To change the formula,
+# add a NEW label to the registry and change PASS_SCORE_KIND and
+# PASS_FORMULA_ID together. Never re-use a label: 2026-10-09 algo2 ->
+# category3 -> sum10 all landed under one label (docs/OBSERVATION_LABELS.md).
+PASS_FORMULA_ID = "sum10"
+# What the dashboard JSON's per-epoch "method" says this run measured.
+MEASUREMENT = "local_fast_scorer_multipass_mean"
 #: provenance.cohort of the bounded HF top-up rows (= hf_topup.TOPUP_COHORT).
 TOPUP_COHORT = "hf_top200"
 
@@ -171,6 +180,22 @@ def sum_of_ten(field: pd.DataFrame) -> pd.Series:
             continue
         total += field[metric].rank(method="dense", ascending=(direction == "min"))
     return total
+
+
+def pass_formula(field: pd.DataFrame) -> pd.Series:
+    """The formula every stored pass is ranked with (``PASS_FORMULA_ID``)."""
+    return sum_of_ten(field)
+
+
+def assert_pass_label() -> None:
+    """Refuse to run if PASS_SCORE_KIND/PASS_FORMULA_ID/pass_formula disagree
+    with the label registry (raises observation_labels.LabelViolation)."""
+    here = Path(__file__).resolve().parent
+    for root in (here, here.parent):  # box: /root; repo: tools/..
+        if (root / "nanobody_opt").is_dir() and str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+    from nanobody_opt import observation_labels
+    observation_labels.assert_formula(PASS_SCORE_KIND, PASS_FORMULA_ID, pass_formula)
 
 
 def topup_settings() -> dict:
@@ -287,7 +312,7 @@ def pass_observations(*, epoch: int, run: int, passes: int,
             "structure": structs.get(seq),
             # Every key below lands in provenance_json.
             "writer": WRITER,
-            "formula": "sum10",
+            "formula": PASS_FORMULA_ID,
             "cohort": cohort_of.get(seq, "rival"),
             "pass_index": run,
             "passes": passes,
@@ -342,7 +367,7 @@ def rank_pass_payload(payload: dict, archive: pd.DataFrame
     # then returns a multi-row Series for it and float(scores[seq]) blows up.
     # Keep the rival's (last) row so the fresh multipass score wins the overlap.
     field = field[~field.index.duplicated(keep="last")]
-    scores = sum_of_ten(field)  # index = sequence (sum-of-10, lower = better)
+    scores = pass_formula(field)  # PASS_FORMULA_ID; lower = better
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.
@@ -364,6 +389,8 @@ def main() -> int:
         return 2
     epoch = int(sys.argv[1])
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+    # Before any GPU time: the label we write must still mean this formula.
+    assert_pass_label()
     archive_path = Path(sys.argv[3]) if len(sys.argv) > 3 else Path(
         f"/root/live/epoch{epoch}/producer/archive.csv")
     config = Path(sys.argv[4]) if len(sys.argv) > 4 else Path(
@@ -544,6 +571,18 @@ def main() -> int:
         "ours": None,
         "rivals": {},
         "sequences": {s: float(seq_means[s]) for s in common},
+        # How these numbers were made, so the dashboard never joins two
+        # measurement regimes into one line (docs/OBSERVATION_LABELS.md).
+        "method": {
+            "score_kind": PASS_SCORE_KIND,
+            "formula": PASS_FORMULA_ID,
+            "measurement": MEASUREMENT,
+            "passes": n,
+            "field": field.get("field"),
+            "field_rows": field.get("field_rows"),
+            "field_sha256": field.get("field_sha256"),
+            "writer": WRITER,
+        },
         # The bounded HF top-up that rode along (R1). Counts only: its
         # sequences are parent candidates, not part of this epoch's field.
         "topup": {

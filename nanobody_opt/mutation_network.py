@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import pickle
+import sys
 import os
 import tempfile
 import time
@@ -587,6 +588,24 @@ def update_observation_store(
     """
     if not isinstance(observations, (list, tuple)):
         observations = list(observations)
+    # Label registry (ARCHITECTURE_REDESIGN R3/P4): a score_kind names one
+    # scale. Strict labels (multipass, closed legacy) refuse a wrong writer,
+    # formula or source; the rest warn on stderr. Checked before any write, so
+    # a refused batch writes nothing. A registry import/bug never blocks a
+    # write; only a real LabelViolation does.
+    try:
+        from nanobody_opt import observation_labels
+    except Exception as error:  # noqa: BLE001
+        print(f"OBSERVATION_LABEL_REGISTRY_UNAVAILABLE {type(error).__name__}: {error}",
+              file=sys.stderr, flush=True)
+    else:
+        try:
+            observation_labels.check_observations(observations)
+        except observation_labels.LabelViolation:
+            raise
+        except Exception as error:  # noqa: BLE001
+            print(f"OBSERVATION_LABEL_CHECK_ERROR {type(error).__name__}: {error}",
+                  file=sys.stderr, flush=True)
     written = 0
     last_commit = time.monotonic()
     with _connect(path) as connection:

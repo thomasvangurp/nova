@@ -103,6 +103,10 @@ def main() -> int:
     from nanobody_opt import db
     from nanobody_opt.mutation_network import update_observation_store
 
+    # The re-derived scores go under mp.PASS_SCORE_KIND: the label registry
+    # must agree that mp.pass_formula still computes its formula.
+    mp.assert_pass_label()
+
     archive = pd.read_csv(args.archive).drop_duplicates("sequence", keep="last")
     archive["sequence"] = archive["sequence"].astype(str).str.upper()
     field = mp.field_fingerprint(args.archive, archive)
