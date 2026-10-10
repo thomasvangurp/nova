@@ -84,7 +84,7 @@ def _cached_igblast(
           f"{len(missing):,} missing", flush=True)
     chunks = [missing[start : start + batch_size]
               for start in range(0, len(missing), batch_size)]
-    workers = max(1, min(128, concurrency, len(chunks))) if chunks else 0
+    workers = max(1, min(200, concurrency, len(chunks))) if chunks else 0
     completed = 0
 
     def checkpoint(chunk, scored):
@@ -230,7 +230,7 @@ def main() -> None:
         hashlib.sha256(row["sequence"].encode("ascii")).hexdigest(): row["sequence"]
         for row in rows
     }
-    igblast_concurrency = max(1, min(128, args.igblast_concurrency))
+    igblast_concurrency = max(1, min(200, args.igblast_concurrency))
     igblast_batch_size = max(1, args.igblast_batch_size)
     scored = _cached_igblast(
         keyed, args.cache_dir, igblast_concurrency, igblast_batch_size
@@ -309,7 +309,7 @@ def main() -> None:
         return
 
     if survivors:
-        concurrency = max(1, min(128, args.concurrency))
+        concurrency = max(1, min(200, args.concurrency))
         dev_results = _cached_developability(survivors, args.cache_dir, concurrency)
         for row, result in zip(survivors, dev_results, strict=True):
             row["developability"] = result

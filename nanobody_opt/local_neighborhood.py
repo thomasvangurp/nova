@@ -1273,7 +1273,7 @@ def main() -> None:
     parser.add_argument(
         "--generation-workers",
         type=int,
-        default=min(32, os.cpu_count() or 1),
+        default=min(200, os.cpu_count() or 1),
         help="process pool size for resolving each accepted candidate's "
              "evidence()/mutation_contexts() (pure Python, GIL-bound to one "
              "core otherwise); 1 disables the pool and resolves serially",

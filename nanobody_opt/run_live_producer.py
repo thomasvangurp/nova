@@ -1106,7 +1106,7 @@ def _parser() -> argparse.ArgumentParser:
         help="proposals generated per elite parent before Layer-2 filtering",
     )
     parser.add_argument("--generation-workers", type=int,
-                        default=min(32, os.cpu_count() or 1),
+                        default=min(200, os.cpu_count() or 1),
                         help="forwarded to local_neighborhood")
     parser.add_argument("--generation-workers-minimum-candidates", type=int,
                         default=64, help="forwarded to local_neighborhood")
@@ -1201,7 +1201,7 @@ def _parser() -> argparse.ArgumentParser:
             "sequence; 0 disables the filter"
         ),
     )
-    parser.add_argument("--layer2-concurrency", type=int, default=128)
+    parser.add_argument("--layer2-concurrency", type=int, default=200)
     parser.add_argument(
         "--igblast-batch-size",
         type=int,
