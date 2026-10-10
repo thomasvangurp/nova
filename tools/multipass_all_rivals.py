@@ -557,6 +557,50 @@ def main() -> int:
               f"stored observations, no GPU time spent on them", flush=True)
     gpu_sequences = [s for s in sequences if s not in reused_sequences]
 
+    # Write OUR OWN distribution immediately, before spending any time on the
+    # (much slower) real rival GPU passes: the race already measured these
+    # sequences, so there is nothing to wait for. "rivals" stays {} here --
+    # score_latest_rival_epoch.sh's complete() check (needs >=1 rival) and the
+    # dashboard sync (nanobody_dash's build.py) both already treat an
+    # ours-only file as legitimate, just not yet complete, so this rides the
+    # existing 5/10-minute refresh+sync cadence instead of waiting ~20-30
+    # minutes for the rival passes too.
+    reused_seq_means = {
+        s: float(np.mean([p[0][s] for p in local_passes])) for s in reused_sequences
+    }
+    if reused_seq_means:
+        early_json = out_root / f"multipass_{epoch}.json"
+        early_existing: dict = {}
+        if early_json.is_file():
+            try:
+                early_existing = json.loads(early_json.read_text()).get(str(epoch), {})
+            except (OSError, json.JSONDecodeError):
+                early_existing = {}
+        if not early_existing.get("rivals"):
+            our_scores = sorted(reused_seq_means.values())
+            early_result = {
+                "ours": {
+                    "mean": float(np.mean(our_scores)),
+                    "stdev": float(np.std(our_scores)) if len(our_scores) > 1 else None,
+                    "fleet_size": len(our_sequences),
+                    "scores": [float(v) for v in our_scores],
+                },
+                "rivals": {},
+                "sequences": {s: v for s, v in reused_seq_means.items()},
+                "method": {
+                    "score_kind": PASS_SCORE_KIND, "formula": PASS_FORMULA_ID,
+                    "measurement": MEASUREMENT, "passes": n,
+                    "field": field.get("field"), "field_rows": field.get("field_rows"),
+                    "field_sha256": field.get("field_sha256"), "writer": WRITER,
+                },
+                "preliminary": True,
+            }
+            early_json.write_text(
+                json.dumps({str(epoch): early_result}, indent=2) + "\n")
+            print(f"WROTE_EARLY {early_json} ours={len(reused_sequences)} "
+                  f"(rivals pending, {len(short_sequences)} of our own "
+                  "sequences too thin to reuse)", flush=True)
+
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
     per_pass_raw: list[dict[str, dict[str, float]]] = []
