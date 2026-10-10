@@ -457,6 +457,73 @@ def local_passes_for_ours(
     return passes, short_sequences
 
 
+def _write_ours_only_early(
+    epoch: int, our_pairs: list[tuple[str, str]], archive_path: Path, n: int,
+    out_root: Path,
+) -> None:
+    """Write whatever of OUR OWN distribution is already known, straight from
+    stored observations, with no GPU time and no dependency on the validator's
+    leaderboard publish lag -- "we can backfill rivals when they arrive"
+    (user, 2026-10-10). Used both as the pre-leaderboard fallback (``pairs``
+    from ``fetch_our_intended``) and the early in-run write once rivals are
+    known too (see the call in ``main``, which reuses this for the exact same
+    reason: there is nothing to wait for on our own side).
+
+    Only sequences with >= n stored observations are included -- anything
+    thinner is simply left out of this early write (not GPU-scored here; the
+    full run picks it up once rivals are available, or it accumulates enough
+    observations from the race's own activity). Never overwrites an existing
+    file that already has real rival data.
+    """
+    sequences = sorted({seq for _, seq in our_pairs})
+    if not sequences:
+        return
+    archive = pd.read_csv(archive_path).drop_duplicates("sequence", keep="last")
+    archive["sequence"] = archive["sequence"].astype(str).str.upper()
+    field = field_fingerprint(archive_path, archive)
+    local_passes, short_sequences = local_passes_for_ours(sequences, n, archive)
+    reused_sequences = set(sequences) - short_sequences
+    if not reused_sequences:
+        print(f"  ours-only early write: 0 of {len(sequences)} of our own "
+              "sequence(s) have enough stored observations yet", flush=True)
+        return
+    seq_means = {
+        s: float(np.mean([p[0][s] for p in local_passes])) for s in reused_sequences
+    }
+    out_json = out_root / f"multipass_{epoch}.json"
+    existing: dict = {}
+    if out_json.is_file():
+        try:
+            existing = json.loads(out_json.read_text()).get(str(epoch), {})
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    if existing.get("rivals"):
+        return
+    scores = sorted(seq_means.values())
+    result = {
+        "ours": {
+            "mean": float(np.mean(scores)),
+            "stdev": float(np.std(scores)) if len(scores) > 1 else None,
+            "fleet_size": len(sequences),
+            "scores": [float(v) for v in scores],
+        },
+        "rivals": {},
+        "sequences": {s: v for s, v in seq_means.items()},
+        "method": {
+            "score_kind": PASS_SCORE_KIND, "formula": PASS_FORMULA_ID,
+            "measurement": MEASUREMENT, "passes": n,
+            "field": field.get("field"), "field_rows": field.get("field_rows"),
+            "field_sha256": field.get("field_sha256"), "writer": WRITER,
+        },
+        "preliminary": True,
+    }
+    out_root.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps({str(epoch): result}, indent=2) + "\n")
+    print(f"WROTE_EARLY {out_json} ours={len(reused_sequences)} (rivals "
+          f"pending, {len(short_sequences)} of our own sequences too thin "
+          "to reuse)", flush=True)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
@@ -484,26 +551,32 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
 
     pairs = fetch_leaderboard(epoch)
-    # Gate on the PUBLIC leaderboard before merging our local intent. The
-    # our-intended supplement below is available as soon as the Pi archives
-    # the epoch, i.e. long before the validator publishes it; merging it into
-    # an unavailable/empty leaderboard used to "succeed" with only our fleet,
-    # write multipass_<epoch>.json, and the caller's skip-if-exists cache then
-    # never retried the epoch once rivals were published (25616-25618 were
-    # stuck with 0 rivals). Exit non-zero WITHOUT writing output so the
-    # caller retries on a later cycle.
-    if pairs is None:
-        print(f"LEADERBOARD_UNAVAILABLE epoch={epoch} (not published yet or "
-              "API error); no output written, retry later", flush=True)
+    # Gate the FULL (ours+rivals) result on the public leaderboard: writing
+    # ours-only output used to make the caller's skip-if-exists cache never
+    # retry the epoch once rivals were actually published (25616-25618 were
+    # stuck with 0 rivals). That cache now keys off `rivals` being non-empty
+    # (score_latest_rival_epoch.sh's complete()), so an ours-only write below
+    # is safe: it no longer causes that regression, only removes the wait.
+    if pairs is None or not {ck for ck, _ in pairs if ck != OUR_COLDKEY}:
+        reason = "not published yet or API error" if pairs is None else \
+            "published but zero rival coldkeys (suspicious)"
+        print(f"LEADERBOARD_UNAVAILABLE epoch={epoch} ({reason}); trying "
+              "our-own-intent fallback so 'ours' isn't blocked on the "
+              "validator's publish lag", flush=True)
+        intended = fetch_our_intended(epoch)
+        if intended:
+            archive_path_fallback = archive_path if archive_path.exists() else None
+            if archive_path_fallback is not None:
+                _write_ours_only_early(
+                    epoch, intended, archive_path_fallback, n, out_root)
+            else:
+                print(f"ARCHIVE_UNAVAILABLE epoch={epoch} {archive_path}; "
+                      "cannot score the our-own-intent fallback either",
+                      flush=True)
+        else:
+            print(f"NO_INTENDED_SEQUENCES epoch={epoch}; nothing to score "
+                  "yet, retry later", flush=True)
         return 3
-    leaderboard_rivals = {ck for ck, _ in pairs if ck != OUR_COLDKEY}
-    if not leaderboard_rivals:
-        # Published but no rival P20809 submissions: on a competitive subnet
-        # this is almost certainly a partial/odd publish, not reality.
-        print(f"NO_RIVALS epoch={epoch} leaderboard published with "
-              f"{len(pairs)} P20809 sequence(s) but zero rival coldkeys; "
-              "suspicious, no output written, retry later", flush=True)
-        return 1
     leaderboard_sequences = {seq for _, seq in pairs}
     supplement = [
         (coldkey, seq) for coldkey, seq in fetch_our_intended(epoch)
@@ -565,41 +638,10 @@ def main() -> int:
     # ours-only file as legitimate, just not yet complete, so this rides the
     # existing 5/10-minute refresh+sync cadence instead of waiting ~20-30
     # minutes for the rival passes too.
-    reused_seq_means = {
-        s: float(np.mean([p[0][s] for p in local_passes])) for s in reused_sequences
-    }
-    if reused_seq_means:
-        early_json = out_root / f"multipass_{epoch}.json"
-        early_existing: dict = {}
-        if early_json.is_file():
-            try:
-                early_existing = json.loads(early_json.read_text()).get(str(epoch), {})
-            except (OSError, json.JSONDecodeError):
-                early_existing = {}
-        if not early_existing.get("rivals"):
-            our_scores = sorted(reused_seq_means.values())
-            early_result = {
-                "ours": {
-                    "mean": float(np.mean(our_scores)),
-                    "stdev": float(np.std(our_scores)) if len(our_scores) > 1 else None,
-                    "fleet_size": len(our_sequences),
-                    "scores": [float(v) for v in our_scores],
-                },
-                "rivals": {},
-                "sequences": {s: v for s, v in reused_seq_means.items()},
-                "method": {
-                    "score_kind": PASS_SCORE_KIND, "formula": PASS_FORMULA_ID,
-                    "measurement": MEASUREMENT, "passes": n,
-                    "field": field.get("field"), "field_rows": field.get("field_rows"),
-                    "field_sha256": field.get("field_sha256"), "writer": WRITER,
-                },
-                "preliminary": True,
-            }
-            early_json.write_text(
-                json.dumps({str(epoch): early_result}, indent=2) + "\n")
-            print(f"WROTE_EARLY {early_json} ours={len(reused_sequences)} "
-                  f"(rivals pending, {len(short_sequences)} of our own "
-                  "sequences too thin to reuse)", flush=True)
+    if reused_sequences:
+        _write_ours_only_early(
+            epoch, [(OUR_COLDKEY, s) for s in our_sequences], archive_path, n,
+            out_root)
 
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
