@@ -556,14 +556,28 @@ class MutationNetwork:
             raise
 
 
-def _connect(path: Path | None = None) -> db.Connection:
-    """Open the central MySQL connection.
+def _connect(path: Path | None = None) -> "db.Connection | db.LocalConnection":
+    """Open master's write connection: local SQLite primary, or central MySQL.
 
-    ``path`` is retained for call-site compatibility with the previous
-    sqlite3 backend and is ignored -- all nodes share the one ``sn68`` schema
-    on Hetzner.
+    NOVA_LOCAL_SQLITE=1 switches every caller of this function to the local
+    SQLite primary at ``path`` (ARCHITECTURE_REDESIGN new finding 8) -- the
+    same path every caller already passes for historical sqlite3 call-site
+    compatibility, now actually used. Replication to Hetzner MySQL (for
+    cross-box visibility and durability) is a separate, downstream process
+    (nanobody_opt/replicate_local.py), not synchronous with this write.
+
+    Without the env var, behaviour is unchanged: the central MySQL
+    connection, ``path`` ignored.
     """
+    if os.environ.get("NOVA_LOCAL_SQLITE") == "1":
+        if path is None:
+            raise ValueError("NOVA_LOCAL_SQLITE=1 requires a local db path")
+        return db.connect_local(path)
     return db.connect()
+
+
+def _is_local(connection: "db.Connection | db.LocalConnection") -> bool:
+    return isinstance(connection, db.LocalConnection)
 
 
 _NODE_UPSERT_SQL = """
@@ -609,6 +623,55 @@ _LINEAGE_UPSERT_SQL = """
         proposal_type=VALUES(proposal_type),
         mutations_json=VALUES(mutations_json),
         metadata_json=VALUES(metadata_json)
+"""
+# SQLite dialect of the four upserts above: `?` placeholders, `ON CONFLICT`
+# needs its target (the unique/primary key actually violated) spelled out --
+# unlike MySQL's `ON DUPLICATE KEY UPDATE`, which infers it -- so these are
+# hand-written per table, not auto-translated. Row semantics (which column
+# wins, idempotency) are identical to the MySQL versions above.
+_NODE_UPSERT_SQL_SQLITE = """
+    INSERT INTO nodes(target, sequence, length, residue_vector)
+    VALUES(?, ?, ?, ?)
+    ON CONFLICT(target, sequence) DO UPDATE SET
+        length=excluded.length,
+        residue_vector=excluded.residue_vector
+"""
+_OBSERVATION_UPSERT_SQL_SQLITE = """
+    INSERT INTO observations(
+        observation_id, node_id, epoch, source, score_kind, score,
+        observation_count, metrics_json, pose_json, provenance_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(observation_id) DO UPDATE SET
+        node_id=excluded.node_id,
+        epoch=excluded.epoch,
+        source=excluded.source,
+        score_kind=excluded.score_kind,
+        score=excluded.score,
+        observation_count=excluded.observation_count,
+        metrics_json=excluded.metrics_json,
+        pose_json=excluded.pose_json,
+        provenance_json=excluded.provenance_json
+"""
+_ARTIFACT_UPSERT_SQL_SQLITE = """
+    INSERT INTO observation_artifacts(
+        observation_id, confidence_path, writer_path,
+        structure_json, sample_selection_json
+    ) VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(observation_id) DO UPDATE SET
+        confidence_path=excluded.confidence_path,
+        writer_path=excluded.writer_path,
+        structure_json=excluded.structure_json,
+        sample_selection_json=excluded.sample_selection_json
+"""
+_LINEAGE_UPSERT_SQL_SQLITE = """
+    INSERT INTO lineage_edges(
+        parent_node_id, child_node_id, epoch, source,
+        proposal_type, mutations_json, metadata_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(parent_node_id, child_node_id, epoch, source) DO UPDATE SET
+        proposal_type=excluded.proposal_type,
+        mutations_json=excluded.mutations_json,
+        metadata_json=excluded.metadata_json
 """
 _OBSERVATION_EXCLUDED = frozenset({
     "observation_id", "sequence", "target", "epoch", "source",
@@ -744,15 +807,26 @@ def _resolve_node_ids(
     by_target: dict[str, list[str]] = defaultdict(list)
     for target, sequence in ordered:
         by_target[target].append(sequence)
+    local = _is_local(connection)
+    placeholder = "?" if local else "%s"
+    node_upsert_sql = _NODE_UPSERT_SQL_SQLITE if local else _NODE_UPSERT_SQL
 
     def lookup(target: str, sequences: list[str], *, locking: bool) -> dict[tuple[str, str], int]:
         found: dict[tuple[str, str], int] = {}
         for start in range(0, len(sequences), _NODE_LOOKUP_BATCH):
             batch = sequences[start:start + _NODE_LOOKUP_BATCH]
+            # SQLite has no FOR SHARE equivalent and doesn't need one here:
+            # it's a single-writer-at-a-time database (WAL mode serialises
+            # writers), so a committed INSERT from the missing-node upsert
+            # just below is immediately visible to the very next plain SELECT
+            # on this same connection -- there is no other writer's
+            # in-flight, uncommitted row to race against.
+            suffix = " FOR SHARE" if (locking and not local) else ""
             rows = connection.execute(
-                "SELECT id, sequence FROM nodes WHERE target=%s AND sequence IN ("
-                + ",".join(["%s"] * len(batch)) + ")"
-                + (" FOR SHARE" if locking else ""),
+                f"SELECT id, sequence FROM nodes WHERE target={placeholder} "
+                f"AND sequence IN ("
+                + ",".join([placeholder] * len(batch)) + ")"
+                + suffix,
                 (target, *batch),
             ).fetchall()
             for node_id, sequence in rows:
@@ -765,7 +839,7 @@ def _resolve_node_ids(
     missing = [key for key in ordered if key not in ids]
     if missing:
         connection.executemany(
-            _NODE_UPSERT_SQL,
+            node_upsert_sql,
             [
                 (target, sequence, len(sequence),
                  bytes(AA_INDEX[residue] for residue in sequence))
@@ -797,8 +871,12 @@ def _write_observation_chunk(
         if row["parent_sequence"]:
             keys.append((row["target"], row["parent_sequence"]))
     ids = _resolve_node_ids(connection, keys)
+    local = _is_local(connection)
+    observation_sql = _OBSERVATION_UPSERT_SQL_SQLITE if local else _OBSERVATION_UPSERT_SQL
+    artifact_sql = _ARTIFACT_UPSERT_SQL_SQLITE if local else _ARTIFACT_UPSERT_SQL
+    lineage_sql = _LINEAGE_UPSERT_SQL_SQLITE if local else _LINEAGE_UPSERT_SQL
     connection.executemany(
-        _OBSERVATION_UPSERT_SQL,
+        observation_sql,
         [
             (row["observation"][0], ids[(row["target"], row["sequence"])],
              *row["observation"][1:])
@@ -809,7 +887,7 @@ def _write_observation_chunk(
     artifacts = [row["artifact"] for row in chunk if row["artifact"] is not None]
     if artifacts:
         connection.executemany(
-            _ARTIFACT_UPSERT_SQL, artifacts, max_stmt_length=_MAX_STATEMENT_BYTES
+            artifact_sql, artifacts, max_stmt_length=_MAX_STATEMENT_BYTES
         )
     lineage = [
         (
@@ -821,7 +899,7 @@ def _write_observation_chunk(
     ]
     if lineage:
         connection.executemany(
-            _LINEAGE_UPSERT_SQL, lineage, max_stmt_length=_MAX_STATEMENT_BYTES
+            lineage_sql, lineage, max_stmt_length=_MAX_STATEMENT_BYTES
         )
 
 

@@ -12,8 +12,10 @@ UPDATE`, `INSERT OR REPLACE` -> `REPLACE INTO`) rather than cursor plumbing.
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from functools import wraps
+from pathlib import Path
 from typing import Any, Iterable
 
 import MySQLdb
@@ -177,6 +179,88 @@ class Connection:
         else:
             self._conn.rollback()
         self.close()
+
+
+LOCAL_SCHEMA_PATH = Path(__file__).resolve().parent / "local_schema.sql"
+
+
+class LocalConnection:
+    """Local SQLite primary store (ARCHITECTURE_REDESIGN new finding 8).
+
+    Mirrors :class:`Connection`'s surface so mutation_network's write path can
+    select either backend without changing its call sites. The two backends
+    are NOT SQL-dialect-compatible (``%s`` vs ``?`` placeholders,
+    ``ON DUPLICATE KEY UPDATE`` vs ``ON CONFLICT ... DO UPDATE``, no
+    ``FOR SHARE`` in SQLite) -- callers that write must use the dialect-aware
+    SQL constants in mutation_network.py, selected by ``isinstance(connection,
+    LocalConnection)``, not pass MySQL SQL to this class.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not path.is_file() or path.stat().st_size == 0
+        self._conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute("BEGIN")
+        if is_new:
+            self._conn.executescript(LOCAL_SCHEMA_PATH.read_text())
+
+    def execute(self, sql: str, params: Any = None) -> "_LocalCursor":
+        cur = self._conn.cursor()
+        cur.execute(sql, params or ())
+        return _LocalCursor(cur)
+
+    def executemany(
+        self, sql: str, seq: Any, *, max_stmt_length: int | None = None
+    ) -> None:
+        # max_stmt_length is a MySQL/mysqlclient statement-folding knob; SQLite
+        # has no equivalent (executemany is already one prepared statement
+        # re-bound per row, not a folded multi-row INSERT), so it's accepted
+        # and ignored for call-site compatibility with Connection.executemany.
+        self._conn.executemany(sql, seq)
+
+    def commit(self) -> None:
+        self._conn.commit()
+        self._conn.execute("BEGIN")
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+        self._conn.execute("BEGIN")
+
+    def close(self) -> None:
+        try:
+            self._conn.commit()
+        except sqlite3.Error:
+            pass
+        self._conn.close()
+
+    def __enter__(self) -> "LocalConnection":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        self.close()
+
+
+class _LocalCursor:
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self._cursor = cursor
+
+    def fetchall(self) -> list[Any]:
+        return self._cursor.fetchall()
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+
+def connect_local(path: str | Path) -> LocalConnection:
+    """Open (creating/migrating if needed) master's local SQLite primary."""
+    return LocalConnection(Path(path))
 
 
 def connect(_path: str | None = None) -> Connection:
