@@ -566,6 +566,265 @@ def _connect(path: Path | None = None) -> db.Connection:
     return db.connect()
 
 
+_NODE_UPSERT_SQL = """
+    INSERT INTO nodes(target, sequence, length, residue_vector)
+    VALUES(%s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        length=VALUES(length),
+        residue_vector=VALUES(residue_vector)
+"""
+_OBSERVATION_UPSERT_SQL = """
+    INSERT INTO observations(
+        observation_id, node_id, epoch, source, score_kind, score,
+        observation_count, metrics_json, pose_json, provenance_json
+    ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        node_id=VALUES(node_id),
+        epoch=VALUES(epoch),
+        source=VALUES(source),
+        score_kind=VALUES(score_kind),
+        score=VALUES(score),
+        observation_count=VALUES(observation_count),
+        metrics_json=VALUES(metrics_json),
+        pose_json=VALUES(pose_json),
+        provenance_json=VALUES(provenance_json)
+"""
+_ARTIFACT_UPSERT_SQL = """
+    INSERT INTO observation_artifacts(
+        observation_id, confidence_path, writer_path,
+        structure_json, sample_selection_json
+    ) VALUES(%s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        confidence_path=VALUES(confidence_path),
+        writer_path=VALUES(writer_path),
+        structure_json=VALUES(structure_json),
+        sample_selection_json=VALUES(sample_selection_json)
+"""
+_LINEAGE_UPSERT_SQL = """
+    INSERT INTO lineage_edges(
+        parent_node_id, child_node_id, epoch, source,
+        proposal_type, mutations_json, metadata_json
+    ) VALUES(%s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        proposal_type=VALUES(proposal_type),
+        mutations_json=VALUES(mutations_json),
+        metadata_json=VALUES(metadata_json)
+"""
+_OBSERVATION_EXCLUDED = frozenset({
+    "observation_id", "sequence", "target", "epoch", "source",
+    "score_kind", "score", "observation_count", "metrics",
+    "pose_stability", "structure",
+})
+_LINEAGE_EXCLUDED = frozenset({
+    "observation_id", "sequence", "parent_sequence", "target",
+    "epoch", "source", "proposal_type", "mutations",
+    "score_kind", "score", "observation_count", "metrics",
+    "pose_stability",
+})
+# One multi-row statement per table per chunk. A 1000-row chunk of
+# live_exact_screen rows is ~1-3 MB of SQL (metrics/provenance JSON), so 8 MiB
+# keeps it to one statement while staying far below the server's 64 MiB
+# max_allowed_packet. mysqlclient's own default (64 KiB) would split the same
+# chunk into ~40 statements, i.e. ~40 extra network round-trips.
+_MAX_STATEMENT_BYTES = 8 * 1024 * 1024
+# Bound for one ``sequence IN (...)`` id lookup (keeps the statement small).
+_NODE_LOOKUP_BATCH = 1000
+
+
+def _prepare_observation(observation: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate one record and build every row it writes, except the node ids.
+
+    Pure Python, no DB access. Mirrors the per-row rules the writer has always
+    applied; returns None for a record the writer skips.
+    """
+    observation_id = str(observation.get("observation_id", "")).strip()
+    sequence = str(observation.get("sequence", "")).strip().upper()
+    target = str(observation.get("target", "")).strip()
+    try:
+        score = float(observation["score"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        not observation_id
+        or not sequence
+        or not target
+        or not math.isfinite(score)
+        or any(residue not in AA_INDEX for residue in sequence)
+    ):
+        return None
+    provenance = {
+        key: value for key, value in observation.items()
+        if key not in _OBSERVATION_EXCLUDED
+    }
+    prepared: dict[str, Any] = {
+        "target": target,
+        "sequence": sequence,
+        # observations row minus node_id (filled in after the id lookup).
+        "observation": (
+            observation_id,
+            observation.get("epoch"),
+            str(observation.get("source", "unknown")),
+            str(observation.get("score_kind", "unknown")),
+            score,
+            int(observation.get("observation_count", 1)),
+            json.dumps(observation.get("metrics") or {}, sort_keys=True),
+            json.dumps(observation.get("pose_stability"), sort_keys=True)
+            if observation.get("pose_stability") is not None else None,
+            json.dumps(provenance, sort_keys=True),
+        ),
+        "artifact": None,
+        "parent_sequence": None,
+        "lineage": None,
+    }
+    structure = observation.get("structure")
+    if isinstance(structure, dict):
+        confidence_path = structure.get("confidence_path") or structure.get("path")
+        writer_path = structure.get("writer_path") or structure.get("path")
+        sample_selection = structure.get("sample_selection")
+        prepared["artifact"] = (
+            observation_id,
+            str(confidence_path) if confidence_path else None,
+            str(writer_path) if writer_path else None,
+            json.dumps(structure, sort_keys=True),
+            json.dumps(sample_selection, sort_keys=True)
+            if isinstance(sample_selection, dict) else None,
+        )
+    parent_sequence = str(observation.get("parent_sequence", "")).strip().upper()
+    if (
+        parent_sequence
+        and len(parent_sequence) == len(sequence)
+        and parent_sequence != sequence
+        and all(residue in AA_INDEX for residue in parent_sequence)
+    ):
+        lineage_metadata = {
+            key: value for key, value in observation.items()
+            if key not in _LINEAGE_EXCLUDED
+        }
+        supplied_mutations = observation.get("mutations")
+        if isinstance(supplied_mutations, str):
+            supplied_mutations = [item for item in supplied_mutations.split(";") if item]
+        prepared["parent_sequence"] = parent_sequence
+        # lineage_edges row minus (parent_node_id, child_node_id).
+        prepared["lineage"] = (
+            int(observation["epoch"]) if observation.get("epoch") is not None else -1,
+            str(observation.get("source", "unknown")),
+            str(observation.get("proposal_type", "unknown")),
+            json.dumps(supplied_mutations or mutations(parent_sequence, sequence)),
+            json.dumps(lineage_metadata, sort_keys=True),
+        )
+    return prepared
+
+
+def _resolve_node_ids(
+    connection: db.Connection, keys: Iterable[tuple[str, str]]
+) -> dict[tuple[str, str], int]:
+    """Return ``{(target, sequence): nodes.id}``, inserting the missing nodes.
+
+    Batched replacement for the old per-row ``INSERT ... ON DUPLICATE KEY
+    UPDATE`` + ``SELECT id``. ``LAST_INSERT_ID()`` cannot replace the SELECT:
+    after a multi-row insert it returns only the first generated id, and on
+    the UPDATE branch of ``ON DUPLICATE KEY UPDATE`` it does not return the
+    existing row's id at all. So ids are looked up by the unique key instead.
+
+    1. One plain (non-locking) SELECT per <=1000 keys finds existing nodes.
+       ``length``/``residue_vector`` are pure functions of ``sequence``, so the
+       old upsert's UPDATE branch rewrote identical values; skipping it for
+       existing rows changes no data and takes no row locks on them.
+    2. The missing nodes go in one multi-row upsert, in first-encounter
+       order (child, then its parent, row by row) -- the order the per-row
+       loop inserted them, so new nodes get ids in the same relative order
+       (``load_observations`` orders by ``n.id``).
+    3. Their ids are read with ``FOR SHARE``, a locking read that sees the
+       latest committed row. A plain read would use this transaction's
+       REPEATABLE-READ snapshot and could miss a node another writer committed
+       after that snapshot (our upsert then hit its UPDATE branch with
+       identical values, which does not make the row visible to us).
+    """
+    ordered = list(dict.fromkeys(keys))  # de-duplicated, first-encounter order
+    by_target: dict[str, list[str]] = defaultdict(list)
+    for target, sequence in ordered:
+        by_target[target].append(sequence)
+
+    def lookup(target: str, sequences: list[str], *, locking: bool) -> dict[tuple[str, str], int]:
+        found: dict[tuple[str, str], int] = {}
+        for start in range(0, len(sequences), _NODE_LOOKUP_BATCH):
+            batch = sequences[start:start + _NODE_LOOKUP_BATCH]
+            rows = connection.execute(
+                "SELECT id, sequence FROM nodes WHERE target=%s AND sequence IN ("
+                + ",".join(["%s"] * len(batch)) + ")"
+                + (" FOR SHARE" if locking else ""),
+                (target, *batch),
+            ).fetchall()
+            for node_id, sequence in rows:
+                found[(target, str(sequence).upper())] = int(node_id)
+        return found
+
+    ids: dict[tuple[str, str], int] = {}
+    for target, sequences in by_target.items():
+        ids.update(lookup(target, sequences, locking=False))
+    missing = [key for key in ordered if key not in ids]
+    if missing:
+        connection.executemany(
+            _NODE_UPSERT_SQL,
+            [
+                (target, sequence, len(sequence),
+                 bytes(AA_INDEX[residue] for residue in sequence))
+                for target, sequence in missing
+            ],
+            max_stmt_length=_MAX_STATEMENT_BYTES,
+        )
+        missing_by_target: dict[str, list[str]] = defaultdict(list)
+        for target, sequence in missing:
+            missing_by_target[target].append(sequence)
+        for target, sequences in missing_by_target.items():
+            ids.update(lookup(target, sequences, locking=True))
+    unresolved = [key for key in ordered if key not in ids]
+    if unresolved:
+        raise RuntimeError(
+            f"node id lookup failed for {len(unresolved)} sequence(s), "
+            f"e.g. {unresolved[0]}"
+        )
+    return ids
+
+
+def _write_observation_chunk(
+    connection: db.Connection, chunk: list[dict[str, Any]]
+) -> None:
+    """Write one chunk with a constant number of round-trips (~5-7)."""
+    keys: list[tuple[str, str]] = []
+    for row in chunk:
+        keys.append((row["target"], row["sequence"]))
+        if row["parent_sequence"]:
+            keys.append((row["target"], row["parent_sequence"]))
+    ids = _resolve_node_ids(connection, keys)
+    connection.executemany(
+        _OBSERVATION_UPSERT_SQL,
+        [
+            (row["observation"][0], ids[(row["target"], row["sequence"])],
+             *row["observation"][1:])
+            for row in chunk
+        ],
+        max_stmt_length=_MAX_STATEMENT_BYTES,
+    )
+    artifacts = [row["artifact"] for row in chunk if row["artifact"] is not None]
+    if artifacts:
+        connection.executemany(
+            _ARTIFACT_UPSERT_SQL, artifacts, max_stmt_length=_MAX_STATEMENT_BYTES
+        )
+    lineage = [
+        (
+            ids[(row["target"], row["parent_sequence"])],
+            ids[(row["target"], row["sequence"])],
+            *row["lineage"],
+        )
+        for row in chunk if row["lineage"] is not None
+    ]
+    if lineage:
+        connection.executemany(
+            _LINEAGE_UPSERT_SQL, lineage, max_stmt_length=_MAX_STATEMENT_BYTES
+        )
+
+
 @db.deadlock_retry()
 def update_observation_store(
     path: Path,
@@ -575,13 +834,25 @@ def update_observation_store(
 ) -> int:
     """Transactionally upsert uniquely identified scored VHH observations.
 
-    Commits every ``commit_every`` writes or ``commit_interval`` seconds
-    (whichever comes first) so a slow/lazy ``observations`` iterable can never
-    hold an open transaction -- and its row locks -- for minutes and stall
-    every other writer.  The upserts are idempotent (``ON DUPLICATE KEY
-    UPDATE``), so an intermediate commit is safe to re-run.
+    Rows are written in chunks of ``commit_every`` (default 1000), one
+    transaction per chunk. Each chunk costs a constant ~5-7 network
+    round-trips (node id lookup, missing-node upsert + locking re-read, one
+    multi-row upsert each for observations / artifacts / lineage, commit)
+    instead of 3-5 round-trips per row. Over the ~460 ms master->Hetzner
+    tunnel the old per-row loop took ~1 s/row -- 10,000 rows was the measured
+    9,600-10,400 s "bookkeeping" of epochs 25623/25627 (ARCHITECTURE_REDESIGN
+    new finding 5). A 1000-row chunk holds its row locks for a few seconds,
+    the same order as the old ``commit_interval`` bound, and its statements
+    are a few MB, far below ``max_allowed_packet``. ``commit_interval`` is
+    kept for call-site compatibility; a chunk is never split by time.
 
-    A MySQL deadlock (1213) rolls back this whole transaction; the
+    Row semantics are unchanged: same tables, same ``ON DUPLICATE KEY
+    UPDATE`` upserts keyed the same way, rows applied in input order within a
+    statement (a later duplicate ``observation_id`` still wins), and the same
+    per-row validation/skip rules. The upserts are idempotent, so an
+    intermediate commit is safe to re-run.
+
+    A MySQL deadlock (1213) rolls back the current chunk; the
     ``@db.deadlock_retry()`` decorator re-runs the entire function, so
     ``observations`` must be re-iterable. It is materialized up front because
     ``select_elite_parents`` passes a generator expression.
@@ -606,182 +877,17 @@ def update_observation_store(
         except Exception as error:  # noqa: BLE001
             print(f"OBSERVATION_LABEL_CHECK_ERROR {type(error).__name__}: {error}",
                   file=sys.stderr, flush=True)
-    written = 0
-    last_commit = time.monotonic()
+    prepared = [
+        row for row in map(_prepare_observation, observations) if row is not None
+    ]
+    if not prepared:
+        return 0
+    chunk_size = commit_every if commit_every > 0 else 1000
     with _connect(path) as connection:
-        for observation in observations:
-            observation_id = str(observation.get("observation_id", "")).strip()
-            sequence = str(observation.get("sequence", "")).strip().upper()
-            target = str(observation.get("target", "")).strip()
-            try:
-                score = float(observation["score"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if (
-                not observation_id
-                or not sequence
-                or not target
-                or not math.isfinite(score)
-                or any(residue not in AA_INDEX for residue in sequence)
-            ):
-                continue
-            vector = bytes(AA_INDEX[residue] for residue in sequence)
-            connection.execute(
-                """
-                INSERT INTO nodes(target, sequence, length, residue_vector)
-                VALUES(%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    length=VALUES(length),
-                    residue_vector=VALUES(residue_vector)
-                """,
-                (target, sequence, len(sequence), vector),
-            )
-            node_id = int(connection.execute(
-                "SELECT id FROM nodes WHERE target=%s AND sequence=%s",
-                (target, sequence),
-            ).fetchone()[0])
-            excluded = {
-                "observation_id", "sequence", "target", "epoch", "source",
-                "score_kind", "score", "observation_count", "metrics",
-                "pose_stability", "structure",
-            }
-            provenance = {
-                key: value for key, value in observation.items() if key not in excluded
-            }
-            connection.execute(
-                """
-                INSERT INTO observations(
-                    observation_id, node_id, epoch, source, score_kind, score,
-                    observation_count, metrics_json, pose_json, provenance_json
-                ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    node_id=VALUES(node_id),
-                    epoch=VALUES(epoch),
-                    source=VALUES(source),
-                    score_kind=VALUES(score_kind),
-                    score=VALUES(score),
-                    observation_count=VALUES(observation_count),
-                    metrics_json=VALUES(metrics_json),
-                    pose_json=VALUES(pose_json),
-                    provenance_json=VALUES(provenance_json)
-                """,
-                (
-                    observation_id,
-                    node_id,
-                    observation.get("epoch"),
-                    str(observation.get("source", "unknown")),
-                    str(observation.get("score_kind", "unknown")),
-                    score,
-                    int(observation.get("observation_count", 1)),
-                    json.dumps(observation.get("metrics") or {}, sort_keys=True),
-                    json.dumps(observation.get("pose_stability"), sort_keys=True)
-                    if observation.get("pose_stability") is not None else None,
-                    json.dumps(provenance, sort_keys=True),
-                ),
-            )
-            structure = observation.get("structure")
-            if isinstance(structure, dict):
-                confidence_path = (
-                    structure.get("confidence_path") or structure.get("path")
-                )
-                writer_path = structure.get("writer_path") or structure.get("path")
-                sample_selection = structure.get("sample_selection")
-                connection.execute(
-                    """
-                    INSERT INTO observation_artifacts(
-                        observation_id, confidence_path, writer_path,
-                        structure_json, sample_selection_json
-                    ) VALUES(%s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                        confidence_path=VALUES(confidence_path),
-                        writer_path=VALUES(writer_path),
-                        structure_json=VALUES(structure_json),
-                        sample_selection_json=VALUES(sample_selection_json)
-                    """,
-                    (
-                        observation_id,
-                        str(confidence_path) if confidence_path else None,
-                        str(writer_path) if writer_path else None,
-                        json.dumps(structure, sort_keys=True),
-                        json.dumps(sample_selection, sort_keys=True)
-                        if isinstance(sample_selection, dict) else None,
-                    ),
-                )
-            parent_sequence = str(
-                observation.get("parent_sequence", "")
-            ).strip().upper()
-            if (
-                parent_sequence
-                and len(parent_sequence) == len(sequence)
-                and parent_sequence != sequence
-                and all(residue in AA_INDEX for residue in parent_sequence)
-            ):
-                parent_vector = bytes(AA_INDEX[residue] for residue in parent_sequence)
-                connection.execute(
-                    """
-                    INSERT INTO nodes(target, sequence, length, residue_vector)
-                    VALUES(%s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                        length=VALUES(length),
-                        residue_vector=VALUES(residue_vector)
-                    """,
-                    (target, parent_sequence, len(parent_sequence), parent_vector),
-                )
-                parent_node_id = int(connection.execute(
-                    "SELECT id FROM nodes WHERE target=%s AND sequence=%s",
-                    (target, parent_sequence),
-                ).fetchone()[0])
-                lineage_excluded = {
-                    "observation_id", "sequence", "parent_sequence", "target",
-                    "epoch", "source", "proposal_type", "mutations",
-                    "score_kind", "score", "observation_count", "metrics",
-                    "pose_stability",
-                }
-                lineage_metadata = {
-                    key: value
-                    for key, value in observation.items()
-                    if key not in lineage_excluded
-                }
-                supplied_mutations = observation.get("mutations")
-                if isinstance(supplied_mutations, str):
-                    supplied_mutations = [
-                        item for item in supplied_mutations.split(";") if item
-                    ]
-                connection.execute(
-                    """
-                    INSERT INTO lineage_edges(
-                        parent_node_id, child_node_id, epoch, source,
-                        proposal_type, mutations_json, metadata_json
-                    ) VALUES(%s, %s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                        proposal_type=VALUES(proposal_type),
-                        mutations_json=VALUES(mutations_json),
-                        metadata_json=VALUES(metadata_json)
-                    """,
-                    (
-                        parent_node_id,
-                        node_id,
-                        (
-                            int(observation["epoch"])
-                            if observation.get("epoch") is not None
-                            else -1
-                        ),
-                        str(observation.get("source", "unknown")),
-                        str(observation.get("proposal_type", "unknown")),
-                        json.dumps(
-                            supplied_mutations or mutations(parent_sequence, sequence)
-                        ),
-                        json.dumps(lineage_metadata, sort_keys=True),
-                    ),
-                )
-            written += 1
-            now = time.monotonic()
-            if (commit_every > 0 and written % commit_every == 0) or (
-                now - last_commit
-            ) >= commit_interval:
-                connection.commit()
-                last_commit = now
-    return written
+        for start in range(0, len(prepared), chunk_size):
+            _write_observation_chunk(connection, prepared[start:start + chunk_size])
+            connection.commit()
+    return len(prepared)
 
 
 @db.deadlock_retry()

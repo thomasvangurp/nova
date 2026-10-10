@@ -101,6 +101,53 @@ pool is wanted later:
    top-50's GROUP BY (sequence) currently finishes, measured end to end at
    61 s including pixi start-up. It is the same failure class the producer
    just hit, so watch for `TOP50` failures in `failed.json`.
+5. **The producer's observation writer was bound by round-trips, not by query cost
+   (fixed 2026-10-10).** `update_observation_store` (`mutation_network.py`)
+   sent 3–5 statements per row: a node upsert, `SELECT id`, an observation
+   upsert, and optionally an artifact upsert and a parent node + lineage edge.
+   It also committed every 5 s. Master reaches MySQL through the 127.0.0.1
+   tunnel, which has a measured **459 ms** round-trip (`SELECT 1`; an empty
+   `COMMIT` costs the same). So the loop ran at ~1 s/row. The screen
+   `_store_ranking` writes 10,000 rows, which accounts for the
+   `bookkeeping_seconds` of **10,414 s (25623)** and **9,606 s (25627)**
+   in `race/timings.jsonl`. Long-lived per-row write loops plausibly also fed the 1213/2013 failures of earlier
+   epochs. The producer fell to 0–1 iterations per epoch.
+   - **Fix:** rows are validated and serialised in Python first. They are
+     then written in chunks of `commit_every`=1000, one transaction per
+     chunk. Each chunk does one plain `SELECT id … sequence IN (…)` for
+     existing nodes, a multi-row upsert of only the missing nodes followed
+     by a `FOR SHARE` re-read, and one multi-row upsert each into
+     `observations`, `observation_artifacts` and `lineage_edges`, then
+     commits. `db.Connection.executemany` gained `max_stmt_length`, set to
+     8 MiB. mysqlclient's 64 KiB default would split a chunk into ~40
+     statements, and the server's `max_allowed_packet` is 64 MiB.
+     `LAST_INSERT_ID()` is not used. After a multi-row insert it gives only
+     the first id, and on the UPDATE branch it does not return the existing
+     row's id. Skipping the no-op UPDATE on existing nodes is safe:
+     `length`/`residue_vector` are functions of `sequence` (2,891 sampled
+     live rows, 0 mismatches). It also stops this writer taking row locks on
+     existing nodes.
+   - **Equivalence:** a harness ran old and new code on the same 1,203 input
+     rows. It used the live server and tunnel, but session-private
+     `TEMPORARY` tables shadowing the four tables, so no production rows
+     were touched. The inputs covered existing and new nodes, parents,
+     structures, a duplicate id and invalid rows. All four tables came out
+     identical, including the relative node-id order.
+   - **Measured:** 1,200 rows took old **5,058 statements / 1,600 s**, new
+     **15 / 7.7 s**. 10,000 rows took new **83 statements / 42.5 s**; old,
+     extrapolated, is ~42k / ~13,000 s.
+   - **Why not a master-local sqlite:** the `live_exact_*` rows share
+     `nodes` ids and `observations` with dashboard-written
+     `public_multipass_rivals` and `public_validator_api` rows. The producer
+     readers (`MutationNetwork`, `select_elite_parents`, `build_top50_index`,
+     `rank_exact`) read both, plus 3.1 M historical rows, in single joins.
+     Splitting the store means rewriting every reader, which is the same
+     class of change as the 16-epoch sqlite-reader freeze.
+   - Deployed 2026-10-10 12:16 UTC, between producer stages, with
+     `.pre-batched-writer-20261010` backups of `db.py` and
+     `mutation_network.py` on master. `sequential_exact_race` runs as a
+     fresh `-m` subprocess per iteration, so the next race picks the fix up
+     without a producer restart.
 
 ---
 

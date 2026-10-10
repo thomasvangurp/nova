@@ -145,8 +145,17 @@ class Connection:
         finally:
             cur.close()
 
-    def executemany(self, sql: str, seq: Any) -> None:
+    def executemany(
+        self, sql: str, seq: Any, *, max_stmt_length: int | None = None
+    ) -> None:
+        """``cursor.executemany``; mysqlclient folds an ``INSERT ... VALUES``
+        (including ``ON DUPLICATE KEY UPDATE``) into multi-row statements of at
+        most ``max_stmt_length`` bytes each (its default is 64 KiB). Raise it
+        to cut round-trips for large rows; keep it below the server's
+        ``max_allowed_packet``."""
         cur = self._conn.cursor()
+        if max_stmt_length is not None:
+            cur.max_stmt_length = max_stmt_length
         cur.executemany(sql, seq)
 
     def commit(self) -> None:
