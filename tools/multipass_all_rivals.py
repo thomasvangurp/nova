@@ -383,6 +383,80 @@ def rank_pass_payload(payload: dict, archive: pd.DataFrame
     return ranks, structures, raw
 
 
+#: Sources trusted for reusing OUR OWN stored observations in place of a
+#: fresh GPU pass -- the producer's own exact-scoring pipeline, same set
+#: build_top50_index.REPLAY_SCALE_SOURCES trusts (ARCHITECTURE_REDESIGN new
+#: finding 9). Never rival data: a rival's sequence has no local observations
+#: here by construction, so this set only ever matches our own sequences.
+OUR_RAW_SOURCES = (
+    "live_exact_screen", "live_exact_repeat", "local_exact_raw",
+    "children_8x", "children_20x", "children_40x", "backfill_8x",
+    "exhaustive_8x",
+)
+
+
+def local_passes_for_ours(
+    sequences: list[str], n: int, archive: pd.DataFrame
+) -> tuple[list[tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]],
+           set[str]]:
+    """Build up to ``n`` synthetic scorer passes for OUR OWN sequences from
+    already-stored raw metrics, instead of spending fresh GPU time re-scoring
+    something we already measured during the race itself.
+
+    Every sequence here is ours (the caller only passes OUR_COLDKEY's
+    sequences) -- a rival's sequence is never in our local observation store,
+    so this can never accidentally reuse a rival's old score as if it were
+    fresh. Returns (passes, short_sequences): ``passes`` has the SAME shape
+    ``score_pass`` returns (one (ranks, structs, raw) tuple per pass, fed
+    through the identical rank_pass_payload/pass_formula so the result is
+    byte-for-byte what a real pass would have produced for the same raw
+    metrics), and ``short_sequences`` are the ones with fewer than ``n``
+    stored observations -- those get a real GPU pass instead, so a
+    thin-evidence sequence is never silently degraded.
+    """
+    from nanobody_opt import db
+
+    if not sequences:
+        return [], set()
+    conn = db.connect()
+    placeholders = ",".join(["%s"] * len(sequences))
+    source_placeholders = ",".join(["%s"] * len(OUR_RAW_SOURCES))
+    rows = conn.execute(
+        f"""
+        SELECT n.sequence, o.metrics_json, o.observation_id
+        FROM observations o JOIN nodes n ON n.id = o.node_id
+        WHERE n.target = %s AND n.sequence IN ({placeholders})
+          AND o.source IN ({source_placeholders})
+          AND o.metrics_json IS NOT NULL AND o.metrics_json != ''
+        ORDER BY o.observation_id
+        """,
+        (TARGET, *sequences, *OUR_RAW_SOURCES),
+    ).fetchall()
+    by_seq: dict[str, list[dict[str, float]]] = defaultdict(list)
+    for seq, metrics_json, _obs_id in rows:
+        try:
+            m = json.loads(metrics_json)
+        except (TypeError, ValueError):
+            continue
+        if all(k in m and isinstance(m[k], (int, float)) for k in METRICS_NEEDED):
+            by_seq[seq].append({k: float(m[k]) for k in METRICS_NEEDED})
+
+    short_sequences = {seq for seq in sequences if len(by_seq.get(seq, [])) < n}
+    reusable = [seq for seq in sequences if seq not in short_sequences]
+    if not reusable:
+        return [], short_sequences
+
+    passes: list[tuple[dict, dict, dict]] = []
+    for run in range(n):
+        wave = {
+            seq: {TARGET: by_seq[seq][run]} for seq in reusable
+        }
+        payload = {"per_nanobody_components": {"0": wave}, "structures": {}}
+        ranks, structs, raw = rank_pass_payload(payload, archive)
+        passes.append((ranks, structs, raw))
+    return passes, short_sequences
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
@@ -468,6 +542,21 @@ def main() -> int:
         cohort_of[seq] = TOPUP_COHORT
     leaderboard_set = set(sequences)
 
+    # Never spend GPU time re-scoring our own sequences: the race already
+    # measured them, often dozens to hundreds of times (ARCHITECTURE_REDESIGN
+    # new finding 9). Reuse those stored raw metrics for any of our sequences
+    # with at least `n` of them; anything thinner still gets a real pass so
+    # it is never degraded, just not optimized.
+    our_sequences = sorted(seq for seq, c in cohort_of.items() if c == "ours")
+    local_passes, short_sequences = (
+        local_passes_for_ours(our_sequences, n, archive) if our_sequences else ([], set())
+    )
+    reused_sequences = set(our_sequences) - short_sequences
+    if reused_sequences:
+        print(f"  reused {len(reused_sequences)} of our own sequence(s) from "
+              f"stored observations, no GPU time spent on them", flush=True)
+    gpu_sequences = [s for s in sequences if s not in reused_sequences]
+
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
     per_pass_raw: list[dict[str, dict[str, float]]] = []
@@ -475,9 +564,14 @@ def main() -> int:
     rounds = max(n, len(topup_batches))
     for run in range(1, rounds + 1):
         extra = topup_batches[run - 1] if run <= len(topup_batches) else []
-        batch = (sequences if run <= n else []) + extra
+        batch = (gpu_sequences if run <= n else []) + extra
         ranks, structs, raw = score_pass(batch, run, archive=archive, config=config,
                                          scorer=scorer, out_root=out_root)
+        if run <= n and local_passes:
+            local_ranks, local_structs, local_raw = local_passes[run - 1]
+            ranks = {**ranks, **local_ranks}
+            structs = {**structs, **local_structs}
+            raw = {**raw, **local_raw}
         if run <= n:
             per_pass.append({s: v for s, v in ranks.items() if s in leaderboard_set})
             per_pass_structures.append(
