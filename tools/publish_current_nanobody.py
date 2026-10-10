@@ -90,6 +90,27 @@ DEFAULT_LAYER2_INPUTS = (
 # publishes went on refusing.
 RANK_QUALIFICATION_ARGUMENTS = tuple(publication_gates.gate_arguments())
 
+# NOVA_FULL_ARCHIVE_FIELD=1 (see sequential_exact_race.py's identical switch)
+# must flip the PUBLISHER's own ranking pass too, not just the race: before
+# this, _rank_command always ranked against the small live-epoch field
+# (--field-size 49), so nanobody_history/epoch*.json's selection.score sat on
+# a 60-400 scale even after the race itself switched to the ~50k-260k
+# archive-wide scale -- two different yardsticks for the same fleet, one of
+# them stale. User, 2026-10-10: "Fix publisher to use the same [scale]."
+_ARCHIVE_FIELD_GATES_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "nanobody_opt" / "strict_gates_archive_field.json"
+)
+
+
+def _full_archive_field_enabled() -> bool:
+    return os.environ.get("NOVA_FULL_ARCHIVE_FIELD") == "1"
+
+
+def _archive_field_rank_qualification_arguments() -> tuple[str, ...]:
+    overrides = publication_gates.load_overrides(_ARCHIVE_FIELD_GATES_PATH)
+    return tuple(publication_gates.gate_arguments(overrides))
+
 # Only rank one pays and the validator draws once, so the shortlist that decides
 # what is published must be ordered by the chance of a winning draw.
 SELECTION_ORDER = fleet_module.REQUIRED_SELECTION_ORDER
@@ -834,23 +855,43 @@ def _rank_command(
         "--api-field-count", "10",
         "--minimum-api-fields", "3",
     ])
+    # NOVA_FULL_ARCHIVE_FIELD switches the publisher's own ranking pass to the
+    # same full-archive field the race ranks candidates against (see the
+    # module-level comment by _full_archive_field_enabled). rank_exact.py
+    # ignores --field-size/--bootstrap-fields/--api-field-count/
+    # --minimum-api-fields once this is set, so they are left in place above
+    # rather than threaded with conditionals.
+    full_archive_field = _full_archive_field_enabled()
+    if full_archive_field:
+        command.append("--full-archive-field")
     if diversity_reserve_count:
         command.extend([
             "--diversity-reserve-count", str(diversity_reserve_count)
         ])
     if strict:
         command.extend(["--pose-config", str(config)])
-        command.extend(RANK_QUALIFICATION_ARGUMENTS)
+        command.extend(
+            _archive_field_rank_qualification_arguments() if full_archive_field
+            else RANK_QUALIFICATION_ARGUMENTS
+        )
     else:
         # The provisional pass exists so that an epoch always submits something;
         # it applies the evidence floor only, never the quality gates. The
         # threshold remains a shared diagnostic basis for competitive rates;
         # fresh-draw field-win probability itself no longer depends on it.
+        gates = (
+            publication_gates.load_overrides(_ARCHIVE_FIELD_GATES_PATH)
+            if full_archive_field else {}
+        )
+        defaults = publication_gates.gate_defaults()
         command.extend([
             "--minimum-observations",
-            publication_gates.gate_defaults()["--minimum-observations"],
+            defaults["--minimum-observations"],
             "--competitive-score-threshold",
-            publication_gates.gate_defaults()["--competitive-score-threshold"],
+            str(gates.get(
+                "--competitive-score-threshold",
+                defaults["--competitive-score-threshold"],
+            )),
         ])
     command.extend(["--selection-order", SELECTION_ORDER])
     return command
