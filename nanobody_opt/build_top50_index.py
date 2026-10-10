@@ -81,27 +81,39 @@ def _live_top50_from_db(
 
     import numpy as np
 
-    # Read the LIVE central MySQL DB (the producer writes there since ~25558),
-    # NOT the stale per-machine sqlite file. sqlite froze at the migration and
-    # left the priority-parent read on a dead snapshot.
+    # Read OUR OWN replay data through the same NOVA_LOCAL_SQLITE-aware path
+    # mutation_network.py's write side uses, not an unconditional central
+    # MySQL connection: db_path is the producer's own local SQLite primary
+    # (NOVA_LOCAL_SQLITE=1, deployed 2026-10-10), which has this data as soon
+    # as the race writes it -- no cross-continent round trip, and no
+    # dependency on Hetzner's transient availability for data we wrote
+    # ourselves. 2026-10-10: this function received db_path as its first
+    # argument and never used it, so every call paid the MySQL round trip
+    # (and its blips, see PRODUCER_ITERATION_FAILED) for nothing -- the
+    # "stale per-machine sqlite" note below predates the 2026-10-10
+    # NOVA_LOCAL_SQLITE migration and no longer applies.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from nanobody_opt import db  # noqa: E402
+    from nanobody_opt import mutation_network  # noqa: E402
 
-    with db.connect() as conn:
+    with mutation_network._connect(Path(db_path)) as conn:
+        local = mutation_network._is_local(conn)
+        p = "?" if local else "%s"
+        placeholders = ",".join([p] * len(REPLAY_SCALE_SOURCES))
         rows = conn.execute(
-            """
+            f"""
             SELECT n.sequence, AVG(o.score) AS mean_score, COUNT(*) AS n_obs
             FROM observations o JOIN nodes n ON o.node_id = n.id
-            WHERE n.target = 'P20809'
-              AND o.score_kind IN ('local_validator_replay_rank_sum',
-                                   'local_exact_validator_replay_rank_sum')
+            WHERE n.target = {p}
+              AND o.score_kind IN ({p}, {p})
               AND o.source IN ({placeholders})
             GROUP BY n.sequence
-            HAVING n_obs >= %s
+            HAVING n_obs >= {p}
             ORDER BY mean_score ASC
-            LIMIT %s
-            """.format(placeholders=",".join(["%s"] * len(REPLAY_SCALE_SOURCES))),
-            (*REPLAY_SCALE_SOURCES, min_obs, limit + extra * 4),
+            LIMIT {p}
+            """,
+            ("P20809", "local_validator_replay_rank_sum",
+             "local_exact_validator_replay_rank_sum",
+             *REPLAY_SCALE_SOURCES, min_obs, limit + extra * 4),
         ).fetchall()
     candidates = [str(r[0]).strip().upper() for r in rows]
 
