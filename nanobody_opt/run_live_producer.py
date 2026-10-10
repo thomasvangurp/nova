@@ -62,8 +62,19 @@ def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
     """
     if not paths:
         return False
+    # Our own race's sealed-run bookkeeping -- route through database (the
+    # local SQLite primary under NOVA_LOCAL_SQLITE=1) via mutation_network's
+    # dialect-aware connect, not an unconditional central MySQL connect().
+    # `database` used to be accepted and ignored here, same bug fixed in
+    # build_top50_index.py (2026-10-10): every pruning cycle paid a
+    # cross-continent round trip for data sitting locally, and a Hetzner
+    # blip silently disabled pruning for that cycle rather than crashing
+    # (this function fails closed on any exception already).
+    from nanobody_opt import mutation_network
     try:
-        connection = db.connect()
+        connection = mutation_network._connect(Path(database))
+        # No %s/? placeholders in this query (target is a literal), so no
+        # dialect branch is needed -- the SQL is identical on both backends.
         rows = connection.execute(
             """
             SELECT r.source_path, r.file_sha256, r.expected_rows,

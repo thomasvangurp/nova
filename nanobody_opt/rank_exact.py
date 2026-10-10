@@ -443,8 +443,20 @@ def _historical_observations(database: Path, target: str,
     # checker reads, and into the rankings payload as
     # observation_history.status=read_failed (ARCHITECTURE_AUDIT §0.4, P0b).
     global _HISTORY_READ_ERROR
+    # This is our own race's folds (source='local_exact_raw'), the same data
+    # NOVA_LOCAL_SQLITE's local primary holds as soon as the race writes it --
+    # route through mutation_network._connect(database) (dialect-aware, the
+    # same path the write side uses) instead of an unconditional central
+    # MySQL connect(), mirroring the build_top50_index.py fix (2026-10-10):
+    # `database` used to be accepted and ignored here too, so every call on
+    # this -- the hottest call path in the pipeline, hit by every race
+    # tranche/round via sequential_exact_race.py AND every publish pass via
+    # publish_current_nanobody.py -- paid a cross-continent round trip (and
+    # silently threw away the +0.165->+0.365 accuracy lift on every Hetzner
+    # blip) for data already sitting locally.
+    from nanobody_opt import mutation_network
     try:
-        connection = db.connect()
+        connection = mutation_network._connect(Path(database))
     except Exception as error:
         _HISTORY_READ_ERROR = f"connect: {type(error).__name__}: {error}"[:500]
         from nanobody_opt.failure_log import record_failure
@@ -452,6 +464,7 @@ def _historical_observations(database: Path, target: str,
                        error, stage="connect", target=target)
         return found, 0
     try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
         rows = connection.execute(
             "SELECT n.sequence, o.metrics_json, x.run_id "
             "FROM observations o "
@@ -460,7 +473,7 @@ def _historical_observations(database: Path, target: str,
             "ON x.observation_id=o.observation_id AND x.target=n.target "
             "JOIN exact_runs r ON r.target=x.target "
             "AND r.run_id=x.run_id AND r.complete=1 "
-            "WHERE n.target = %s AND o.source='local_exact_raw' "
+            f"WHERE n.target = {p} AND o.source='local_exact_raw' "
             "AND o.metrics_json IS NOT NULL",
             (target,))
         for sequence, blob, run_id in rows:

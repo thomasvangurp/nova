@@ -569,16 +569,25 @@ def _exact_run_is_sealed(
 ) -> bool:
     if not descriptor["expected_rows"]:
         return False
+    # Our own race's sealed-run bookkeeping -- route through database (the
+    # local SQLite primary under NOVA_LOCAL_SQLITE=1) via mutation_network's
+    # dialect-aware connect, not an unconditional central MySQL connect().
+    # `database` used to be accepted and ignored here, same bug fixed in
+    # build_top50_index.py (2026-10-10): a Hetzner blip here silently
+    # degraded (this already fails closed to False) a check on data that
+    # was sitting locally the whole time.
+    from nanobody_opt import mutation_network
     try:
-        connection = db.connect()
+        connection = mutation_network._connect(Path(database))
+        p = "?" if mutation_network._is_local(connection) else "%s"
         row = connection.execute(
-            """
+            f"""
             SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
                    COUNT(x.observation_id)
             FROM exact_runs r
             LEFT JOIN exact_run_observations x
               ON x.target=r.target AND x.run_id=r.run_id
-            WHERE r.target=%s AND r.run_id=%s
+            WHERE r.target={p} AND r.run_id={p}
             GROUP BY r.target, r.run_id
             """,
             (target, descriptor["run_id"]),
@@ -603,10 +612,13 @@ def _database_exact_fingerprints(
     database: Path, target: str
 ) -> tuple[str, str, int]:
     """Fingerprint authoritative sealed raw runs without reading score files."""
+    # Same local-SQLite routing as _exact_run_is_sealed above.
+    from nanobody_opt import mutation_network
     try:
-        connection = db.connect()
+        connection = mutation_network._connect(Path(database))
+        p = "?" if mutation_network._is_local(connection) else "%s"
         rows = connection.execute(
-            """
+            f"""
             SELECT r.run_id, r.file_sha256, r.expected_rows, r.scorer_protocol,
                    COUNT(x.observation_id),
                    SUM(CASE WHEN a.observation_id IS NOT NULL THEN 1 ELSE 0 END)
@@ -615,7 +627,7 @@ def _database_exact_fingerprints(
               ON x.target=r.target AND x.run_id=r.run_id
             LEFT JOIN observation_artifacts a
               ON a.observation_id=x.observation_id
-            WHERE r.target=%s AND r.complete=1
+            WHERE r.target={p} AND r.complete=1
             GROUP BY r.target, r.run_id
             HAVING COUNT(x.observation_id)=r.expected_rows
             ORDER BY r.run_id
