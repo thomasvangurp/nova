@@ -101,6 +101,17 @@ pool is wanted later:
    top-50's GROUP BY (sequence) currently finishes, measured end to end at
    61 s including pixi start-up. It is the same failure class the producer
    just hit, so watch for `TOP50` failures in `failed.json`.
+   - **Update 2026-10-10 13:45Z: it fired.** 25631 iteration_03 failed in
+     `build_top50_index._live_top50_from_db` with 2013 at the 60 s
+     `read_timeout`. The same query timed read-only with a 600 s timeout
+     took **69.0 / 53.1 / 51.1 s**. It matches 3.92 M observation rows, and
+     its plan is `uq_nodes_target_sequence` (70,969 nodes) →
+     `idx_observations_node_epoch`, using a temporary table and a filesort.
+     This is not new: `build_top50_index` `failed.json` appears in 25603–25612
+     and in 25618. It now costs more, because fast races mean the query runs
+     once per iteration, several times an epoch. **Open:** the fix is a
+     covering index or a pre-aggregated table. Raising the producer's read
+     timeout for this one reader would only be a stop-gap.
 5. **The producer's observation writer was bound by round-trips, not by query cost
    (fixed 2026-10-10).** `update_observation_store` (`mutation_network.py`)
    sent 3–5 statements per row: a node upsert, `SELECT id`, an observation
@@ -148,6 +159,48 @@ pool is wanted later:
      `mutation_network.py` on master. `sequential_exact_race` runs as a
      fresh `-m` subprocess per iteration, so the next race picks the fix up
      without a producer restart.
+   - **Live verification (2026-10-10, 13:55 UTC). CONFIRMED.** Measured on
+     the first races that started after the deploy: 25630 iteration_01
+     (started 12:24Z) and 25631. Every one of these writes was 10,000 rows,
+     the same size as before the fix.
+     - **Race tranche `bookkeeping_seconds`** (`race/timings.jsonl`): before
+       the fix, 885 (25619), 2,316 (25621), 10,414 (25623) and 9,606
+       (25627). After it, 103 (25630) and 104 / 115 / 100 (25631, 3
+       tranches). The writer itself is ~23 s of that: in 25631 tranche 3,
+       `screen_ranking.json` was written at 13:14:16.6 and the timing line
+       at 13:14:39.9. The other ~77 s is the `rank_exact` subprocess.
+     - **Race wall time:** before, 28 / 47 / 180 / 168 min (25619 / 21 /
+       23 / 27). After, 6 min (25630) and 13 min (25631, 856 screened).
+     - **`select_elite_parents` was a second victim.** It re-upserts ~2k
+       `public_validator_api` rows every epoch through the same writer.
+       Measured from `top50_index.json` to `elite_parents.json`, it took
+       24.7 / 29.8 / 27.2 / 27.0 / 33.0 min (25619 / 21 / 23 / 27 / 30).
+       After the fix it takes 11 s (25631) and 12 s (25632). The first race
+       now starts ~19 min into the epoch, not 45–55 min.
+     - **Iterations:** 25631 is the first whole epoch on the fix. It ran 4
+       producer iterations:
+       - one full screen race;
+       - one replication race (`qualified=1`);
+       - one TOP50 2013 failure (finding 4, which predates this fix);
+       - one stopped by the reserve window.
+
+       That compares with 1 iteration in each of 25621–25630. The 9–12
+       "iterations" of 25617/25618 are not a healthy baseline: all of them
+       failed in `local_neighborhood`/`build_top50_index` within ~3 min,
+       and none ran a race. Each iteration is now bounded by ~10–18 min of
+       proposal generation plus layer2, not by DB writes.
+     - **Integrity** (read-only checks on the live DB): 25630 has 10,000
+       `live_exact_screen` rows and 25631 has 10,002. There are 0 orphan
+       `node_id`s and 0 nodes with a length or residue-vector mismatch
+       (10,034 nodes checked), and 0 duplicate (target, sequence) nodes.
+       Lineage edges number 297 (25630) and 409 (25631), all child ids
+       match an observation node, with 0 missing parents and 0 cross-target
+       edges. Artifact coverage is 0 rows, the same as the old writer in
+       25627. Both readers are healthy: `TOP50_OK … topup=10
+       topup_status=ok` and `ELITE_PARENTS_READY parents=400` in
+       25630–25632. No `MUTATION_DB_UPDATE_FAILED` has been logged since
+       the deploy, and `pipeline_failures.jsonl` was last written at
+       02:14Z.
 
 ---
 
