@@ -561,6 +561,7 @@ def _run_iteration(
             "--priority-parents", str(top50),
             "--rival-coldkey", args.rival_coldkey,
             "--limit", "2000",
+            "--mutation-database", str(args.mutation_database),
             "--output", str(elite_parents),
         ]
         if args.ranker_model.is_file():

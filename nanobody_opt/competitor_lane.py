@@ -96,6 +96,58 @@ POSITION_RESIDUE_ORDER = {
 }
 
 
+#: Writer/score_kind tag for the robust 10-pass replay (multipass_all_rivals.py
+#: PASS_SCORE_KIND) -- the same measurement for "ours" and every rival, ranked
+#: against the identical archive field each pass. Matched against literally,
+#: never re-derived, so a label change there breaks this loudly instead of
+#: silently mixing scales.
+MULTIPASS_SCORE_KIND = "multipass_sum10_pass"
+
+
+def multipass_scores(
+    sequences: list[str], db_path: Path, *, min_passes: int = 10,
+) -> dict[str, float]:
+    """Mean 10-pass replay rank-sum per sequence, for whichever of
+    ``sequences`` have at least ``min_passes`` stored passes.
+
+    User directive, 2026-10-10: competitor_lane's parent pool must be ranked
+    by robust multi-pass scoring only, "it doesn't matter where it comes
+    from" -- the validator's single-observation final_score (fetch_rival_
+    sequences) and the archive's single-snapshot Algorithm-2 proxy
+    (_load_pool) are both the kind of noisy single-observation signal
+    already ruled out for candidate ranking (see rank_exact.py's
+    --full-archive-field); the same principle applies one step upstream, at
+    parent selection. multipass_all_rivals.py already writes this score for
+    BOTH cohorts (ours and rivals) under one writer/score_kind/formula, so no
+    new measurement is needed -- only a stricter read of what's already
+    stored. A sequence with fewer than ``min_passes`` stored passes is
+    simply absent from the returned mapping; the caller drops it rather than
+    falling back to a noisier score for it.
+    """
+    from nanobody_opt import db
+
+    if not sequences:
+        return {}
+    conn = db.connect()
+    placeholders = ",".join(["%s"] * len(sequences))
+    rows = conn.execute(
+        f"""
+        SELECT n.sequence, o.score
+        FROM observations o JOIN nodes n ON n.id = o.node_id
+        WHERE n.target = %s AND n.sequence IN ({placeholders})
+          AND o.source = %s AND o.score_kind = %s
+        """,
+        (TARGET, *sequences, "public_multipass_rivals", MULTIPASS_SCORE_KIND),
+    ).fetchall()
+    by_seq: dict[str, list[float]] = {}
+    for seq, score in rows:
+        by_seq.setdefault(seq, []).append(float(score))
+    return {
+        seq: sum(scores) / len(scores)
+        for seq, scores in by_seq.items() if len(scores) >= min_passes
+    }
+
+
 def _load_pool(archive: Path) -> list[str]:
     """Every public sequence in the archive, ranked by the validator's
     Algorithm-2 minmax (best first), deduped.
@@ -161,7 +213,9 @@ def generate(archive: Path, positions: list[int], limit: int | None,
              priority: list[str] | None = None,
              double_edit_pairs: int = 0,
              ranker_model: Any | None = None,
-             rival_sequences: list[str] | None = None) -> dict[str, Any]:
+             rival_sequences: list[str] | None = None,
+             mutation_database: Path | None = None,
+             min_passes: int = 10) -> dict[str, Any]:
     # Parent source: the rival's proven-good sequences when supplied, else the
     # global archive ranked by the validator's Algorithm-2 proxy.
     if rival_sequences:
@@ -186,10 +240,28 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         priority_pool = [s.upper() for s in priority if len(s) == modal_length]
         priority_set = set(priority_pool)
         pool = [s for s in pool if s not in priority_set]
-    # Keep the pool ranked best-first (Algorithm-2 from _load_pool) rather than
-    # shuffling: the shuffle threw away the quality signal and diluted rare
-    # winning motifs (e.g. the T/V CDR3 variants) to their ~random share of the
-    # 2000-slot cap.
+
+    multipass_ranked = 0
+    if mutation_database is not None:
+        # User directive, 2026-10-10: "demand multipass scoring, only use
+        # those" -- drop every parent (priority and broad pool alike) without
+        # >= min_passes stored replay passes, and rank what's left by that
+        # robust score instead of the validator's single final_score / the
+        # archive's single-snapshot Algorithm-2 proxy. See multipass_scores()
+        # docstring for why this is the same principle as --full-archive-field,
+        # one step upstream.
+        scores = multipass_scores(
+            sorted(set(priority_pool) | set(pool)), mutation_database,
+            min_passes=min_passes)
+        multipass_ranked = len(scores)
+        priority_pool = sorted(
+            (s for s in priority_pool if s in scores), key=lambda s: scores[s])
+        pool = sorted((s for s in pool if s in scores), key=lambda s: scores[s])
+
+    # Keep the pool ranked best-first (Algorithm-2 from _load_pool, or the
+    # multipass score above) rather than shuffling: the shuffle threw away
+    # the quality signal and diluted rare winning motifs (e.g. the T/V CDR3
+    # variants) to their ~random share of the 2000-slot cap.
     if pool_limit and len(pool) > pool_limit:
         pool = pool[:pool_limit]
 
@@ -259,6 +331,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     return {
         "source": "competitor_position_lane",
         "positions": positions,
+        "multipass_required": mutation_database is not None,
+        "multipass_ranked_pool": multipass_ranked,
         "pool_size": len(priority_pool) + len(pool),
         "priority_pool_size": len(priority_pool),
         "ranker_applied": ranker_applied,
@@ -289,6 +363,10 @@ def main() -> None:
                         help="model.joblib from train_parent_relative_ranker; when given, single-edits are ordered by predicted improvement before --limit")
     parser.add_argument("--rival-coldkey", type=str, default=None,
                         help="coldkey prefix of a competitor; when given, their recent submissions become the parent pool (proven-good source)")
+    parser.add_argument("--mutation-database", type=Path, default=None,
+                        help="when given, every parent (priority and broad pool) must have >= --min-passes stored multipass_sum10_pass observations, ranked by that score instead of the validator final_score / archive Algorithm-2 proxy")
+    parser.add_argument("--min-passes", type=int, default=10,
+                        help="stored passes required per parent when --mutation-database is given (default 10)")
     args = parser.parse_args()
     positions = [int(p) for p in args.positions.split(",") if p.strip()]
     top50 = None
@@ -321,12 +399,23 @@ def main() -> None:
                        top50=top50, min_parent_distance=args.min_parent_distance,
                        priority=priority, double_edit_pairs=args.double_edit_pairs,
                        ranker_model=ranker_model,
-                       rival_sequences=rival_sequences)
+                       rival_sequences=rival_sequences,
+                       mutation_database=args.mutation_database,
+                       min_passes=args.min_passes)
+    if args.mutation_database is not None and payload["pool_size"] == 0:
+        raise SystemExit(
+            f"--mutation-database given but zero parents have >= "
+            f"{args.min_passes} stored passes; refusing to write an empty "
+            "parent pool (strict multipass-only mode, no silent fallback)"
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
     print(
         f"COMPETITOR_LANE_READY pool={payload['pool_size']} "
-        f"candidates={len(payload['candidates'])} output={args.output}"
+        f"candidates={len(payload['candidates'])} "
+        f"multipass_required={payload['multipass_required']} "
+        f"multipass_ranked_pool={payload['multipass_ranked_pool']} "
+        f"output={args.output}"
     )
 
 
