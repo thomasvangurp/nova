@@ -27,7 +27,24 @@ EXACT_SCORER = "nova-boltzgen-validator-wrapper"
 # publication impossible for exactly the candidates ranking just approved -- and
 # a hardcoded ceiling of 90 on a drifting rank-sum scale is how re-scoring the
 # sequence the validator paid 79 for came back at median 180 and blocked itself.
+#
+# NOVA_FULL_ARCHIVE_FIELD=1 (set on the same process that ranked this winner,
+# via publish_current_nanobody.py's _rank_command) must flip these gates the
+# same way it flips rank_exact.py's: 2026-10-10, ranking switched to the
+# ~50k-260k archive-wide scale but this module kept the small-field defaults
+# (--maximum-p90-rank-sum=400), so every candidate ranking just approved was
+# then rejected here as "exceeds 400" -- the exact failure mode the comment
+# above warns about, just reintroduced one level up by the field switch
+# instead of a hardcoded number.
 _PUBLICATION_GATES = publication_gates.gate_defaults()
+if os.environ.get("NOVA_FULL_ARCHIVE_FIELD") == "1":
+    # Merge, not replace: the override file only carries the scale-dependent
+    # score gates (competitive-score-threshold, p90 rank sums), not evidence
+    # gates like --minimum-observations, which stay the field-independent
+    # defaults above.
+    _PUBLICATION_GATES.update(publication_gates.load_overrides(
+        Path(__file__).resolve().parent / "strict_gates_archive_field.json"
+    ))
 MINIMUM_EXACT_OBSERVATIONS = int(_PUBLICATION_GATES["--minimum-observations"])
 MINIMUM_COMPETITIVE_RATE = float(_PUBLICATION_GATES["--minimum-competitive-rate"])
 MINIMUM_OBSERVATION_COMPETITIVE_RATE = float(
