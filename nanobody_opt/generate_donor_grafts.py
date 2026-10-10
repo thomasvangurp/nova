@@ -214,6 +214,82 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+#: Set once per worker process by _init_donor_worker, same pattern as
+#: check_validator_novelty.py's _WORKER_ENGINE -- these are identical for
+#: every donor, so each worker builds/receives them once, not per donor.
+_DONOR_TEACHER_SEQUENCE: str = ""
+_DONOR_PRESERVED: Any = None
+_DONOR_MODE: str = ""
+_DONOR_SWAP_COUNTS: list[int] = []
+_DONOR_ARCHIVE_SEQUENCES: set = set()
+_DONOR_REQUIREMENTS: dict = {}
+_DONOR_TOP_KMERS: list = []
+_DONOR_THRESHOLD: float = 0.0
+
+
+def _init_donor_worker(teacher_sequence, preserved, mode, swap_counts,
+                       archive_sequences, requirements, top_kmers, threshold) -> None:
+    global _DONOR_TEACHER_SEQUENCE, _DONOR_PRESERVED, _DONOR_MODE, \
+        _DONOR_SWAP_COUNTS, _DONOR_ARCHIVE_SEQUENCES, _DONOR_REQUIREMENTS, \
+        _DONOR_TOP_KMERS, _DONOR_THRESHOLD
+    _DONOR_TEACHER_SEQUENCE = teacher_sequence
+    _DONOR_PRESERVED = preserved
+    _DONOR_MODE = mode
+    _DONOR_SWAP_COUNTS = swap_counts
+    _DONOR_ARCHIVE_SEQUENCES = archive_sequences
+    _DONOR_REQUIREMENTS = requirements
+    _DONOR_TOP_KMERS = top_kmers
+    _DONOR_THRESHOLD = threshold
+
+
+def _process_donor(donor: dict) -> list[tuple]:
+    """Exactly the old serial loop's per-donor body, minus the `seen` check
+    (that stays single-threaded in main(), after collecting every worker's
+    results, since it's the one cross-donor sequential dependency). Returns
+    one (reason, sequence, mutations, contact_backmutations,
+    vernier_backmutations, max_jaccard) tuple per variant; `reason` is ""
+    for a variant that passed every per-donor check (still needs the `seen`
+    check in main())."""
+    try:
+        if _DONOR_MODE == "full":
+            sequence, contact_backmutations, vernier_backmutations = (
+                graft_sequence(_DONOR_TEACHER_SEQUENCE, donor["sequence"],
+                               _DONOR_PRESERVED)
+            )
+            variants = [(sequence, [], contact_backmutations,
+                         vernier_backmutations)]
+        else:
+            variants = [
+                (sequence, mutations, [], [])
+                for sequence, mutations in progressive_grafts(
+                    _DONOR_TEACHER_SEQUENCE, donor["sequence"], _DONOR_PRESERVED,
+                    _DONOR_SWAP_COUNTS,
+                )
+            ]
+    except (AssertionError, ValueError, RuntimeError):
+        return [("imgt_graft", "", [], [], [], 0.0)]
+    if not variants:
+        return [("no_eligible_swaps", "", [], [], [], 0.0)]
+
+    results = []
+    for sequence, mutations, contact_backmutations, vernier_backmutations in variants:
+        reason = ""
+        max_jaccard = 0.0
+        if sequence in _DONOR_ARCHIVE_SEQUENCES:
+            reason = "historical_exact"
+        elif gates.check_sequence(sequence, _DONOR_REQUIREMENTS):
+            reason = "layer1"
+        else:
+            diverse, max_jaccard = diversity.passes_diversity(
+                sequence, _DONOR_TOP_KMERS, threshold=_DONOR_THRESHOLD, k=5
+            )
+            if not diverse:
+                reason = "top50_jaccard"
+        results.append((reason, sequence, mutations, contact_backmutations,
+                        vernier_backmutations, max_jaccard))
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--teachers", required=True, type=Path)
@@ -237,6 +313,12 @@ def main() -> None:
         help="comma-separated progressive framework mutation counts",
     )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--concurrency", type=int, default=min(64, os.cpu_count() or 1),
+        help="donors are independent (grafting + per-variant checks), so "
+             "this is embarrassingly parallel; 1 reproduces the old serial "
+             "path exactly",
+    )
     args = parser.parse_args()
 
     teacher_payload = json.loads(args.teachers.read_text())
@@ -299,44 +381,35 @@ def main() -> None:
     cases = []
     rejected: dict[str, int] = {}
     seen = set()
-    for donor in donor_frame.to_dict("records"):
-        try:
-            if args.mode == "full":
-                sequence, contact_backmutations, vernier_backmutations = (
-                    graft_sequence(teacher_sequence, donor["sequence"], preserved)
-                )
-                variants = [(sequence, [], contact_backmutations,
-                             vernier_backmutations)]
-            else:
-                variants = [
-                    (sequence, mutations, [], [])
-                    for sequence, mutations in progressive_grafts(
-                        teacher_sequence, donor["sequence"], preserved, swap_counts
-                    )
-                ]
-        except (AssertionError, ValueError, RuntimeError):
-            reason = "imgt_graft"
-            rejected[reason] = rejected.get(reason, 0) + 1
-            continue
-        if not variants:
-            reason = "no_eligible_swaps"
-            rejected[reason] = rejected.get(reason, 0) + 1
-            continue
+    donors = donor_frame.to_dict("records")
+    # Grafting + the per-variant archive/layer1/diversity checks are
+    # independent per donor (no shared mutable state); only the `seen`
+    # cross-donor dedup is sequential. Parallelize the expensive, independent
+    # part across donors, then do the cheap `seen` check as a single-threaded
+    # pass over the aggregated per-variant results in donor order -- same
+    # result as the old serial loop (duplicate_hybrid still means "a
+    # higher-priority donor already produced this exact sequence"), just not
+    # redone inside the worker.
+    if args.concurrency > 1 and len(donors) >= args.concurrency:
+        import concurrent.futures
 
-        for sequence, mutations, contact_backmutations, vernier_backmutations in variants:
-            reason = ""
-            if sequence in seen:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=args.concurrency,
+            initializer=_init_donor_worker,
+            initargs=(teacher_sequence, preserved, args.mode, swap_counts,
+                      archive_sequences, requirements, top_kmers, threshold),
+        ) as pool:
+            per_donor_results = list(pool.map(_process_donor, donors))
+    else:
+        _init_donor_worker(teacher_sequence, preserved, args.mode, swap_counts,
+                           archive_sequences, requirements, top_kmers, threshold)
+        per_donor_results = [_process_donor(donor) for donor in donors]
+
+    for donor, variant_results in zip(donors, per_donor_results):
+        for reason, sequence, mutations, contact_backmutations, \
+                vernier_backmutations, max_jaccard in variant_results:
+            if not reason and sequence in seen:
                 reason = "duplicate_hybrid"
-            elif sequence in archive_sequences:
-                reason = "historical_exact"
-            elif gates.check_sequence(sequence, requirements):
-                reason = "layer1"
-            else:
-                diverse, max_jaccard = diversity.passes_diversity(
-                    sequence, top_kmers, threshold=threshold, k=5
-                )
-                if not diverse:
-                    reason = "top50_jaccard"
             if not reason:
                 seen.add(sequence)
                 cases.append({
@@ -357,7 +430,7 @@ def main() -> None:
                     "swap_count": len(mutations),
                     "swaps": mutations,
                 })
-            if reason:
+            else:
                 rejected[reason] = rejected.get(reason, 0) + 1
 
     cases.sort(key=lambda item: (
