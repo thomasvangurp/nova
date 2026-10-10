@@ -290,7 +290,31 @@ def job_from_command(command, *, observation_id=None) -> dict:
         raise ValueError(
             "not a fast_score_batch argv: %s belong to an outer CLI" % outer)
     with open(flags["--sequences"]) as handle:
-        sequences = _json.load(handle)
+        raw_sequences = _json.load(handle)
+    # fast_score_batch.py's own main() (--sequences loading, around line 520)
+    # accepts {"sequences": [...]} / {"cases": [...]} / a bare list, and each
+    # item may be a bare string OR a {"sequence": ...} object (the shape
+    # score_boltzgen_waves._wave_command and the live race always write).
+    # job_from_command used to hand the raw item list straight through when
+    # items were dicts, so the worker's _deduplicate_nanobodies tried to hash
+    # a dict and raised inside run_chunk, caught and logged as "continuing"
+    # with the sequence silently dropped -- the daemon then answered "ok"
+    # with nothing scored, which _merge correctly reports as
+    # "MERGE LOST SEQUENCES: submitted N, merged 0". This mirrors
+    # fast_score_batch.py's own extraction exactly so the two can never
+    # disagree on what one sequence item means. See
+    # tests/test_scorer_daemon.py::test_job_from_command_extracts_dict_items.
+    _items = (
+        raw_sequences if isinstance(raw_sequences, list)
+        else (raw_sequences.get("cases") or raw_sequences.get("sequences") or [])
+    )
+    sequences_list = [
+        item["sequence"] if isinstance(item, dict) else item for item in _items
+    ]
+    sequences_list = [s for s in sequences_list if isinstance(s, str) and s]
+    if not sequences_list:
+        raise ValueError(
+            "no sequences parsed from %s" % flags["--sequences"])
 
     # main() derives the rotamer library by globbing beside the reference
     # when --synth-library is absent; the worker would otherwise iterate None.
@@ -309,7 +333,7 @@ def job_from_command(command, *, observation_id=None) -> dict:
         # Pass EVERY gpu: taking gpus[0] would run a whole round on one device.
         "gpus": flags.get("--gpus", "0,1"),
         "shards_per_gpu": _int("--shards-per-gpu", 1),
-        "sequences": sequences.get("sequences", sequences),
+        "sequences": sequences_list,
         "target": flags.get("--target", "P20809"),
         "subnet_config": flags["--config"],
         "out_path": flags["--out"],
