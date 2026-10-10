@@ -165,11 +165,21 @@ def _batches(items: list[str], size: int) -> list[list[str]]:
     return [items[start : start + size] for start in range(0, len(items), size)]
 
 
+def _tranche_source_key(metadata: dict[str, dict[str, Any]], sequence: str) -> str:
+    """Which generation lane proposed this candidate (local_neighborhood's
+    ``parent_source``: ``exact_shortlist``/``recent_archive`` from
+    ``elite_parents.json``, or ``historical_basin_member`` from its own
+    internal basin exploration -- see local_neighborhood.py)."""
+    return str(metadata.get(sequence, {}).get("parent_source") or "__unattributed__")
+
+
 def _balanced_screen_tranche(
     pending: list[str],
     metadata: dict[str, dict[str, Any]],
     screened_parent_counts: Counter[str],
     size: int,
+    *,
+    screened_source_counts: "Counter[str] | None" = None,
 ) -> list[str]:
     """Select the next tranche without oversampling one structural basin.
 
@@ -179,6 +189,18 @@ def _balanced_screen_tranche(
     budget on one family.  It deliberately does not use neighbour total scores:
     the exact replay shows that binding/interaction outcomes are not smooth
     enough for graph-based arm elimination.
+
+    Balancing by individual parent alone is not balancing by LANE: a lane
+    with many distinct parents (e.g. elite_parents.json's exact_shortlist,
+    often ~400 distinct basin cores) dilutes across them while a lane with
+    few parents concentrates its candidates on each one, so equal per-parent
+    treatment still starves the many-parent lane of tranche slots overall --
+    measured live at 23-32/epoch for exact_shortlist against 270-800 for the
+    other lane despite exact_shortlist's children having the BEST median
+    screened score of any lane (ARCHITECTURE_REDESIGN new finding 6). The
+    source key below is checked FIRST, so no lane can be starved regardless
+    of how many distinct parents it has; the existing per-parent key still
+    breaks ties within a lane exactly as before.
     """
     if size < 1:
         raise ValueError("tranche size must be positive")
@@ -198,11 +220,13 @@ def _balanced_screen_tranche(
 
     available = list(enumerate(pending))
     counts = Counter(screened_parent_counts)
+    source_counts = Counter(screened_source_counts or {})
     selected: list[str] = []
     while available and len(selected) < size:
         choice = min(
             range(len(available)),
             key=lambda index: (
+                source_counts[_tranche_source_key(metadata, available[index][1])],
                 counts[allocation_key(available[index][1])],
                 int(
                     metadata.get(available[index][1], {}).get(
@@ -214,8 +238,10 @@ def _balanced_screen_tranche(
         )
         _, sequence = available.pop(choice)
         parent = allocation_key(sequence)
+        source = _tranche_source_key(metadata, sequence)
         selected.append(sequence)
         counts[parent] += 1
+        source_counts[source] += 1
     return selected
 
 
@@ -227,11 +253,13 @@ def _resumable_screen_tranche(
     *,
     source: Path,
     completed: Path,
+    screened_source_counts: "Counter[str] | None" = None,
 ) -> list[str]:
     """Preserve the actual candidate list of an already completed tranche."""
     if not completed.is_file():
         return _balanced_screen_tranche(
-            pending, metadata, screened_parent_counts, size
+            pending, metadata, screened_parent_counts, size,
+            screened_source_counts=screened_source_counts,
         )
     if not source.is_file():
         raise ValueError(f"completed tranche lacks its candidate source: {source}")
@@ -1698,6 +1726,7 @@ def main() -> None:
     incumbent_p90: float | None = None
     weak_initial_fallback_spent = False
     screened_parent_counts: Counter[str] = Counter()
+    screened_source_counts: Counter[str] = Counter()
     screened = 0
     pending = list(sequences)
     tranche_index = 0
@@ -1774,6 +1803,7 @@ def main() -> None:
             affordable,
             source=source,
             completed=completed,
+            screened_source_counts=screened_source_counts,
         )
         if not completed.is_file():
             _atomic_json(source, {"target": args.target, "sequences": tranche})
@@ -1787,6 +1817,7 @@ def main() -> None:
                 or "__unattributed__"
             )
             screened_parent_counts[parent] += 1
+            screened_source_counts[_tranche_source_key(candidate_metadata, sequence)] += 1
         return _start_screen(
             index=tranche_index,
             tranche=tranche,
