@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Refresh the hf_field_sum10_20x_rank_sum pool each epoch (every 30 min tick).
-#
-# Idempotent (hf_field_refresh.py only scores sequences missing from the pool).
+# Top rival / HF top-200 sequences up to 20 stored multipass_sum10_pass passes
+# (every 30 min tick). Idempotent: hf_field_refresh.py only scores the passes
+# still missing.
 # The GPU/time safety guard lives in hf_field_refresh.py ITSELF, so it also
 # holds when the script is started by hand or from another wrapper:
 #   - refuses (exit 3) unless no live-producer / GPU-scoring process runs on
@@ -33,9 +33,9 @@ echo "$(date -u +%FT%TZ) RUN" >> "$LOGDIR/loop.log"
 export SN68_MYSQL_HOST=127.0.0.1 SN68_MYSQL_PORT=3306
 # NOT NANOBODY_SCORER_DAEMON: the refresh must never feed the producer's
 # shared warm scorer (hf_field_refresh.py forces it off for its scorer too).
-# Import the one-shot JSONs first (cheap, DB-only, idempotent).
-/root/.pixi/envs/bgen/bin/python /root/import_hf_field_20x.py \
-  >> "$LOGDIR/import.log" 2>&1
+# 2026-10-10: import_hf_field_20x.py is no longer run here. It imported the
+# old one-shot JSONs under hf_field_20x_rank_sum, a label being closed by the
+# 2026-10-10 relabel (tools/migrate_hf_field_20x.py -> legacy_hf_field_algo2_20x_mean).
 
 # --gpus defaults to every GPU nvidia-smi lists on this host.
 /root/.pixi/envs/bgen/bin/python /root/hf_field_refresh.py >> "$LOGDIR/refresh.log" 2>&1

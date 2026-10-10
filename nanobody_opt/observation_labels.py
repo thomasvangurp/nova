@@ -87,6 +87,9 @@ PRODUCER_REPLAY_SOURCES = frozenset({
 })
 
 RELABEL_WRITER = "relabel_multipass_legacy"
+#: nanobody_opt/hf_field_refresh.py: tops rival / HF top-200 sequences up to a
+#: depth of 20 stored passes, one multipass_sum10_pass row per pass.
+HF_REFRESH_WRITER = "hf_field_refresh"
 
 LABELS: dict[str, Label] = {label.score_kind: label for label in (
     Label(
@@ -138,7 +141,7 @@ LABELS: dict[str, Label] = {label.score_kind: label for label in (
         field="hf_archive_full (field_rows + field_sha256 in provenance)", passes=1,
         sources=frozenset({"public_multipass_rivals"}),
         writers=frozenset({"multipass_all_rivals", "backfill_multipass_metrics",
-                           RELABEL_WRITER}),
+                           RELABEL_WRITER, HF_REFRESH_WRITER}),
         strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-09",
         epochs="25533-25534, 25593-25603 (backfilled from disk), 25613-25618 "
                "(relabelled, no metrics), 25619+ (native)",

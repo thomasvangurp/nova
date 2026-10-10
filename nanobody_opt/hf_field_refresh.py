@@ -1,34 +1,58 @@
 #!/usr/bin/env python3
-"""Per-epoch refresh: extend the ``hf_field_20x_rank_sum`` pool with NEW sequences.
+"""Per-epoch 20x depth top-up of rival / HF-archive passes into ``multipass_sum10_pass``.
 
-The parent pool is the flat top-50 by 20x HF-field rank-sum across three
-sources.  This script grows that pool over time.  Each run it recomputes the
-three source sets, finds the sequences that are NOT yet scored at 20x
-(``hf_field_20x_rank_sum``), 20x-scores just those, and imports them.
+What it scores. Each run rebuilds three candidate sets:
 
-Sources (all 20x, one shared 21k-58k rank-sum scale, lower = better):
+  public_multipass_rivals  every rival sequence on this epoch's leaderboard,
+                           plus every rival ever stored (cohort rival)
+  hf_archive_top200        rank_binders top-200 over the raw HF archive
+                           (nanobody_opt.hf_topup, the same copy the live
+                           reader uses)
+  our_top50_20x            our top-50 (only with --include-ours; see below)
 
-  our_top50_20x           our top-50 by the mixed replay rank-sum read
-  public_multipass_rivals every rival coldkey's submissions this epoch
-                          (leaderboard API, coldkey != ours)
-  hf_archive_top200       rank_binders top-200 over the raw HF archive
+For each sequence it counts the passes already stored under
+``multipass_sum10_pass`` with raw metrics, from any writer
+(``hf_topup.stored_pass_counts``). It scores only the passes MISSING to a
+depth of N_PASSES. "20x" is a depth target, not a second pipeline
+(ARCHITECTURE_REDESIGN R1), so no relabel can ever trigger a full re-fold
+again.
 
-Idempotent and cheap to re-run: scoring only covers sequences missing from the
-pool, so overlapping runs / restarts are safe.
+What it writes (2026-10-10). One row per sequence per pass, under exactly
+the contract that ``tools/multipass_all_rivals.py`` (dashboard) and
+``tools/migrate_hf_field_20x.py`` already write
+(``observation_labels.LABELS['multipass_sum10_pass']``, strict):
 
-What a row holds (2026-10-10 fix). One row per sequence under SCORE_KIND:
+  score_kind    multipass_sum10_pass
+  source        public_multipass_rivals   (the only registered source)
+  score         ONE pass's sum-of-10 vs the full HF archive + that pass's batch
+                (archive duplicates dropped, keep the fresh pass: same as
+                multipass_all_rivals.rank_pass_payload)
+  metrics_json  the RAW per-pass BoltzGen metrics (all ten metrics; this was
+                '{}' on every row the old version wrote)
+  provenance    writer=hf_field_refresh, formula=sum10, cohort, pass_index,
+                passes, field / field_rows / field_sha256, epoch_basis,
+                scorer_protocol, hf20x_source, refresh_epoch
+  id            hf20x_pass:<source>:epoch<E>:<seq>:pass<k>  (the migration's
+                scheme; k = the sequence's depth index, so ids never collide)
+  epoch         the sequence's latest stored public_multipass_rivals epoch
+                <= this run's epoch, else this run's epoch. This is the same
+                rule the migration uses for re-scored sequences: an old rival
+                must not be pulled into the live top-up reader's 16-epoch
+                "current rival field" window just because we topped it up
+                today.
 
-  score         20-pass MEAN sum-of-10 vs the HF archive + the scored batch
-  metrics_json  the per-metric MEAN of the raw BoltzGen metrics over the 20
-                passes (all ten SUM_OF_TEN_DIRS metrics, always)
-  provenance    writer, formula, passes, cohort, field rows + sha256, and the
-                RAW per-pass metrics (``per_pass_metrics``, pass order) plus
-                ``per_pass_scores``, so any later formula / reference field
-                can be recomputed per pass with no GPU
+Cohort (``ours`` / ``rival`` / ``hf_top200``) follows
+``migrate_hf_field_20x.ours_set``: a sequence is ours if it is in our top-50,
+carries cohort=ours on any stored pass row, or appears under our coldkey on
+any leaderboard (or in the Pi's intended drop) since the first multipass
+epoch. cohort=ours is NOT written by default, for the reason the migration
+gives: the top-up reader drops it, and MutationNetwork still pools every
+score_kind into a node's live score. ``--include-ours`` overrides this.
 
-Before this fix every row had ``metrics_json='{}'``: the raw metrics were in
-``score<k>/exact_all.json`` on disk but score_pass() dropped them and the
-observation dict never carried a ``metrics`` key.
+This store FEEDS THE LIVE PARENT POOL: ``build_top50_index`` ->
+``hf_topup.ranked_topup`` ranks every non-ours pass under this label each
+producer epoch. That is the point (one store), and it is why the guard below
+exists.
 
 GPU / wall-clock guard (2026-10-10, after the GPU-contending 20x re-fold of
 2026-10-09). The script itself -- not only its loop wrapper -- refuses to run
@@ -41,12 +65,17 @@ unless it gets a provably safe window, on ANY box:
   * a hard wall-clock cap per invocation (``--max-wall-hours``, ceiling
     HARD_MAX_WALL_HOURS) and a sequence-pass budget per invocation;
   * while scoring, a watchdog kills the scorer's process group the moment a
-    producer process appears or the deadline passes.
+    producer process appears or the deadline passes;
+  * the label registry must accept the rows before any GPU time is spent.
 
 A refusal or abort is LOUD: a ``HF_REFRESH_GUARD_REFUSED`` /
-``HF_REFRESH_ABORTED`` marker on stderr, a ``pipeline_failures.jsonl`` entry,
-and a distinct exit code (3 refused, 4 aborted). It never degrades to running
-alongside the producer; there is no busy-but-stale override.
+``HF_REFRESH_LABEL_REFUSED`` / ``HF_REFRESH_ABORTED`` marker on stdout and
+stderr, a ``pipeline_failures.jsonl`` entry, and a distinct exit code (3
+refused, 4 aborted). It never degrades to running alongside the producer;
+there is no busy-but-stale override.
+
+Writes go through ``mutation_network.update_observation_store``: one batched
+call per source, with a constant number of round-trips per 1000 rows.
 
 Run on a dedicated box (bgen env, over the tailscale MySQL relay)::
 
@@ -73,12 +102,12 @@ from typing import Callable
 import pandas as pd
 
 TARGET = "P20809"
-# A distinct label from the pre-sum-of-10 era: "hf_field_20x_rank_sum" rows
-# already in the DB were written under algo2_score (minmax over weighted
-# metric ranks) through epoch ~25610, and mixing sum-of-10 values into that
-# same label would corrupt every comparison that reads it. New rows land
-# under this label instead; the stale ones are untouched, not deleted.
-SCORE_KIND = "hf_field_sum10_20x_rank_sum"
+# 2026-10-10: per-pass rows under the ONE current multipass label. The old
+# per-sequence mean labels (hf_field_20x_rank_sum, hf_field_sum10_20x_rank_sum)
+# are closed; their rows were relabelled to legacy_* by migrate_hf_field_20x.
+SCORE_KIND = "multipass_sum10_pass"
+SOURCE = "public_multipass_rivals"
+#: Target depth: stored passes (with raw metrics) per sequence.
 N_PASSES = 20
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
 API = "https://compound-api.metanova-labs.ai"
@@ -87,12 +116,14 @@ ARCHIVE = "/root/P20809_nanobodies.csv"
 CONFIG = "/root/config/config.yaml"
 SCORER = "/root/nanobody_opt/score_boltzgen_fast_adapter.py"
 OUT_ROOT = Path("/root/hf_field_refresh")
+INTENDED_DIR = Path("/root/our_intended_sequences")
 #: provenance.writer (registered for SCORE_KIND in observation_labels).
 WRITER = "hf_field_refresh"
 FORMULA_ID = "sum10"
-#: provenance.cohort per refresh source; a sequence in our top-50 is "ours".
-SOURCE_COHORT = {"our_top50_20x": "ours", "public_multipass_rivals": "rival",
-                 "hf_archive_top200": "hf_top200"}
+#: provenance.cohort per refresh source when the sequence is not ours
+#: (= migrate_hf_field_20x.SOURCE_COHORT).
+SOURCE_COHORT = {"public_multipass_rivals": "rival", "hf_archive_top200": "hf_top200",
+                 "our_top50_20x": "ours"}
 COMPONENT = "hf_field_refresh"
 
 # --- GPU / wall-clock guard ------------------------------------------------
@@ -121,8 +152,8 @@ MONITOR_POLL_S = 15.0
 #: Wall-clock cap per invocation: default, and a ceiling no flag can exceed.
 DEFAULT_MAX_WALL_HOURS = 2.0
 HARD_MAX_WALL_HOURS = 6.0
-#: Sequence-passes (sequences x N_PASSES) per invocation; the rest is deferred
-#: to the next run (the refresh is idempotent). 2000 = 100 sequences, ~2.7
+#: MISSING sequence-passes topped up per invocation; the rest is deferred
+#: to the next run (the refresh is idempotent). 2000 = e.g. 100 sequences from 0 to 20, ~2.7
 #: GPU-h at the 2026-10-09 rate (~730 sequence-passes per GPU-hour).
 DEFAULT_MAX_SEQUENCE_PASSES = 2000
 HARD_MAX_SEQUENCE_PASSES = 10000
@@ -202,28 +233,6 @@ def latest_completed_epoch(start: int, lookback: int = 60) -> int | None:
     return None
 
 
-def fetch_rivals(epoch: int) -> set[str]:
-    try:
-        req = urllib.request.Request(
-            f"{API}/api/competitions/leaderboard/{epoch}/nanobodies",
-            headers={"User-Agent": "nova-hf-field-refresh/1"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = json.load(resp)
-    except Exception:
-        return set()
-    out: set[str] = set()
-    for submission in payload.get("data") or []:
-        if str(submission.get("coldkey") or "").strip() == OUR_COLDKEY:
-            continue
-        for nb in submission.get("nanobodies") or []:
-            if nb.get("protein_name") != TARGET:
-                continue
-            seq = str(nb.get("sequence") or "").strip().upper()
-            if seq:
-                out.add(seq)
-    return out
-
-
 def fetch_hf_top200(archive: pd.DataFrame) -> set[str]:
     # One copy of this ranking: nanobody_opt.hf_topup (R1), which now feeds
     # the live parent pool through the dashboard pass scorer.
@@ -231,33 +240,154 @@ def fetch_hf_top200(archive: pd.DataFrame) -> set[str]:
     return set(hf_archive_top(archive, 200))
 
 
-def fetch_db_rivals(conn) -> set[str]:
-    """Every rival sequence we have ever scored (cumulative, all epochs)."""
-    rows = conn.execute(
-        """
-        SELECT DISTINCT n.sequence
-        FROM observations o JOIN nodes n ON o.node_id = n.id
-        WHERE o.source IN ('public_multipass_rivals', 'slave_public_multipass_rivals')
-        """,
-    ).fetchall()
-    return {str(r[0]).strip().upper() for r in rows}
-
-
 def fetch_our_top50(conn) -> set[str]:
     rows = conn.execute(OUR_TOP50_SQL, (TARGET,)).fetchall()
     return {str(r[0]).strip().upper() for r in rows}
 
 
-def already_scored(conn) -> set[str]:
+
+
+def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
+    """``[(coldkey, sequence)]`` for every P20809 nanobody, deduped; ``None``
+    when the epoch is not available (same semantics as
+    ``multipass_all_rivals.fetch_leaderboard``: None != [])."""
+    req = urllib.request.Request(
+        f"{API}/api/competitions/leaderboard/{epoch}/nanobodies",
+        headers={"User-Agent": "nova-hf-field-refresh/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.load(resp)
+    except Exception:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for submission in data:
+        coldkey = str(submission.get("coldkey") or "").strip()
+        if not coldkey:
+            continue
+        for nb in submission.get("nanobodies") or []:
+            if nb.get("protein_name") != TARGET:
+                continue
+            seq = str(nb.get("sequence") or "").strip().upper()
+            if seq and seq not in seen:
+                seen.add(seq)
+                pairs.append((coldkey, seq))
+    return pairs
+
+
+def fetch_rivals(epoch: int) -> set[str]:
+    return {seq for ck, seq in fetch_leaderboard(epoch) or [] if ck != OUR_COLDKEY}
+
+
+def fetch_our_intended(epoch: int) -> set[str]:
+    """The Pi's per-epoch intended drop (= multipass_all_rivals.fetch_our_intended)."""
+    path = INTENDED_DIR / f"{epoch}.json"
+    try:
+        rows = json.loads(path.read_text()) if path.is_file() else []
+    except (OSError, ValueError):
+        return set()
+    return {str((r or {}).get("sequence") or "").strip().upper()
+            for r in (rows if isinstance(rows, list) else [])} - {""}
+
+
+def fetch_db_rivals(conn) -> set[str]:
+    """Every sequence ever stored as a RIVAL pass: cohort rival, or no cohort
+    (rows from before cohorts existed). Not hf_top200 / ours: this script
+    writes this source too, and must not read its own output back as
+    'rivals' (ARCHITECTURE_REDESIGN R3)."""
     rows = conn.execute(
         """
         SELECT DISTINCT n.sequence
         FROM observations o JOIN nodes n ON o.node_id = n.id
-        WHERE o.score_kind = %s
+        WHERE n.target = %s
+          AND o.source IN ('public_multipass_rivals', 'slave_public_multipass_rivals')
+          AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.provenance_json, '$.cohort')),
+                       'rival') = 'rival'
         """,
-        (SCORE_KIND,),
+        (TARGET,),
     ).fetchall()
     return {str(r[0]).strip().upper() for r in rows}
+
+
+def ours_set(conn, extra: set[str], *, cache_path: Path | None = None
+             ) -> tuple[set[str], dict]:
+    """Our sequences, by the rule ``migrate_hf_field_20x.ours_set`` uses:
+    ``extra`` (our top-50), cohort=ours on any stored pass row, our coldkey on
+    any published leaderboard since the first multipass epoch, and the Pi's
+    intended drops. Published leaderboards are immutable, so the per-epoch
+    "ours" lists are cached in ``cache_path``."""
+    ours = set(extra)
+    evidence: dict = {"our_top50": len(extra)}
+    rows = conn.execute(
+        "SELECT DISTINCT n.sequence FROM observations o JOIN nodes n ON n.id=o.node_id "
+        "WHERE o.source=%s AND JSON_UNQUOTE(JSON_EXTRACT(o.provenance_json,'$.cohort'))='ours'",
+        (SOURCE,)).fetchall()
+    db_ours = {str(r[0]).strip().upper() for r in rows}
+    evidence["db_cohort_ours"] = len(db_ours)
+    ours |= db_ours
+    lo, hi = conn.execute("SELECT MIN(epoch), MAX(epoch) FROM observations "
+                          "WHERE source=%s", (SOURCE,)).fetchone()
+    cache: dict[str, list[str]] = {}
+    if cache_path is not None:
+        try:
+            cache = json.loads(cache_path.read_text())
+        except (OSError, ValueError):
+            cache = {}
+    board_ours: set[str] = set()
+    missing = 0
+    if lo is not None and hi is not None:
+        for epoch in range(int(lo), int(hi) + 1):
+            if str(epoch) in cache:
+                board_ours |= set(cache[str(epoch)])
+            else:
+                board = fetch_leaderboard(epoch)
+                if board is None:
+                    missing += 1
+                else:
+                    mine = sorted({seq for ck, seq in board if ck == OUR_COLDKEY})
+                    cache[str(epoch)] = mine
+                    board_ours |= set(mine)
+            board_ours |= fetch_our_intended(epoch)
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache, sort_keys=True))
+        except OSError:
+            pass
+    evidence.update({"leaderboard_or_intended_ours": len(board_ours),
+                     "leaderboard_epochs": f"{lo}-{hi}", "leaderboard_unavailable": missing})
+    ours |= board_ours
+    evidence["total"] = len(ours)
+    return ours, evidence
+
+
+def latest_epochs(conn, sequences, run_epoch: int) -> dict[str, tuple[int, str]]:
+    """``{seq: (epoch, basis)}``: the sequence's latest stored
+    public_multipass_rivals epoch <= ``run_epoch``, else ``run_epoch``
+    (= migrate_hf_field_20x.rescore_epochs' DB rule)."""
+    out = {s: (int(run_epoch), "run epoch (no prior epoch)") for s in sequences}
+    ordered = sorted(out)
+    for i in range(0, len(ordered), 300):
+        chunk = ordered[i:i + 300]
+        rows = conn.execute(
+            "SELECT n.sequence, MAX(o.epoch) FROM observations o JOIN nodes n ON n.id=o.node_id "
+            "WHERE o.source=%s AND o.epoch IS NOT NULL AND o.epoch<=%s "
+            f"AND n.sequence IN ({','.join(['%s'] * len(chunk))}) GROUP BY n.sequence",
+            (SOURCE, int(run_epoch), *chunk)).fetchall()
+        for seq, epoch in rows:
+            seq = str(seq).strip().upper()
+            if seq in out and epoch is not None:
+                out[seq] = (int(epoch), f"latest {SOURCE} row epoch")
+    return out
+
+
+def stored_counts(conn, sequences) -> dict[str, int]:
+    """Stored passes WITH raw metrics per sequence: the live reader's own count."""
+    from nanobody_opt.hf_topup import stored_pass_counts
+    return stored_pass_counts(conn, sorted(sequences), target=TARGET)
 
 
 # ===========================================================================
@@ -559,30 +689,42 @@ def acquire_lock(path: Path = LOCK_PATH):
     return handle
 
 
-def plan_budget(batches: list[tuple[str, list[str]]], max_sequence_passes: int
-                ) -> tuple[list[tuple[str, list[str]]], dict[str, int]]:
-    """Cap this invocation at ``max_sequence_passes``; defer the rest, in order."""
-    left = max_sequence_passes // N_PASSES
-    planned, deferred = [], {}
+def plan_budget(batches: list[tuple[str, list[str]]], counts: dict[str, int],
+                max_sequence_passes: int
+                ) -> tuple[list[tuple[str, dict[str, int]]], dict[str, int], dict[str, int]]:
+    """``(planned, deferred, deep)``. ``planned`` is ``[(source, {seq: missing
+    passes})]``: whole sequences, in source order, while the missing passes
+    fit ``max_sequence_passes``. ``deferred`` counts the sequences left for a
+    later run, and ``deep`` the ones already at N_PASSES (nothing to do)."""
+    left = max_sequence_passes
+    planned, deferred, deep = [], {}, {}
     for source, seqs in batches:
-        take = seqs[:max(left, 0)]
-        left -= len(take)
-        planned.append((source, take))
-        deferred[source] = len(seqs) - len(take)
-    return planned, deferred
+        plan: dict[str, int] = {}
+        deferred[source] = deep[source] = 0
+        for seq in seqs:
+            missing = N_PASSES - int(counts.get(seq, 0))
+            if missing <= 0:
+                deep[source] += 1
+            elif missing <= left:
+                plan[seq] = missing
+                left -= missing
+            else:
+                deferred[source] += 1
+        planned.append((source, plan))
+    return planned, deferred, deep
 
 
 def assert_label_open() -> None:
     """Before any GPU time: the registry must accept the rows we will write and
-    ``sum_of_ten`` must still compute the registered formula. A closed label is
-    refused here, not after a 40-minute scoring run."""
+    ``sum_of_ten`` must still compute the registered formula. A closed label or
+    an unregistered writer is refused here, not after a 40-minute run."""
     from nanobody_opt import observation_labels
     observation_labels.assert_formula(SCORE_KIND, FORMULA_ID, sum_of_ten)
     observation_labels.check_observations([
-        {"observation_id": "hf20x:preflight", "sequence": "A", "target": TARGET,
-         "source": source, "score_kind": SCORE_KIND, "score": 1.0,
-         "writer": WRITER, "formula": FORMULA_ID}
-        for source in SOURCE_COHORT])
+        {"observation_id": "hf20x_pass:preflight", "sequence": "A", "target": TARGET,
+         "source": SOURCE, "score_kind": SCORE_KIND, "score": 1.0,
+         "writer": WRITER, "formula": FORMULA_ID, "cohort": cohort}
+        for cohort in ("rival", "hf_top200")])
 
 
 def gpu_ids(arg: str | None, probe) -> list[int]:
@@ -594,10 +736,15 @@ def gpu_ids(arg: str | None, probe) -> list[int]:
 # ===========================================================================
 # Scoring and the observation rows
 # ===========================================================================
+METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
+
+
 def raw_metrics_from_payload(payload: dict, wanted: set[str] | None = None
                              ) -> dict[str, dict[str, float]]:
     """``{sequence: {metric: value}}``: every finite numeric metric of one pass
-    (wave 0, TARGET), for the requested sequences only. Formula-independent."""
+    (wave 0, TARGET), for the requested sequences only. Formula-independent
+    (= multipass_all_rivals.raw_metrics_from_exact_all, restricted to the
+    batch we asked for)."""
     wave = (payload.get("per_nanobody_components") or {}).get("0") or {}
     out: dict[str, dict[str, float]] = {}
     for seq, comp in wave.items():
@@ -614,29 +761,36 @@ def raw_metrics_from_payload(payload: dict, wanted: set[str] | None = None
 
 
 def rank_pass(raw: dict[str, dict[str, float]], archive: pd.DataFrame) -> dict[str, float]:
-    """Sum-of-10 of each scored sequence vs the archive + this pass's batch.
-
-    Unchanged from the pre-fix scorer (same field, same duplicate handling), so
-    the stored score stays on the label's existing scale.
-    """
-    cols = METRICS + ["liability_num_violations"]
-    rows = {s: {k: v for k, v in m.items() if k in cols} for s, m in raw.items()}
+    """Sum-of-10 of each scored sequence vs the archive + this pass's batch,
+    with archive duplicates dropped (the fresh pass wins) -- exactly
+    ``multipass_all_rivals.rank_pass_payload``, so every row under the label
+    is ranked the same way (tests/test_hf_field_refresh.py checks this)."""
+    rows = {s: {k: v for k, v in m.items() if k in METRICS_NEEDED} for s, m in raw.items()}
     rival = pd.DataFrame(rows).T
-    arch_s = archive.set_index("sequence")[cols]
-    field = pd.concat([arch_s, rival])
-    scores = sum_of_ten(field)  # sum-of-10 (lower = better)
-    out = {}
-    for s in rival.index:
-        mask = scores.index == s
-        if mask.any():
-            out[s] = float(scores[mask].iloc[-1])
+    archive_s = archive.set_index("sequence")[METRICS_NEEDED]
+    field = pd.concat([archive_s, rival])
+    field = field[~field.index.duplicated(keep="last")]
+    scores = sum_of_ten(field)
+    return {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
+
+
+def structures_from_payload(payload: dict) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for seq, by_target in (payload.get("structures") or {}).items():
+        rec = (by_target or {}).get(TARGET, {})
+        if rec:
+            out[str(seq).strip().upper()] = {
+                "path": rec.get("path"), "writer_path": rec.get("writer_path"),
+                "sample_selection": rec.get("sample_selection")}
     return out
 
 
 def score_pass(sequences: list[str], run: int, archive: pd.DataFrame,
                out_root: Path, gpus: str, runner: Callable[[list[str], Path], None]
-               ) -> tuple[dict[str, float], dict[str, dict[str, float]], str | None]:
-    """One scorer pass -> ({seq: sum10}, {seq: raw metrics}, scorer_protocol)."""
+               ) -> tuple[dict[str, float], dict[str, dict[str, float]], dict[str, dict],
+                          str | None]:
+    """One scorer pass -> ({seq: sum10}, {seq: raw metrics}, {seq: cif ref},
+    scorer_protocol)."""
     inp = out_root / f"input_{run}.json"
     out_dir = out_root / f"score{run}"
     inp.write_text(json.dumps({"sequences": [{"sequence": s} for s in sequences]}))
@@ -651,65 +805,64 @@ def score_pass(sequences: list[str], run: int, archive: pd.DataFrame,
     )
     payload = json.loads((out_dir / "exact_all.json").read_text())
     raw = raw_metrics_from_payload(payload, set(sequences))
-    return rank_pass(raw, archive), raw, payload.get("scorer_protocol")
+    return (rank_pass(raw, archive), raw, structures_from_payload(payload),
+            payload.get("scorer_protocol"))
 
 
 def field_fingerprint(path: str, archive: pd.DataFrame) -> dict:
+    """= multipass_all_rivals.field_fingerprint (same keys, same values)."""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
-    return {"field": "hf_archive_full_plus_scored_batch", "field_path": str(path),
+    return {"field": "hf_archive_full", "field_path": str(path),
             "field_rows": int(len(archive)), "field_sha256": digest.hexdigest()}
 
 
-def build_observations(source: str, per_pass_scores: list[dict[str, float]],
-                       per_pass_raw: list[dict[str, dict[str, float]]], *,
-                       field: dict, our: set[str], refresh_epoch: int | None,
-                       scorer_protocol: str | None = None,
-                       ) -> tuple[list[dict], list[str]]:
-    """One row per sequence scored in EVERY pass with all ten metrics.
+def pass_observations(source: str, *, pass_of: dict[str, int], ranks: dict[str, float],
+                      raw: dict[str, dict[str, float]], structs: dict[str, dict],
+                      field: dict, ours: set[str], epochs: dict[str, tuple[int, str]],
+                      refresh_epoch: int, scorer_protocol: str | None,
+                      ) -> tuple[list[dict], list[str]]:
+    """One ``multipass_sum10_pass`` row per sequence of one pass.
 
-    Returns ``(observations, incomplete)``; ``incomplete`` are the sequences
-    left out because some pass lacked a finite sum10 or one of the ten metrics
-    (previously dropped silently as a NaN score).
+    ``pass_of[seq]`` is the sequence's depth index for this pass (stored + r
+    + 1). Returns ``(rows, incomplete)``: a sequence without a finite score
+    or with one of the ten metrics missing is reported, not written.
     """
-    passes = len(per_pass_scores)
-    seen = set().union(*(set(p) for p in per_pass_raw)) if per_pass_raw else set()
-    obs, incomplete = [], []
-    for s in sorted(seen):
-        raws = [p.get(s) for p in per_pass_raw]
-        scores = [p.get(s) for p in per_pass_scores]
-        if (any(r is None for r in raws)
-                or any(sc is None or not math.isfinite(sc) for sc in scores)
-                or any(m not in r for r in raws for m in SUM_OF_TEN_DIRS)):
-            incomplete.append(s)
+    rows, incomplete = [], []
+    for seq in sorted(pass_of):
+        score, metrics = ranks.get(seq), raw.get(seq)
+        if (score is None or not math.isfinite(score) or metrics is None
+                or any(m not in metrics for m in SUM_OF_TEN_DIRS)):
+            incomplete.append(seq)
             continue
-        shared = set.intersection(*(set(r) for r in raws))
-        mean_metrics = {m: float(sum(r[m] for r in raws) / passes) for m in sorted(shared)}
-        obs.append({
-            "observation_id": f"hf20x:{s}",
-            "sequence": s,
+        epoch, basis = epochs.get(seq, (int(refresh_epoch), "run epoch (no prior epoch)"))
+        k = pass_of[seq]
+        rows.append({
+            "observation_id": f"hf20x_pass:{source}:epoch{refresh_epoch}:{seq}:pass{k}",
+            "sequence": seq,
             "target": TARGET,
-            "source": source,
+            "epoch": epoch,
+            "source": SOURCE,
             "score_kind": SCORE_KIND,
-            "score": float(sum(scores) / passes),
-            "observation_count": passes,
-            # metrics_json: per-metric mean over the passes (flat {metric: v}).
-            "metrics": mean_metrics,
+            "score": float(score),
+            "observation_count": 1,
+            "metrics": dict(metrics),
+            "structure": structs.get(seq),
             # Every key below lands in provenance_json.
             "writer": WRITER,
             "formula": FORMULA_ID,
-            "cohort": "ours" if s in our else SOURCE_COHORT.get(source, source),
-            "passes": passes,
-            "metrics_aggregation": "mean_over_passes",
-            "per_pass_metrics": raws,
-            "per_pass_scores": [float(x) for x in scores],
-            "refresh_epoch": refresh_epoch,
-            "scorer_protocol": scorer_protocol,
+            "cohort": "ours" if seq in ours else SOURCE_COHORT[source],
+            "pass_index": k,
+            "passes": N_PASSES,
             **field,
+            "epoch_basis": basis,
+            "scorer_protocol": scorer_protocol,
+            "hf20x_source": source,
+            "refresh_epoch": int(refresh_epoch),
         })
-    return obs, incomplete
+    return rows, incomplete
 
 
 def _retry_db(fn, *args, retries=6, delay=12, **kwargs):
@@ -729,94 +882,112 @@ def _retry_db(fn, *args, retries=6, delay=12, **kwargs):
 
 
 def _default_writer(obs: list[dict]) -> int:
+    """The batched store writer (constant round-trips per 1000-row chunk)."""
     from nanobody_opt.mutation_network import update_observation_store
     return _retry_db(update_observation_store, Path("/root/.sn68_mysql_creds"),
                      obs, commit_every=1000, commit_interval=5.0)
 
 
-def score_and_import(source: str, seqs: list[str], archive: pd.DataFrame, gpus: str, *,
-                     watchdog: Watchdog, field: dict, our: set[str],
-                     refresh_epoch: int | None, env: dict[str, str],
+def score_and_import(source: str, plan: dict[str, int], archive: pd.DataFrame, gpus: str, *,
+                     watchdog: Watchdog, field: dict, ours: set[str],
+                     counts: dict[str, int], epochs: dict[str, tuple[int, str]],
+                     refresh_epoch: int, env: dict[str, str],
                      writer: Callable[[list[dict]], int] = _default_writer,
                      out_root_base: Path | None = None) -> int:
-    seqs = sorted(seqs)
-    if not seqs:
-        print(f"  {source}: nothing new", flush=True)
+    """Top ``plan`` ({seq: missing passes}) up to depth and write the passes.
+
+    The rows of every COMPLETED pass are written in one batched call at the
+    end -- also when the watchdog aborts the run (no GPU is involved in the
+    write), so finished GPU work is never thrown away; the abort is then
+    re-raised. Depth indices continue from the stored count, so the next run
+    tops up exactly what is still missing.
+    """
+    if not plan:
+        print(f"  {source}: nothing to top up", flush=True)
         return 0
-    print(f"  {source}: scoring {len(seqs)} new sequences at {N_PASSES}x", flush=True)
-    out_root = (out_root_base or OUT_ROOT) / source
+    from nanobody_opt.hf_topup import pass_batches
+
+    batches = pass_batches(plan)
+    print(f"  {source}: topping up {len(plan)} sequences "
+          f"({sum(plan.values())} sequence-passes, {len(batches)} scorer passes) "
+          f"to depth {N_PASSES}", flush=True)
+    out_root = (out_root_base or OUT_ROOT) / source / f"epoch{refresh_epoch}"
     out_root.mkdir(parents=True, exist_ok=True)
 
     def runner(cmd: list[str], log_path: Path) -> None:
         run_guarded(cmd, watchdog, log_path=log_path, env=env)
 
-    per_pass_scores: list[dict[str, float]] = []
-    per_pass_raw: list[dict[str, dict[str, float]]] = []
-    protocol = None
+    rows: list[dict] = []
+    incomplete: set[str] = set()
     pass_seconds: list[float] = []
-    for run in range(1, N_PASSES + 1):
-        if pass_seconds:
-            need = max(pass_seconds) * PASS_TIME_MARGIN
-            if watchdog.remaining() < need:
-                raise GuardAborted(
-                    f"{source}: pass {run}/{N_PASSES} needs ~{need:.0f}s but only "
-                    f"{max(watchdog.remaining(), 0):.0f}s of the wall-clock cap remain; "
-                    f"nothing written for {source} (lower --max-sequence-passes)")
-        started = watchdog.probe.now()
-        scores, raw, proto = score_pass(seqs, run, archive, out_root, gpus, runner)
-        pass_seconds.append(watchdog.probe.now() - started)
-        protocol = protocol or proto
-        per_pass_scores.append(scores)
-        per_pass_raw.append(raw)
-        print(f"    pass {run}/{N_PASSES} done ({pass_seconds[-1]:.0f}s)", flush=True)
-    obs, incomplete = build_observations(
-        source, per_pass_scores, per_pass_raw, field=field, our=our,
-        refresh_epoch=refresh_epoch, scorer_protocol=protocol)
+    aborted: GuardAborted | None = None
+    try:
+        for r, batch in enumerate(batches):
+            run = r + 1
+            if pass_seconds:
+                need = max(pass_seconds) * PASS_TIME_MARGIN
+                if watchdog.remaining() < need:
+                    raise GuardAborted(
+                        f"{source}: scorer pass {run}/{len(batches)} needs ~{need:.0f}s but "
+                        f"only {max(watchdog.remaining(), 0):.0f}s of the wall-clock cap "
+                        f"remain (lower --max-sequence-passes)")
+            started = watchdog.probe.now()
+            ranks, raw, structs, proto = score_pass(batch, run, archive, out_root, gpus,
+                                                    runner)
+            pass_seconds.append(watchdog.probe.now() - started)
+            new, bad = pass_observations(
+                source, pass_of={s: int(counts.get(s, 0)) + run for s in batch},
+                ranks=ranks, raw=raw, structs=structs, field=field, ours=ours,
+                epochs=epochs, refresh_epoch=refresh_epoch, scorer_protocol=proto)
+            rows += new
+            incomplete |= set(bad)
+            print(f"    pass {run}/{len(batches)} done: {len(batch)} sequences, "
+                  f"{pass_seconds[-1]:.0f}s", flush=True)
+    except GuardAborted as exc:
+        aborted = exc
     if incomplete:
         _loud("HF_REFRESH_INCOMPLETE_METRICS",
-              f"{source}: {len(incomplete)} of {len(seqs)} sequences lack a finite "
-              f"score or one of the ten metrics in some pass; not written",
-              source=source, n=len(incomplete), example=incomplete[0])
-    if not obs:
-        return 0
-    written = writer(obs)
-    print(f"  {source}: imported {written}", flush=True)
+              f"{source}: {len(incomplete)} of {len(plan)} sequences lack a finite score "
+              f"or one of the ten metrics in some pass; those passes were not written",
+              source=source, n=len(incomplete), example=sorted(incomplete)[0])
+    written = writer(rows) if rows else 0
+    print(f"  {source}: imported {written} pass rows"
+          + (" (before the abort)" if aborted else ""), flush=True)
+    if aborted is not None:
+        raise GuardAborted(f"{aborted} [imported {written} completed pass rows]")
     return written
 
 
 def main(argv: list[str] | None = None, *, probe=None,
          writer: Callable[[list[dict]], int] = _default_writer) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gpus", default=None,
                     help="GPU ids to use; default = every GPU nvidia-smi lists")
     ap.add_argument("--epoch", type=int, default=None,
                     help="explicit epoch; default = latest completed")
     ap.add_argument("--allow-unconsumed", action="store_true",
-                    help="run even though no production code reads this pool "
-                         "(see the disable note below)")
+                    help="deliberate override of the P3 disable gate (see main())")
+    ap.add_argument("--include-ours", action="store_true",
+                    help="also top up and write cohort=ours passes (default: no; "
+                         "MutationNetwork would pool them into live node scores)")
     ap.add_argument("--max-wall-hours", type=float, default=DEFAULT_MAX_WALL_HOURS,
                     help=f"hard wall-clock cap for this invocation (ceiling "
                          f"{HARD_MAX_WALL_HOURS:g})")
     ap.add_argument("--max-sequence-passes", type=int, default=DEFAULT_MAX_SEQUENCE_PASSES,
-                    help=f"sequences x {N_PASSES} passes per invocation; the rest "
+                    help=f"missing sequence-passes topped up per invocation; the rest "
                          f"is deferred (ceiling {HARD_MAX_SEQUENCE_PASSES})")
     args = ap.parse_args(argv)
 
-    # DISABLED BY DEFAULT (2026-10-09, ARCHITECTURE_REDESIGN P3). Nothing in
-    # production reads hf_field_20x_rank_sum or hf_field_sum10_20x_rank_sum
-    # (re-checked: repo, master /root, dashboard /root, Pi /opt). The sum-of-10
-    # label rename made already_scored() return 0 and started a ~10 h,
-    # ~80 GPU-hour re-fold of 2,908 sequences, 99% of which the dashboard had
-    # already 10x-scored with the identical scorer, competing with the
-    # producer on all 8 GPUs; the operator killed it. Do not restart this on
-    # the same terms. It should come back only as a consumer-backed,
-    # read-only aggregator over stored raw per-pass metrics (R1/R2), never as
-    # a second GPU scorer. --allow-unconsumed or HF_FIELD_REFRESH_ENABLED=1
-    # overrides, deliberately.
+    # DISABLED BY DEFAULT (2026-10-09, ARCHITECTURE_REDESIGN P3): the
+    # 2026-10-09 run re-folded ~2,900 sequences (~80 GPU-h) on master's 8 GPUs
+    # against the live producer. Re-enabling is a deliberate act:
+    # --allow-unconsumed or HF_FIELD_REFRESH_ENABLED=1. Since 2026-10-10 the
+    # rows land in multipass_sum10_pass, which the live top-up reader DOES
+    # consume (see the module docstring).
     if not (args.allow_unconsumed or os.environ.get("HF_FIELD_REFRESH_ENABLED") == "1"):
-        print("HF_FIELD_REFRESH_DISABLED: no production consumer reads this pool; "
-              "see docs/ARCHITECTURE_REDESIGN.md P3. Pass --allow-unconsumed "
-              "or set HF_FIELD_REFRESH_ENABLED=1 to override.", flush=True)
+        print("HF_FIELD_REFRESH_DISABLED: see docs/ARCHITECTURE_REDESIGN.md P3. Pass "
+              "--allow-unconsumed or set HF_FIELD_REFRESH_ENABLED=1 to run.", flush=True)
         return EXIT_DISABLED
 
     probe = probe or SystemProbe()
@@ -825,9 +996,9 @@ def main(argv: list[str] | None = None, *, probe=None,
         if not 0 < args.max_wall_hours <= HARD_MAX_WALL_HOURS:
             raise GuardRefused(f"--max-wall-hours {args.max_wall_hours:g} outside "
                                f"(0, {HARD_MAX_WALL_HOURS:g}]")
-        if not N_PASSES <= args.max_sequence_passes <= HARD_MAX_SEQUENCE_PASSES:
+        if not 1 <= args.max_sequence_passes <= HARD_MAX_SEQUENCE_PASSES:
             raise GuardRefused(f"--max-sequence-passes {args.max_sequence_passes} outside "
-                               f"[{N_PASSES}, {HARD_MAX_SEQUENCE_PASSES}]")
+                               f"[1, {HARD_MAX_SEQUENCE_PASSES}]")
         deadline = started + args.max_wall_hours * 3600.0
         lock = acquire_lock()  # held until the process exits
         gpus = gpu_ids(args.gpus, probe)
@@ -863,27 +1034,30 @@ def main(argv: list[str] | None = None, *, probe=None,
     print(f"epoch={args.epoch}", flush=True)
 
     with db.connect() as conn:
-        scored = already_scored(conn)
-        our = fetch_our_top50(conn)
+        our_top50 = fetch_our_top50(conn)
         db_rivals = fetch_db_rivals(conn)
-
+        ours, ours_evidence = ours_set(conn, our_top50,
+                                       cache_path=OUT_ROOT / "ours_by_epoch.json")
     leaderboard_rivals = fetch_rivals(args.epoch)
-    # Union of the latest leaderboard rivals and every rival we have ever
-    # scored, so a sequence skipped by an earlier backfill snapshot still gets
-    # caught and 20x-scored here.
-    rivals = leaderboard_rivals | db_rivals
     hf = fetch_hf_top200(archive)
-
-    print(f"pool already scored={len(scored)}; new: ours={len(our - scored)} "
-          f"rivals={len(rivals - scored)} hf={len(hf - scored)}", flush=True)
-    planned, deferred = plan_budget(
-        [("our_top50_20x", sorted(our - scored)),
-         ("public_multipass_rivals", sorted(rivals - scored - our)),
-         ("hf_archive_top200", sorted(hf - scored - our - rivals))],
-        args.max_sequence_passes)
-    print("HF_REFRESH_BUDGET max_sequence_passes=%d max_wall_hours=%g planned=%s deferred=%s"
+    rivals = (leaderboard_rivals | db_rivals) - ours
+    hf_new = hf - ours - rivals
+    candidates = [("public_multipass_rivals", sorted(rivals)),
+                  ("hf_archive_top200", sorted(hf_new))]
+    if args.include_ours:
+        candidates.insert(0, ("our_top50_20x", sorted(our_top50)))
+    with db.connect() as conn:
+        counts = stored_counts(conn, {s for _, q in candidates for s in q})
+    planned, deferred, deep = plan_budget(candidates, counts, args.max_sequence_passes)
+    with db.connect() as conn:
+        epochs = latest_epochs(conn, {s for _, p in planned for s in p}, args.epoch)
+    print(f"ours={ours_evidence} candidates={ {s: len(q) for s, q in candidates} }",
+          flush=True)
+    print("HF_REFRESH_BUDGET max_sequence_passes=%d max_wall_hours=%g planned=%s "
+          "sequence_passes=%d already_at_depth=%s deferred=%s"
           % (args.max_sequence_passes, args.max_wall_hours,
-             {s: len(q) for s, q in planned}, deferred), flush=True)
+             {s: len(p) for s, p in planned},
+             sum(sum(p.values()) for _, p in planned), deep, deferred), flush=True)
 
     # Never route our folds through the producer's shared warm scorer daemon:
     # the work would run inside a process the watchdog cannot see or kill.
@@ -892,12 +1066,14 @@ def main(argv: list[str] | None = None, *, probe=None,
                         self_pid=os.getpid()).start()
     total = 0
     try:
-        for source, seqs in planned:
+        for source, plan in planned:
             total += score_and_import(
-                source, seqs, archive, ",".join(map(str, gpus)), watchdog=watchdog,
-                field=field, our=our, refresh_epoch=args.epoch, env=env, writer=writer)
+                source, plan, archive, ",".join(map(str, gpus)), watchdog=watchdog,
+                field=field, ours=ours,
+                counts=counts, epochs=epochs, refresh_epoch=args.epoch, env=env,
+                writer=writer)
     except GuardAborted as exc:
-        _loud("HF_REFRESH_ABORTED", f"{exc} (imported={total} before the abort)",
+        _loud("HF_REFRESH_ABORTED", f"{exc} (imported={total} before this source)",
               imported=total)
         return EXIT_ABORTED
     finally:

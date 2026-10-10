@@ -1,23 +1,31 @@
-"""hf_field_refresh: raw metrics reach metrics_json, and the GPU/time guard.
+"""hf_field_refresh: raw per-pass metrics under multipass_sum10_pass, plus the GPU/time guard.
 
-Two bugs fixed on 2026-10-10:
+Two bugs fixed on 2026-10-10, and one redirect:
 
 1. Every row the refresh wrote had ``metrics_json='{}'``: score_pass() read
    the raw BoltzGen metrics from ``exact_all.json`` and threw them away.
-   The metrics tests here use REAL scorer passes (tests/fixtures/
-   hf_field_refresh/real_passes.json) and send the rows through the real
-   ``mutation_network._prepare_observation``. That is the function that
-   serializes ``metrics_json`` / ``provenance_json`` for the DB.
 2. The only contention guard was a single nvidia-smi sample in the loop
-   wrapper, plus a "stale for 3h, run anyway" override, so a run started
-   by hand had no guard at all. The guard tests simulate the live
-   producer mid-race and check that the script refuses before it touches
-   the DB or a GPU. A watchdog test uses real processes: it kills a
-   running scorer when a producer process appears.
+   wrapper, plus a "stale for 3h, run anyway" override, so a run started by
+   hand had no guard at all.
+3. The refresh now writes ONE ROW PER PASS under ``multipass_sum10_pass``,
+   with the contract of the dashboard pass scorer
+   (tools/multipass_all_rivals.py) and of tools/migrate_hf_field_20x.py.
+   It only tops up the passes missing to depth 20. The old mean labels
+   are closed.
+
+The metrics tests use REAL scorer passes (tests/fixtures/hf_field_refresh/
+real_passes.json). They compare against the dashboard writer's own
+functions, and they send rows through the real
+``mutation_network._prepare_observation`` (the code that builds the DB
+columns) and the live top-up reader (``hf_topup``). The guard tests
+simulate the live producer mid-race and check that the script refuses
+before touching the DB or a GPU. One watchdog test uses real processes: it
+kills a running scorer when a producer process appears.
 """
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 import subprocess
 import sys
@@ -49,6 +57,7 @@ from nanobody_opt import observation_labels as OL
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "hf_field_refresh" / "real_passes.json"
 TEN = list(R.SUM_OF_TEN_DIRS)
 
+ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _isolated_failure_log(tmp_path, monkeypatch):
@@ -105,151 +114,229 @@ def _no_db(monkeypatch):
     """Make any DB/scoring access an immediate test failure."""
     def boom(*a, **k):
         raise AssertionError("guard let the run reach the DB / scorer")
-    monkeypatch.setattr(R, "already_scored", boom)
-    monkeypatch.setattr(R, "score_pass", boom)
-    monkeypatch.setattr(R, "fetch_rivals", boom)
+    for name in ("fetch_our_top50", "fetch_db_rivals", "stored_counts", "score_pass",
+                 "fetch_rivals", "ours_set"):
+        monkeypatch.setattr(R, name, boom)
 
 
 # ---------------------------------------------------------------------------
-# 1. metrics_json is populated from the real raw metrics
+# 1. Per-pass rows under multipass_sum10_pass, carrying the real raw metrics
 # ---------------------------------------------------------------------------
-def _run_real_passes(monkeypatch, tmp_path, archive, passes, *, our=frozenset()):
-    """score_and_import over the fixture passes. A fake scorer writes pass k's
-    exact_all.json where the real one would."""
-    monkeypatch.setattr(R, "N_PASSES", len(passes))
-    calls = []
+def _mp():
+    """The dashboard pass scorer, whose row contract the refresh must match."""
+    path = ROOT / "tools" / "multipass_all_rivals.py"
+    spec = importlib.util.spec_from_file_location("multipass_all_rivals_for_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
-    def fake_run_guarded(cmd, watchdog, *, log_path, env=None):
-        out_dir = Path(cmd[cmd.index("--output-dir") + 1])
-        run = int(out_dir.name.replace("score", ""))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "exact_all.json").write_text(json.dumps(passes[run - 1]))
-        calls.append((run, env.get("NANOBODY_SCORER_DAEMON")))
 
-    monkeypatch.setattr(R, "run_guarded", fake_run_guarded)
-    written = []
-    seqs = sorted(passes[0]["per_nanobody_components"]["0"])
-    watchdog = R.Watchdog(FakeProbe(), deadline=1e12, gpus=[0], self_pid=1)
-    n = R.score_and_import(
-        "public_multipass_rivals", seqs, archive, "0", watchdog=watchdog,
-        field={"field": "hf_archive_full_plus_scored_batch", "field_rows": len(archive),
-               "field_sha256": "f" * 64},
-        our=set(our), refresh_epoch=25640, env={"NANOBODY_SCORER_DAEMON": "0"},
-        writer=lambda obs: written.extend(obs) or len(obs), out_root_base=tmp_path)
-    return n, written, seqs, calls
+def _seqs(passes):
+    return sorted(passes[0]["per_nanobody_components"]["0"])
 
 
 def _raw(passes, k, seq):
     return {m: float(v) for m, v in passes[k]["per_nanobody_components"]["0"][seq]["P20809"].items()}
 
 
-def test_rows_carry_the_real_raw_metrics(monkeypatch, tmp_path, real):
+def _install_fake_scorer(monkeypatch, passes, calls=None):
+    """run_guarded stand-in: pass k's real exact_all.json, restricted to the batch."""
+    def fake_run_guarded(cmd, watchdog, *, log_path, env=None):
+        out_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        batch = {s["sequence"] for s in json.loads(
+            Path(cmd[cmd.index("--sequences") + 1]).read_text())["sequences"]}
+        run = int(out_dir.name.replace("score", ""))
+        payload = json.loads(json.dumps(passes[(run - 1) % len(passes)]))
+        wave = payload["per_nanobody_components"]["0"]
+        payload["per_nanobody_components"]["0"] = {s: v for s, v in wave.items() if s in batch}
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "exact_all.json").write_text(json.dumps(payload))
+        if calls is not None:
+            calls.append((run, sorted(batch), (env or {}).get("NANOBODY_SCORER_DAEMON")))
+    monkeypatch.setattr(R, "run_guarded", fake_run_guarded)
+
+
+def _top_up(monkeypatch, tmp_path, archive, passes, *, plan, counts=None, ours=frozenset(),
+            source="public_multipass_rivals", epochs=None):
+    calls, written = [], []
+    _install_fake_scorer(monkeypatch, passes, calls)
+    watchdog = R.Watchdog(FakeProbe(), deadline=1e12, gpus=[0], self_pid=1)
+    n = R.score_and_import(
+        source, plan, archive, "0", watchdog=watchdog,
+        field={"field": "hf_archive_full", "field_path": "/root/P20809_nanobodies.csv",
+               "field_rows": len(archive), "field_sha256": "f" * 64},
+        ours=set(ours), counts=counts or {}, epochs=epochs or {}, refresh_epoch=25640,
+        env={"NANOBODY_SCORER_DAEMON": "0"},
+        writer=lambda obs: written.extend(obs) or len(obs), out_root_base=tmp_path)
+    return n, written, calls
+
+
+def test_rows_carry_the_real_raw_metrics_per_pass(monkeypatch, tmp_path, real):
     archive, passes = real
-    n, obs, seqs, calls = _run_real_passes(monkeypatch, tmp_path, archive, passes)
-    assert n == len(seqs) == len(obs) == 6
-    assert [c[0] for c in calls] == [1, 2, 3, 4]
-    assert all(c[1] == "0" for c in calls)  # never through the shared daemon
-    for row in obs:
-        s = row["sequence"]
-        raws = [_raw(passes, k, s) for k in range(len(passes))]
-        # metrics_json = per-metric mean over the passes, all ten metrics
+    seqs = _seqs(passes)
+    n, rows, calls = _top_up(monkeypatch, tmp_path, archive, passes,
+                             plan={s: 4 for s in seqs})
+    assert n == len(rows) == 6 * 4
+    assert [c[0] for c in calls] == [1, 2, 3, 4] and all(c[2] == "0" for c in calls)
+    for row in rows:
+        k = row["pass_index"]
+        # metrics_json = this pass's RAW metrics, all ten, exactly as scored
+        assert row["metrics"] == _raw(passes, k - 1, row["sequence"])
         assert set(TEN) <= set(row["metrics"])
-        for m in TEN:
-            assert row["metrics"][m] == pytest.approx(np.mean([r[m] for r in raws]), rel=1e-12)
-        # the raw per-pass values are preserved exactly, in pass order
-        assert row["per_pass_metrics"] == raws
-        # score = mean of the per-pass sum10 against archive + batch
-        per_pass = [R.rank_pass({q: _raw(passes, k, q) for q in seqs}, archive)[s]
-                    for k in range(len(passes))]
-        assert row["per_pass_scores"] == pytest.approx(per_pass)
-        assert row["score"] == pytest.approx(np.mean(per_pass))
-        assert row["observation_count"] == 4 and row["passes"] == 4
+        assert row["score_kind"] == "multipass_sum10_pass"
+        assert row["source"] == "public_multipass_rivals"
         assert row["writer"] == "hf_field_refresh" and row["formula"] == "sum10"
-        assert row["cohort"] == "rival" and row["refresh_epoch"] == 25640
+        assert row["cohort"] == "rival" and row["passes"] == R.N_PASSES
+        assert row["observation_count"] == 1
+        assert row["observation_id"] == (
+            f"hf20x_pass:public_multipass_rivals:epoch25640:{row['sequence']}:pass{k}")
+        assert row["epoch"] == 25640 and row["epoch_basis"].startswith("run epoch")
         assert row["scorer_protocol"] == "validator-dual-sample-v1"
-        # the per-pass metrics differ between passes, so a mean really is a mean
-    assert any(len({json.dumps(p, sort_keys=True) for p in r["per_pass_metrics"]}) > 1 for r in obs)
+    assert len({r["observation_id"] for r in rows}) == len(rows)
+
+
+def test_score_matches_the_dashboard_pass_scorer(real):
+    """Same label, same ranking: rank_pass == multipass_all_rivals.rank_pass_payload,
+    and the raw metrics == its raw_metrics_from_exact_all, on real passes."""
+    archive, passes = real
+    mp = _mp()
+    for payload in passes:
+        want_ranks, _structs, want_raw = mp.rank_pass_payload(payload, archive)
+        raw = R.raw_metrics_from_payload(payload)
+        assert raw == want_raw
+        assert R.rank_pass(raw, archive) == pytest.approx(want_ranks)
+    # including a batch member that is also in the archive (dedup, keep the pass)
+    dup = json.loads(json.dumps(passes[0]))
+    arch_seq = archive["sequence"].iloc[0]
+    first = _seqs(passes)[0]
+    dup["per_nanobody_components"]["0"][arch_seq] = dup["per_nanobody_components"]["0"][first]
+    want, _s, _r = mp.rank_pass_payload(dup, archive)
+    assert R.rank_pass(R.raw_metrics_from_payload(dup), archive) == pytest.approx(want)
+
+
+def test_row_shape_matches_the_multipass_contract(monkeypatch, tmp_path, real):
+    """Every key the dashboard writer puts on a pass row is on ours too."""
+    archive, passes = real
+    mp = _mp()
+    ranks, structs, raw = mp.rank_pass_payload(passes[0], archive)
+    theirs = mp.pass_observations(epoch=25640, run=1, passes=10, ranks=ranks, raw=raw,
+                                  structs=structs, cohort_of={}, field={
+                                      "field": "hf_archive_full", "field_path": "x",
+                                      "field_rows": 1, "field_sha256": "f"})[0]
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes,
+                         plan={s: 1 for s in _seqs(passes)})
+    assert set(theirs) <= set(rows[0])
+    for key in ("source", "score_kind", "formula", "field"):
+        assert rows[0][key] == theirs[key]
 
 
 def test_db_serialization_is_not_empty(monkeypatch, tmp_path, real):
-    """The exact bytes update_observation_store would write (no DB needed)."""
+    """The exact column values update_observation_store would write (no DB)."""
     archive, passes = real
-    _, obs, _, _ = _run_real_passes(monkeypatch, tmp_path, archive, passes)
-    for row in obs:
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes,
+                         plan={s: 4 for s in _seqs(passes)})
+    for row in rows:
         prepared = MN._prepare_observation(row)
         assert prepared is not None
         (oid, epoch, source, kind, score, count, metrics_json, _pose,
          provenance_json) = prepared["observation"]
-        assert oid == f"hf20x:{row['sequence']}" and kind == R.SCORE_KIND
-        assert epoch is None  # column unchanged; the run epoch is in provenance
+        assert kind == "multipass_sum10_pass" and source == "public_multipass_rivals"
+        assert epoch == 25640 and count == 1 and np.isfinite(score)
         assert metrics_json != "{}"
-        metrics = json.loads(metrics_json)
-        assert set(TEN) <= set(metrics) and all(np.isfinite(list(metrics.values())))
+        assert json.loads(metrics_json) == _raw(passes, row["pass_index"] - 1, row["sequence"])
         prov = json.loads(provenance_json)
-        assert len(prov["per_pass_metrics"]) == 4
-        assert {"writer", "formula", "cohort", "passes", "field_sha256", "field_rows",
-                "per_pass_scores", "refresh_epoch"} <= set(prov)
-        # scaled to 20 passes the provenance stays far below a TEXT column (64 KB)
-        assert len(provenance_json) * 20 / 4 < 60_000
+        assert {"writer", "formula", "cohort", "pass_index", "passes", "field",
+                "field_rows", "field_sha256", "epoch_basis"} <= set(prov)
 
 
-def test_stored_passes_are_usable_by_a_read_time_consumer(monkeypatch, tmp_path, real):
-    """A consumer that re-derives sum10 per pass against its own reference field
-    (hf_topup's reader, and the planned elite_breadth) gets every pass back."""
+def test_the_live_reader_counts_and_ranks_these_rows(monkeypatch, tmp_path, real):
+    """hf_topup (the live top-up reader, and the shape elite_breadth reads)
+    gets every pass back and re-derives sum10 from metrics_json."""
     archive, passes = real
-    _, obs, seqs, _ = _run_real_passes(monkeypatch, tmp_path, archive, passes)
-    rows = []
-    for row in obs:
-        prov = json.loads(MN._prepare_observation(row)["observation"][8])
-        for pm in prov["per_pass_metrics"]:
-            rows.append((row["sequence"], 25640, json.dumps(pm), json.dumps({"cohort": "rival"})))
-    frame = H._passes_frame(rows)
-    assert len(frame) == len(seqs) * 4
-    assert frame[TEN].notna().all().all()
-    derived = H.sum10_against_field(frame, archive)
-    assert np.isfinite(derived).all()
+    seqs = _seqs(passes)
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes, plan={s: 4 for s in seqs},
+                         source="hf_archive_top200")
+    db_rows = []
+    for row in rows:
+        obs = MN._prepare_observation(row)["observation"]
+        db_rows.append((row["sequence"], obs[1], obs[6], obs[8]))
+    frame = H._passes_frame(db_rows)
+    assert len(frame) == len(seqs) * 4 and frame[TEN].notna().all().all()
+    assert set(frame["cohort"]) == {"hf_top200"}
+    ranked = H.rank_topup_passes(frame, archive, min_passes=4)
+    assert sorted(r["sequence"] for r in ranked) == seqs
+    assert all(r["passes"] == 4 for r in ranked)
 
 
-def test_incomplete_sequences_are_reported_not_silently_dropped(monkeypatch, tmp_path, real, capsys):
+def test_depth_top_up_scores_only_the_missing_passes(monkeypatch, tmp_path, real):
+    """Stored 18 -> 2 more; stored 0 -> 4 (plan); ids continue the depth."""
     archive, passes = real
-    seq = sorted(passes[0]["per_nanobody_components"]["0"])[2]
+    a, b = _seqs(passes)[:2]
+    _, rows, calls = _top_up(monkeypatch, tmp_path, archive, passes,
+                             plan={a: 2, b: 4}, counts={a: 18, b: 0})
+    assert [c[1] for c in calls] == [sorted([a, b]), sorted([a, b]), [b], [b]]
+    assert sorted(r["pass_index"] for r in rows if r["sequence"] == a) == [19, 20]
+    assert sorted(r["pass_index"] for r in rows if r["sequence"] == b) == [1, 2, 3, 4]
+
+
+def test_old_rival_keeps_its_own_epoch(monkeypatch, tmp_path, real):
+    """A rival last seen at 25500 must not be pulled into the reader's 16-epoch
+    'current rival field' window by today's top-up."""
+    archive, passes = real
+    a = _seqs(passes)[0]
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes, plan={a: 1},
+                         epochs={a: (25500, "latest public_multipass_rivals row epoch")})
+    assert rows[0]["epoch"] == 25500
+    assert rows[0]["observation_id"].startswith("hf20x_pass:public_multipass_rivals:epoch25640:")
+
+
+def test_incomplete_passes_are_reported_not_silently_dropped(monkeypatch, tmp_path, real, capsys):
+    archive, passes = real
+    seq = _seqs(passes)[2]
     del passes[1]["per_nanobody_components"]["0"][seq]["P20809"]["interaction_pae"]
-    _, obs, _, _ = _run_real_passes(monkeypatch, tmp_path, archive, passes)
-    assert len(obs) == 5 and seq not in {o["sequence"] for o in obs}
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes,
+                         plan={s: 4 for s in _seqs(passes)})
+    assert len(rows) == 6 * 4 - 1
+    assert (seq, 2) not in {(r["sequence"], r["pass_index"]) for r in rows}
     assert "HF_REFRESH_INCOMPLETE_METRICS" in capsys.readouterr().err
 
 
-def test_our_sequence_gets_cohort_ours(monkeypatch, tmp_path, real):
+def test_cohort_ours_and_hf_top200(monkeypatch, tmp_path, real):
     archive, passes = real
-    ours = sorted(passes[0]["per_nanobody_components"]["0"])[0]
-    _, obs, _, _ = _run_real_passes(monkeypatch, tmp_path, archive, passes, our={ours})
-    by = {o["sequence"]: o["cohort"] for o in obs}
-    assert by[ours] == "ours" and sorted(set(by.values())) == ["ours", "rival"]
+    seqs = _seqs(passes)
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes, plan={s: 1 for s in seqs},
+                         ours={seqs[0]}, source="hf_archive_top200")
+    by = {r["sequence"]: r["cohort"] for r in rows}
+    assert by[seqs[0]] == "ours" and {by[s] for s in seqs[1:]} == {"hf_top200"}
 
 
-def test_rank_pass_matches_the_pre_fix_scoring(real):
-    """The stored score keeps its scale: rank_pass is the old score_pass math."""
+def test_abort_writes_the_completed_passes_then_raises(monkeypatch, tmp_path, real):
+    """Finished GPU work is kept (one batched write), and the abort stays loud."""
     archive, passes = real
-    payload = passes[0]
-    # Pre-fix score_pass body (git 48a23ce..a3ad1c9), verbatim minus the subprocess.
-    wave = payload["per_nanobody_components"]["0"]
-    rows = {}
-    for seq, comp in wave.items():
-        m = comp.get(R.TARGET, {})
-        rows[seq] = {k: float(v) for k, v in m.items()
-                     if k in R.METRICS + ["liability_num_violations"]
-                     and isinstance(v, (int, float))}
-    rival = pd.DataFrame(rows).T
-    arch_s = archive.set_index("sequence")[R.METRICS + ["liability_num_violations"]]
-    field = pd.concat([arch_s, rival])
-    scores = R.sum_of_ten(field)
-    old = {s: float(scores[scores.index == s].iloc[-1]) for s in rival.index}
-    new = R.rank_pass(R.raw_metrics_from_payload(payload, set(wave)), archive)
-    assert new == pytest.approx(old)
+    seqs = _seqs(passes)
+    probe = FakeProbe()
+    _install_fake_scorer(monkeypatch, passes)
+    real_score_pass = R.score_pass
+
+    def slow(*a, **k):
+        out = real_score_pass(*a, **k)
+        probe.t += 600.0
+        return out
+    monkeypatch.setattr(R, "score_pass", slow)
+    written = []
+    watchdog = R.Watchdog(probe, deadline=probe.t + 1500.0, gpus=[0], self_pid=1)
+    with pytest.raises(R.GuardAborted, match=r"pass 3/4.*imported 12 completed"):
+        R.score_and_import("public_multipass_rivals", {s: 4 for s in seqs}, archive, "0",
+                           watchdog=watchdog, field={}, ours=set(), counts={}, epochs={},
+                           refresh_epoch=1, env={},
+                           writer=lambda obs: written.extend(obs) or len(obs),
+                           out_root_base=tmp_path)
+    assert len(written) == 12 and {r["pass_index"] for r in written} == {1, 2}
 
 
 # ---------------------------------------------------------------------------
-# Label preflight (before any GPU time)
+# Label registry: accepted under the real registry, refused when closed
 # ---------------------------------------------------------------------------
 def _with_label(monkeypatch, **changes):
     labels = dict(OL.LABELS)
@@ -257,18 +344,26 @@ def _with_label(monkeypatch, **changes):
     monkeypatch.setattr(OL, "LABELS", labels)
 
 
-def test_rows_pass_a_strict_open_label(monkeypatch, tmp_path, real):
+def test_registry_lists_the_writer():
+    label = OL.LABELS["multipass_sum10_pass"]
+    assert label.strict and "hf_field_refresh" in label.writers
+    assert label.formula == R.FORMULA_ID and R.SOURCE in label.sources
+
+
+def test_rows_pass_the_real_strict_registry(monkeypatch, tmp_path, real):
     archive, passes = real
-    _with_label(monkeypatch, strict=True, writers=frozenset({"hf_field_refresh"}),
-                formula="sum10")
     R.assert_label_open()
-    _, obs, _, _ = _run_real_passes(monkeypatch, tmp_path, archive, passes)
-    OL.check_observations(obs)  # raises on a wrong writer / formula / source
+    _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes,
+                         plan={s: 2 for s in _seqs(passes)})
+    OL.check_observations(rows)  # raises on a wrong writer / formula / source
 
 
-def test_a_closed_label_refuses_before_any_gpu_time(monkeypatch):
-    _with_label(monkeypatch, strict=True, writers=frozenset())
-    with pytest.raises(OL.LabelViolation):
+def test_an_unlisted_writer_or_closed_label_refuses_before_any_gpu_time(monkeypatch):
+    _with_label(monkeypatch, writers=frozenset({"multipass_all_rivals"}))
+    with pytest.raises(OL.LabelViolation, match="hf_field_refresh"):
+        R.assert_label_open()
+    _with_label(monkeypatch, writers=frozenset())
+    with pytest.raises(OL.LabelViolation, match="closed"):
         R.assert_label_open()
 
 
@@ -372,12 +467,16 @@ def test_a_second_instance_is_refused(tmp_path):
         first.close()
 
 
-def test_budget_defers_in_source_order():
-    planned, deferred = R.plan_budget(
-        [("our_top50_20x", list("abc")), ("public_multipass_rivals", list("defgh")),
-         ("hf_archive_top200", list("ij"))], max_sequence_passes=6 * R.N_PASSES)
-    assert [len(s) for _, s in planned] == [3, 3, 0]
-    assert deferred == {"our_top50_20x": 0, "public_multipass_rivals": 2, "hf_archive_top200": 2}
+def test_budget_counts_missing_passes_and_defers_in_source_order():
+    counts = {"a": 20, "b": 15, "c": 0, "d": 10}
+    planned, deferred, deep = R.plan_budget(
+        [("public_multipass_rivals", ["a", "b", "c", "d"]), ("hf_archive_top200", ["e"])],
+        counts, max_sequence_passes=40)
+    # a is at depth; b needs 5, c 20, d 10 -> 35; e needs 20 > 5 left -> deferred
+    assert planned == [("public_multipass_rivals", {"b": 5, "c": 20, "d": 10}),
+                       ("hf_archive_top200", {})]
+    assert deep == {"public_multipass_rivals": 1, "hf_archive_top200": 0}
+    assert deferred == {"public_multipass_rivals": 0, "hf_archive_top200": 1}
 
 
 def test_disabled_by_default_still_exits_2(monkeypatch):
@@ -386,25 +485,6 @@ def test_disabled_by_default_still_exits_2(monkeypatch):
     assert R.main([], probe=FakeProbe()) == R.EXIT_DISABLED
 
 
-def test_deadline_stops_the_next_pass_before_it_starts(monkeypatch, tmp_path, real):
-    """A pass that would not fit in the remaining wall clock is never started;
-    nothing is written for that source."""
-    archive, passes = real
-    monkeypatch.setattr(R, "N_PASSES", 4)
-    probe = FakeProbe()
-
-    def slow_pass(cmd, watchdog, *, log_path, env=None):
-        out_dir = Path(cmd[cmd.index("--output-dir") + 1])
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "exact_all.json").write_text(json.dumps(passes[0]))
-        probe.t += 600.0  # each pass takes 10 min
-    monkeypatch.setattr(R, "run_guarded", slow_pass)
-    watchdog = R.Watchdog(probe, deadline=probe.t + 1500.0, gpus=[0], self_pid=1)
-    with pytest.raises(R.GuardAborted, match="pass 3/4"):
-        R.score_and_import("public_multipass_rivals", ["X"], archive, "0", watchdog=watchdog,
-                           field={}, our=set(), refresh_epoch=1, env={},
-                           writer=lambda obs: pytest.fail("partial source written"),
-                           out_root_base=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -492,19 +572,18 @@ def test_hard_deadline_kills_a_running_scorer(tmp_path):
 
 
 def test_main_end_to_end_on_an_idle_box(monkeypatch, tmp_path, real, capsys):
-    """Full main() wiring on an idle box: guard OK -> label OK -> budget ->
-    guarded passes -> one writer call per source with populated metrics."""
+    """Full main() wiring on an idle box, under the REAL registry: guard OK ->
+    label OK -> depth plan -> guarded passes -> one batched write per source.
+    Ours are never scored or written by default."""
     import types
 
     import nanobody_opt
     archive, passes = real
-    seqs = sorted(passes[0]["per_nanobody_components"]["0"])
+    seqs = _seqs(passes)
     csv = tmp_path / "archive.csv"
     archive.to_csv(csv, index=False)
     monkeypatch.setattr(R, "ARCHIVE", str(csv))
     monkeypatch.setattr(R, "OUT_ROOT", tmp_path / "out")
-    monkeypatch.setattr(R, "N_PASSES", 4)
-    _with_label(monkeypatch, strict=True, writers=frozenset({"hf_field_refresh"}))
     fake_db = types.ModuleType("nanobody_opt.db")
 
     class _Conn:
@@ -516,30 +595,32 @@ def test_main_end_to_end_on_an_idle_box(monkeypatch, tmp_path, real, capsys):
     fake_db.connect = lambda: _Conn()
     monkeypatch.setitem(sys.modules, "nanobody_opt.db", fake_db)
     monkeypatch.setattr(nanobody_opt, "db", fake_db, raising=False)
-    monkeypatch.setattr(R, "already_scored", lambda conn: set())
+    ours = {seqs[0]}
     monkeypatch.setattr(R, "fetch_our_top50", lambda conn: {seqs[0]})
-    monkeypatch.setattr(R, "fetch_db_rivals", lambda conn: set(seqs[:4]))  # overlaps ours
-    monkeypatch.setattr(R, "fetch_rivals", lambda epoch: set(seqs[3:5]))
-    monkeypatch.setattr(R, "fetch_hf_top200", lambda a: set(seqs[4:]))
-
-    def fake_run_guarded(cmd, watchdog, *, log_path, env=None):
-        assert env["NANOBODY_SCORER_DAEMON"] == "0"
-        assert watchdog.remaining() > 0 and watchdog.abort_reason is None
-        out_dir = Path(cmd[cmd.index("--output-dir") + 1])
-        run = int(out_dir.name.replace("score", ""))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "exact_all.json").write_text(json.dumps(passes[run - 1]))
-    monkeypatch.setattr(R, "run_guarded", fake_run_guarded)
+    monkeypatch.setattr(R, "ours_set", lambda conn, extra, cache_path=None: (ours | extra, {}))
+    monkeypatch.setattr(R, "fetch_db_rivals", lambda conn: set(seqs[:3]))  # includes ours
+    monkeypatch.setattr(R, "fetch_rivals", lambda epoch: set(seqs[2:4]))
+    monkeypatch.setattr(R, "fetch_hf_top200", lambda a: set(seqs[3:]))
+    # seqs[1] already at depth; seqs[2] needs 1; seqs[3] needs 20 (budget: 18 left)
+    counts = {seqs[1]: 20, seqs[2]: 19, seqs[3]: 0, seqs[4]: 18, seqs[5]: 19}
+    monkeypatch.setattr(R, "stored_counts", lambda conn, s: {k: counts.get(k, 0) for k in s})
+    monkeypatch.setattr(R, "latest_epochs", lambda conn, s, e: {k: (e, "run epoch") for k in s})
+    calls = []
+    _install_fake_scorer(monkeypatch, passes, calls)
     batches = []
-    rc = R.main(["--allow-unconsumed", "--epoch", "25640", "--max-sequence-passes", "16"],
+    rc = R.main(["--allow-unconsumed", "--epoch", "25640", "--max-sequence-passes", "4"],
                 probe=FakeProbe(), writer=lambda obs: batches.append(obs) or len(obs))
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "HF_REFRESH_GUARD_OK gpus=0,1,2,3" in out and "REFRESH_DONE imported=4" in out
-    # budget 16 = 4 sequences x 4 passes; each sequence scored once, in source order
-    assert [[o["source"] for o in b][0] for b in batches] == ["our_top50_20x", "public_multipass_rivals"]
+    assert "HF_REFRESH_GUARD_OK gpus=0,1,2,3" in out
     written = [o for b in batches for o in b]
-    assert sorted(o["sequence"] for o in written) == seqs[:4]
-    assert all(set(TEN) <= set(o["metrics"]) for o in written)
-    assert "deferred={'our_top50_20x': 0, 'public_multipass_rivals': 1, 'hf_archive_top200': 1}" in out
-    assert {o["sequence"]: o["cohort"] for o in written}[seqs[0]] == "ours"
+    # rivals: s2 (1 pass); s3 needs 20 > budget -> deferred. hf: s4 (2), s5 (1)
+    assert sorted((o["sequence"], o["pass_index"]) for o in written) == sorted(
+        [(seqs[2], 20), (seqs[4], 19), (seqs[4], 20), (seqs[5], 20)])
+    assert seqs[0] not in {o["sequence"] for o in written}
+    assert all(c[1] != [] and seqs[0] not in c[1] for c in calls)
+    assert {o["hf20x_source"]: o["cohort"] for o in written} == {
+        "public_multipass_rivals": "rival", "hf_archive_top200": "hf_top200"}
+    assert len(batches) == 2  # one batched update_observation_store call per source
+    OL.check_observations(written)
+    assert "REFRESH_DONE imported=4 deferred=1" in out

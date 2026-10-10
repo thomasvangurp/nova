@@ -54,7 +54,7 @@ Enforced at write time by `mutation_network.update_observation_store` (`check_ob
 - scale: ONE fast-scorer pass, sum-of-10 dense rank-sum vs the full HF archive field (~61k rows on 2026-10-09); per pass ~8.5e4-2.1e5, epoch mean ~1.2e5; lower=better. The CURRENT multipass label.
 - field: hf_archive_full (field_rows + field_sha256 in provenance)
 - sources: `public_multipass_rivals`
-- writers: `backfill_multipass_metrics`, `multipass_all_rivals`, `relabel_multipass_legacy`
+- writers: `backfill_multipass_metrics`, `hf_field_refresh`, `multipass_all_rivals`, `relabel_multipass_legacy`
 - trip-wire range: 50000 to 260000
 - epochs: 25533-25534, 25593-25603 (backfilled from disk), 25613-25618 (relabelled, no metrics), 25619+ (native)
 - introduced: 2026-10-09
