@@ -173,6 +173,30 @@ def _tranche_source_key(metadata: dict[str, dict[str, Any]], sequence: str) -> s
     return str(metadata.get(sequence, {}).get("parent_source") or "__unattributed__")
 
 
+#: Target screening SHARE per lane, not an equal split. historical_basin_member
+#: is where every actual win has come from so far; exact_shortlist's children
+#: score best on MEDIAN but that is not the same as win rate -- wins can come
+#: from rare strong outliers a median doesn't capture, so handing it an equal
+#: 50% (cutting the winning lane's share from its organic ~70-80% to 50%)
+#: risks trading real wins for a paper metric. The bug being fixed here was
+#: extreme starvation (measured 4-8% of tranche slots for exact_shortlist,
+#: due to per-parent dilution -- see the docstring below), not a departure
+#: from 50/50; the target below restores the lane weighting that existed
+#: before the bug, it does not invent a new one.  Weight, not a normalized
+#: share: a source counts as "behind" at screened_source_counts[s] / weight[s],
+#: so the source furthest below its weighted target is picked next.  Unlisted
+#: sources (including __unattributed__) get the default weight.
+_SOURCE_TARGET_WEIGHT: dict[str, float] = {
+    "historical_basin_member": 3.0,
+}
+_DEFAULT_SOURCE_TARGET_WEIGHT = 1.0
+
+
+def _source_priority(source_counts: Counter[str], source: str) -> float:
+    weight = _SOURCE_TARGET_WEIGHT.get(source, _DEFAULT_SOURCE_TARGET_WEIGHT)
+    return source_counts[source] / weight
+
+
 def _balanced_screen_tranche(
     pending: list[str],
     metadata: dict[str, dict[str, Any]],
@@ -226,7 +250,9 @@ def _balanced_screen_tranche(
         choice = min(
             range(len(available)),
             key=lambda index: (
-                source_counts[_tranche_source_key(metadata, available[index][1])],
+                _source_priority(
+                    source_counts, _tranche_source_key(metadata, available[index][1])
+                ),
                 counts[allocation_key(available[index][1])],
                 int(
                     metadata.get(available[index][1], {}).get(
