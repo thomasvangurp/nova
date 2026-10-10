@@ -163,8 +163,21 @@ def main() -> int:
         totals["passes"] += len(pass_files)
         totals["rows"] += len(observations)
         if keep and not args.dry_run:
-            totals["written"] += update_observation_store(
-                Path("/root/artifacts/nanobody_mutations.sqlite"), keep)
+            # Small batches with retries: the central DB is shared with the
+            # live producer, and one 500-row transaction deadlocked (1213).
+            for start in range(0, len(keep), 100):
+                batch = keep[start:start + 100]
+                for attempt in range(1, 6):
+                    try:
+                        totals["written"] += update_observation_store(
+                            Path("/root/artifacts/nanobody_mutations.sqlite"), batch)
+                        break
+                    except Exception as error:  # noqa: BLE001
+                        print(f"  epoch {epoch} batch {start}: attempt {attempt} "
+                              f"{type(error).__name__}: {error}", flush=True)
+                        if attempt == 5:
+                            raise
+                        time.sleep(5 * attempt)
     print("BACKFILL_DONE " + json.dumps({**totals, "dry_run": args.dry_run}), flush=True)
     return 0
 
