@@ -88,6 +88,16 @@ Nine tickets need nine distinct qualifying sequences per epoch, which a
 > [ARCHITECTURE_REDESIGN.md](ARCHITECTURE_REDESIGN.md) is the prioritised
 > clean-up plan. Where this section disagrees with the audit (for example the
 > branch name), the audit reflects the live boxes.
+> Its "Status" table tracks what is done. Two operator switches came out of it:
+>
+> - `/opt/nova-submit/REFUSE_UNEXPECTED_PRODUCER` on the Pi stops it
+>   committing a nanobody artifact the real publisher did not write. It is
+>   off by default; `touch` it to enable and `rm` it to disable.
+> - `HF_FIELD_REFRESH_ENABLED=1` re-enables the 20x refresh. It is off
+>   because nothing consumes that pool.
+>
+> Swallowed failures are recorded in `/root/artifacts/pipeline_failures.jsonl`
+> on master and on the dashboard box.
 
 Three roles, three hosts, one branch (`nanobody-opt`), one runtime root.
 
