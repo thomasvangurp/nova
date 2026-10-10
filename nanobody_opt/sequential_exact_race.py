@@ -794,6 +794,19 @@ def _rank_command(
     command = [sys.executable, "-m", "nanobody_opt.rank_exact",
                "--selection-metric-policy", selection_metric_policy,
                "--consensus-ranking-policy", consensus_ranking_policy]
+    # NOVA_FULL_ARCHIVE_FIELD switches BOTH the ranking field and the strict
+    # qualification gates together, atomically. The two must never be enabled
+    # independently: the small-field gates (60/400/300/100/30) reject almost
+    # nothing on the archive's ~50k-260k scale, so a field change without the
+    # matching gate change would let everything through (ARCHITECTURE_REDESIGN
+    # new finding 7).
+    if os.environ.get("NOVA_FULL_ARCHIVE_FIELD") == "1":
+        command.append("--full-archive-field")
+        if strict and not strict_gate_overrides:
+            default_overrides_path = (
+                Path(__file__).resolve().parent / "strict_gates_archive_field.json"
+            )
+            strict_gate_overrides = load_strict_gate_overrides(default_overrides_path)
     # Earlier-epoch folds are still valid evidence: the challenge is identical
     # across epochs, and the database holds ~40 observations per sequence
     # where this epoch produced one. Out of sample over 22 epochs this lifts

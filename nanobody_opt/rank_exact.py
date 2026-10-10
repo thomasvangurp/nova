@@ -828,6 +828,15 @@ def main() -> None:
     parser.add_argument("--recent", type=int, default=300)
     parser.add_argument("--field-size", type=int, default=49)
     parser.add_argument("--bootstrap-fields", type=int, default=64)
+    parser.add_argument(
+        "--full-archive-field",
+        action="store_true",
+        help=(
+            "rank against the entire HF archive as one field instead of a small "
+            "live-epoch field; ignores --api-field-count/--field-size/"
+            "--bootstrap-fields. See ARCHITECTURE_REDESIGN new finding 7."
+        ),
+    )
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument(
         "--before-epoch",
@@ -953,45 +962,60 @@ def main() -> None:
     if missing:
         raise SystemExit(f"archive lacks metrics: {sorted(missing)}")
 
-    api_fields: list[tuple[int, pd.DataFrame]] = []
-    if args.api_field_count:
-        if args.before_epoch is None:
-            parser.error("--api-field-count requires --before-epoch")
-        api_fields = fetch_leaderboard_fields(
-            args.leaderboard_api_root,
-            before_epoch=args.before_epoch,
-            target=args.target,
-            count=args.api_field_count,
-            scan_limit=args.api_scan_limit,
-        )
-        if len(api_fields) < args.minimum_api_fields:
-            raise SystemExit(
-                f"only {len(api_fields)} complete {args.target} leaderboard fields "
-                f"were available; require {args.minimum_api_fields}"
-            )
-
-    if api_fields:
-        fields = [field for _, field in api_fields]
+    if args.full_archive_field:
+        # Rank against the entire HF archive as ONE field, not a small live-epoch
+        # sample. The validator's own final_score ranks a submission only against
+        # its ~50-sequence live epoch field (see validator_scores_from_observations),
+        # but that single live draw is high-variance and noisy to select against.
+        # The full-archive rank-sum is the lower-variance, multi-pass-averaged
+        # metric that actually shows our measured, repeated gap against rivals
+        # (ARCHITECTURE_REDESIGN new finding 7) -- deliberately NOT matching the
+        # validator's literal field size; that was investigated and rejected.
+        compiled_fields = [_compile_validator_field(full_archive)]
         reference = {
-            "source": "public_leaderboard_api",
-            "api_root": args.leaderboard_api_root.rstrip("/"),
-            "epochs": [epoch for epoch, _ in api_fields],
-            "field_sizes": [len(field) for _, field in api_fields],
+            "source": "full_hf_archive",
+            "archive_rows": len(full_archive),
         }
     else:
-        rng = np.random.default_rng(args.random_seed)
-        fields = [
-            archive.iloc[rng.choice(len(archive), args.field_size, replace=False)]
-            for _ in range(args.bootstrap_fields)
-        ]
-        reference = {
-            "source": "archive_bootstrap",
-            "recent_rows": len(archive),
-            "field_size": args.field_size,
-            "field_count": len(fields),
-            "random_seed": args.random_seed,
-        }
-    compiled_fields = [_compile_validator_field(field) for field in fields]
+        api_fields: list[tuple[int, pd.DataFrame]] = []
+        if args.api_field_count:
+            if args.before_epoch is None:
+                parser.error("--api-field-count requires --before-epoch")
+            api_fields = fetch_leaderboard_fields(
+                args.leaderboard_api_root,
+                before_epoch=args.before_epoch,
+                target=args.target,
+                count=args.api_field_count,
+                scan_limit=args.api_scan_limit,
+            )
+            if len(api_fields) < args.minimum_api_fields:
+                raise SystemExit(
+                    f"only {len(api_fields)} complete {args.target} leaderboard "
+                    f"fields were available; require {args.minimum_api_fields}"
+                )
+
+        if api_fields:
+            fields = [field for _, field in api_fields]
+            reference = {
+                "source": "public_leaderboard_api",
+                "api_root": args.leaderboard_api_root.rstrip("/"),
+                "epochs": [epoch for epoch, _ in api_fields],
+                "field_sizes": [len(field) for _, field in api_fields],
+            }
+        else:
+            rng = np.random.default_rng(args.random_seed)
+            fields = [
+                archive.iloc[rng.choice(len(archive), args.field_size, replace=False)]
+                for _ in range(args.bootstrap_fields)
+            ]
+            reference = {
+                "source": "archive_bootstrap",
+                "recent_rows": len(archive),
+                "field_size": args.field_size,
+                "field_count": len(fields),
+                "random_seed": args.random_seed,
+            }
+        compiled_fields = [_compile_validator_field(field) for field in fields]
     # The field the ranker already replays is also the field whose consensus
     # decides which positions are settled, so it costs one pass over sequences
     # we have loaded anyway.

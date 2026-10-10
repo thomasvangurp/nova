@@ -1,0 +1,12 @@
+{
+  "_comment": "Re-derived strict qualification thresholds for --full-archive-field mode (ARCHITECTURE_REDESIGN new finding 7). Empirically derived, not linearly scaled: see docs/ARCHITECTURE_REDESIGN.md. Derived from 2,880 known-qualified sequences (epoch>=25400, >=3 repeat observations each), computing each sequence's real per-observation p90 category rank-sum against the full HF archive field (60,187 rows as of 2026-10-10). Values set at or slightly above the observed max among known-good sequences, consistent with these gates being a sanity floor, not a selection criterion.",
+  "gates": {
+    "--competitive-score-threshold": "118000",
+    "--minimum-competitive-rate": "0.0",
+    "--minimum-observation-competitive-rate": "0.0",
+    "--maximum-p90-rank-sum": "185000",
+    "--maximum-p90-confidence-rank-sum": "130000",
+    "--maximum-p90-physical-interaction-rank-sum": "56000",
+    "--maximum-p90-developability-rank-sum": "62"
+  }
+}
