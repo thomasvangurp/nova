@@ -16,8 +16,12 @@ SCORER=$(python3 -c "import json;print(json.load(open('$CONFIG'))['scorer'])")
 # piece with NANOBODY_CHUNK_REUSE_SKIP=warm_lightning.
 # 2026-10-09: defaulted to 0 because the daemon production has actually run
 # since the 2026-10-08 box move was started without it ("CHUNK_REUSE
-# enabled=False" in /root/scorer_daemon.log). Set 1 deliberately, not by restore.
-export NANOBODY_CHUNK_REUSE=${NANOBODY_CHUNK_REUSE:-0}
+# enabled=False" in /root/scorer_daemon.log).
+# 2026-10-10: set 1 deliberately, not by restore -- verified live on an
+# isolated 4-GPU box (13 real sequences, content-keyed stages + warm
+# lightning + persistent analysis pool all installed, scores unchanged from
+# the uncached path) before flipping this on the production daemon.
+export NANOBODY_CHUNK_REUSE=${NANOBODY_CHUNK_REUSE:-1}
 echo "supervisor: python=$PYTHON scorer=$SCORER socket=$SOCKET reuse=$NANOBODY_CHUNK_REUSE"
 while true; do
     # Never start a second daemon on top of one that is already serving the
