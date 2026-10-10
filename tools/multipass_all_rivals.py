@@ -65,6 +65,8 @@ METRICS_NEEDED = sorted(SUM_OF_TEN_DIRS)
 #   provenance   formula, field rows + sha256, pass index/count, writer, cohort
 PASS_SCORE_KIND = "multipass_sum10_pass"
 WRITER = "multipass_all_rivals"
+#: provenance.cohort of the bounded HF top-up rows (= hf_topup.TOPUP_COHORT).
+TOPUP_COHORT = "hf_top200"
 
 
 def fetch_our_intended(epoch: int) -> list[tuple[str, str]]:
@@ -169,6 +171,71 @@ def sum_of_ten(field: pd.DataFrame) -> pd.Series:
             continue
         total += field[metric].rank(method="dense", ascending=(direction == "min"))
     return total
+
+
+def topup_settings() -> dict:
+    """HF top-up knobs (ARCHITECTURE_REDESIGN R1), from the environment.
+
+    MULTIPASS_TOPUP=0 turns it off; MULTIPASS_TOPUP_DEPTH (passes per HF
+    candidate, default 10) and MULTIPASS_TOPUP_BUDGET (sequence-passes per
+    run, default 500) bound it.
+    """
+    from nanobody_opt import hf_topup
+    return {
+        "enabled": os.environ.get("MULTIPASS_TOPUP", "1") != "0",
+        "depth": int(os.environ.get("MULTIPASS_TOPUP_DEPTH", hf_topup.DEFAULT_DEPTH)),
+        "budget": int(os.environ.get("MULTIPASS_TOPUP_BUDGET",
+                                     hf_topup.DEFAULT_PASS_BUDGET)),
+    }
+
+
+def plan_hf_topup(archive: pd.DataFrame, batch: set[str], settings: dict
+                  ) -> tuple[dict[str, int], dict[str, int]]:
+    """``({sequence: passes_to_score}, {sequence: stored_passes})`` for this run.
+
+    Candidates: the HF archive's rank_binders top-200 that are eligible
+    parents (>= MIN_PARENT_DISTANCE from the validator's archive top-50, the
+    dedup reference) and not in this epoch's leaderboard ``batch``. Each is
+    topped up only by the passes it is missing. Never raises: the top-up is
+    additive, so a failure here leaves the leaderboard run untouched.
+    """
+    if not settings.get("enabled"):
+        return {}, {}
+    try:
+        from nanobody_opt import db, hf_topup
+        top = hf_topup.hf_archive_top(archive, hf_topup.HF_TOP_K)
+        candidates = hf_topup.eligible_parents(
+            top, top[:hf_topup.VALIDATOR_TOP_N], hf_topup.MIN_PARENT_DISTANCE)
+        with db.connect() as conn:
+            existing = hf_topup.stored_pass_counts(conn, candidates)
+        plan = hf_topup.plan_topup(candidates, existing, exclude=batch,
+                                   depth=settings["depth"], budget=settings["budget"])
+        done = sum(1 for s in candidates if existing.get(s, 0) >= settings["depth"])
+        print(f"TOPUP_PLAN candidates={len(candidates)} at_depth={done} "
+              f"this_run={len(plan)} sequence_passes={sum(plan.values())} "
+              f"depth={settings['depth']} budget={settings['budget']}", flush=True)
+        return plan, existing
+    except BaseException as exc:  # noqa: BLE001 - incl. SystemExit from the loader
+        print(f"TOPUP_PLAN_FAILED {type(exc).__name__}: {exc}", flush=True)
+        try:
+            from nanobody_opt.failure_log import record_failure
+            record_failure(WRITER, "TOPUP_PLAN_FAILED", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return {}, {}
+
+
+def prepare_topup(archive: pd.DataFrame, batch: set[str]
+                  ) -> tuple[dict, dict[str, int], dict[str, int], list[list[str]]]:
+    """(settings, plan, stored pass counts, per-pass batches); never raises."""
+    try:
+        settings = topup_settings()
+        from nanobody_opt import hf_topup
+    except BaseException as exc:  # noqa: BLE001 - stale box tree without hf_topup
+        print(f"TOPUP_PLAN_FAILED {type(exc).__name__}: {exc}", flush=True)
+        return {"enabled": False}, {}, {}, []
+    plan, existing = plan_hf_topup(archive, batch, settings)
+    return settings, plan, existing, hf_topup.pass_batches(plan)
 
 
 def raw_metrics_from_exact_all(payload: dict) -> dict[str, dict[str, float]]:
@@ -365,16 +432,37 @@ def main() -> int:
     cohort_of = {seq: ("ours" if coldkey == OUR_COLDKEY else "rival")
                  for coldkey, seq in pairs}
 
+    # Bounded HF top-up (R1): HF-archive parent candidates ride along in the
+    # same scorer passes, each only for the passes it is still missing. They
+    # are kept out of the leaderboard aggregation and the dashboard numbers.
+    topup_cfg, topup_plan, topup_existing, topup_batches = prepare_topup(
+        archive, set(sequences))
+    for seq in topup_plan:
+        cohort_of[seq] = TOPUP_COHORT
+    leaderboard_set = set(sequences)
+
     per_pass: list[dict[str, float]] = []
     per_pass_structures: list[dict[str, dict]] = []
     per_pass_raw: list[dict[str, dict[str, float]]] = []
-    for run in range(1, n + 1):
-        ranks, structs, raw = score_pass(sequences, run, archive=archive, config=config,
+    topup_rows: list[tuple[int, dict, dict, dict]] = []  # (run, ranks, structs, raw)
+    rounds = max(n, len(topup_batches))
+    for run in range(1, rounds + 1):
+        extra = topup_batches[run - 1] if run <= len(topup_batches) else []
+        batch = (sequences if run <= n else []) + extra
+        ranks, structs, raw = score_pass(batch, run, archive=archive, config=config,
                                          scorer=scorer, out_root=out_root)
-        per_pass.append(ranks)
-        per_pass_structures.append(structs)
-        per_pass_raw.append(raw)
-        print(f"  pass {run}/{n} done", flush=True)
+        if run <= n:
+            per_pass.append({s: v for s, v in ranks.items() if s in leaderboard_set})
+            per_pass_structures.append(
+                {s: v for s, v in structs.items() if s in leaderboard_set})
+            per_pass_raw.append({s: v for s, v in raw.items() if s in leaderboard_set})
+        if extra:
+            keep = set(extra)
+            topup_rows.append((
+                run, {s: v for s, v in ranks.items() if s in keep},
+                {s: v for s, v in structs.items() if s in keep},
+                {s: v for s, v in raw.items() if s in keep}))
+        print(f"  pass {run}/{rounds} done (topup={len(extra)})", flush=True)
 
     # A sequence can be rejected by the scorer in some passes (liability/fold
     # failure), so only aggregate over sequences present in EVERY pass.
@@ -415,12 +503,57 @@ def main() -> int:
             import traceback
             traceback.print_exc()
 
+    # The HF top-up passes: same label, source, writer, formula and field as
+    # the leaderboard rows (one scale), cohort=hf_top200. Same observation id
+    # scheme, so backfill_multipass_metrics re-imports of this epoch's score
+    # dirs are no-ops on them. Written separately: a failure here is logged and
+    # self-heals (the passes are still missing, so the next run re-plans them);
+    # it does not fail the leaderboard run.
+    topup_written = 0
+    if topup_rows:
+        try:
+            from nanobody_opt.mutation_network import update_observation_store
+            observations = []
+            for run, ranks, structs, raw in topup_rows:
+                for seq in ranks:
+                    observations.extend(pass_observations(
+                        epoch=epoch, run=run, passes=topup_plan[seq],
+                        ranks={seq: ranks[seq]}, raw=raw, structs=structs,
+                        cohort_of=cohort_of, field=field,
+                        extra_provenance={
+                            "topup": True,
+                            "topup_target_depth": topup_cfg.get("depth"),
+                            "stored_passes_before": int(topup_existing.get(seq, 0)),
+                        }))
+            topup_written = update_observation_store(
+                Path("/root/artifacts/nanobody_mutations.sqlite"), observations)
+            print(f"TOPUP_DB_WRITE observations={topup_written} "
+                  f"sequences={len({o['sequence'] for o in observations})} "
+                  f"score_kind={PASS_SCORE_KIND}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"TOPUP_DB_WRITE_FAILED {type(exc).__name__}: {exc}", flush=True)
+            try:
+                from nanobody_opt.failure_log import record_failure
+                record_failure(WRITER, "TOPUP_DB_WRITE_FAILED", exc, epoch=epoch)
+            except Exception:  # noqa: BLE001
+                pass
+
     # Preserve the sequence -> mean rank-sum mapping (do NOT drop it) in the
     # artifact alongside the per-coldkey rollup.
     result: dict[str, dict] = {
         "ours": None,
         "rivals": {},
         "sequences": {s: float(seq_means[s]) for s in common},
+        # The bounded HF top-up that rode along (R1). Counts only: its
+        # sequences are parent candidates, not part of this epoch's field.
+        "topup": {
+            "cohort": TOPUP_COHORT,
+            "enabled": bool(topup_cfg.get("enabled")),
+            "depth": topup_cfg.get("depth"),
+            "sequences": len(topup_plan),
+            "sequence_passes": int(sum(topup_plan.values())),
+            "rows_written": int(topup_written or 0),
+        },
     }
     for coldkey, seqs in sorted(by_coldkey.items(), key=lambda kv: -len(kv[1])):
         scored = [seq_means[s] for s in seqs if s in seq_means]

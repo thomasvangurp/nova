@@ -21,32 +21,19 @@ Invocation (metanano env)::
 
 ``obs_db``, when given, supplies ``live_sequences`` -- our own multi-pass replay
 top-50, the stable quality read for frontier parents -- instead of the archive
-top-50 fallback.
+top-50 fallback. Since 2026-10-10 (ARCHITECTURE_REDESIGN R1) ``live_sequences``
+also carries up to ``hf_topup.DEFAULT_SLOTS`` HF-archive/rival parents in
+reserved, interleaved slots (every ``DEFAULT_STRIDE``-th position), merged by
+rank position, never by score; ``topup`` in the JSON records which. Touch
+``/root/artifacts/DISABLE_TOP50_TOPUP`` to turn that off for the next build.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
 
 import pandas as pd
-
-
-def _validator_rank_binders():
-    """Load utils/minmax_weighted_rank.rank_binders by path (validator's source).
-
-    Not ``from utils import rank_binders``: utils/__init__.py imports rdkit,
-    which the metanano environment does not carry. Loading the file directly is
-    still the validator's own source, not a reimplementation of it.
-    """
-    source = Path(__file__).resolve().parent.parent / "utils" / "minmax_weighted_rank.py"
-    spec = importlib.util.spec_from_file_location("_nova_minmax_weighted_rank", source)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"cannot load the validator's ranking from {source}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.rank_binders
 
 
 #: Writers whose rows under the two replay kinds are on the producer's ~20-370
@@ -70,7 +57,8 @@ REPLAY_SCALE_SOURCES = (
 
 def _live_top50_from_db(
     db_path: str, *, limit: int = 50, min_obs: int = 8, min_distance: int = 6,
-    extra: int = 15,
+    extra: int = 15, topup: list[str] | None = None,
+    report: dict | None = None,
 ) -> list[str]:
     """Our own multi-pass parents: the top-50 plus a few diverse fillers.
 
@@ -82,6 +70,12 @@ def _live_top50_from_db(
     fleet). Their single-edits crowd into one family, so the fleet selector's
     0.95 dedup leaves a few UIDs unfilled; append `extra` parents that are
     >= min_distance edits from the top-50 so those slots get distinct edits.
+
+    ``topup`` (optional) is the HF/rival list from :func:`_hf_rival_topup`,
+    already ranked on ITS OWN scale. It is merged into the top-50 by rank
+    position only (``hf_topup.merge_by_rank``: reserved, interleaved slots),
+    never by score: its values (~1e5, vs the full HF field) and this query's
+    (~20-370, producer replay) are different scales (ARCHITECTURE_REDESIGN R3).
     """
     from collections import Counter
 
@@ -142,7 +136,55 @@ def _live_top50_from_db(
         filler.append(seq)
         if len(filler) >= extra:
             break
-    return top + filler
+    if report is not None:
+        report["producer_top50"] = list(top)
+        report["filler"] = list(filler)
+    if not topup:
+        return top + filler
+    from nanobody_opt.hf_topup import merge_by_rank  # noqa: E402
+
+    # Same modal length as the producer list (the competitor lane drops any
+    # other length); not already a top-50 parent or a filler.
+    usable = [s for s in topup if len(s) == mlen and s not in filler]
+    merged, positions = merge_by_rank(top, usable)
+    if report is not None:
+        report["topup_positions"] = positions
+        report["topup_merged"] = [merged[i] for i in positions]
+    return merged + filler
+
+
+def _hf_rival_topup(frame: pd.DataFrame, hf_top: list[str]) -> tuple[list[str], dict]:
+    """The HF/rival top-up list (best first) and a summary. Degrades to [].
+
+    Ranked by ``hf_topup.ranked_topup``: mean derived sum-of-10 against THIS
+    epoch's HF archive, from the dashboard pass scorer's stored raw metrics.
+    Those values are compared only with each other; the list leaves here as
+    plain ordered sequences. Unlike the producer-scale half (which fails
+    closed), a missing/broken top-up just means "no top-up this epoch".
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from nanobody_opt import hf_topup  # noqa: E402
+
+        if hf_topup.DISABLE_FILE.exists():
+            return [], {"status": "disabled", "switch": str(hf_topup.DISABLE_FILE)}
+        from nanobody_opt import db  # noqa: E402
+
+        with db.connect() as conn:
+            ranked, summary = hf_topup.ranked_topup(conn, frame, hf_top=hf_top)
+        summary["status"] = "ok" if ranked else "empty"
+        summary["candidates"] = ranked[: 3 * hf_topup.DEFAULT_SLOTS]
+        return [r["sequence"] for r in ranked], summary
+    except BaseException as exc:  # noqa: BLE001 - never fail the epoch for this
+        print(f"TOP50_TOPUP_UNAVAILABLE {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        try:
+            from nanobody_opt.failure_log import record_failure  # noqa: E402
+
+            record_failure("build_top50_index", "TOP50_TOPUP_UNAVAILABLE", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return [], {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
 def main() -> int:
@@ -165,19 +207,26 @@ def main() -> int:
     if "sequence" not in frame.columns or frame.empty:
         raise SystemExit(f"HF archive has no sequence column: {archive_path}")
 
-    rank_binders = _validator_rank_binders()
-    top = rank_binders(frame, k=50, max_liability_violations=50).head(50)
-    hf_sequences = [str(s).strip().upper() for s in top["sequence"].tolist()]
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from nanobody_opt.hf_topup import HF_TOP_K, hf_archive_top  # noqa: E402
 
+    hf_top = hf_archive_top(frame, HF_TOP_K)
+    hf_sequences = hf_top[:50]
+
+    report: dict = {}
+    topup_info: dict = {"status": "not_run"}
     if obs_db:
-        live_sequences = _live_top50_from_db(obs_db)
+        topup, topup_info = _hf_rival_topup(frame, hf_top)
+        live_sequences = _live_top50_from_db(obs_db, topup=topup, report=report)
+        # The dedup reference stays the producer-scale top-50 + fillers only;
+        # the top-up changes the parent pool (`live_sequences`), nothing else.
+        sequences = report["producer_top50"] + report["filler"]
     else:
         live_sequences = hf_sequences
-
+        sequences = live_sequences
     # The dedup reference (`sequences`) is OUR OWN multiscored top-50, not the
     # HF archive: the full-history rank_binders set is ~30 edits from the live
     # field and proved a bad selection reference. Use our stable 20x replay read.
-    sequences = live_sequences
 
     cdr3s: list[str] = []
     missed = 0
@@ -201,6 +250,15 @@ def main() -> int:
         "archive_count": int(len(frame)),
         "source": "our_top50",
         "live_sequences": live_sequences,
+        # R1 HF/rival top-up: which live_sequences slots it fills, and its own
+        # ranking (derived sum10 vs this archive; NOT comparable to the
+        # producer replay scale of the other slots).
+        "topup": {
+            **topup_info,
+            "positions": report.get("topup_positions", []),
+            "sequences": report.get("topup_merged", []),
+            "merge": "rank-position interleave (hf_topup.merge_by_rank)",
+        },
     }
     with open(out_path, "w") as handle:
         json.dump(payload, handle, indent=2)
@@ -209,7 +267,8 @@ def main() -> int:
     print(
         f"TOP50_OK archive_rows={len(frame)} top={len(sequences)} "
         f"unextractable={missed} distinct_cdr3={len(set(cdr3s))} "
-        f"source=hf_archive",
+        f"source=hf_archive topup={len(report.get('topup_merged', []))} "
+        f"topup_status={topup_info.get('status')}",
         flush=True,
     )
     return 0

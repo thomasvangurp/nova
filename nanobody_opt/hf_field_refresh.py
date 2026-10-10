@@ -96,15 +96,6 @@ OUR_TOP50_SQL = """
 """
 
 
-def _rank_binders():
-    import importlib.util
-    src = Path("/root/utils/minmax_weighted_rank.py")
-    spec = importlib.util.spec_from_file_location("_rb", src)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m.rank_binders
-
-
 def algo2_score(field: pd.DataFrame) -> pd.Series:
     work = field[field["liability_num_violations"] <= 50].copy()
     rc = {}
@@ -154,9 +145,10 @@ def fetch_rivals(epoch: int) -> set[str]:
 
 
 def fetch_hf_top200(archive: pd.DataFrame) -> set[str]:
-    rb = _rank_binders()
-    top = rb(archive, k=200, max_liability_violations=50)
-    return {str(s).strip().upper() for s in top["sequence"].tolist()}
+    # One copy of this ranking: nanobody_opt.hf_topup (R1), which now feeds
+    # the live parent pool through the dashboard pass scorer.
+    from nanobody_opt.hf_topup import hf_archive_top
+    return set(hf_archive_top(archive, 200))
 
 
 def fetch_db_rivals(conn) -> set[str]:
