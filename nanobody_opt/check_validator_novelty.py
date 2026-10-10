@@ -92,6 +92,59 @@ def _build_search_engine(top: pd.DataFrame):
     return engine
 
 
+#: Set once per worker process by _init_worker, never pickled/shared across
+#: processes directly -- each worker builds its own SearchEngine from `top`.
+_WORKER_ENGINE = None
+_WORKER_HISTORICAL: set[str] = set()
+
+
+def _init_worker(top: pd.DataFrame, historical: set[str]) -> None:
+    global _WORKER_ENGINE, _WORKER_HISTORICAL
+    _WORKER_ENGINE = _build_search_engine(top)
+    _WORKER_HISTORICAL = historical
+
+
+def _search_one(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Exactly the per-candidate body of the old serial loop, unchanged --
+    only the engine's origin (built once per worker, not once per process
+    overall) and the dispatch (pool.map instead of a for loop) differ. See
+    the parent docstring for why coarse_min_shared=0/coarse_jaccard=0.0 is
+    not optional."""
+    sequence = candidate["sequence"]
+    exact_historical = sequence in _WORKER_HISTORICAL
+    search = _WORKER_ENGINE.search(
+        sequence,
+        include_alignment=True,
+        exclude_ids=None,
+        coarse_min_shared=0,
+        coarse_jaccard=0.0,
+    )
+    matches = []
+    for match in search.matches:
+        reason = duplicate_reason(match.identity, match.cdr_similarity)
+        matches.append(
+            {
+                "target_id": match.target_id,
+                "identity": match.identity,
+                "cdr_similarity": match.cdr_similarity,
+                "duplicate_reason": reason,
+            }
+        )
+    duplicate_matches = [match for match in matches if match["duplicate_reason"]]
+    return {
+        **candidate,
+        "exact_historical": exact_historical,
+        "indexed_top": search.total_indexed,
+        "coarse_candidates": search.total_candidates,
+        "maximum_identity": max(
+            (match["identity"] for match in matches), default=0.0
+        ),
+        "duplicate_matches": duplicate_matches,
+        "validator_novel": not exact_historical and not duplicate_matches,
+        "matches": matches,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path)
@@ -100,6 +153,15 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--top", type=int, default=50)
     parser.add_argument("--max-liability-violations", type=int, default=50)
+    parser.add_argument(
+        "--concurrency", type=int, default=64,
+        help=(
+            "candidate searches run in parallel worker processes (each "
+            "candidate's search only reads the shared top-50 index, so "
+            "this is embarrassingly parallel); 1 reproduces the old serial "
+            "behavior exactly, including error messages"
+        ),
+    )
     args = parser.parse_args()
 
     candidates = _load_candidates(args.input)
@@ -112,56 +174,37 @@ def main() -> None:
     top = _rank_binders(archive, args.top, args.max_liability_violations)
     if len(top) != args.top:
         raise SystemExit(f"expected {args.top} top sequences, got {len(top)}")
-    engine = _build_search_engine(top)
 
-    results: list[dict[str, Any]] = []
-    for candidate in candidates:
-        sequence = candidate["sequence"]
-        exact_historical = sequence in historical
-        # Exactly the call neurons/validator/nanobody_validity.py makes. The
-        # engine's DEFAULT coarse k-mer prefilter discards every top sequence
-        # before alignment -- this replay reported coarse=0, max_identity=0.000
-        # and "30/30 novel" for a fleet that was 0.95-0.98 identical to the
-        # live rank-1 sequence. The validator disables that prefilter, so a
-        # replay that leaves it on proves nothing.
-        # Explicit zeros, not None. None means "use the configured coarse
-        # filter", not "skip it", so every top-50 sequence was discarded before
-        # alignment and this replay reported coarse_candidates=0,
-        # maximum_identity=0.000 and 350/350 novel -- a gate that compared
-        # nothing and had never rejected a candidate.
-        search = engine.search(
-            sequence,
-            include_alignment=True,
-            exclude_ids=None,
-            coarse_min_shared=0,
-            coarse_jaccard=0.0,
-        )
-        matches = []
-        for match in search.matches:
-            reason = duplicate_reason(match.identity, match.cdr_similarity)
-            matches.append(
-                {
-                    "target_id": match.target_id,
-                    "identity": match.identity,
-                    "cdr_similarity": match.cdr_similarity,
-                    "duplicate_reason": reason,
-                }
-            )
-        duplicate_matches = [match for match in matches if match["duplicate_reason"]]
-        results.append(
-            {
-                **candidate,
-                "exact_historical": exact_historical,
-                "indexed_top": search.total_indexed,
-                "coarse_candidates": search.total_candidates,
-                "maximum_identity": max(
-                    (match["identity"] for match in matches), default=0.0
-                ),
-                "duplicate_matches": duplicate_matches,
-                "validator_novel": not exact_historical and not duplicate_matches,
-                "matches": matches,
-            }
-        )
+    # Exactly the call neurons/validator/nanobody_validity.py makes. The
+    # engine's DEFAULT coarse k-mer prefilter discards every top sequence
+    # before alignment -- this replay reported coarse=0, max_identity=0.000
+    # and "30/30 novel" for a fleet that was 0.95-0.98 identical to the
+    # live rank-1 sequence. The validator disables that prefilter, so a
+    # replay that leaves it on proves nothing.
+    # Explicit zeros, not None. None means "use the configured coarse
+    # filter", not "skip it", so every top-50 sequence was discarded before
+    # alignment and this replay reported coarse_candidates=0,
+    # maximum_identity=0.000 and 350/350 novel -- a gate that compared
+    # nothing and had never rejected a candidate.
+    #
+    # PARALLELIZED (2026-10-10): each candidate's full alignment search
+    # against the fixed top-50 index is independent of every other
+    # candidate's -- nothing here is shared mutable state, so this is a
+    # correctness-preserving reshape of the same serial loop, not a
+    # different algorithm. The engine is rebuilt once per WORKER (not once
+    # per candidate), amortizing its cost across however many candidates
+    # that worker handles.
+    if args.concurrency <= 1:
+        _init_worker(top, historical)
+        results = [_search_one(candidate) for candidate in candidates]
+    else:
+        import concurrent.futures
+
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=min(args.concurrency, len(candidates)),
+            initializer=_init_worker, initargs=(top, historical),
+        ) as pool:
+            results = list(pool.map(_search_one, candidates))
 
     passed = [item for item in results if item["validator_novel"]]
     payload = {
