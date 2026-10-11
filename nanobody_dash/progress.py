@@ -225,7 +225,17 @@ def _gap_at_method_change(xs, ys, methods_by_x, *extra):
 
 
 def _mark_method_boundaries(figure, segments, *, categorical_index=None) -> None:
-    """Dashed line at every boundary plus a label over each regime."""
+    """Dashed line at every boundary plus a label over each regime.
+
+    A single segment (the common case once the whole series is on one
+    consistent regime -- see rescale_multipass_history.py) has nothing to
+    distinguish, so it draws nothing: the label previously shown even then
+    sat at the same y as the legend (both ~y=1.0-1.02 paper coords) and
+    overlapped it, worst on narrow/mobile widths where there is no spare
+    vertical room between the two (user, 2026-10-11: "like crap on mobile").
+    """
+    if len(segments) <= 1:
+        return
     for i, (method, first, last) in enumerate(segments):
         if categorical_index is not None:
             x0, x1 = categorical_index[str(first)], categorical_index[str(last)]
@@ -236,7 +246,7 @@ def _mark_method_boundaries(figure, segments, *, categorical_index=None) -> None
         figure.add_annotation(
             x=(x0 + x1) / 2, y=1.0, xref="x", yref="paper", yanchor="bottom",
             text=_method_label(method), showarrow=False,
-            font=dict(color=WARN if len(segments) > 1 else MUTED, size=11))
+            font=dict(color=WARN, size=11))
 
 
 def _normalize_multipass_actor(value):
