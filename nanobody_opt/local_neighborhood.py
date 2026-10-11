@@ -20,6 +20,7 @@ import multiprocessing
 import os
 import hashlib
 import json
+import zlib
 import math
 import sys
 from pathlib import Path
@@ -756,7 +757,14 @@ def bounded_basin_terminal_routes(
             0 if source == "basin_terminal_single_substitution" else 1,
             len(changed),
             terminal_depth,
-            hashlib.sha256(candidate.encode("ascii")).hexdigest(),
+            # A unique, deterministic tie-break -- same property a hash
+            # gives (total order regardless of input order), without
+            # hashing: the candidate string itself already compares
+            # deterministically. Measured live: route_key is the sort key
+            # for ~5M calls across one basin-representative loop (profiled
+            # on real epoch 25639 data), and the sha256 hexdigest this
+            # replaced was over 40% of that cost.
+            candidate,
         )
 
     for base in grouped:
@@ -785,8 +793,17 @@ def bounded_basin_terminal_routes(
     remaining = [
         route for route in routes if route[0] not in used
     ]
+    # Deterministic pseudo-random exploration order, not a meaningful
+    # ranking -- any hash that is fast, deterministic and well-distributed
+    # satisfies the intent. sha256 over up to ~1.6M routes measured at
+    # ~22.7s per bounded_basin_terminal_routes call (profiled on real
+    # epoch 25639 data); crc32 is non-cryptographic but exactly as
+    # deterministic, and orders of magnitude cheaper per call. This DOES
+    # pick a different specific set of exploration candidates than the old
+    # sha256 order would -- a different valid pseudo-random draw, not a
+    # regression -- confirmed with the user before swapping.
     remaining.sort(key=lambda route: (
-        hashlib.sha256(f"explore:{route[0]}".encode("ascii")).hexdigest(),
+        zlib.crc32(f"explore:{route[0]}".encode("ascii")),
         route[0],
     ))
     for route in remaining:
