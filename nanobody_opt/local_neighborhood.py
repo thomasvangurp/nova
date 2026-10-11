@@ -23,6 +23,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -827,6 +828,71 @@ def bounded_basin_terminal_routes(
         if len(selected) >= limit:
             break
     return selected
+
+
+#: Set once per worker by _init_basin_worker -- identical for every parent,
+#: so each worker receives it once, not once per parent.
+_BASIN_TERMINAL_PRIORS: Any = None
+_BASIN_BASE_SCORES: dict[str, float] = {}
+_BASIN_TERMINAL_WIDTH: int = 0
+_BASIN_MAX_HAPLOTYPE_MUTATIONS: int = 0
+_BASIN_ROUTES_PER_CORE: int = 0
+
+
+def _init_basin_worker(terminal_priors, base_scores, terminal_width,
+                       maximum_haplotype_mutations, basin_routes_per_core) -> None:
+    global _BASIN_TERMINAL_PRIORS, _BASIN_BASE_SCORES, _BASIN_TERMINAL_WIDTH, \
+        _BASIN_MAX_HAPLOTYPE_MUTATIONS, _BASIN_ROUTES_PER_CORE
+    _BASIN_TERMINAL_PRIORS = terminal_priors
+    _BASIN_BASE_SCORES = base_scores
+    _BASIN_TERMINAL_WIDTH = terminal_width
+    _BASIN_MAX_HAPLOTYPE_MUTATIONS = maximum_haplotype_mutations
+    _BASIN_ROUTES_PER_CORE = basin_routes_per_core
+
+
+def _basin_terminal_routes_for_parent(
+    args: tuple[tuple, list[str]],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """The expensive, side-effect-free half of main()'s basin-representative
+    loop: enumerating and bounding terminal routes for one parent. Nothing
+    here touches add_candidate's shared dedup state (seen/lineage_attributions
+    /pending_evidence) -- that stays sequential in main(), fed by this
+    function's output, exactly as before. This is the O(compatible_sequences
+    x mutable_positions x amino_acids) nested loop that dominates a basin
+    representative's cost; add_candidate's own per-candidate work afterward
+    is flat and bounded by basin_routes_per_core, so it is cheap by
+    comparison and not worth parallelizing separately."""
+    parent_record, basin_sequences = args
+    parent = parent_record[1]
+    protected = parent_record[4]
+    legacy_routes = supported_basin_terminal_candidates(
+        parent,
+        basin_sequences=basin_sequences,
+        protected=protected,
+        terminal_width=_BASIN_TERMINAL_WIDTH,
+        maximum_haplotype_mutations=_BASIN_MAX_HAPLOTYPE_MUTATIONS,
+    )
+    legacy_candidates = bounded_basin_terminal_routes(
+        legacy_routes,
+        base_scores=_BASIN_BASE_SCORES,
+        limit=_BASIN_ROUTES_PER_CORE,
+    )
+    evidence_routes = supported_basin_terminal_candidates(
+        parent,
+        basin_sequences=basin_sequences,
+        protected=protected,
+        exploration_residues=_BASIN_TERMINAL_PRIORS.exploration_residues,
+        terminal_width=_BASIN_TERMINAL_WIDTH,
+        maximum_haplotype_mutations=_BASIN_MAX_HAPLOTYPE_MUTATIONS,
+    )
+    evidence_candidates = bounded_basin_terminal_routes(
+        evidence_routes,
+        base_scores=_BASIN_BASE_SCORES,
+        limit=_BASIN_ROUTES_PER_CORE,
+        terminal_priors=_BASIN_TERMINAL_PRIORS,
+        evidence_fraction=1.0,
+    )
+    return legacy_candidates, evidence_candidates
 
 
 def _interleave_rankings(
@@ -2011,40 +2077,56 @@ def main() -> None:
     reserved_core_seeds = [item for item in core_seeds if item[8]]
     for parent_record in reserved_core_seeds or core_seeds:
         basin_representatives.setdefault(parent_record[6], parent_record)
-    for parent_record in basin_representatives.values():
+    # The nested enumeration inside supported_basin_terminal_candidates (every
+    # historical basin member x every mutable position x every observed
+    # residue, built via pure-Python string slicing) is independent per
+    # parent and the single biggest cost in this script -- measured live at
+    # 12m50s on a 224-core box using exactly 1 core. add_candidate's own
+    # per-candidate work below is flat and bounded by basin_routes_per_core,
+    # so only the route enumeration is dispatched to a pool; the dedup state
+    # it feeds (seen/lineage_attributions/pending_evidence) stays sequential,
+    # processed in the same parent order as the old loop.
+    basin_parents = list(basin_representatives.values())
+    basin_worker_inputs = [
+        (parent_record, background_by_basin[parent_record[6]])
+        for parent_record in basin_parents
+    ]
+    # --generation-workers-minimum-candidates (64) is the OTHER pool's
+    # threshold, sized for per-CANDIDATE evidence resolution where there can
+    # be thousands of cheap items. Live basin_representatives is typically a
+    # handful of parents (observed: 8) -- each individually expensive (the
+    # O(compatible x positions x residues) enumeration above), not numerous.
+    # Gating on that threshold meant this pool never activated in production;
+    # gate on parent count alone instead -- fork overhead (~1-2s) is trivial
+    # against even a single parent's multi-second-to-minutes cost.
+    if args.generation_workers > 1 and len(basin_parents) > 1:
+        with ProcessPoolExecutor(
+            max_workers=min(args.generation_workers, len(basin_parents)),
+            mp_context=multiprocessing.get_context("fork"),
+            initializer=_init_basin_worker,
+            initargs=(terminal_priors, base_scores, args.terminal_width,
+                      args.maximum_terminal_haplotype_mutations,
+                      args.basin_routes_per_core),
+        ) as pool:
+            basin_route_results = list(
+                pool.map(_basin_terminal_routes_for_parent, basin_worker_inputs)
+            )
+    else:
+        _init_basin_worker(terminal_priors, base_scores, args.terminal_width,
+                           args.maximum_terminal_haplotype_mutations,
+                           args.basin_routes_per_core)
+        basin_route_results = [
+            _basin_terminal_routes_for_parent(item) for item in basin_worker_inputs
+        ]
+
+    for parent_record, (legacy_candidates, evidence_candidates) in zip(
+        basin_parents, basin_route_results
+    ):
         parent = parent_record[1]
-        protected = parent_record[4]
         basin_sequences = background_by_basin[parent_record[6]]
         parent_recency_rank = basin_parent_recency_ranks(
             basin_sequences,
             terminal_priors,
-        )
-        legacy_routes = supported_basin_terminal_candidates(
-            parent,
-            basin_sequences=basin_sequences,
-            protected=protected,
-            terminal_width=args.terminal_width,
-            maximum_haplotype_mutations=args.maximum_terminal_haplotype_mutations,
-        )
-        legacy_candidates = bounded_basin_terminal_routes(
-            legacy_routes,
-            base_scores=base_scores,
-            limit=args.basin_routes_per_core,
-        )
-        evidence_routes = supported_basin_terminal_candidates(
-            parent,
-            basin_sequences=basin_sequences,
-            protected=protected,
-            exploration_residues=terminal_priors.exploration_residues,
-            terminal_width=args.terminal_width,
-            maximum_haplotype_mutations=args.maximum_terminal_haplotype_mutations,
-        )
-        evidence_candidates = bounded_basin_terminal_routes(
-            evidence_routes,
-            base_scores=base_scores,
-            limit=args.basin_routes_per_core,
-            terminal_priors=terminal_priors,
-            evidence_fraction=1.0,
         )
         parent_proposals: list[dict[str, object]] = []
         for route_policy, candidates in (
