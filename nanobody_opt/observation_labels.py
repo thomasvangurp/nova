@@ -90,6 +90,11 @@ RELABEL_WRITER = "relabel_multipass_legacy"
 #: nanobody_opt/hf_field_refresh.py: tops rival / HF top-200 sequences up to a
 #: depth of 20 stored passes, one multipass_sum10_pass row per pass.
 HF_REFRESH_WRITER = "hf_field_refresh"
+#: tools/migrate_hf_field_20x.py: imports master 20x disk passes into
+#: multipass_sum10_pass and relabels the hf_field_* means to legacy labels.
+HF20X_MIGRATE_WRITER = "migrate_hf_field_20x"
+HF20X_SOURCES = frozenset({"public_multipass_rivals", "hf_archive_top200",
+                           "motif_variants_20x", "our_top50_20x"})
 
 LABELS: dict[str, Label] = {label.score_kind: label for label in (
     Label(
@@ -141,14 +146,45 @@ LABELS: dict[str, Label] = {label.score_kind: label for label in (
         field="hf_archive_full (field_rows + field_sha256 in provenance)", passes=1,
         sources=frozenset({"public_multipass_rivals"}),
         writers=frozenset({"multipass_all_rivals", "backfill_multipass_metrics",
-                           RELABEL_WRITER, HF_REFRESH_WRITER}),
+                           RELABEL_WRITER, HF20X_MIGRATE_WRITER, HF_REFRESH_WRITER}),
         strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-09",
         epochs="25533-25534, 25593-25603 (backfilled from disk), 25613-25618 "
-               "(relabelled, no metrics), 25619+ (native)",
+               "(relabelled, no metrics), 25619+ (native); 25598-25616 also "
+               "hold migrated master 20x passes (ids hf20x_pass:*)",
         notes="Rows written natively or by backfill_multipass_metrics carry raw "
               "metrics_json + field fingerprint. Rows relabelled by "
               "relabel_multipass_legacy (25613-25618) have no metrics and an "
-              "unrecorded hf_archive snapshot; same formula and field type.",
+              "unrecorded hf_archive snapshot; same formula and field type. "
+              "Rows from migrate_hf_field_20x are the raw per-pass metrics of "
+              "master's killed 20x hf_field_refresh runs (same scorer, "
+              "validator-dual-sample-v1, read back from master disk); epoch = "
+              "the refresh run's epoch, cohort derived per sequence.",
+    ),
+    Label(
+        score_kind="slave_multipass_sum10_pass",
+        klass="raw_pass", formula="sum10",
+        scale="ONE fast-scorer pass, run on the slave box's idle GPUs "
+              "(ssh2.vast.ai), sum-of-10 dense rank-sum vs the full HF archive "
+              "field; same scale as multipass_sum10_pass (~8.5e4-2.1e5 per "
+              "pass); lower=better.",
+        field="hf_archive_full (field_rows + field_sha256 in provenance)", passes=1,
+        sources=frozenset({"slave_public_multipass_rivals"}),
+        writers=frozenset({"slave_multipass_writeback"}),
+        strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-11",
+        notes="Scored on the slave box with hf_field_refresh.py's unchanged "
+              "score_pass/sum_of_ten harness, over real sequences that reached "
+              "an epoch's qualified-for-publication shortlist "
+              "(checkpoints/qualified/uid*.json). Slave never opens "
+              "nanobody_mutations.sqlite: results are shipped to master as "
+              "NDJSON (tools/run_slave_multipass_epoch.sh) and inserted ONLY "
+              "by tools/ingest_slave_multipass.py running on master, via the "
+              "same update_observation_store() the live producer uses "
+              "(NOVA_LOCAL_SQLITE=1). A new label, not a reuse of "
+              "multipass_sum10_pass, because the registry keys a label to its "
+              "exact writer set (ARCHITECTURE_REDESIGN R3/P4) even when the "
+              "formula/field/scale match. `slave_public_multipass_rivals` was "
+              "a source placeholder referenced by hf_field_refresh.py "
+              "(0 rows, no writer) until this.",
     ),
     Label(
         score_kind="legacy_multipass_category3_pass",
@@ -181,28 +217,65 @@ LABELS: dict[str, Label] = {label.score_kind: label for label in (
               "2026-10-09 14:01:40Z. Verified: stored == algo2 recomputed from "
               "disk passes, rho=1.000 (25594, 25599, 25604, 25610).",
     ),
-    # --- master 20x HF-field refresh (off; P3) -------------------------------
+    # --- master 20x HF-field refresh (off; P3; relabelled 2026-10-10) ------
+    Label(
+        score_kind="legacy_hf_field_algo2_20x_mean",
+        klass="legacy", formula="algo2",
+        scale="ONE row per sequence: 20-pass MEAN algo2 vs the full HF archive "
+              "+ the scored batch; ~2.65e4-6.05e4; lower=better. NOT comparable "
+              "to sum10 or to per-pass rows.",
+        field="/root/P20809_nanobodies.csv snapshot at write time (unrecorded)",
+        passes=20, sources=HF20X_SOURCES,
+        writers=frozenset({HF20X_MIGRATE_WRITER}),
+        strict=True, typical_range=(1.0e4, 7.0e4), introduced="2026-10-10 (relabel)",
+        epochs="epoch NULL (refresh runs 25598-25615 and earlier imports)",
+        notes="Was hf_field_20x_rank_sum: 3,772 rows (2,853 rival, 642 "
+              "motif_variants_20x, 275 hf_archive_top200, 2 ours), no "
+              "metrics_json. Verified: stored == algo2 recomputed from the 20 "
+              "disk passes still on master for 2,114 rival rows (rho 0.999, "
+              "median |diff| 1.1%) and 75 HF rows (algo2 rho 0.76, |diff| "
+              "2.5%; sum10 |diff| >190%). The other 1,583 rows have no raw "
+              "passes anywhere: legacy only. The raw passes that survived "
+              "were migrated to multipass_sum10_pass (hf20x_pass:* ids); "
+              "provenance.raw_passes_migrated_to says so per row.",
+    ),
+    Label(
+        score_kind="legacy_hf_field_sum10_20x_mean",
+        klass="legacy", formula="sum10",
+        scale="ONE row per sequence: 20-pass MEAN sum-of-10 vs the full HF "
+              "archive + the scored batch; ~1.06e5-1.31e5; lower=better",
+        field="/root/P20809_nanobodies.csv snapshot at write time (unrecorded)",
+        passes=20, sources=frozenset({"our_top50_20x"}),
+        writers=frozenset({HF20X_MIGRATE_WRITER}),
+        strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-10 (relabel)",
+        epochs="epoch NULL (refresh run for 25616)",
+        notes="Was hf_field_sum10_20x_rank_sum: 50 rows, our top-50 only (the "
+              "rival batch was killed in pass 4 of 20, before any import). "
+              "Verified: stored == sum10 recomputed from the 20 disk passes "
+              "(rho 1.000). All 20 raw passes migrated to multipass_sum10_pass "
+              "(cohort ours).",
+    ),
     Label(
         score_kind="hf_field_20x_rank_sum",
         klass="legacy", formula="algo2",
-        scale="20-pass mean algo2 vs full HF archive; ~2.6e4-6.0e4",
-        field="hf_archive_full", passes=20,
-        sources=frozenset({"public_multipass_rivals", "hf_archive_top200",
-                           "motif_variants_20x", "our_top50_20x"}),
-        writers=frozenset({"import_hf_field_20x"}),
+        scale="CLOSED, 0 rows: relabelled to legacy_hf_field_algo2_20x_mean",
+        field="hf_archive_full", passes=20, sources=HF20X_SOURCES,
+        writers=frozenset(), strict=True,
         typical_range=(1.0e4, 7.0e4), introduced="2026-10-08",
-        notes="Closed in practice: superseded by hf_field_sum10_20x_rank_sum.",
+        notes="Closed 2026-10-10. Never write it again.",
     ),
     Label(
         score_kind="hf_field_sum10_20x_rank_sum",
-        klass="derived", formula="sum10",
-        scale="20-pass mean sum-of-10 vs full HF archive; ~1.0e5-1.4e5",
+        klass="legacy", formula="sum10",
+        scale="CLOSED, 0 rows: relabelled to legacy_hf_field_sum10_20x_mean",
         field="hf_archive_full", passes=20,
         sources=frozenset({"public_multipass_rivals", "hf_archive_top200",
                            "our_top50_20x"}),
-        writers=frozenset({"hf_field_refresh"}),
+        writers=frozenset(), strict=True,
         typical_range=(5.0e4, 2.6e5), introduced="2026-10-09",
-        notes="Pipeline is off (P3); no consumer.",
+        notes="Closed 2026-10-10. hf_field_refresh (off, P3) wrote it; a "
+              "re-enabled refresh is now refused at write time. Its job is "
+              "done by multipass_all_rivals' bounded top-up (R1).",
     ),
 )}
 
@@ -331,6 +404,28 @@ def violations(observation: dict[str, Any]) -> list[tuple[bool, str]]:
         if formula != label.formula:
             out.append((True, f"provenance formula {formula!r} != registered "
                               f"{label.formula!r} for {kind!r}"))
+    if label.klass == "raw_pass" and writer != RELABEL_WRITER:
+        # User, 2026-10-11: "Ensure we always store all raw data so this
+        # cannot reoccur." Root cause of the whole 2026-10-11 dashboard
+        # rescale effort: pre-2026-10-09 multipass_sum10_pass rows were
+        # written with metrics={} (no raw per-pass BoltzGen metrics), so the
+        # formula/field could never be recomputed later -- only the original
+        # score survived, on whatever scale it was written at. raw_pass is
+        # the class that exists SPECIFICALLY so a later formula or field
+        # change needs no GPU work (see tools/rescale_multipass_history.py's
+        # docstring); an empty metrics dict defeats its entire purpose
+        # silently, the same way a dropped NOVA_LOCAL_SQLITE write did.
+        # Same severity as the writer/formula checks above (hard under
+        # strict/_enforce_all, same as everything else here) -- except for
+        # RELABEL_WRITER, which legitimately, documentedly writes metrics-less
+        # rows for a handful of already-closed historical epochs (see
+        # multipass_sum10_pass's own notes) and must stay able to.
+        metrics = observation.get("metrics")
+        if not isinstance(metrics, dict) or not metrics:
+            out.append((hard, f"score_kind {kind!r} is class=raw_pass but "
+                              "metrics is empty/missing -- raw_pass rows must "
+                              "carry their raw per-pass metrics or the "
+                              "formula/field can never be recomputed later"))
     return out
 
 
