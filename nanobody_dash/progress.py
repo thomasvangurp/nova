@@ -158,6 +158,18 @@ MULTIPASS_METHOD_LABELS = {
     "validator_published_single_pass": "validator-published metrics, 1 pass",
     "local_fast_scorer_multipass_mean": "local fast scorer, multi-pass mean",
 }
+# field (method["field"]) is a THIRD axis a formula+measurement match can
+# still hide: 2026-10-11 switched the ranking field from the static,
+# ever-growing HF archive (~1.2e5 scale) to a pooled real last-10-epochs
+# field (~1-2e3 scale) without changing formula or measurement at all, so
+# the two-part key above alone would have joined a ~100x scale break into
+# one line. Folded into the regime key below instead of its own axis, since
+# every panel here (_smooth, _gap_at_method_change, _mark_method_boundaries)
+# already keys off one opaque method string.
+MULTIPASS_FIELD_LABELS = {
+    "hf_archive_full": "full archive",
+    "recent_validator_epochs": "recent 10 epochs",
+}
 LEGACY_API_BACKFILL_LAST_EPOCH = 25612
 
 
@@ -165,15 +177,21 @@ def _multipass_method(epoch: int, row) -> str:
     """Measurement regime key for one epoch row (see MULTIPASS_METHOD_LABELS)."""
     method = row.get("method") if isinstance(row, dict) else None
     if isinstance(method, dict) and method.get("measurement"):
-        return f"{method.get('formula') or '?'}:{method['measurement']}"
+        key = f"{method.get('formula') or '?'}:{method['measurement']}"
+        field = method.get("field")
+        return f"{key}:{field}" if field else key
     if epoch <= LEGACY_API_BACKFILL_LAST_EPOCH:
         return "sum10:validator_published_single_pass"
     return "sum10:local_fast_scorer_multipass_mean"
 
 
 def _method_label(method: str) -> str:
-    formula, _, measurement = method.partition(":")
-    return f"{formula} · {MULTIPASS_METHOD_LABELS.get(measurement, measurement)}"
+    formula, _, rest = method.partition(":")
+    measurement, _, field = rest.partition(":")
+    label = f"{formula} · {MULTIPASS_METHOD_LABELS.get(measurement, measurement)}"
+    if field:
+        label += f" ({MULTIPASS_FIELD_LABELS.get(field, field)})"
+    return label
 
 
 def _method_segments(epochs, methods):
