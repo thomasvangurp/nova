@@ -885,7 +885,7 @@ def _rank_command(
         command.extend([
             "--pose-config", str(config),
             "--before-epoch", str(epoch),
-            "--api-field-count", "10",
+            "--db-field-count", "10",
             "--minimum-api-fields", "3",
         ])
         command.extend(strict_rank_arguments(strict_gate_overrides))

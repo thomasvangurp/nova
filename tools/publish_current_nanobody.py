@@ -864,9 +864,14 @@ def _rank_command(
         "--bootstrap-fields", "64",
         "--limit", str(shortlist),
         "--before-epoch", str(epoch),
-        "--api-field-count", "10",
-        "--minimum-api-fields", "3",
     ])
+    # --db-field-count needs --observation-history; the rare explicit_exact
+    # invocation (observation_history=None, see caller) falls back to the
+    # live API instead of crashing on a missing required arg.
+    if observation_history is not None:
+        command.extend(["--db-field-count", "10", "--minimum-api-fields", "3"])
+    else:
+        command.extend(["--api-field-count", "10", "--minimum-api-fields", "3"])
     # NOVA_FULL_ARCHIVE_FIELD switches the publisher's own ranking pass to the
     # same full-archive field the race ranks candidates against (see the
     # module-level comment by _full_archive_field_enabled). rank_exact.py

@@ -575,6 +575,80 @@ def fetch_leaderboard_fields(
     return fields
 
 
+def fetch_recent_fields_from_db(
+    database: Path, *, target: str, before_epoch: int, count: int,
+) -> list[tuple[int, pd.DataFrame]]:
+    """Real per-epoch validator fields read from the local cache, no live call.
+
+    seed_mutation_database.py already keeps
+    observations(source='public_validator_api', score_kind=
+    'validator_final_rank_sum') continuously synced with the public
+    leaderboard -- every live submission across every coldkey, by epoch, with
+    raw metrics (confirmed 2026-10-11: 853 distinct epochs cached, current
+    through the live epoch). Reading that here means ranking -- the hottest
+    call path in the pipeline, hit by every race tranche/round -- never makes
+    a live HTTP call in its own critical path; the one network dependency
+    moves to the separate, already-running sync process, mirroring the
+    _recent_observation_history fix for the same reason (dialect-aware
+    mutation_network._connect, never an unconditional central MySQL hop).
+    """
+    from nanobody_opt import mutation_network
+
+    try:
+        connection = mutation_network._connect(database)
+    except Exception:
+        return []
+    try:
+        # Some deployments of mutation_network only ever speak central MySQL
+        # (no local-sqlite branch, no _is_local helper at all -- confirmed on
+        # the dashboard box 2026-10-11); default to the MySQL placeholder
+        # whenever that helper is missing, rather than assuming sqlite.
+        is_local = getattr(mutation_network, "_is_local", None)
+        p = "?" if (is_local is not None and is_local(connection)) else "%s"
+        epoch_rows = connection.execute(
+            "SELECT DISTINCT o.epoch FROM observations o "
+            "JOIN nodes n ON n.id = o.node_id "
+            f"WHERE n.target = {p} AND o.source = 'public_validator_api' "
+            f"AND o.epoch < {p} ORDER BY o.epoch DESC LIMIT {p}",
+            (target, before_epoch, count),
+        )
+        epochs = [int(row[0]) for row in epoch_rows]
+        if not epochs:
+            return []
+        placeholders = ",".join([p] * len(epochs))
+        rows = connection.execute(
+            "SELECT o.epoch, o.metrics_json FROM observations o "
+            "JOIN nodes n ON n.id = o.node_id "
+            f"WHERE n.target = {p} AND o.source = 'public_validator_api' "
+            f"AND o.epoch IN ({placeholders})",
+            (target, *epochs),
+        )
+        by_epoch: dict[int, list[dict[str, float]]] = defaultdict(list)
+        for epoch, blob in rows:
+            try:
+                metrics = json.loads(blob)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metrics, dict) or not set(METRICS).issubset(metrics):
+                continue
+            try:
+                values = {name: float(metrics[name]) for name in METRICS}
+            except (TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in values.values()):
+                continue
+            by_epoch[int(epoch)].append(values)
+    except Exception:
+        return []
+    finally:
+        connection.close()
+    return [
+        (epoch, pd.DataFrame(values))
+        for epoch, values in sorted(by_epoch.items(), reverse=True)
+        if len(values) >= 2
+    ]
+
+
 #: Read-only context for _rank_candidate, set once per process: directly
 #: in the main process for a serial run, or via _init_rank_worker in each
 #: pool worker (a separate process, so it cannot see main()'s closure).
@@ -857,6 +931,16 @@ def main() -> None:
         help="use completed public leaderboard fields strictly before this epoch",
     )
     parser.add_argument("--api-field-count", type=int, default=0)
+    parser.add_argument(
+        "--db-field-count", type=int, default=0,
+        help=(
+            "like --api-field-count but reads real recent-epoch fields from "
+            "the already-synced local observation history (source="
+            "public_validator_api) instead of a live leaderboard API call; "
+            "takes priority over --api-field-count when both are set, and "
+            "requires --observation-history"
+        ),
+    )
     parser.add_argument("--minimum-api-fields", type=int, default=3)
     parser.add_argument("--api-scan-limit", type=int, default=40)
     parser.add_argument("--leaderboard-api-root", default=LEADERBOARD_API_ROOT)
@@ -991,7 +1075,25 @@ def main() -> None:
         }
     else:
         api_fields: list[tuple[int, pd.DataFrame]] = []
-        if args.api_field_count:
+        field_reference_source = "public_leaderboard_api"
+        if args.db_field_count:
+            if args.before_epoch is None:
+                parser.error("--db-field-count requires --before-epoch")
+            if args.observation_history is None:
+                parser.error("--db-field-count requires --observation-history")
+            api_fields = fetch_recent_fields_from_db(
+                args.observation_history,
+                target=args.target,
+                before_epoch=args.before_epoch,
+                count=args.db_field_count,
+            )
+            field_reference_source = "db_cache_public_validator_api"
+            if len(api_fields) < args.minimum_api_fields:
+                raise SystemExit(
+                    f"only {len(api_fields)} complete {args.target} cached "
+                    f"fields were available; require {args.minimum_api_fields}"
+                )
+        elif args.api_field_count:
             if args.before_epoch is None:
                 parser.error("--api-field-count requires --before-epoch")
             api_fields = fetch_leaderboard_fields(
@@ -1010,8 +1112,7 @@ def main() -> None:
         if api_fields:
             fields = [field for _, field in api_fields]
             reference = {
-                "source": "public_leaderboard_api",
-                "api_root": args.leaderboard_api_root.rstrip("/"),
+                "source": field_reference_source,
                 "epochs": [epoch for epoch, _ in api_fields],
                 "field_sizes": [len(field) for _, field in api_fields],
             }

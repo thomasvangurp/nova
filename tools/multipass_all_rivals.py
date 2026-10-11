@@ -288,6 +288,50 @@ def field_fingerprint(archive_path: Path, archive: pd.DataFrame) -> dict:
             "field_rows": int(len(archive)), "field_sha256": digest.hexdigest()}
 
 
+#: How many of the most recently COMPLETED epochs (never the one being
+#: scored) to pool into one real field. User, 2026-10-11: the static
+#: hf_archive_full field (60k+ rows spanning the project's whole history)
+#: correlates with the real validator's us-vs-rival outcome at only
+#: rho=0.29/63% concordance (both us and the rival clear nearly all of a
+#: field dominated by years of now-irrelevant early-generation sequences, so
+#: real quality differences get diluted by density that neither of us is
+#: actually competing against). A field pooled from the real last 10 epochs'
+#: actual submissions (every coldkey, same raw metrics) measured rho=0.975 /
+#: 89% concordance on 81 epochs of real leaderboard history -- field choice,
+#: not local-scorer noise, explained nearly all of the gap.
+RECENT_FIELD_EPOCHS = 10
+
+
+def _recent_validator_field(epoch: int) -> tuple[pd.DataFrame, list[int]]:
+    """Real field pooled from the last RECENT_FIELD_EPOCHS completed epochs.
+
+    Reads nanobody_opt.mutation_network's already-synced cache
+    (observations.source='public_validator_api', written continuously by
+    seed_mutation_database.py from the same public leaderboard API this
+    script already calls elsewhere) -- never a live HTTP call in this
+    script's own hot path. NOVA_LOCAL_SQLITE unset here (this runs on the
+    dashboard box, not master) routes to the central MySQL replica
+    automatically; the path argument is only used when that env var is set.
+    """
+    from nanobody_opt.rank_exact import fetch_recent_fields_from_db
+
+    fields = fetch_recent_fields_from_db(
+        Path("/root/artifacts/nanobody_mutations.sqlite"),
+        target=TARGET, before_epoch=epoch, count=RECENT_FIELD_EPOCHS,
+    )
+    if not fields:
+        return pd.DataFrame(columns=METRICS_NEEDED), []
+    epochs = [e for e, _ in fields]
+    pooled = pd.concat([df for _, df in fields], ignore_index=True)
+    return pooled, epochs
+
+
+def recent_field_fingerprint(recent_field: pd.DataFrame, epochs: list[int]) -> dict:
+    """What a stored rank-sum was ranked against, so it can be re-derived."""
+    return {"field": "recent_validator_epochs", "field_epochs": epochs,
+            "field_rows": int(len(recent_field))}
+
+
 def pass_observations(*, epoch: int, run: int, passes: int,
                       ranks: dict[str, float], raw: dict[str, dict[str, float]],
                       structs: dict[str, dict], cohort_of: dict[str, str],
@@ -323,7 +367,7 @@ def pass_observations(*, epoch: int, run: int, passes: int,
     return rows
 
 
-def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
+def score_pass(sequences: list[str], run: int, *, recent_field: pd.DataFrame,
                config: Path, scorer: Path, out_root: Path
                ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
     """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref},
@@ -347,12 +391,13 @@ def score_pass(sequences: list[str], run: int, *, archive: pd.DataFrame,
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     payload = json.loads((out_dir / "exact_all.json").read_text())
-    return rank_pass_payload(payload, archive)
+    return rank_pass_payload(payload, recent_field)
 
 
-def rank_pass_payload(payload: dict, archive: pd.DataFrame
+def rank_pass_payload(payload: dict, recent_field: pd.DataFrame
                       ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
-    """Rank one pass's ``exact_all.json`` against ``archive`` (sum-of-10)."""
+    """Rank one pass's ``exact_all.json`` against the pooled recent-epoch
+    field (sum-of-10). See RECENT_FIELD_EPOCHS / _recent_validator_field."""
     wave = payload["per_nanobody_components"]["0"]
     rows = {}
     for seq, comp in wave.items():
@@ -361,11 +406,11 @@ def rank_pass_payload(payload: dict, archive: pd.DataFrame
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
     raw = raw_metrics_from_exact_all(payload)
     rival = pd.DataFrame(rows).T  # index = sequence
-    archive_s = archive.set_index("sequence")[METRICS_NEEDED]
-    field = pd.concat([archive_s, rival])  # index = sequence
-    # A rival sequence that is also in the archive appears twice; algo2_score
-    # then returns a multi-row Series for it and float(scores[seq]) blows up.
-    # Keep the rival's (last) row so the fresh multipass score wins the overlap.
+    # recent_field has no sequence identity (pooled real observations from
+    # past epochs, not indexed by sequence) -- give it a disjoint integer
+    # index so concat can never collide with rival's sequence-string index,
+    # then keep the dedup as a safety net in case rival itself has a repeat.
+    field = pd.concat([recent_field.reset_index(drop=True), rival])
     field = field[~field.index.duplicated(keep="last")]
     scores = pass_formula(field)  # PASS_FORMULA_ID; lower = better
     ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
@@ -396,7 +441,7 @@ OUR_RAW_SOURCES = (
 
 
 def local_passes_for_ours(
-    sequences: list[str], n: int, archive: pd.DataFrame
+    sequences: list[str], n: int, recent_field: pd.DataFrame
 ) -> tuple[list[tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]],
            set[str]]:
     """Build up to ``n`` synthetic scorer passes for OUR OWN sequences from
@@ -452,7 +497,7 @@ def local_passes_for_ours(
             seq: {TARGET: by_seq[seq][run]} for seq in reusable
         }
         payload = {"per_nanobody_components": {"0": wave}, "structures": {}}
-        ranks, structs, raw = rank_pass_payload(payload, archive)
+        ranks, structs, raw = rank_pass_payload(payload, recent_field)
         passes.append((ranks, structs, raw))
     return passes, short_sequences
 
@@ -478,10 +523,9 @@ def _write_ours_only_early(
     sequences = sorted({seq for _, seq in our_pairs})
     if not sequences:
         return
-    archive = pd.read_csv(archive_path).drop_duplicates("sequence", keep="last")
-    archive["sequence"] = archive["sequence"].astype(str).str.upper()
-    field = field_fingerprint(archive_path, archive)
-    local_passes, short_sequences = local_passes_for_ours(sequences, n, archive)
+    recent_field, recent_epochs = _recent_validator_field(epoch)
+    field = recent_field_fingerprint(recent_field, recent_epochs)
+    local_passes, short_sequences = local_passes_for_ours(sequences, n, recent_field)
     reused_sequences = set(sequences) - short_sequences
     if not reused_sequences:
         print(f"  ours-only early write: 0 of {len(sequences)} of our own "
@@ -597,12 +641,17 @@ def main() -> int:
         return 1
 
     sequences = sorted({seq for _, seq in pairs})
+    # Still loaded for hf_topup's unrelated use below (identifying HF-archive
+    # parent candidates) -- the RANKING field is now the recent-epochs pool,
+    # not this static archive. See _recent_validator_field.
     archive = pd.read_csv(archive_path).drop_duplicates("sequence", keep="last")
     archive["sequence"] = archive["sequence"].astype(str).str.upper()
+    recent_field, recent_epochs = _recent_validator_field(epoch)
     print(f"epoch={epoch} coldkeys={len(by_coldkey)} seqs={len(sequences)} "
-          f"passes={n}", flush=True)
+          f"passes={n} recent_field_epochs={recent_epochs} "
+          f"recent_field_rows={len(recent_field)}", flush=True)
 
-    field = field_fingerprint(archive_path, archive)
+    field = recent_field_fingerprint(recent_field, recent_epochs)
     cohort_of = {seq: ("ours" if coldkey == OUR_COLDKEY else "rival")
                  for coldkey, seq in pairs}
 
@@ -622,7 +671,7 @@ def main() -> int:
     # it is never degraded, just not optimized.
     our_sequences = sorted(seq for seq, c in cohort_of.items() if c == "ours")
     local_passes, short_sequences = (
-        local_passes_for_ours(our_sequences, n, archive) if our_sequences else ([], set())
+        local_passes_for_ours(our_sequences, n, recent_field) if our_sequences else ([], set())
     )
     reused_sequences = set(our_sequences) - short_sequences
     if reused_sequences:
@@ -651,7 +700,7 @@ def main() -> int:
     for run in range(1, rounds + 1):
         extra = topup_batches[run - 1] if run <= len(topup_batches) else []
         batch = (gpu_sequences if run <= n else []) + extra
-        ranks, structs, raw = score_pass(batch, run, archive=archive, config=config,
+        ranks, structs, raw = score_pass(batch, run, recent_field=recent_field, config=config,
                                          scorer=scorer, out_root=out_root)
         if run <= n and local_passes:
             local_ranks, local_structs, local_raw = local_passes[run - 1]
