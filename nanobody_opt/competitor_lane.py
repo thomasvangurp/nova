@@ -106,42 +106,74 @@ MULTIPASS_SCORE_KIND = "multipass_sum10_pass"
 
 def multipass_scores(
     sequences: list[str], db_path: Path, *, min_passes: int = 10,
+    epoch: int | None = None,
 ) -> dict[str, float]:
     """Mean 10-pass replay rank-sum per sequence, for whichever of
-    ``sequences`` have at least ``min_passes`` stored passes.
+    ``sequences`` have at least ``min_passes`` stored passes -- recomputed
+    on read against the CURRENT real last-10-epochs field, never a stored
+    ``score`` frozen at whatever field was live when that pass was written.
 
     User directive, 2026-10-10: competitor_lane's parent pool must be ranked
     by robust multi-pass scoring only, "it doesn't matter where it comes
     from" -- the validator's single-observation final_score (fetch_rival_
     sequences) and the archive's single-snapshot Algorithm-2 proxy
     (_load_pool) are both the kind of noisy single-observation signal
-    already ruled out for candidate ranking (see rank_exact.py's
-    --full-archive-field); the same principle applies one step upstream, at
-    parent selection. multipass_all_rivals.py already writes this score for
-    BOTH cohorts (ours and rivals) under one writer/score_kind/formula, so no
-    new measurement is needed -- only a stricter read of what's already
-    stored. A sequence with fewer than ``min_passes`` stored passes is
-    simply absent from the returned mapping; the caller drops it rather than
-    falling back to a noisier score for it.
-    """
-    from nanobody_opt import db
+    already ruled out for candidate ranking; the same principle applies one
+    step upstream, at parent selection.
 
-    if not sequences:
+    User, 2026-10-11: the background a stored multi-pass score was ranked
+    against keeps moving (same reason the live producer now rebuilds its own
+    field every ranking pass, see rank_exact.py's --db-field-count), so a
+    cached ``score`` column goes stale the same way a cached field would.
+    multipass_all_rivals.py already stores the raw ``metrics_json`` per pass
+    specifically so this never needs fresh GPU work: reread it and rank
+    against today's field via the one shared formula
+    (rank_exact.rank_metrics_against_field) multipass_all_rivals.py itself
+    uses, so a dashboard number and a parent-selection number are never two
+    different computations.
+    """
+    import json as _json
+
+    from nanobody_opt import db
+    from nanobody_opt.rank_exact import (
+        fetch_recent_fields_from_db, pool_recent_fields, rank_metrics_against_field,
+    )
+
+    if not sequences or epoch is None:
+        return {}
+    pooled_field = pool_recent_fields(
+        fetch_recent_fields_from_db(db_path, target=TARGET, before_epoch=epoch, count=10)
+    )
+    if pooled_field.empty:
         return {}
     conn = db.connect()
     placeholders = ",".join(["%s"] * len(sequences))
     rows = conn.execute(
         f"""
-        SELECT n.sequence, o.score
+        SELECT n.sequence, o.observation_id, o.metrics_json
         FROM observations o JOIN nodes n ON n.id = o.node_id
         WHERE n.target = %s AND n.sequence IN ({placeholders})
           AND o.source = %s AND o.score_kind = %s
+          AND o.metrics_json IS NOT NULL AND o.metrics_json != ''
         """,
         (TARGET, *sequences, "public_multipass_rivals", MULTIPASS_SCORE_KIND),
     ).fetchall()
+    metrics_by_pass: dict[str, dict[str, float]] = {}
+    seq_of_pass: dict[str, str] = {}
+    for seq, observation_id, blob in rows:
+        try:
+            metrics = _json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metrics, dict):
+            continue
+        key = f"{seq}::{observation_id}"
+        metrics_by_pass[key] = metrics
+        seq_of_pass[key] = seq
+    pass_ranks = rank_metrics_against_field(metrics_by_pass, pooled_field)
     by_seq: dict[str, list[float]] = {}
-    for seq, score in rows:
-        by_seq.setdefault(seq, []).append(float(score))
+    for key, rank_sum in pass_ranks.items():
+        by_seq.setdefault(seq_of_pass[key], []).append(rank_sum)
     return {
         seq: sum(scores) / len(scores)
         for seq, scores in by_seq.items() if len(scores) >= min_passes
@@ -215,7 +247,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
              ranker_model: Any | None = None,
              rival_sequences: list[str] | None = None,
              mutation_database: Path | None = None,
-             min_passes: int = 10) -> dict[str, Any]:
+             min_passes: int = 10,
+             epoch: int | None = None) -> dict[str, Any]:
     # Parent source: the rival's proven-good sequences when supplied, else the
     # global archive ranked by the validator's Algorithm-2 proxy.
     if rival_sequences:
@@ -252,7 +285,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         # one step upstream.
         scores = multipass_scores(
             sorted(set(priority_pool) | set(pool)), mutation_database,
-            min_passes=min_passes)
+            min_passes=min_passes, epoch=epoch)
         multipass_ranked = len(scores)
         priority_pool = sorted(
             (s for s in priority_pool if s in scores), key=lambda s: scores[s])
@@ -383,25 +416,33 @@ def main() -> None:
         from nanobody_opt.parent_relative_ranker_inference import load_model
 
         ranker_model = load_model(args.ranker_model)
+    import re
+
+    archive_epoch_match = re.search(r"epoch(\d+)", str(args.archive))
     rival_sequences = None
     if args.rival_coldkey:
-        import re
-
-        m = re.search(r"epoch(\d+)", str(args.archive))
-        if not m:
+        if not archive_epoch_match:
             raise SystemExit(f"cannot derive epoch from archive path {args.archive}")
-        rival_sequences = fetch_rival_sequences(int(m.group(1)), args.rival_coldkey)
+        rival_sequences = fetch_rival_sequences(
+            int(archive_epoch_match.group(1)), args.rival_coldkey)
         if not rival_sequences:
             raise SystemExit(
                 f"no sequences found for rival coldkey {args.rival_coldkey!r}"
             )
+    epoch = int(archive_epoch_match.group(1)) if archive_epoch_match else None
+    if args.mutation_database is not None and epoch is None:
+        raise SystemExit(
+            f"--mutation-database requires an epoch, and none could be "
+            f"derived from archive path {args.archive}"
+        )
     payload = generate(args.archive, positions, args.limit, pool_limit=args.pool_limit,
                        top50=top50, min_parent_distance=args.min_parent_distance,
                        priority=priority, double_edit_pairs=args.double_edit_pairs,
                        ranker_model=ranker_model,
                        rival_sequences=rival_sequences,
                        mutation_database=args.mutation_database,
-                       min_passes=args.min_passes)
+                       min_passes=args.min_passes,
+                       epoch=epoch)
     if args.mutation_database is not None and payload["pool_size"] == 0:
         raise SystemExit(
             f"--mutation-database given but zero parents have >= "

@@ -649,6 +649,48 @@ def fetch_recent_fields_from_db(
     ]
 
 
+def pool_recent_fields(fields: list[tuple[int, pd.DataFrame]]) -> pd.DataFrame:
+    """One field from fetch_recent_fields_from_db's per-epoch list, for
+    callers that rank many candidates against the same pooled background in
+    one go (fetch once, reuse for every candidate -- see
+    rank_metrics_against_field)."""
+    if not fields:
+        return pd.DataFrame(columns=list(METRICS))
+    return pd.concat([df for _, df in fields], ignore_index=True)
+
+
+def rank_metrics_against_field(
+    metrics_by_key: Mapping[str, Mapping[str, float]], pooled_field: pd.DataFrame,
+) -> dict[str, float]:
+    """Dense sum-of-10 rank-sum for each key's raw metrics against
+    ``pooled_field`` (typically pool_recent_fields' output).
+
+    The one ranking formula multipass_all_rivals.py (dashboard + parent-pool
+    writer) and competitor_lane.py (parent-pool reader, on-demand recompute
+    from stored metrics_json) both call, so a dashboard number and a
+    parent-selection number are never two different computations of "rank
+    against the recent field" -- user, 2026-10-11: "ensure dashboard uses
+    this logic."
+    """
+    if not metrics_by_key:
+        return {}
+    candidates = pd.DataFrame(
+        {key: {metric: float(values[metric]) for metric in METRICS}
+         for key, values in metrics_by_key.items() if set(METRICS).issubset(values)}
+    ).T
+    if candidates.empty:
+        return {}
+    combined = pd.concat([pooled_field.reset_index(drop=True), candidates])
+    # A candidate key colliding with the field's own (discarded) integer
+    # index never happens in practice (string keys vs a RangeIndex), but
+    # dedup stays as a safety net exactly like multipass_all_rivals.py's.
+    combined = combined[~combined.index.duplicated(keep="last")]
+    total = pd.Series(0.0, index=combined.index)
+    for metric, direction in METRICS.items():
+        total += combined[metric].rank(method="dense", ascending=(direction == "min"))
+    return {key: float(total[key]) for key in candidates.index if key in total.index}
+
+
 #: Read-only context for _rank_candidate, set once per process: directly
 #: in the main process for a serial run, or via _init_rank_worker in each
 #: pool worker (a separate process, so it cannot see main()'s closure).

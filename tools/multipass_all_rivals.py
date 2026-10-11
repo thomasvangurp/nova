@@ -313,7 +313,7 @@ def _recent_validator_field(epoch: int) -> tuple[pd.DataFrame, list[int]]:
     dashboard box, not master) routes to the central MySQL replica
     automatically; the path argument is only used when that env var is set.
     """
-    from nanobody_opt.rank_exact import fetch_recent_fields_from_db
+    from nanobody_opt.rank_exact import fetch_recent_fields_from_db, pool_recent_fields
 
     fields = fetch_recent_fields_from_db(
         Path("/root/artifacts/nanobody_mutations.sqlite"),
@@ -322,7 +322,7 @@ def _recent_validator_field(epoch: int) -> tuple[pd.DataFrame, list[int]]:
     if not fields:
         return pd.DataFrame(columns=METRICS_NEEDED), []
     epochs = [e for e, _ in fields]
-    pooled = pd.concat([df for _, df in fields], ignore_index=True)
+    pooled = pool_recent_fields(fields)
     return pooled, epochs
 
 
@@ -405,15 +405,8 @@ def rank_pass_payload(payload: dict, recent_field: pd.DataFrame
         rows[seq] = {k: float(v) for k, v in m.items()
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
     raw = raw_metrics_from_exact_all(payload)
-    rival = pd.DataFrame(rows).T  # index = sequence
-    # recent_field has no sequence identity (pooled real observations from
-    # past epochs, not indexed by sequence) -- give it a disjoint integer
-    # index so concat can never collide with rival's sequence-string index,
-    # then keep the dedup as a safety net in case rival itself has a repeat.
-    field = pd.concat([recent_field.reset_index(drop=True), rival])
-    field = field[~field.index.duplicated(keep="last")]
-    scores = pass_formula(field)  # PASS_FORMULA_ID; lower = better
-    ranks = {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
+    from nanobody_opt.rank_exact import rank_metrics_against_field
+    ranks = rank_metrics_against_field(rows, recent_field)
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.
     structures: dict[str, dict] = {}
