@@ -18,6 +18,7 @@ family, which provides a bounded fallback after the other anchors agree:
 """
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass
@@ -36,8 +37,19 @@ class Regions:
 _FR4_ANCHOR = re.compile(r"[WF]G.G")
 
 
+@lru_cache(maxsize=None)
 def find_regions(seq: str) -> Regions:
-    """Anchor-based VHH parse. Raises if the sequence is not VHH-shaped."""
+    """Anchor-based VHH parse. Raises if the sequence is not VHH-shaped.
+
+    Pure function of `seq` alone (regex/str.find anchor parsing, no state),
+    and the returned Regions is never mutated anywhere in the codebase
+    (checked), so caching is safe. Measured live: called 4.49M times inside
+    a per-donor loop (local_neighborhood.py's stochastic whole_cdr_motif
+    lane) that re-parses the SAME fixed donor_sequences list on every one
+    of up to per_seed*500 attempts per seed -- 22.1s of self time on one
+    basin, matching the two sort-key fixes combined. lru_cache turns that
+    into a one-time cost per distinct sequence.
+    """
     # FR1 ends at the conserved cysteine (C) around position 22
     c1 = seq.find("C", 18, 28)
     if c1 < 0:
