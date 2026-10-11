@@ -830,8 +830,63 @@ def bounded_basin_terminal_routes(
     return selected
 
 
-#: Set once per worker by _init_basin_worker -- identical for every parent,
+#: Set once per worker by _init_seed_worker -- identical for every parent,
 #: so each worker receives it once, not once per parent.
+_SEED_FRAMEWORK_ALLOWED: list[list[str]] = []
+_SEED_BACKGROUND_SEQUENCES: list[str] = []
+_SEED_TERMINAL_WIDTH: int = 0
+_SEED_MAX_HAPLOTYPE_MUTATIONS: int = 0
+_SEED_PRIORS: list[dict[str, float]] | None = None
+
+
+def _init_seed_worker(framework_allowed, background_sequences, terminal_width,
+                      maximum_haplotype_mutations, priors) -> None:
+    global _SEED_FRAMEWORK_ALLOWED, _SEED_BACKGROUND_SEQUENCES, \
+        _SEED_TERMINAL_WIDTH, _SEED_MAX_HAPLOTYPE_MUTATIONS, _SEED_PRIORS
+    _SEED_FRAMEWORK_ALLOWED = framework_allowed
+    _SEED_BACKGROUND_SEQUENCES = background_sequences
+    _SEED_TERMINAL_WIDTH = terminal_width
+    _SEED_MAX_HAPLOTYPE_MUTATIONS = maximum_haplotype_mutations
+    _SEED_PRIORS = priors
+
+
+def _seed_candidates_for_parent(
+    parent_record: tuple,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """The expensive, side-effect-free half of main()'s two per-seed loops:
+    supported_framework_candidates and supported_lineage_candidates are both
+    pure functions (no closures, no shared state) independent per parent --
+    only the subsequent add_candidate calls touch shared dedup state, and
+    those stay sequential in main(), fed by this function's output. Computed
+    together since both need the same find_regions(parent) call and the same
+    background_sequences/framework_allowed inputs."""
+    parent = parent_record[1]
+    protected = parent_record[4]
+    regions = find_regions(parent)
+    cdr_positions = set(regions.cdr_positions())
+    framework_candidates = supported_framework_candidates(
+        parent,
+        allowed=_SEED_FRAMEWORK_ALLOWED,
+        background_sequences=_SEED_BACKGROUND_SEQUENCES,
+        cdr_positions=cdr_positions,
+        protected=protected,
+        terminal_width=_SEED_TERMINAL_WIDTH,
+        maximum_haplotype_mutations=_SEED_MAX_HAPLOTYPE_MUTATIONS,
+    )
+    lineage_candidates = supported_lineage_candidates(
+        parent,
+        allowed=_SEED_FRAMEWORK_ALLOWED,
+        background_sequences=_SEED_BACKGROUND_SEQUENCES,
+        cdr_positions=cdr_positions,
+        protected=protected,
+        terminal_width=_SEED_TERMINAL_WIDTH,
+        maximum_haplotype_mutations=_SEED_MAX_HAPLOTYPE_MUTATIONS,
+        priors=_SEED_PRIORS,
+    )
+    return framework_candidates, lineage_candidates
+
+
+
 _BASIN_TERMINAL_PRIORS: Any = None
 _BASIN_BASE_SCORES: dict[str, float] = {}
 _BASIN_TERMINAL_WIDTH: int = 0
@@ -2177,21 +2232,29 @@ def main() -> None:
         )
         basin_proposals.extend(parent_proposals)
 
-    for parent_record in seeds:
-        parent = parent_record[1]
-        protected = parent_record[4]
-        regions = find_regions(parent)
-        candidates = supported_framework_candidates(
-            parent,
-            allowed=framework_allowed,
-            background_sequences=background_sequences,
-            cdr_positions=set(regions.cdr_positions()),
-            protected=protected,
-            terminal_width=args.terminal_width,
-            maximum_haplotype_mutations=(
-                args.maximum_terminal_haplotype_mutations
-            ),
-        )
+    # supported_framework_candidates and supported_lineage_candidates are
+    # both pure functions independent per parent (same reasoning as the
+    # basin-terminal routes above); computed together here since both loops
+    # below iterate the same `seeds` and need the same inputs. Only the
+    # subsequent add_candidate calls in each loop touch shared dedup state,
+    # so those stay sequential, fed by this pool's precomputed output.
+    if args.generation_workers > 1 and len(seeds) > 1:
+        with ProcessPoolExecutor(
+            max_workers=min(args.generation_workers, len(seeds)),
+            mp_context=multiprocessing.get_context("fork"),
+            initializer=_init_seed_worker,
+            initargs=(framework_allowed, background_sequences,
+                      args.terminal_width, args.maximum_terminal_haplotype_mutations,
+                      priors),
+        ) as pool:
+            seed_results = list(pool.map(_seed_candidates_for_parent, seeds))
+    else:
+        _init_seed_worker(framework_allowed, background_sequences,
+                          args.terminal_width, args.maximum_terminal_haplotype_mutations,
+                          priors)
+        seed_results = [_seed_candidates_for_parent(item) for item in seeds]
+
+    for parent_record, (candidates, _lineage_candidates) in zip(seeds, seed_results):
         singles = [item for item in candidates if "haplotype" not in item[1]]
         haplotypes = [item for item in candidates if "haplotype" in item[1]]
         lane_limits = _lane_limits(args.framework_per_seed, args.haplotype_lane_fraction)
@@ -2223,24 +2286,7 @@ def main() -> None:
             ):
                 accepted += 1
 
-    for parent_record in seeds:
-        parent = parent_record[1]
-        protected = parent_record[4]
-        regions = find_regions(parent)
-        candidates = supported_lineage_candidates(
-            parent,
-            allowed=framework_allowed,
-            background_sequences=background_sequences,
-            cdr_positions=set(regions.cdr_positions()),
-            protected=protected,
-            terminal_width=args.terminal_width,
-            maximum_haplotype_mutations=(
-                args.maximum_terminal_haplotype_mutations
-            ),
-            # This lane is the only producer for CDR positions, so without the
-            # prior a saturated weight there never reaches a proposal.
-            priors=priors,
-        )
+    for parent_record, (_framework_candidates, candidates) in zip(seeds, seed_results):
         parent_proposals: list[dict[str, object]] = []
         for candidate, source in candidates:
             add_candidate(
