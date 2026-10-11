@@ -559,19 +559,24 @@ class MutationNetwork:
 def _connect(path: Path | None = None) -> "db.Connection | db.LocalConnection":
     """Open master's write connection: local SQLite primary, or central MySQL.
 
-    NOVA_LOCAL_SQLITE=1 switches every caller of this function to the local
-    SQLite primary at ``path`` (ARCHITECTURE_REDESIGN new finding 8) -- the
-    same path every caller already passes for historical sqlite3 call-site
-    compatibility, now actually used. Replication to Hetzner MySQL (for
-    cross-box visibility and durability) is a separate, downstream process
-    (nanobody_opt/replicate_local.py), not synchronous with this write.
+    Local sqlite is used whenever ``path`` names a file that already exists
+    (ARCHITECTURE_REDESIGN new finding 8) -- the same path every caller
+    already passes for historical sqlite3 call-site compatibility. A box
+    without that file (the dashboard box, any box that is not master) falls
+    through to central MySQL automatically, with no configuration needed.
 
-    Without the env var, behaviour is unchanged: the central MySQL
-    connection, ``path`` ignored.
+    User, 2026-10-11: this used to be gated on NOVA_LOCAL_SQLITE=1, an opt-in
+    environment variable every process had to remember to export. The scorer
+    daemon's own supervisor script never did -- every observation it wrote
+    went straight to MySQL, silently orphaned from master's actual primary,
+    for the ~20 epochs between the 2026-10-10 cutover and this fix (recovered
+    via tools/sync_missing_from_mysql.py). Checking the file itself removes
+    that whole failure mode: there is no flag left to forget. Replication to
+    Hetzner MySQL (for cross-box visibility and durability) remains a
+    separate, downstream process (nanobody_opt/replicate_local.py), not
+    synchronous with this write.
     """
-    if os.environ.get("NOVA_LOCAL_SQLITE") == "1":
-        if path is None:
-            raise ValueError("NOVA_LOCAL_SQLITE=1 requires a local db path")
+    if path is not None and path.exists():
         return db.connect_local(path)
     return db.connect()
 
@@ -988,51 +993,77 @@ def record_exact_run(
     """
     expected = list(dict.fromkeys(str(item) for item in observation_ids))
     with _connect(path) as connection:
+        local = _is_local(connection)
+        p = "?" if local else "%s"
         present_ids = {
             str(row[0])
             for observation_id in expected
             for row in connection.execute(
-                """
+                f"""
                 SELECT o.observation_id
                 FROM observations o
                 JOIN nodes n ON n.id=o.node_id
-                WHERE o.observation_id=%s AND n.target=%s
+                WHERE o.observation_id={p} AND n.target={p}
                 """,
                 (observation_id, target),
-            )
+            ).fetchall()
         }
         present = len(present_ids)
         complete = int(present == len(expected) and bool(expected))
+        if local:
+            connection.execute(
+                """
+                INSERT INTO exact_runs(
+                    target, run_id, epoch, source_path, file_sha256,
+                    scorer_protocol, expected_rows, ingested_rows, complete,
+                    ingested_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(target, run_id) DO UPDATE SET
+                    epoch=excluded.epoch,
+                    source_path=excluded.source_path,
+                    file_sha256=excluded.file_sha256,
+                    scorer_protocol=excluded.scorer_protocol,
+                    expected_rows=excluded.expected_rows,
+                    ingested_rows=excluded.ingested_rows,
+                    complete=excluded.complete,
+                    ingested_at=excluded.ingested_at
+                """,
+                (
+                    target, run_id, epoch, str(source_path), file_sha256,
+                    scorer_protocol, len(expected), present, complete, time.time(),
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO exact_runs(
+                    target, run_id, epoch, source_path, file_sha256,
+                    scorer_protocol, expected_rows, ingested_rows, complete,
+                    ingested_at
+                ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    epoch=VALUES(epoch),
+                    source_path=VALUES(source_path),
+                    file_sha256=VALUES(file_sha256),
+                    scorer_protocol=VALUES(scorer_protocol),
+                    expected_rows=VALUES(expected_rows),
+                    ingested_rows=VALUES(ingested_rows),
+                    complete=VALUES(complete),
+                    ingested_at=VALUES(ingested_at)
+                """,
+                (
+                    target, run_id, epoch, str(source_path), file_sha256,
+                    scorer_protocol, len(expected), present, complete, time.time(),
+                ),
+            )
         connection.execute(
-            """
-            INSERT INTO exact_runs(
-                target, run_id, epoch, source_path, file_sha256,
-                scorer_protocol, expected_rows, ingested_rows, complete,
-                ingested_at
-            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                epoch=VALUES(epoch),
-                source_path=VALUES(source_path),
-                file_sha256=VALUES(file_sha256),
-                scorer_protocol=VALUES(scorer_protocol),
-                expected_rows=VALUES(expected_rows),
-                ingested_rows=VALUES(ingested_rows),
-                complete=VALUES(complete),
-                ingested_at=VALUES(ingested_at)
-            """,
-            (
-                target, run_id, epoch, str(source_path), file_sha256,
-                scorer_protocol, len(expected), present, complete, time.time(),
-            ),
-        )
-        connection.execute(
-            "DELETE FROM exact_run_observations WHERE target=%s AND run_id=%s",
+            f"DELETE FROM exact_run_observations WHERE target={p} AND run_id={p}",
             (target, run_id),
         )
         connection.executemany(
-            """
+            f"""
             INSERT INTO exact_run_observations(target, run_id, observation_id)
-            VALUES(%s, %s, %s)
+            VALUES({p}, {p}, {p})
             """,
             ((target, run_id, observation_id) for observation_id in present_ids),
         )
@@ -1053,17 +1084,24 @@ def exact_run_is_complete(
     file_sha256: str,
     expected_rows: int,
 ) -> bool:
-    """Whether the database holds a sealed, byte-matched raw exact run."""
+    """Whether the database holds a sealed, byte-matched raw exact run.
+
+    Reads through _connect(path), same as the writer (record_exact_run), so
+    under NOVA_LOCAL_SQLITE=1 this checks the barrier the producer's own
+    write just sealed -- not a MySQL replica that may still be a few seconds
+    behind it.
+    """
     try:
-        with db.connect() as connection:
+        with _connect(path) as connection:
+            p = "?" if _is_local(connection) else "%s"
             row = connection.execute(
-                """
+                f"""
                 SELECT r.file_sha256, r.expected_rows, r.ingested_rows, r.complete,
                        COUNT(x.observation_id)
                 FROM exact_runs r
                 LEFT JOIN exact_run_observations x
                   ON x.target=r.target AND x.run_id=r.run_id
-                WHERE r.target=%s AND r.run_id=%s
+                WHERE r.target={p} AND r.run_id={p}
                 GROUP BY r.target, r.run_id
                 """,
                 (target, run_id),
@@ -1085,9 +1123,10 @@ def load_exact_artifacts(
 ) -> dict[str, list[dict[str, Any]]]:
     """Load retained structure/sample metadata for authoritative raw folds."""
     try:
-        with db.connect() as connection:
+        with _connect(path) as connection:
+            p = "?" if _is_local(connection) else "%s"
             rows = connection.execute(
-                """
+                f"""
                 SELECT n.sequence, o.observation_id, x.run_id, a.confidence_path,
                        a.writer_path, a.structure_json, a.sample_selection_json
                 FROM observations o
@@ -1097,7 +1136,7 @@ def load_exact_artifacts(
                 JOIN exact_runs r
                   ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
                 JOIN observation_artifacts a ON a.observation_id=o.observation_id
-                WHERE n.target=%s AND o.source='local_exact_raw'
+                WHERE n.target={p} AND o.source='local_exact_raw'
                 ORDER BY o.observation_id
                 """,
                 (target,),
@@ -1141,23 +1180,47 @@ def load_observations(path: Path, *, target: str) -> list[dict[str, Any]]:
         path.with_name(f"{path.name}.obs_cache.{target}.pkl"),
         target=target,
         load=lambda: _load_observations_uncached(path, target=target),
+        source_path=path,
     )
 
 
 def _cached_observations(
-    cache_path: Path, *, target: str, load: Any
+    cache_path: Path, *, target: str, load: Any, source_path: Path | None = None
 ) -> list[dict[str, Any]]:
     """Serve ``load()`` from a pickle keyed on the target's (row count, max
-    observation id); any write to the target's observations is a miss."""
-    with db.connect() as probe:
-        cache_key = probe.execute(
-            """
-            SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
-            FROM observations o JOIN nodes n ON n.id=o.node_id
-            WHERE n.target=%s
-            """,
-            (target,),
-        ).fetchone()
+    observation id); any write to the target's observations is a miss.
+
+    ``source_path``, when given, makes the cache-key probe read through the
+    SAME connection ``load()`` actually reads from (_connect(source_path):
+    local SQLite under NOVA_LOCAL_SQLITE=1, MySQL otherwise). Without it the
+    probe always hit MySQL -- correct for load_network_observations, whose
+    _load_network_observations_uncached also always reads MySQL by design
+    (see its docstring), but WRONG for load_observations once its own read
+    moved to local SQLite: a fresh local write not yet replicated wouldn't
+    change what MySQL reports, so the cache key wouldn't change either, and
+    a stale pickle would be served past the write that should have missed it.
+    """
+    if source_path is not None:
+        with _connect(source_path) as probe:
+            p = "?" if _is_local(probe) else "%s"
+            cache_key = probe.execute(
+                f"""
+                SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
+                FROM observations o JOIN nodes n ON n.id=o.node_id
+                WHERE n.target={p}
+                """,
+                (target,),
+            ).fetchone()
+    else:
+        with db.connect() as probe:
+            cache_key = probe.execute(
+                """
+                SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
+                FROM observations o JOIN nodes n ON n.id=o.node_id
+                WHERE n.target=%s
+                """,
+                (target,),
+            ).fetchone()
     try:
         with cache_path.open("rb") as handle:
             cached_key, cached_records = pickle.load(handle)
@@ -1181,14 +1244,15 @@ def _cached_observations(
 
 def _load_observations_uncached(path: Path, *, target: str) -> list[dict[str, Any]]:
     with _connect(path) as connection:
+        p = "?" if _is_local(connection) else "%s"
         rows = connection.execute(
-            """
+            f"""
             SELECT n.sequence, o.score, o.epoch, o.source, o.score_kind,
                    o.observation_count, o.metrics_json, o.pose_json,
                    o.provenance_json
             FROM observations o
             JOIN nodes n ON n.id=o.node_id
-            WHERE n.target=%s
+            WHERE n.target={p}
             ORDER BY o.epoch, o.observation_id
             """,
             (target,),
@@ -1298,14 +1362,15 @@ def _load_network_observations_uncached(
 def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
     """Load observed proposal parent-child relationships without inference."""
     with _connect(path) as connection:
+        p = "?" if _is_local(connection) else "%s"
         rows = connection.execute(
-            """
+            f"""
             SELECT parent.sequence, child.sequence, edge.epoch, edge.source,
                    edge.proposal_type, edge.mutations_json, edge.metadata_json
             FROM lineage_edges edge
             JOIN nodes parent ON parent.id=edge.parent_node_id
             JOIN nodes child ON child.id=edge.child_node_id
-            WHERE child.target=%s
+            WHERE child.target={p}
             ORDER BY edge.epoch, parent.sequence, child.sequence
             """,
             (target,),
@@ -1325,21 +1390,30 @@ def load_lineage_edges(path: Path, *, target: str) -> list[dict[str, Any]]:
 
 
 def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
-    """Load the latest complete directional-effect snapshot for a target."""
+    """Load the latest complete directional-effect snapshot for a target.
+
+    mutation_effects/metadata are NOT replicated to Hetzner (a derived
+    snapshot rebuild_nearest_edges recomputes locally from nodes +
+    observations; pushing it would overwrite the graph_version pointer other
+    boxes read -- see replicate_local.py). Under NOVA_LOCAL_SQLITE=1 this is
+    local-only data, so a fresh box or one whose rebuild hasn't run yet
+    legitimately has none: the empty-row path below is not an error.
+    """
     with _connect(path) as connection:
+        p = "?" if _is_local(connection) else "%s"
         row = connection.execute(
-            "SELECT value FROM metadata WHERE `key`=%s",
+            f"SELECT value FROM metadata WHERE `key`={p}",
             (f"graph_version:{target}",),
         ).fetchone()
         if row is None:
             return []
         graph_version = str(row[0])
         rows = connection.execute(
-            """
+            f"""
             SELECT position, from_residue, to_residue, region, contact_class,
                    support, median_score_delta, uncertainty, graph_version
             FROM mutation_effects
-            WHERE target=%s AND graph_version=%s
+            WHERE target={p} AND graph_version={p}
             """,
             (target, graph_version),
         ).fetchall()
@@ -1360,18 +1434,19 @@ def load_mutation_effects(path: Path, *, target: str) -> list[dict[str, Any]]:
 
 
 def _robust_node_scores(
-    connection: db.Connection,
+    connection: "db.Connection | db.LocalConnection",
     *,
     target: str,
     sequence_length: int,
 ) -> tuple[list[int], list[str], np.ndarray, dict[str, float]]:
+    p = "?" if _is_local(connection) else "%s"
     rows = connection.execute(
-        """
+        f"""
         SELECT n.id, n.sequence, n.residue_vector, o.score, o.score_kind,
                o.epoch, o.source, o.observation_count
         FROM nodes n
         JOIN observations o ON o.node_id=n.id
-        WHERE n.target=%s AND n.length=%s
+        WHERE n.target={p} AND n.length={p}
         ORDER BY n.id, o.observation_id
         """,
         (target, sequence_length),
@@ -1416,13 +1491,14 @@ def rebuild_nearest_edges(
     if edge_limit < 1 or maximum_distance < 1 or workers < 1:
         raise ValueError("invalid nearest-edge rebuild configuration")
     with _connect(path) as connection:
+        p = "?" if _is_local(connection) else "%s"
         edge_rows: dict[tuple[int, int], tuple[int, int, int, str, str]] = {}
         scores: dict[str, float] = {}
         contact_rows = connection.execute(
-            """
+            f"""
             SELECT n.id, o.pose_json FROM nodes n
             JOIN observations o ON o.node_id=n.id
-            WHERE n.target=%s AND o.pose_json IS NOT NULL
+            WHERE n.target={p} AND o.pose_json IS NOT NULL
             """,
             (target,),
         ).fetchall()
@@ -1437,9 +1513,9 @@ def rebuild_nearest_edges(
                 if int(position) >= 1
             )
         lengths = connection.execute(
-            """
+            f"""
             SELECT length, COUNT(*) FROM nodes
-            WHERE target=%s GROUP BY length ORDER BY length
+            WHERE target={p} GROUP BY length ORDER BY length
             """,
             (target,),
         ).fetchall()
@@ -1505,28 +1581,28 @@ def rebuild_nearest_edges(
                         )
 
         connection.execute(
-            """
+            f"""
             DELETE FROM edges
-            WHERE source_node_id IN (SELECT id FROM nodes WHERE target=%s)
+            WHERE source_node_id IN (SELECT id FROM nodes WHERE target={p})
             """,
             (target,),
         )
         connection.executemany(
-            """
+            f"""
             INSERT INTO edges(
                 source_node_id, target_node_id, distance,
                 mutations_json, context_json
-            ) VALUES(%s, %s, %s, %s, %s)
+            ) VALUES({p}, {p}, {p}, {p}, {p})
             """,
             edge_rows.values(),
         )
 
         observation_rows = connection.execute(
-            """
+            f"""
             SELECT n.id, o.epoch, o.score_kind, o.source, o.score
             FROM nodes n
             JOIN observations o ON o.node_id=n.id
-            WHERE n.target=%s AND o.epoch IS NOT NULL
+            WHERE n.target={p} AND o.epoch IS NOT NULL
             """,
             (target,),
         ).fetchall()
@@ -1573,7 +1649,7 @@ def rebuild_nearest_edges(
                 effects[forward].append(delta)
                 effects[reverse].append(-delta)
         connection.execute(
-            "DELETE FROM mutation_effects WHERE target=%s AND graph_version=%s",
+            f"DELETE FROM mutation_effects WHERE target={p} AND graph_version={p}",
             (target, graph_version),
         )
         effect_rows = []
@@ -1584,17 +1660,17 @@ def rebuild_nearest_edges(
                 target, *key, len(deltas), median, uncertainty, graph_version
             ))
         connection.executemany(
-            """
+            f"""
             INSERT INTO mutation_effects(
                 target, position, from_residue, to_residue, region,
                 contact_class, support, median_score_delta, uncertainty,
                 graph_version
-            ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
             effect_rows,
         )
         connection.execute(
-            "REPLACE INTO metadata(`key`, value) VALUES(%s, %s)",
+            f"REPLACE INTO metadata(`key`, value) VALUES({p}, {p})",
             (f"graph_version:{target}", graph_version),
         )
     return {
