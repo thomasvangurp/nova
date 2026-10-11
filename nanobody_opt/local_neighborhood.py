@@ -660,13 +660,21 @@ def supported_basin_terminal_candidates(
     exploration_residues: dict[int, frozenset[str]] | None = None,
     terminal_width: int = 17,
     maximum_haplotype_mutations: int = 6,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str, tuple[int, ...]]]:
     """Enumerate terminal variants observed within one masked binding core.
 
     Single substitutions provide combinatorial coverage of residues already
     seen in the basin.  Short haplotypes preserve co-observed terminal residue
     combinations.  Candidates remain distinct: sharing a core allocates budget
     but does not imply equal validator behavior.
+
+    Each route carries the positions that changed (vs. its stored base) as
+    its 4th element -- known for free at construction (the single
+    substitution's own `position`, or the haplotype loop's own `changes`),
+    so route_key/terminal_route_priority don't have to rediscover it via a
+    full string zip+enumerate per route. Measured live: that rediscovery was
+    43.6s + 22.5s of self time across ~7.4M calls on one basin -- the actual
+    dominant cost once the sort keys' own sha256 hashing was removed.
     """
     length = len(parent)
     if terminal_width < 1 or maximum_haplotype_mutations < 2:
@@ -682,7 +690,7 @@ def supported_basin_terminal_candidates(
         set(range(min(10, length)))
         | set(range(max(0, length - terminal_width), length))
     ) - protected
-    candidates: dict[str, tuple[str, str]] = {}
+    candidates: dict[str, tuple[str, str, tuple[int, ...]]] = {}
     # Every historical terminal haplotype is a legitimate parent inside an
     # already qualified basin.  Mutating only the selected representative
     # would still miss winners that are one step from a lower-ranked sibling.
@@ -702,7 +710,7 @@ def supported_basin_terminal_candidates(
                 candidate = base[:position] + residue + base[position + 1 :]
                 candidates.setdefault(
                     candidate,
-                    ("basin_terminal_single_substitution", base),
+                    ("basin_terminal_single_substitution", base, (position,)),
                 )
     for donor in compatible:
         changes = [
@@ -715,11 +723,12 @@ def supported_basin_terminal_candidates(
         for position in changes:
             candidate[position] = donor[position]
         candidates.setdefault(
-            "".join(candidate), ("basin_terminal_haplotype", parent)
+            "".join(candidate),
+            ("basin_terminal_haplotype", parent, tuple(changes)),
         )
     return [
-        (candidate, source, base)
-        for candidate, (source, base) in candidates.items()
+        (candidate, source, base, changed)
+        for candidate, (source, base, changed) in candidates.items()
     ]
 
 
@@ -743,12 +752,8 @@ def bounded_basin_terminal_routes(
     for route in routes:
         grouped[route[2]].append(route)
 
-    def route_key(route: tuple[str, str, str]) -> tuple[object, ...]:
-        candidate, source, base = route
-        changed = [
-            index for index, (left, right) in enumerate(zip(base, candidate, strict=True))
-            if left != right
-        ]
+    def route_key(route: tuple[str, str, str, tuple[int, ...]]) -> tuple[object, ...]:
+        candidate, source, base, changed = route
         terminal_depth = min(
             (min(position + 1, len(candidate) - position) for position in changed),
             default=len(candidate),
@@ -822,6 +827,7 @@ def bounded_basin_terminal_routes(
         key=lambda route: terminal_route_priority(
             route[0],
             route[2],
+            changed=route[3],
             priors=terminal_priors,
             base_rank=base_rank,
         ),
@@ -2205,10 +2211,11 @@ def main() -> None:
             ("legacy", legacy_candidates),
             ("winner_position", evidence_candidates),
         ):
-            for candidate, source, base_parent in candidates:
+            for candidate, source, base_parent, changed in candidates:
                 route_priority = terminal_route_priority(
                     candidate,
                     base_parent,
+                    changed=changed,
                     priors=terminal_priors,
                     base_rank=parent_recency_rank,
                 )

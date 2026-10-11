@@ -203,15 +203,25 @@ def terminal_route_priority(
     candidate: str,
     base: str,
     *,
+    changed: tuple[int, ...] | list[int] | None = None,
     priors: TerminalPriors,
     base_rank: dict[str, int],
 ) -> tuple[int, int, int, str]:
-    """Order single routes by winner position, target residue, then parent."""
-    changed = [
-        position
-        for position, (before, after) in enumerate(zip(base, candidate, strict=True))
-        if before != after
-    ]
+    """Order single routes by winner position, target residue, then parent.
+
+    `changed` is known for free at the caller (the route's recorded
+    positions-that-differ-from-`base`), so it is accepted directly rather
+    than rediscovered via a full string zip+enumerate -- measured live at
+    22.5s of self time across ~2.5M calls on one basin's evidence lane.
+    `None` preserves the original recompute-from-scratch behavior for any
+    other caller that doesn't have it on hand.
+    """
+    if changed is None:
+        changed = [
+            position
+            for position, (before, after) in enumerate(zip(base, candidate, strict=True))
+            if before != after
+        ]
     if len(changed) != 1:
         return (10**9, 10**9, base_rank.get(base, 10**9), candidate)
     position = changed[0]
