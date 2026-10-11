@@ -556,7 +556,9 @@ class MutationNetwork:
             raise
 
 
-def _connect(path: Path | None = None) -> "db.Connection | db.LocalConnection":
+def _connect(
+    path: Path | None = None, *, create: bool = False,
+) -> "db.Connection | db.LocalConnection":
     """Open master's write connection: local SQLite primary, or central MySQL.
 
     Local sqlite is used whenever ``path`` names a file that already exists
@@ -564,6 +566,11 @@ def _connect(path: Path | None = None) -> "db.Connection | db.LocalConnection":
     already passes for historical sqlite3 call-site compatibility. A box
     without that file (the dashboard box, any box that is not master) falls
     through to central MySQL automatically, with no configuration needed.
+    ``create=True`` is the one deliberate exception: bootstrapping a brand
+    new local store (db.connect_local applies local_schema.sql on first
+    open) has no file to check existence of yet, so the caller says so
+    explicitly instead of the file silently not existing and this routing to
+    MySQL by accident.
 
     User, 2026-10-11: this used to be gated on NOVA_LOCAL_SQLITE=1, an opt-in
     environment variable every process had to remember to export. The scorer
@@ -576,7 +583,7 @@ def _connect(path: Path | None = None) -> "db.Connection | db.LocalConnection":
     separate, downstream process (nanobody_opt/replicate_local.py), not
     synchronous with this write.
     """
-    if path is not None and path.exists():
+    if path is not None and (create or path.exists()):
         return db.connect_local(path)
     return db.connect()
 

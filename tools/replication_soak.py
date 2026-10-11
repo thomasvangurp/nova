@@ -153,7 +153,6 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=68)
     args = parser.parse_args()
 
-    os.environ["NOVA_LOCAL_SQLITE"] = "1"
     from nanobody_opt import mutation_network
 
     rng = random.Random(args.seed)
@@ -225,7 +224,7 @@ def main() -> int:
 
     # ---- replicator under random SIGKILL -------------------------------------
     # The writer creates the store (db.connect_local applies local_schema.sql).
-    with mutation_network._connect(local_path):
+    with mutation_network._connect(local_path, create=True):
         pass
     runner = ReplicatorRunner(local_path, args.remote_creds, log_path)
     runner.fault = args.fault_after_commit
