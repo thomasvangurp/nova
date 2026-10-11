@@ -224,7 +224,16 @@ def rescale_epoch(epoch: int) -> dict | None:
     our_seqs = set(by_coldkey.get(OUR_COLDKEY, []))
     all_seqs = {seq for seqs in by_coldkey.values() for seq in seqs}
 
-    pass_metrics = multipass_sum10_metrics(epoch)
+    # sequences=all_seqs is load-bearing, not an optimization: without it
+    # this also pulls every HF-top200 bounded-topup "parent candidate" row
+    # multipass_all_rivals.py scores alongside the real field each epoch
+    # (thousands of rows some epochs) into rank_metrics_against_field's
+    # candidate pool -- they get ranked (and counted in the denominator)
+    # right alongside the real rivals, inflating a real candidate's rank by
+    # up to ~35x on a heavy-topup epoch (confirmed: epoch 25598 alone had
+    # 17,827 tier-1 rows for ~50 real submissions, producing rank-sums of
+    # 20,000-30,000 against a 493-row field whose true ceiling is ~4,930).
+    pass_metrics = multipass_sum10_metrics(epoch, all_seqs)
     covered_our_seqs = {
         key.rsplit("::", 1)[0] for key in pass_metrics
     } & our_seqs
