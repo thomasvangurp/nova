@@ -848,6 +848,7 @@ def _rank_command(
     strict: bool,
     observation_history: Path | None = None,
     diversity_reserve_count: int = 0,
+    only_sequences: Path | None = None,
 ) -> list[str]:
     command = [str(bgen_python), str(nanobody_opt_root / "rank_exact.py")]
     for path in exact_inputs:
@@ -885,6 +886,8 @@ def _rank_command(
         command.extend([
             "--diversity-reserve-count", str(diversity_reserve_count)
         ])
+    if only_sequences is not None:
+        command.extend(["--only-sequences", str(only_sequences)])
     if strict:
         command.extend(["--pose-config", str(config)])
         command.extend(
@@ -912,6 +915,68 @@ def _rank_command(
         ])
     command.extend(["--selection-order", SELECTION_ORDER])
     return command
+
+
+def _strict_pool(
+    *,
+    args: argparse.Namespace,
+    bgen_python: Path,
+    epoch_root: Path,
+    archive_path: Path,
+    target: str,
+    exclusion_path: Path,
+    epoch: int,
+    shortlist: int,
+    config_path: Path,
+    exact_inputs: Sequence[Path],
+    observation_history: Path | None,
+    crew: Sequence[Any],
+    previous: dict[str, Any] | None,
+) -> Path | None:
+    """The sequences strict qualification should look at, or None for the whole shortlist.
+
+    A FRESH provisional-mode ranking supplies the order (the stored one can be an hour old), so the
+    candidates qualified are the ones that would be published if the cycle ran this minute.
+    """
+    size = int(getattr(args, "strict_pool_size", 0) or 0)
+    if size <= 0:
+        return None
+    pool_rankings = epoch_root / "strict_pool_rankings.json"
+    try:
+        _run(_rank_command(
+            bgen_python=bgen_python,
+            nanobody_opt_root=args.nanobody_opt_root,
+            exact_inputs=exact_inputs,
+            archive=archive_path,
+            target=target,
+            output=pool_rankings,
+            exclusion=exclusion_path,
+            epoch=epoch,
+            shortlist=shortlist,
+            config=config_path,
+            strict=False,
+            observation_history=observation_history,
+            diversity_reserve_count=len(crew) * 2 + 1,
+        ))
+        candidates = json.loads(pool_rankings.read_text())["candidates"]
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as error:
+        print(f"strict pool unavailable ({type(error).__name__}); qualifying the whole shortlist",
+              flush=True)
+        return None
+    sequences = list(dict.fromkeys(
+        str(item["sequence"]).strip().upper() for item in candidates[:size]
+    ))
+    # whatever this epoch already published must stay selectable
+    sequences += [s for s in _live_sequences(previous, epoch) if s not in sequences]
+    if len(sequences) < max(3 * len(crew), len(crew) + 4):
+        print(f"strict pool has only {len(sequences)} candidates; qualifying the whole shortlist",
+              flush=True)
+        return None
+    path = epoch_root / "strict_pool_sequences.txt"
+    path.write_text("\n".join(sequences) + "\n")
+    print(f"strict pool: qualifying the top {len(sequences)} of {len(candidates)} candidates",
+          flush=True)
+    return path
 
 
 def _layer2_command(
@@ -1843,6 +1908,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--strict-pool-size",
+        type=int,
+        default=100,
+        help=(
+            "qualify only the top N candidates of a fresh provisional ranking in the strict pass "
+            "(plus anything already published this epoch); 0 qualifies the whole shortlist, which "
+            "takes ~25 minutes and so reflects a database snapshot that old"
+        ),
+    )
+    parser.add_argument(
         "--strict-qualification-reserve-blocks",
         type=int,
         default=220,
@@ -2327,6 +2402,21 @@ def _publish_once(args: argparse.Namespace) -> None:
         qualified_layer2 = epoch_root / "qualified_layer2.json"
         qualified_novelty = epoch_root / "qualified_novelty.json"
         qualified_cdrs = epoch_root / "qualified_cdrs.json"
+        strict_only = _strict_pool(
+            args=args,
+            bgen_python=bgen_python,
+            epoch_root=epoch_root,
+            archive_path=archive_path,
+            target=target,
+            exclusion_path=exclusion_path,
+            epoch=epoch,
+            shortlist=shortlist,
+            config_path=config_path,
+            exact_inputs=exact_inputs,
+            observation_history=observation_history,
+            crew=crew,
+            previous=previous,
+        )
         try:
             _run(_rank_command(
                 bgen_python=bgen_python,
@@ -2342,7 +2432,13 @@ def _publish_once(args: argparse.Namespace) -> None:
                 strict=True,
                 observation_history=observation_history,
                 diversity_reserve_count=len(crew) * 2 + 1,
+                only_sequences=strict_only,
             ))
+            if strict_only is not None:
+                qualified_count = len(json.loads(qualified_rankings.read_text())["candidates"])
+                if qualified_count < len(crew):
+                    # too few survived qualification to fill the fleet: a clean "no upgrade" outcome
+                    raise subprocess.CalledProcessError(1, "strict pool too thin")
         except subprocess.CalledProcessError:
             print(
                 "no robust repeat-observation upgrade is available yet; "
