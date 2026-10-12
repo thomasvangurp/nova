@@ -179,6 +179,12 @@ def pass_batches(plan: dict[str, int]) -> list[list[str]]:
     return [[s for s, k in plan.items() if k > r] for r in range(rounds)]
 
 
+def _ph(conn) -> str:
+    """SQL placeholder for ``conn``: '?' for master's local SQLite store."""
+    from nanobody_opt import db
+    return "?" if isinstance(conn, db.LocalConnection) else "%s"
+
+
 def stored_pass_counts(conn, sequences: Sequence[str], *,
                        target: str = TARGET) -> dict[str, int]:
     """Stored ``multipass_sum10_pass`` rows WITH raw metrics, per sequence.
@@ -187,6 +193,7 @@ def stored_pass_counts(conn, sequences: Sequence[str], *,
     they do not count towards the depth.
     """
     counts: dict[str, int] = {}
+    p = _ph(conn)
     seqs = list(dict.fromkeys(sequences))
     for i in range(0, len(seqs), 200):
         chunk = seqs[i:i + 200]
@@ -194,8 +201,8 @@ def stored_pass_counts(conn, sequences: Sequence[str], *,
             f"""
             SELECT n.sequence, COUNT(*)
             FROM nodes n JOIN observations o ON o.node_id = n.id
-            WHERE n.target = %s AND n.sequence IN ({",".join(["%s"] * len(chunk))})
-              AND o.source = %s AND o.score_kind = %s
+            WHERE n.target = {p} AND n.sequence IN ({",".join([p] * len(chunk))})
+              AND o.source = {p} AND o.score_kind = {p}
               AND o.metrics_json IS NOT NULL AND o.metrics_json <> '{{}}'
             GROUP BY n.sequence
             """,
@@ -290,26 +297,27 @@ def load_topup_passes(conn, hf_candidates: Sequence[str], *,
                       ) -> pd.DataFrame:
     """Every stored pass (with metrics) of the HF candidates, plus every pass
     of the last ``window`` multipass epochs (the rival leaderboard field)."""
-    base = """
+    p = _ph(conn)
+    base = f"""
         SELECT n.sequence, o.epoch, o.metrics_json, o.provenance_json
         FROM observations o JOIN nodes n ON o.node_id = n.id
-        WHERE n.target = %s AND o.source = %s AND o.score_kind = %s
-          AND o.metrics_json IS NOT NULL AND o.metrics_json <> '{}'
+        WHERE n.target = {p} AND o.source = {p} AND o.score_kind = {p}
+          AND o.metrics_json IS NOT NULL AND o.metrics_json <> '{{}}'
     """
     rows: list[tuple] = []
     latest = conn.execute(
-        "SELECT MAX(o.epoch) FROM observations o WHERE o.source = %s AND o.score_kind = %s",
+        f"SELECT MAX(o.epoch) FROM observations o WHERE o.source = {p} AND o.score_kind = {p}",
         (PASS_SOURCE, PASS_SCORE_KIND),
     ).fetchone()
     if latest and latest[0] is not None:
-        rows += conn.execute(base + " AND o.epoch > %s",
+        rows += conn.execute(base + f" AND o.epoch > {p}",
                              (target, PASS_SOURCE, PASS_SCORE_KIND,
                               int(latest[0]) - int(window))).fetchall()
     seqs = list(dict.fromkeys(hf_candidates))
     for i in range(0, len(seqs), 200):
         chunk = seqs[i:i + 200]
         rows += conn.execute(
-            base + f" AND n.sequence IN ({','.join(['%s'] * len(chunk))})",
+            base + f" AND n.sequence IN ({','.join([p] * len(chunk))})",
             (target, PASS_SOURCE, PASS_SCORE_KIND, *chunk)).fetchall()
     frame = _passes_frame(rows)
     if frame.empty:

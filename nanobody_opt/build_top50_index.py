@@ -165,7 +165,7 @@ def _live_top50_from_db(
     return merged + filler
 
 
-def _hf_rival_topup(frame: pd.DataFrame, hf_top: list[str]) -> tuple[list[str], dict]:
+def _hf_rival_topup(frame: pd.DataFrame, hf_top: list[str], db_path: str) -> tuple[list[str], dict]:
     """The HF/rival top-up list (best first) and a summary. Degrades to [].
 
     Ranked by ``hf_topup.ranked_topup``: mean derived sum-of-10 against THIS
@@ -182,7 +182,9 @@ def _hf_rival_topup(frame: pd.DataFrame, hf_top: list[str]) -> tuple[list[str], 
             return [], {"status": "disabled", "switch": str(hf_topup.DISABLE_FILE)}
         from nanobody_opt import db  # noqa: E402
 
-        with db.connect() as conn:
+        if not Path(db_path).is_file():
+            raise FileNotFoundError(f"local observation store not found: {db_path}")
+        with db.connect_local(db_path) as conn:
             ranked, summary = hf_topup.ranked_topup(conn, frame, hf_top=hf_top)
         summary["status"] = "ok" if ranked else "empty"
         summary["candidates"] = ranked[: 3 * hf_topup.DEFAULT_SLOTS]
@@ -228,7 +230,7 @@ def main() -> int:
     report: dict = {}
     topup_info: dict = {"status": "not_run"}
     if obs_db:
-        topup, topup_info = _hf_rival_topup(frame, hf_top)
+        topup, topup_info = _hf_rival_topup(frame, hf_top, obs_db)
         live_sequences = _live_top50_from_db(obs_db, topup=topup, report=report)
         # The dedup reference stays the producer-scale top-50 + fillers only;
         # the top-up changes the parent pool (`live_sequences`), nothing else.

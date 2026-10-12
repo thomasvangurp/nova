@@ -49,11 +49,14 @@ MISSING18 = Path("/root/missing18_hf_field.json")
 TOP50_32 = Path("/root/top50_32_hf_field.json")
 TOPUP = Path("/root/topup_observations.json")
 
+# Master's local SQLite store; central MySQL is retired (2026-10-11).
+LOCAL_DB = Path("/root/artifacts/nanobody_mutations.sqlite")
+
 # DB passes 1-10 for rivals (the top-up adds passes 11-20 to the JSON only).
 RIVAL_DB_SQL = """
     SELECT n.sequence, SUM(o.score), COUNT(*)
     FROM observations o JOIN nodes n ON o.node_id = n.id
-    WHERE n.target = %s
+    WHERE n.target = ?
       AND o.source = 'public_multipass_rivals'
       AND o.score_kind = 'local_validator_replay_rank_sum'
     GROUP BY n.sequence
@@ -133,7 +136,7 @@ def _read_rival_db_passes() -> dict[str, tuple[float, int]]:
     from nanobody_opt import db
 
     def _run():
-        with db.connect() as conn:
+        with db.connect_local(LOCAL_DB) as conn:
             rows = conn.execute(RIVAL_DB_SQL, (TARGET,)).fetchall()
         return {str(r[0]).strip().upper(): (float(r[1]), int(r[2])) for r in rows}
 
@@ -212,7 +215,7 @@ def main() -> int:
         print(f"DRY_RUN (not writing {len(obs)} observations)")
         return 0
     written = _retry(
-        update_observation_store, Path("/root/.sn68_mysql_creds"), obs,
+        update_observation_store, LOCAL_DB, obs,
         commit_every=1000, commit_interval=5.0)
     print(f"IMPORT_DONE written={written}", flush=True)
     return 0

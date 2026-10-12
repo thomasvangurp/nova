@@ -885,9 +885,15 @@ def _rank_command(
         command.extend([
             "--pose-config", str(config),
             "--before-epoch", str(epoch),
-            "--db-field-count", "10",
             "--minimum-api-fields", "3",
         ])
+        # rank_exact refuses --db-field-count without --observation-history;
+        # _try_strict_rank (replication/confirmation) passes none, and that
+        # refusal zeroed qualification for 25655-25659.
+        if observation_history is not None:
+            command.extend(["--db-field-count", "10"])
+        else:
+            command.extend(["--api-field-count", "10"])
         command.extend(strict_rank_arguments(strict_gate_overrides))
         # Strict qualification decides what actually gets published, so it is the
         # one ordering that must target a winning draw rather than a good average.

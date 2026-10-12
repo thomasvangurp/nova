@@ -51,8 +51,10 @@ def basin_id(sequence: str) -> str:
     return hashlib.sha256(core.encode("ascii")).hexdigest()[:16]
 
 
-def _connect(path: Path) -> db.Connection:
-    return db.connect()
+def _connect(path: Path) -> db.LocalConnection:
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"local observation store not found: {path}")
+    return db.connect_local(path)
 
 
 def load_public(path: Path, target: str, single_kind: str) -> dict[str, dict[str, Any]]:
@@ -66,7 +68,7 @@ def load_public(path: Path, target: str, single_kind: str) -> dict[str, dict[str
             SELECT n.sequence, o.score, o.epoch, o.metrics_json
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE n.target = %s AND o.score_kind = %s
+            WHERE n.target = ? AND o.score_kind = ?
             ORDER BY o.epoch, o.score, n.sequence
             """,
             (target, single_kind),
@@ -92,7 +94,7 @@ def load_replay_means(path: Path, target: str, replay_kind: str) -> dict[str, fl
             SELECT n.sequence, AVG(o.score), COUNT(*)
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE n.target = %s AND o.score_kind = %s
+            WHERE n.target = ? AND o.score_kind = ?
             GROUP BY n.sequence
             """,
             (target, replay_kind),

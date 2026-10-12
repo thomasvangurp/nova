@@ -100,15 +100,32 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
     import sqlite3
 
     conn = sqlite3.connect(f"file:{LOCAL_DB}?mode=ro", uri=True, timeout=30)
+    base = (
+        "SELECT n.sequence, o.observation_id, o.metrics_json "
+        "FROM observations o JOIN nodes n ON n.id = o.node_id "
+        "WHERE n.target = ? AND o.source = 'public_multipass_rivals' "
+        "  AND o.score_kind = 'multipass_sum10_pass' "
+        "  AND o.metrics_json IS NOT NULL AND o.metrics_json NOT IN ('', '{}') "
+    )
     try:
-        rows = conn.execute(
-            "SELECT n.sequence, o.observation_id, o.metrics_json "
-            "FROM observations o JOIN nodes n ON n.id = o.node_id "
-            "WHERE n.target = ? AND o.source = 'public_multipass_rivals' "
-            "  AND o.score_kind = 'multipass_sum10_pass' AND o.epoch = ? "
-            "  AND o.metrics_json IS NOT NULL AND o.metrics_json NOT IN ('', '{}')",
-            (TARGET, epoch),
-        ).fetchall()
+        if sequences is None:
+            rows = conn.execute(base + " AND o.epoch = ?", (TARGET, epoch)).fetchall()
+        else:
+            # Replay-queue passes (writer replay_queue_slave) are scored for
+            # parents / provisional children whatever epoch they are later
+            # submitted in; their `epoch` is only the chain epoch at scoring
+            # time. A fold belongs to (sequence, target), so count them for
+            # the sequence, bounded by the sequence set (never the whole
+            # epoch, see the pool-inflation bug).
+            rows = []
+            ordered = sorted(sequences)
+            for i in range(0, len(ordered), 300):
+                chunk = ordered[i:i + 300]
+                rows += conn.execute(
+                    base + f" AND n.sequence IN ({','.join('?' * len(chunk))}) "
+                    "AND (o.epoch = ? OR json_extract(o.provenance_json, '$.writer') = 'replay_queue_slave')",
+                    (TARGET, *chunk, epoch),
+                ).fetchall()
     finally:
         conn.close()
     out: dict[str, dict[str, float]] = {}

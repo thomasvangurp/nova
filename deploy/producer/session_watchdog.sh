@@ -75,6 +75,12 @@ while true; do
         || start_session nova-nanobody-scorerd /root/scorer_daemon_supervisor.sh
     tmux has-session -t nova-rosterwatch 2>/dev/null \
         || start_session nova-rosterwatch /root/roster_watch.sh
+    tmux has-session -t slave-multipass-loop 2>/dev/null \
+        || start_session slave-multipass-loop /root/slave_multipass_loop.sh
+    tmux has-session -t replay-queue-slave 2>/dev/null \
+        || start_session replay-queue-slave /root/tools/replay_queue_loop.sh
+    tmux has-session -t shadow-tournament 2>/dev/null \
+        || start_session shadow-tournament /root/tools/shadow_tournament_loop.sh
 
     if ! tmux has-session -t nova-nanobody-publisher 2>/dev/null; then
         log "session nova-nanobody-publisher MISSING - restarting"

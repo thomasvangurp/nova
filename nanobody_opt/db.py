@@ -257,6 +257,9 @@ class _LocalCursor:
     def fetchone(self) -> Any:
         return self._cursor.fetchone()
 
+    def __iter__(self) -> Any:
+        return iter(self._cursor)
+
 
 def connect_local(path: str | Path) -> LocalConnection:
     """Open (creating/migrating if needed) master's local SQLite primary."""

@@ -596,7 +596,13 @@ def fetch_recent_fields_from_db(
 
     try:
         connection = mutation_network._connect(database)
-    except Exception:
+    except Exception as error:
+        # Local store only (no MySQL fallback); a missing store is loud, not an
+        # empty field passed off as a real one.
+        print(f"RECENT_FIELD_READ_FAILED {type(error).__name__}: {error}",
+              file=sys.stderr, flush=True)
+        from nanobody_opt.failure_log import record_failure
+        record_failure("rank_exact", "RECENT_FIELD_READ_FAILED", error)
         return []
     try:
         # Some deployments of mutation_network only ever speak central MySQL
@@ -672,23 +678,24 @@ def rank_metrics_against_field(
     against the recent field" -- user, 2026-10-11: "ensure dashboard uses
     this logic."
     """
-    if not metrics_by_key:
+    # Each key is ranked against the field ALONE. Concatenating every key into
+    # one frame made a score depend on how many other keys shared the call
+    # (a 60k-sequence call inflated scores ~10x; a 500-pass epoch ~2x). A
+    # value's dense rank when inserted on its own is (number of strictly
+    # better unique field values) + 1 -- identical to ranking it alone,
+    # computed for all keys at once.
+    keys = [key for key, values in metrics_by_key.items() if set(METRICS).issubset(values)]
+    if not keys:
         return {}
-    candidates = pd.DataFrame(
-        {key: {metric: float(values[metric]) for metric in METRICS}
-         for key, values in metrics_by_key.items() if set(METRICS).issubset(values)}
-    ).T
-    if candidates.empty:
-        return {}
-    combined = pd.concat([pooled_field.reset_index(drop=True), candidates])
-    # A candidate key colliding with the field's own (discarded) integer
-    # index never happens in practice (string keys vs a RangeIndex), but
-    # dedup stays as a safety net exactly like multipass_all_rivals.py's.
-    combined = combined[~combined.index.duplicated(keep="last")]
-    total = pd.Series(0.0, index=combined.index)
+    total = np.zeros(len(keys), dtype=np.float64)
     for metric, direction in METRICS.items():
-        total += combined[metric].rank(method="dense", ascending=(direction == "min"))
-    return {key: float(total[key]) for key in candidates.index if key in total.index}
+        unique = np.unique(pooled_field[metric].to_numpy(dtype=np.float64))
+        values = np.array([float(metrics_by_key[key][metric]) for key in keys], dtype=np.float64)
+        if direction == "min":
+            total += np.searchsorted(unique, values, side="left") + 1
+        else:
+            total += len(unique) - np.searchsorted(unique, values, side="right") + 1
+    return dict(zip(keys, total.tolist()))
 
 
 #: Read-only context for _rank_candidate, set once per process: directly

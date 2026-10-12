@@ -16,6 +16,8 @@
 # This is a launcher, not a supervisor: when the producer exits the session
 # ends and session_watchdog.sh starts a fresh one on its next pass.
 cd /root
+export NOVA_FULL_ARCHIVE_FIELD=0
+export NANOBODY_SCORER_DAEMON=1
 ARGV_FILE=/root/artifacts/producer_argv.txt
 if [ ! -s "$ARGV_FILE" ]; then
     echo "$(date -Is) $ARGV_FILE missing or empty; refusing to guess a producer argv" \

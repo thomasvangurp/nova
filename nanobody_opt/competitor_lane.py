@@ -146,14 +146,15 @@ def multipass_scores(
     )
     if pooled_field.empty:
         return {}
-    conn = db.connect()
-    placeholders = ",".join(["%s"] * len(sequences))
+    # Master's local SQLite is the only store; central MySQL is retired.
+    conn = db.connect_local(db_path)
+    placeholders = ",".join(["?"] * len(sequences))
     rows = conn.execute(
         f"""
         SELECT n.sequence, o.observation_id, o.metrics_json
         FROM observations o JOIN nodes n ON n.id = o.node_id
-        WHERE n.target = %s AND n.sequence IN ({placeholders})
-          AND o.source = %s AND o.score_kind = %s
+        WHERE n.target = ? AND n.sequence IN ({placeholders})
+          AND o.source = ? AND o.score_kind = ?
           AND o.metrics_json IS NOT NULL AND o.metrics_json != ''
         """,
         (TARGET, *sequences, "public_multipass_rivals", MULTIPASS_SCORE_KIND),
@@ -178,6 +179,127 @@ def multipass_scores(
         seq: sum(scores) / len(scores)
         for seq, scores in by_seq.items() if len(scores) >= min_passes
     }
+
+
+#: Sources that count as "our own" exact-scoring history (same list
+#: rescale_multipass_history.py uses for its tier-2 fallback).
+OUR_RAW_SOURCES = (
+    "live_exact_screen", "live_exact_repeat", "local_exact_raw",
+    "children_8x", "children_20x", "children_40x", "backfill_8x",
+    "exhaustive_8x",
+)
+
+
+def fetch_elite_history_parents(
+    db_path: Path, *, target: str = TARGET, before_epoch: int, min_passes: int = 3,
+    limit: int = 500,
+) -> dict[str, float]:
+    """Our own historically strong, since-abandoned sequences as a parent
+    source that never ages out just because nobody has resubmitted it.
+
+    `generate()`'s broad pool is rival-only when --rival-coldkey is given
+    (the production path), and `select_elite_parents` was narrowed to
+    --parent-limit 64 on 2026-10-06 -- so a sequence WE generated, scored
+    well, and then stopped mutating (no resubmission, so multipass_all_
+    rivals.py -- which only rescoring sequences it currently sees on the
+    live leaderboard -- never touched it) had NO lane that ever reconsidered
+    it. Confirmed case, 2026-10-11: a sequence 1 edit from the actual #1
+    winner at epoch 25656 sat in our own local_exact_raw/children_8x/20x
+    history at epochs 25423-25552 (rank-sum 59-287, clearly strong) and was
+    never mutated or resubmitted again.
+
+    Reuses OUR_RAW_SOURCES observations the exact way rescale_multipass_
+    history.py's tier 2 already treats as "our multipass", and the same
+    dense-sum-of-10 rank-sum definition as everywhere else, against the
+    exact same pooled recent-field (rank_exact.fetch_recent_fields_from_db
+    + pool_recent_fields) -- this never introduces a second scoring scale.
+    Ranks each candidate against the field alone (see the comment at the
+    ranking loop below for why rank_metrics_against_field itself is not
+    reused here). Requires >= min_passes raw observations per sequence, the
+    same robustness bar multipass gating applies elsewhere: a single noisy
+    pass does not get an exemption just because it is old.
+    """
+    import json as _json
+
+    import numpy as np
+
+    from nanobody_opt import db
+    from nanobody_opt.rank_exact import METRICS, fetch_recent_fields_from_db, pool_recent_fields
+
+    connection = db.connect_local(db_path)
+    pooled_field = pool_recent_fields(
+        fetch_recent_fields_from_db(db_path, target=target, before_epoch=before_epoch, count=10)
+    )
+    if pooled_field.empty:
+        return {}
+
+    p = "?"
+    placeholders = ",".join([p] * len(OUR_RAW_SOURCES))
+    rows = connection.execute(
+        f"""
+        SELECT n.sequence, o.observation_id, o.metrics_json
+        FROM observations o JOIN nodes n ON n.id = o.node_id
+        WHERE n.target = {p} AND o.epoch < {p} AND o.source IN ({placeholders})
+          AND o.metrics_json IS NOT NULL AND o.metrics_json NOT IN ('', '{{}}')
+        """,
+        (target, before_epoch, *OUR_RAW_SOURCES),
+    ).fetchall()
+
+    passes_by_seq: dict[str, list[dict[str, float]]] = {}
+    for seq, _observation_id, blob in rows:
+        try:
+            metrics = _json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metrics, dict) or not metrics or not set(METRICS).issubset(metrics):
+            continue
+        try:
+            values = {name: float(metrics[name]) for name in METRICS}
+        except (TypeError, ValueError):
+            continue
+        passes_by_seq.setdefault(seq.upper(), []).append(values)
+
+    qualifying = {seq: passes for seq, passes in passes_by_seq.items()
+                  if len(passes) >= min_passes}
+    if not qualifying:
+        return {}
+    # Mean metrics per sequence (same "mean of several real measurements"
+    # principle used throughout this session), ranked once against the
+    # current field -- never the stale score a pass carried when written.
+    seqs = list(qualifying)
+    mean_metrics = {
+        seq: {name: sum(pass_[name] for pass_ in qualifying[seq]) / len(qualifying[seq])
+              for name in METRICS}
+        for seq in seqs
+    }
+    # Deliberately NOT rank_metrics_against_field: that batches every
+    # candidate into the same combined frame and dense-ranks them together,
+    # so a candidate's score depends on how many OTHER candidates were
+    # passed in the same call -- harmless for its usual callers (a handful
+    # of passes or one epoch's ~50 submissions) but silently inflates the
+    # scale by up to 10x here, with tens of thousands of candidates at once
+    # (confirmed 2026-10-11: scores up to 45,972 against a field whose true
+    # ceiling is ~5,230, the exact shape of the pool-inflation bug already
+    # fixed once in rescale_multipass_history.py). Instead, rank each
+    # candidate against the field ALONE, vectorized: a value's dense rank if
+    # inserted one at a time equals (count of strictly "worse" field values)
+    # + 1, computed via searchsorted on the field's sorted unique values --
+    # identical result to concatenating field+1 candidate, for every
+    # candidate at once.
+    total = np.zeros(len(seqs), dtype=np.float64)
+    for metric, direction in METRICS.items():
+        field_sorted = np.sort(pooled_field[metric].to_numpy(dtype=np.float64))
+        unique_sorted = np.unique(field_sorted)
+        values = np.array([mean_metrics[seq][metric] for seq in seqs], dtype=np.float64)
+        if direction == "min":
+            # rank 1 = smallest value = best; rank(v) = #(unique field < v) + 1
+            total += np.searchsorted(unique_sorted, values, side="left") + 1
+        else:
+            # rank 1 = largest value = best; rank(v) = #(unique field > v) + 1
+            total += (len(unique_sorted)
+                       - np.searchsorted(unique_sorted, values, side="right")) + 1
+    ranks = dict(zip(seqs, total.tolist()))
+    return dict(sorted(ranks.items(), key=lambda kv: kv[1])[:limit])
 
 
 def _load_pool(archive: Path) -> list[str]:
@@ -220,6 +342,18 @@ def _load_pool(archive: Path) -> list[str]:
     return pool
 
 
+def _merge_priority(priority: list[str], scores: dict[str, float]) -> list[str]:
+    """Keep EVERY priority (top-50) parent in its own list order (Oct 8 rule).
+
+    The 2026-10-10 gate dropped top-50 parents without 10 stored replay
+    passes and re-sorted the rest by multipass score. With a 2,000-candidate
+    --limit, list order decides which ~8 parents get edited at all, so the
+    Oct 8 behaviour is the plain top-50 order. ``scores`` is accepted for the
+    call site but deliberately not used for ordering.
+    """
+    return list(priority)
+
+
 def _eligible_parents(pool: list[str], top50: list[str], min_distance: int) -> list[str]:
     """Parents whose min Hamming distance to the top-50 is >= min_distance, so a
     single-edit child can land >=7 edits and clear the whole-seq 0.95 dedup."""
@@ -248,13 +382,21 @@ def generate(archive: Path, positions: list[int], limit: int | None,
              rival_sequences: list[str] | None = None,
              mutation_database: Path | None = None,
              min_passes: int = 10,
-             epoch: int | None = None) -> dict[str, Any]:
+             epoch: int | None = None,
+             elite_history_scores: dict[str, float] | None = None) -> dict[str, Any]:
     # Parent source: the rival's proven-good sequences when supplied, else the
     # global archive ranked by the validator's Algorithm-2 proxy.
     if rival_sequences:
         pool = [s.upper() for s in rival_sequences]
     else:
         pool = _load_pool(archive)
+    # Our own historically-strong, since-abandoned sequences (see
+    # fetch_elite_history_parents) are a parent source the rival-only broad
+    # pool above has no way to surface -- added here, not as a replacement,
+    # so this never narrows what --rival-coldkey already finds.
+    if elite_history_scores:
+        existing = set(pool)
+        pool = pool + [s for s in elite_history_scores if s not in existing]
     # Nanobodies vary in length; the hot positions are measured against the
     # modal-length sequence, so restrict the pool to that length (a single
     # allowed-residue table must match every parent).
@@ -286,9 +428,17 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         scores = multipass_scores(
             sorted(set(priority_pool) | set(pool)), mutation_database,
             min_passes=min_passes, epoch=epoch)
+        # Elite-history candidates are already gated on >= min_passes raw
+        # observations (fetch_elite_history_parents), just not the
+        # public_multipass_rivals/multipass_sum10_pass label multipass_
+        # scores() requires -- that label is only ever written for
+        # sequences someone is CURRENTLY resubmitting, which is exactly the
+        # trap this pool exists to escape. Merge rather than re-gate them.
+        if elite_history_scores:
+            scores = {**scores, **{s: v for s, v in elite_history_scores.items()
+                                    if s not in scores}}
         multipass_ranked = len(scores)
-        priority_pool = sorted(
-            (s for s in priority_pool if s in scores), key=lambda s: scores[s])
+        priority_pool = _merge_priority(priority_pool, scores)
         pool = sorted((s for s in pool if s in scores), key=lambda s: scores[s])
 
     # Keep the pool ranked best-first (Algorithm-2 from _load_pool, or the
@@ -368,6 +518,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         "multipass_ranked_pool": multipass_ranked,
         "pool_size": len(priority_pool) + len(pool),
         "priority_pool_size": len(priority_pool),
+        "elite_history_pool_size": len(elite_history_scores) if elite_history_scores else 0,
         "ranker_applied": ranker_applied,
         "sequences": [item["sequence"] for item in items],
         "candidates": items,
@@ -400,6 +551,10 @@ def main() -> None:
                         help="when given, every parent (priority and broad pool) must have >= --min-passes stored multipass_sum10_pass observations, ranked by that score instead of the validator final_score / archive Algorithm-2 proxy")
     parser.add_argument("--min-passes", type=int, default=10,
                         help="stored passes required per parent when --mutation-database is given (default 10)")
+    parser.add_argument("--elite-history-limit", type=int, default=500,
+                        help="max of our own historically-strong, since-abandoned sequences to add to the broad pool (0 = off, default 500)")
+    parser.add_argument("--elite-history-min-passes", type=int, default=3,
+                        help="raw OUR_RAW_SOURCES observations required per elite-history sequence (default 3)")
     args = parser.parse_args()
     positions = [int(p) for p in args.positions.split(",") if p.strip()]
     top50 = None
@@ -435,6 +590,12 @@ def main() -> None:
             f"--mutation-database requires an epoch, and none could be "
             f"derived from archive path {args.archive}"
         )
+    elite_history_scores = None
+    if args.mutation_database is not None and args.elite_history_limit:
+        elite_history_scores = fetch_elite_history_parents(
+            args.mutation_database, before_epoch=epoch,
+            min_passes=args.elite_history_min_passes,
+            limit=args.elite_history_limit)
     payload = generate(args.archive, positions, args.limit, pool_limit=args.pool_limit,
                        top50=top50, min_parent_distance=args.min_parent_distance,
                        priority=priority, double_edit_pairs=args.double_edit_pairs,
@@ -442,7 +603,8 @@ def main() -> None:
                        rival_sequences=rival_sequences,
                        mutation_database=args.mutation_database,
                        min_passes=args.min_passes,
-                       epoch=epoch)
+                       epoch=epoch,
+                       elite_history_scores=elite_history_scores)
     if args.mutation_database is not None and payload["pool_size"] == 0:
         raise SystemExit(
             f"--mutation-database given but zero parents have >= "
@@ -456,6 +618,7 @@ def main() -> None:
         f"candidates={len(payload['candidates'])} "
         f"multipass_required={payload['multipass_required']} "
         f"multipass_ranked_pool={payload['multipass_ranked_pool']} "
+        f"elite_history_pool={payload['elite_history_pool_size']} "
         f"output={args.output}"
     )
 

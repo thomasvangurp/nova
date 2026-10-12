@@ -30,7 +30,9 @@ def top_children(db_path: str, ledger_path: str, k: int) -> list[tuple[str, floa
     Prefers ``local_exact_validator_replay_rank_sum`` over the fast replay when
     both exist for the same sequence. Lower rank-sum = better.
     """
-    conn = db.connect()
+    if not Path(db_path).is_file():
+        raise FileNotFoundError(f"local observation store not found: {db_path}")
+    conn = db.connect_local(db_path)
     rows = conn.execute(
         """
         SELECT n.sequence, o.score, o.score_kind

@@ -585,7 +585,10 @@ def _connect(
     """
     if path is not None and (create or path.exists()):
         return db.connect_local(path)
-    return db.connect()
+    # Central MySQL is retired (user, 2026-10-11: "nothing writes to MySQL
+    # anymore, nor should anything read from there"). A missing file is a
+    # wrong path, never a cue to fall back to another store.
+    raise FileNotFoundError(f"local observation store not found: {path}")
 
 
 def _is_local(connection: "db.Connection | db.LocalConnection") -> bool:
@@ -1219,15 +1222,7 @@ def _cached_observations(
                 (target,),
             ).fetchone()
     else:
-        with db.connect() as probe:
-            cache_key = probe.execute(
-                """
-                SELECT COUNT(*), COALESCE(MAX(o.observation_id), '')
-                FROM observations o JOIN nodes n ON n.id=o.node_id
-                WHERE n.target=%s
-                """,
-                (target,),
-            ).fetchone()
+        raise ValueError("_cached_observations needs source_path (local store)")
     try:
         with cache_path.open("rb") as handle:
             cached_key, cached_records = pickle.load(handle)
@@ -1307,34 +1302,33 @@ def load_network_observations(
         path.with_name(f"{path.name}.netobs_cache.{target}.{length}.pkl"),
         target=target,
         load=lambda: _load_network_observations_uncached(
-            target=target, length=length
+            path, target=target, length=length
         ),
+        source_path=path,
     )
 
 
 def _load_network_observations_uncached(
-    *, target: str, length: int
+    path: Path, *, target: str, length: int
 ) -> list[dict[str, Any]]:
-    with db.connect() as connection:
+    with _connect(path) as connection:
         sequences = {
             int(node_id): str(sequence)
             for node_id, sequence in connection.execute(
-                "SELECT id, sequence FROM nodes WHERE target=%s AND length=%s",
+                "SELECT id, sequence FROM nodes WHERE target=? AND length=?",
                 (target, length),
             ).fetchall()
         }
-        # Drain the stream into plain tuples first: the server drops an
-        # unbuffered result whose client stops reading for net_write_timeout.
-        rows = list(connection.stream(
+        rows = connection.execute(
             """
             SELECT o.node_id, o.score, o.epoch, o.source, o.score_kind,
                    o.observation_count, o.pose_json
             FROM observations o
             JOIN nodes n ON n.id=o.node_id
-            WHERE n.target=%s AND n.length=%s
+            WHERE n.target=? AND n.length=?
             """,
             (target, length),
-        ))
+        ).fetchall()
     # pose_json repeats heavily (~11k distinct strings over ~3.9M rows on
     # 2026-10-09); decode each once. The decoded dicts are shared, read-only.
     poses: dict[str, Any] = {}

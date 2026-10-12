@@ -147,9 +147,11 @@ def discover_crew(chain: dict[str, Any], coldkey: str, netuid: int) -> list[flee
     return fleet.discover_fleet(chain.get("neurons"), address, netuid=netuid)
 
 
-def _open_readonly(database: Path) -> db.Connection:
+def _open_readonly(database: Path) -> db.LocalConnection:
+    if not Path(database).is_file():
+        raise SystemExit(f"cannot open the mutation database: {database} not found")
     try:
-        return db.connect()
+        return db.connect_local(database)
     except Exception as error:
         raise SystemExit(f"cannot open the mutation database: {error}") from error
 
@@ -222,10 +224,10 @@ def top_children(
                    SUM(o.observation_count)
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = %s
-              AND o.score_kind = %s
+            WHERE o.source = ?
+              AND o.score_kind = ?
             GROUP BY n.id
-            HAVING SUM(o.observation_count) >= %s
+            HAVING SUM(o.observation_count) >= ?
             ORDER BY AVG(o.score) ASC, n.sequence ASC
             """,
             (source, score_kind, MINIMUM_OBSERVATION_COUNT),
@@ -241,7 +243,7 @@ def top_children(
                 """
                 SELECT metrics_json, provenance_json, score
                 FROM observations
-                WHERE node_id = %s AND source = %s AND score_kind = %s
+                WHERE node_id = ? AND source = ? AND score_kind = ?
                 ORDER BY observation_id ASC
                 LIMIT 1
                 """,
@@ -505,9 +507,9 @@ def measured_means(
             """
             SELECT n.sequence, AVG(o.score), SUM(o.observation_count)
             FROM observations o JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = %s AND o.score_kind = %s
+            WHERE o.source = ? AND o.score_kind = ?
             GROUP BY n.id
-            HAVING SUM(o.observation_count) >= %s
+            HAVING SUM(o.observation_count) >= ?
             """,
             (source, score_kind, MINIMUM_OBSERVATION_COUNT),
         ).fetchall()
@@ -519,7 +521,7 @@ def measured_means(
                 """
                 SELECT o.metrics_json
                 FROM observations o JOIN nodes n ON n.id = o.node_id
-                WHERE n.sequence = %s AND o.source = %s AND o.score_kind = %s
+                WHERE n.sequence = ? AND o.source = ? AND o.score_kind = ?
                 ORDER BY o.observation_id ASC LIMIT 1
                 """,
                 (sequence, source, score_kind),

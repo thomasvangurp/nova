@@ -573,6 +573,8 @@ def _run_iteration(
             "--rival-coldkey", args.rival_coldkey,
             "--limit", "2000",
             "--mutation-database", str(args.mutation_database),
+            "--elite-history-limit", str(args.elite_history_limit),
+            "--elite-history-min-passes", str(args.elite_history_min_passes),
             "--output", str(elite_parents),
         ]
         if args.ranker_model.is_file():
@@ -1036,6 +1038,23 @@ def _parser() -> argparse.ArgumentParser:
         default="5GhREcsK",
         help="coldkey prefix of the top competitor; their recent submissions "
              "become the competitor_lane parent pool (proven-good source)",
+    )
+    parser.add_argument(
+        "--elite-history-limit",
+        type=int,
+        default=500,
+        help="our own historically-strong, since-abandoned sequences to add "
+             "to competitor_lane's broad pool (0 = off); a sequence we "
+             "generated, scored well, and then stopped mutating has no other "
+             "lane that ever reconsiders it -- see competitor_lane."
+             "fetch_elite_history_parents",
+    )
+    parser.add_argument(
+        "--elite-history-min-passes",
+        type=int,
+        default=3,
+        help="raw OUR_RAW_SOURCES observations required per elite-history "
+             "sequence",
     )
     parser.add_argument("--maximum-chain-state-age", type=float, default=90)
     parser.add_argument("--reserve-blocks", type=int, default=55)

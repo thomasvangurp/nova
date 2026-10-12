@@ -93,6 +93,15 @@ HF_REFRESH_WRITER = "hf_field_refresh"
 #: tools/migrate_hf_field_20x.py: imports master 20x disk passes into
 #: multipass_sum10_pass and relabels the hf_field_* means to legacy labels.
 HF20X_MIGRATE_WRITER = "migrate_hf_field_20x"
+#: /root/slave_multipass_writeback.py (slave box): same pinned scorer as
+#: multipass_all_rivals, writes multipass_sum10_pass via NDJSON ingested on
+#: master by tools/ingest_slave_multipass.py.
+SLAVE_MULTIPASS_WRITER = "slave_multipass_writeback"
+#: /root/replay_queue_writeback.py (slave box): epoch-independent replay of
+#: parents / provisional children / near-miss sequences, same pinned scorer;
+#: NDJSON ingested on master by tools/ingest_slave_multipass.py. Origin is the
+#: writer, never a new label.
+REPLAY_QUEUE_WRITER = "replay_queue_slave"
 HF20X_SOURCES = frozenset({"public_multipass_rivals", "hf_archive_top200",
                            "motif_variants_20x", "our_top50_20x"})
 
@@ -146,7 +155,8 @@ LABELS: dict[str, Label] = {label.score_kind: label for label in (
         field="hf_archive_full (field_rows + field_sha256 in provenance)", passes=1,
         sources=frozenset({"public_multipass_rivals"}),
         writers=frozenset({"multipass_all_rivals", "backfill_multipass_metrics",
-                           RELABEL_WRITER, HF20X_MIGRATE_WRITER, HF_REFRESH_WRITER}),
+                           RELABEL_WRITER, HF20X_MIGRATE_WRITER, HF_REFRESH_WRITER,
+                           SLAVE_MULTIPASS_WRITER, REPLAY_QUEUE_WRITER}),
         strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-09",
         epochs="25533-25534, 25593-25603 (backfilled from disk), 25613-25618 "
                "(relabelled, no metrics), 25619+ (native); 25598-25616 also "
@@ -158,33 +168,21 @@ LABELS: dict[str, Label] = {label.score_kind: label for label in (
               "Rows from migrate_hf_field_20x are the raw per-pass metrics of "
               "master's killed 20x hf_field_refresh runs (same scorer, "
               "validator-dual-sample-v1, read back from master disk); epoch = "
-              "the refresh run's epoch, cohort derived per sequence.",
-    ),
-    Label(
-        score_kind="slave_multipass_sum10_pass",
-        klass="raw_pass", formula="sum10",
-        scale="ONE fast-scorer pass, run on the slave box's idle GPUs "
-              "(ssh2.vast.ai), sum-of-10 dense rank-sum vs the full HF archive "
-              "field; same scale as multipass_sum10_pass (~8.5e4-2.1e5 per "
-              "pass); lower=better.",
-        field="hf_archive_full (field_rows + field_sha256 in provenance)", passes=1,
-        sources=frozenset({"slave_public_multipass_rivals"}),
-        writers=frozenset({"slave_multipass_writeback"}),
-        strict=True, typical_range=(5.0e4, 2.6e5), introduced="2026-10-11",
-        notes="Scored on the slave box with hf_field_refresh.py's unchanged "
-              "score_pass/sum_of_ten harness, over real sequences that reached "
-              "an epoch's qualified-for-publication shortlist "
-              "(checkpoints/qualified/uid*.json). Slave never opens "
-              "nanobody_mutations.sqlite: results are shipped to master as "
-              "NDJSON (tools/run_slave_multipass_epoch.sh) and inserted ONLY "
-              "by tools/ingest_slave_multipass.py running on master, via the "
-              "same update_observation_store() the live producer uses "
-              "(NOVA_LOCAL_SQLITE=1). A new label, not a reuse of "
-              "multipass_sum10_pass, because the registry keys a label to its "
-              "exact writer set (ARCHITECTURE_REDESIGN R3/P4) even when the "
-              "formula/field/scale match. `slave_public_multipass_rivals` was "
-              "a source placeholder referenced by hf_field_refresh.py "
-              "(0 rows, no writer) until this.",
+              "the refresh run's epoch, cohort derived per sequence. "
+              "Rows from slave_multipass_writeback are the same pinned scorer "
+              "and command line run on the slave box's GPUs (verified "
+              "2026-10-11: 49 sequences scored by both paths, all ten raw "
+              "metrics equal within noise); they used to carry their own "
+              "slave_multipass_sum10_pass label and were migrated here. The "
+              "writer, not the label, records which box produced a pass. Each "
+              "row's `field` provenance records what its stored `score` was "
+              "ranked against; readers recompute from metrics_json. Rows from "
+              "replay_queue_slave are the same pass for sequences that are "
+              "not (yet) leaderboard submissions -- priority parents, "
+              "provisional children, near-miss history: their `epoch` is "
+              "only the chain epoch when scored, and a fold belongs to "
+              "(sequence, target), so readers must count them regardless of "
+              "epoch.",
     ),
     Label(
         score_kind="legacy_multipass_category3_pass",

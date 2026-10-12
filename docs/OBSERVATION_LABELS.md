@@ -54,11 +54,11 @@ Enforced at write time by `mutation_network.update_observation_store` (`check_ob
 - scale: ONE fast-scorer pass, sum-of-10 dense rank-sum vs the full HF archive field (~61k rows on 2026-10-09); per pass ~8.5e4-2.1e5, epoch mean ~1.2e5; lower=better. The CURRENT multipass label.
 - field: hf_archive_full (field_rows + field_sha256 in provenance)
 - sources: `public_multipass_rivals`
-- writers: `backfill_multipass_metrics`, `hf_field_refresh`, `multipass_all_rivals`, `relabel_multipass_legacy`
+- writers: `backfill_multipass_metrics`, `hf_field_refresh`, `migrate_hf_field_20x`, `multipass_all_rivals`, `relabel_multipass_legacy`
 - trip-wire range: 50000 to 260000
-- epochs: 25533-25534, 25593-25603 (backfilled from disk), 25613-25618 (relabelled, no metrics), 25619+ (native)
+- epochs: 25533-25534, 25593-25603 (backfilled from disk), 25613-25618 (relabelled, no metrics), 25619+ (native); 25598-25616 also hold migrated master 20x passes (ids hf20x_pass:*)
 - introduced: 2026-10-09
-- notes: Rows written natively or by backfill_multipass_metrics carry raw metrics_json + field fingerprint. Rows relabelled by relabel_multipass_legacy (25613-25618) have no metrics and an unrecorded hf_archive snapshot; same formula and field type.
+- notes: Rows written natively or by backfill_multipass_metrics carry raw metrics_json + field fingerprint. Rows relabelled by relabel_multipass_legacy (25613-25618) have no metrics and an unrecorded hf_archive snapshot; same formula and field type. Rows from migrate_hf_field_20x are the raw per-pass metrics of master's killed 20x hf_field_refresh runs (same scorer, validator-dual-sample-v1, read back from master disk); epoch = the refresh run's epoch, cohort derived per sequence.
 
 ### `legacy_multipass_category3_pass`
 
@@ -84,27 +84,51 @@ Enforced at write time by `mutation_network.update_observation_store` (`check_ob
 - introduced: 2026-10-09 (relabel)
 - notes: Every multipass write before the category3 deploy at 2026-10-09 14:01:40Z. Verified: stored == algo2 recomputed from disk passes, rho=1.000 (25594, 25599, 25604, 25610).
 
+### `legacy_hf_field_algo2_20x_mean`
+
+- class: legacy (strict); formula: `algo2`; passes per value: 20
+- scale: ONE row per sequence: 20-pass MEAN algo2 vs the full HF archive + the scored batch; ~2.65e4-6.05e4; lower=better. NOT comparable to sum10 or to per-pass rows.
+- field: /root/P20809_nanobodies.csv snapshot at write time (unrecorded)
+- sources: `hf_archive_top200`, `motif_variants_20x`, `our_top50_20x`, `public_multipass_rivals`
+- writers: `migrate_hf_field_20x`
+- trip-wire range: 10000 to 70000
+- epochs: epoch NULL (refresh runs 25598-25615 and earlier imports)
+- introduced: 2026-10-10 (relabel)
+- notes: Was hf_field_20x_rank_sum: 3,772 rows (2,853 rival, 642 motif_variants_20x, 275 hf_archive_top200, 2 ours), no metrics_json. Verified: stored == algo2 recomputed from the 20 disk passes still on master for 2,114 rival rows (rho 0.999, median |diff| 1.1%) and 75 HF rows (algo2 rho 0.76, |diff| 2.5%; sum10 |diff| >190%). The other 1,583 rows have no raw passes anywhere: legacy only. The raw passes that survived were migrated to multipass_sum10_pass (hf20x_pass:* ids); provenance.raw_passes_migrated_to says so per row.
+
+### `legacy_hf_field_sum10_20x_mean`
+
+- class: legacy (strict); formula: `sum10`; passes per value: 20
+- scale: ONE row per sequence: 20-pass MEAN sum-of-10 vs the full HF archive + the scored batch; ~1.06e5-1.31e5; lower=better
+- field: /root/P20809_nanobodies.csv snapshot at write time (unrecorded)
+- sources: `our_top50_20x`
+- writers: `migrate_hf_field_20x`
+- trip-wire range: 50000 to 260000
+- epochs: epoch NULL (refresh run for 25616)
+- introduced: 2026-10-10 (relabel)
+- notes: Was hf_field_sum10_20x_rank_sum: 50 rows, our top-50 only (the rival batch was killed in pass 4 of 20, before any import). Verified: stored == sum10 recomputed from the 20 disk passes (rho 1.000). All 20 raw passes migrated to multipass_sum10_pass (cohort ours).
+
 ### `hf_field_20x_rank_sum`
 
-- class: legacy; formula: `algo2`; passes per value: 20
-- scale: 20-pass mean algo2 vs full HF archive; ~2.6e4-6.0e4
+- class: legacy (strict); formula: `algo2`; passes per value: 20
+- scale: CLOSED, 0 rows: relabelled to legacy_hf_field_algo2_20x_mean
 - field: hf_archive_full
 - sources: `hf_archive_top200`, `motif_variants_20x`, `our_top50_20x`, `public_multipass_rivals`
-- writers: `import_hf_field_20x`
+- writers: closed / unrecorded
 - trip-wire range: 10000 to 70000
 - introduced: 2026-10-08
-- notes: Closed in practice: superseded by hf_field_sum10_20x_rank_sum.
+- notes: Closed 2026-10-10. Never write it again.
 
 ### `hf_field_sum10_20x_rank_sum`
 
-- class: derived; formula: `sum10`; passes per value: 20
-- scale: 20-pass mean sum-of-10 vs full HF archive; ~1.0e5-1.4e5
+- class: legacy (strict); formula: `sum10`; passes per value: 20
+- scale: CLOSED, 0 rows: relabelled to legacy_hf_field_sum10_20x_mean
 - field: hf_archive_full
 - sources: `hf_archive_top200`, `our_top50_20x`, `public_multipass_rivals`
-- writers: `hf_field_refresh`
+- writers: closed / unrecorded
 - trip-wire range: 50000 to 260000
 - introduced: 2026-10-09
-- notes: Pipeline is off (P3); no consumer.
+- notes: Closed 2026-10-10. hf_field_refresh (off, P3) wrote it; a re-enabled refresh is now refused at write time. Its job is done by multipass_all_rivals' bounded top-up (R1).
 
 ## `public_multipass_rivals` history (2026-10-09 relabel)
 
