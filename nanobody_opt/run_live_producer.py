@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -352,9 +353,15 @@ def _chain_state(path: Path, maximum_age: float) -> dict[str, Any]:
     }
 
 
+_STAGED = threading.local()
+
+
 def _run(command: list[str]) -> None:
     print("+ " + " ".join(command), flush=True)
-    subprocess.run(command, check=True)
+    kwargs: dict[str, Any] = {}
+    if getattr(_STAGED, "nice", False):
+        kwargs["preexec_fn"] = lambda: os.nice(10)   # staged preparation yields to scoring
+    subprocess.run(command, check=True, **kwargs)
 
 
 def _prepare_epoch(
@@ -446,11 +453,136 @@ def _looks_exhausted(iteration_root: Path) -> bool:
     return (iteration_root / ("candidates.csv" + EXHAUSTED_SUFFIX)).is_file()
 
 
+#: (epoch, iteration) -> staged next-iteration preparation started during a race.
+_NEXT_PREP: dict[tuple[int, int], dict[str, Any]] = {}
+#: A staged preparation is not started within this margin of the closing window:
+#: if the next generation turned out to be the confirmation, the staged work
+#: would be wasted and must never delay it.
+OVERLAP_CLOSING_MARGIN_SECONDS = 600.0
+
+
+def _expected_race_seconds(producer_root: Path) -> float:
+    """One screen tranche's wall time, from this epoch's own timings."""
+    seconds = []
+    for path in producer_root.glob("iteration_[0-9][0-9]/race/timings.jsonl"):
+        try:
+            for line in path.read_text().splitlines():
+                row = json.loads(line)
+                if row.get("phase") == "screen_tranche":
+                    seconds.append(float(row.get("scoring_seconds", 0))
+                                   + float(row.get("bookkeeping_seconds", 0)))
+        except (OSError, ValueError):
+            continue
+    return max(seconds) if seconds else 520.0
+
+
+def _next_iteration_is_screening(args: argparse.Namespace, state: dict, producer_root: Path,
+                                 plan: dict, preparation_guard: float) -> bool:
+    """True when the iteration after the current race will still screen."""
+    remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
+    after_race = remaining - _expected_race_seconds(producer_root) / 12.0
+    closing_at = (_handoff_reserve(args) + plan["replication_reserve_blocks"]) * 12 + preparation_guard
+    return after_race * 12 > closing_at + OVERLAP_CLOSING_MARGIN_SECONDS
+
+
+def _start_next_prep(*, args: argparse.Namespace, state: dict, iteration: int) -> None:
+    epoch = int(state["epoch"])
+    key = (epoch, iteration + 1)
+    if key in _NEXT_PREP:
+        return
+    producer_root = args.runtime_root / "live" / f"epoch{epoch}" / "producer"
+    staging = producer_root / f"staging_iteration_{iteration + 1:02d}"
+    shutil.rmtree(staging, ignore_errors=True)
+    record: dict[str, Any] = {"staging": staging, "error": None, "started": time.monotonic()}
+
+    def work() -> None:
+        _STAGED.nice = True
+        try:
+            _run_iteration(args=args, state=state, iteration=iteration + 1,
+                           prepare_only=True, iteration_root_override=staging)
+        except BaseException as error:  # a failed staging only costs the overlap
+            record["error"] = f"{type(error).__name__}: {error}"
+        finally:
+            record["seconds"] = round(time.monotonic() - record["started"], 1)
+
+    thread = threading.Thread(target=work, name=f"prep-{epoch}-{iteration + 1}", daemon=True)
+    record["thread"] = thread
+    _NEXT_PREP[key] = record
+    thread.start()
+    print(f"PRODUCER_OVERLAP_PREP started epoch={epoch} iteration={iteration + 1}", flush=True)
+
+
+def _start_next_epoch_prep(*, args: argparse.Namespace, state: dict) -> None:
+    """During the closing confirmation, prepare the NEXT epoch's prescreen iteration.
+
+    The prescreen starts with ~7.5 minutes of CPU-only generation. Doing that
+    after confirmation leaves the GPUs idle through it; doing it while the
+    confirmation rounds run uses CPUs that are otherwise idle, so the prescreen's
+    GPU tranches can begin the moment confirmation ends. It reads the same
+    leaderboard-derived inputs the prescreen would (the freshest finished epoch's),
+    and they are refreshed once the real epoch starts, exactly as before.
+    """
+    epoch_length = int(state["epoch_length"])
+    following = int(state["epoch"]) + 1
+    producer_root = args.runtime_root / "live" / f"epoch{following}" / "producer"
+    producer_root.mkdir(parents=True, exist_ok=True)
+    retained = [int(path.name.split("_")[-1]) for path in producer_root.glob("iteration_[0-9]*")
+                if path.is_dir() and path.name.split("_")[-1].isdigit()]
+    iteration = max(retained, default=0) + 1
+    synthetic_path = producer_root / "prescreen_chain_state.json"
+    synthetic = {**state, "epoch": following, "block": following * epoch_length,
+                 "updated_at_unix": time.time()}
+    _atomic_json(synthetic_path, synthetic)
+    early = argparse.Namespace(**{**vars(args), "chain_state": synthetic_path,
+                                  "maximum_screen_tranches_override": args.prescreen_screen_tranches})
+    _start_next_prep(args=early, state=synthetic, iteration=iteration - 1)
+
+
+def _adopt_staged_prep(*, epoch: int, iteration: int, iteration_root: Path, wait: bool) -> bool:
+    """Move a finished staged preparation into place. Never raises."""
+    record = _NEXT_PREP.pop((epoch, iteration), None)
+    if record is None:
+        return False
+    staging: Path = record["staging"]
+    if not wait:
+        print(f"PRODUCER_OVERLAP_PREP discarded epoch={epoch} iteration={iteration} "
+              "(confirmation is due)", flush=True)
+        return False
+    record["thread"].join()
+    if (record["error"] or not staging.is_dir()
+            or (iteration_root / "producer_preparation.json").exists()
+            or not (staging / "producer_preparation.json").is_file()):
+        print(f"PRODUCER_OVERLAP_PREP unused epoch={epoch} iteration={iteration} "
+              f"error={record['error']} (falling back to a normal preparation)", flush=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
+    try:
+        iteration_root.mkdir(parents=True, exist_ok=True)
+        for item in sorted(staging.iterdir()):
+            if item.name == "scientific_configuration.json":
+                continue                      # the live run writes its own, immutably
+            target = iteration_root / item.name
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            os.replace(item, target)
+        shutil.rmtree(staging, ignore_errors=True)
+    except OSError as error:
+        print(f"PRODUCER_OVERLAP_PREP adoption failed {error}; preparing normally", flush=True)
+        for name in ("producer_preparation.json", "layer2_dedup.json", "layer2.json"):
+            (iteration_root / name).unlink(missing_ok=True)
+        return False
+    print(f"PRODUCER_OVERLAP_PREP adopted epoch={epoch} iteration={iteration} "
+          f"prepared_in={record.get('seconds')}s", flush=True)
+    return True
+
+
 def _run_iteration(
     *,
     args: argparse.Namespace,
     state: dict[str, Any],
     iteration: int,
+    prepare_only: bool = False,
+    iteration_root_override: Path | None = None,
 ) -> None:
     preparation_started = time.monotonic()
     epoch = int(state["epoch"])
@@ -461,7 +593,7 @@ def _run_iteration(
         expected_target=target,
     )
     producer_root = args.runtime_root / "live" / f"epoch{epoch}" / "producer"
-    iteration_root = producer_root / f"iteration_{iteration:02d}"
+    iteration_root = iteration_root_override or producer_root / f"iteration_{iteration:02d}"
     if (iteration_root / "race/complete.json").is_file():
         return
     from nanobody_opt.consensus_trial import write_immutable
@@ -490,7 +622,12 @@ def _run_iteration(
     confirmation_due = (
         remaining * 12 <= (_handoff_reserve(args) + plan["replication_reserve_blocks"]) * 12 + preparation_guard
     )
-    if args.budget_mode == "adaptive" and args.replication_rounds and confirmation_due:
+    adopted = False
+    if not prepare_only:
+        adopted = _adopt_staged_prep(epoch=epoch, iteration=iteration,
+                                     iteration_root=iteration_root, wait=not confirmation_due)
+    if (args.budget_mode == "adaptive" and args.replication_rounds and confirmation_due
+            and not prepare_only):
         retained = [p for p in sorted(producer_root.glob("iteration_[0-9][0-9]/layer2.json"))
                     if (d := json.loads(p.read_text())).get("candidates") or d.get("sequences")]
         exact = list(producer_root.glob("iteration_[0-9][0-9]/race/**/exact_all.json"))
@@ -499,6 +636,12 @@ def _run_iteration(
                 "epoch": epoch, "layer2_source": str(retained[-1].relative_to(producer_root)),
                 "reason": "remaining time is reserved for confirmation",
             })
+            if (getattr(args, "overlap_next_prep", False) and getattr(args, "prescreen_next_epoch", False)
+                    and not hasattr(args, "maximum_screen_tranches_override")):
+                try:
+                    _start_next_epoch_prep(args=args, state=state)
+                except Exception as error:  # the overlap must never cost the confirmation
+                    print(f"PRODUCER_OVERLAP_PREP next-epoch start failed: {type(error).__name__}: {error}", flush=True)
             _run_race(args=args, state=state, iteration=iteration,
                       config=config, archive=archive, target=target,
                       producer_root=producer_root, iteration_root=iteration_root,
@@ -799,7 +942,14 @@ def _run_iteration(
             "--input", str(layer2),
             "--output", str(layer2_dedup),
         ])
-    _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
+    if not adopted:        # an adopted staging keeps its real preparation time
+        _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
+    if prepare_only:
+        return
+    if (getattr(args, "overlap_next_prep", False)
+            and not hasattr(args, "maximum_screen_tranches_override")
+            and _next_iteration_is_screening(args, state, producer_root, plan, preparation_guard)):
+        _start_next_prep(args=args, state=state, iteration=iteration)
     _run_race(args=args, state=state, iteration=iteration,
               config=config, archive=archive, target=target,
               producer_root=producer_root, iteration_root=iteration_root,
@@ -1315,6 +1465,17 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="overlap tranche bookkeeping with the next tranche's GPU work",
+    )
+    parser.add_argument(
+        "--overlap-next-prep",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="while a screening iteration's tranche is scoring on the GPUs, "
+             "prepare the NEXT screening iteration's candidates on the CPUs "
+             "(into a staging directory), so the GPUs are not idle through "
+             "its ~4 min of generation. The next generation then sees "
+             "observations up to the previous iteration instead of the one "
+             "still scoring",
     )
     parser.add_argument(
         "--screen-predict-batch-size",

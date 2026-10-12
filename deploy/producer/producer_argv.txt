@@ -103,3 +103,4 @@ repair-only
 --budget-mode
 adaptive
 --prescreen-next-epoch
+--overlap-next-prep
