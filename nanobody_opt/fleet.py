@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from nanobody_opt.consensus_policy import CHANCE_FLOOR
+
 # The validator's ordering, and the only one a publisher may use.  Only rank one
 # pays and the validator draws once, so the quantity to maximize is the empirical
 # chance of beating the qualified field on a fresh draw, not the best average or
@@ -644,12 +646,12 @@ def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
         probability = float(value)
         if not math.isfinite(probability):
             raise SelectionOrderError("candidate win_probability is not finite")
-        if probability > 0.0 and seen_no_chance:
+        if probability >= CHANCE_FLOOR and seen_no_chance:
             raise SelectionOrderError(
                 "ranking puts a candidate that cannot win ahead of one that "
-                f"can ({probability} follows a zero win probability)"
+                f"can ({probability} follows a win probability below {CHANCE_FLOOR})"
             )
-        if probability <= 0.0 and not seen_no_chance:
+        if probability < CHANCE_FLOOR and not seen_no_chance:
             # Crossing into the group that cannot win. It is ordered by tier
             # among itself, but its first member may sit at any tier, so both
             # ladders start again here rather than comparing across the break.

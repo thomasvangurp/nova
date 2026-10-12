@@ -6,6 +6,19 @@ from typing import Any, Mapping, Sequence
 
 POLICIES = ("tier", "off")
 
+#: A candidate "has a chance" of winning only if its estimated win probability is
+#: at least this.  The ordering puts every candidate with a chance ahead of every
+#: candidate without one, and then orders by settled-deviation tier, so the floor
+#: decides who may be preferred for being clean.  It used to be ``> 0``, which a
+#: probability of 1e-45 satisfies: in epochs 25668-25670 thirteen clean tier-0
+#: tickets with essentially zero chance (77-92% below 1e-4) filled every slot
+#: ahead of tickets with 0.05-0.001, and the median published replay score fell
+#: from ~1,340 to ~1,500+ while a floor of 1e-3 would have kept it ~1,290-1,330.
+#: Retrospectively (31 epochs, independent replays) 1e-3 gains ~+0.05 expected
+#: wins per epoch.  fleet._assert_non_increasing_win_probability must use the SAME
+#: value, which is why it is defined here once.
+CHANCE_FLOOR = 1e-3
+
 
 def checked_policy(value: str) -> str:
     if value not in POLICIES:
@@ -19,7 +32,7 @@ def order_key(item: Mapping[str, Any], policy: str = "tier") -> tuple:
     if not math.isfinite(probability):
         raise ValueError("ranking probability must be finite")
     return (
-        0 if probability > 0.0 else 1,
+        0 if probability >= CHANCE_FLOOR else 1,
         int(item.get("settled_deviations", 0)) if policy == "tier" else 0,
         -probability,
     )
