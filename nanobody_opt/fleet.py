@@ -35,13 +35,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from nanobody_opt.consensus_policy import CHANCE_FLOOR
-
-# The validator's ordering, and the only one a publisher may use.  Only rank one
-# pays and the validator draws once, so the quantity to maximize is the empirical
-# chance of beating the qualified field on a fresh draw, not the best average or
-# the chance of crossing an arbitrary fixed threshold. See win_probability.py.
-REQUIRED_SELECTION_ORDER = "win-probability"
+# The validator's actual metric, and the only one a publisher may use: the
+# multipass field-rank (dense sum-of-10 rank-sum against the live last-10-epochs
+# field). The race's screen shortlist, strict winner and incumbent are all
+# re-pointed to this, so the publisher's per-UID draw must order by it too --
+# otherwise the 13 UIDs would pick from a different (win-probability/p90) order
+# than the race qualified. See rank_exact.rank_metrics_against_field.
+REQUIRED_SELECTION_ORDER = "multipass"
 
 # ss58 addresses are 47-49 characters.  A truncated key pasted from a dashboard
 # ("5EkCwcNTfxeN...") would match nothing, and "matched nothing" is the failure
@@ -104,7 +104,7 @@ class MissingHotkeyError(RuntimeError):
 
 
 class SelectionOrderError(ValueError):
-    """Raised when a ranking was not ordered by win probability."""
+    """Raised when a ranking was not ordered by multipass field-rank."""
 
 
 @dataclass(frozen=True)
@@ -479,7 +479,7 @@ def uncrowded(
         for sequence in candidates
         if _closest(sequence, crowd) < limit
     ]
-VALUE_KEY = "score_p90"
+VALUE_KEY = "multipass_rank"
 
 
 def _best_by_expected_score(
@@ -489,7 +489,7 @@ def _best_by_expected_score(
     limit: float,
     cdrs: Mapping[str, Mapping[str, str]],
 ) -> list[str]:
-    """Lowest predicted p90 rank sum first; lower is better, ties keep order."""
+    """Lowest multipass field-rank first; lower is better, ties keep order."""
     scored: list[tuple[float, int, str]] = []
     for position, candidate in enumerate(candidates):
         if not isinstance(candidate, Mapping):
@@ -529,7 +529,7 @@ def distinct_sequences(
     """Take the best ``count`` pairwise-distinct sequences from a ranking.
 
     The ranking file's own order is the selection; this only refuses to trust a
-    ranking that was not produced by the win-probability ordering, and drops
+    ranking that was not produced by the multipass ordering, and drops
     repeats so that k uids never carry the same molecule.
     """
     if count < 1:
@@ -539,12 +539,12 @@ def distinct_sequences(
         raise SelectionOrderError(
             f"ranking selection_order is {order!r}, not {required_order!r}; only "
             "rank one pays and the validator draws once, so candidates must be "
-            "ordered by the chance of a winning draw"
+            "ordered by multipass field-rank"
         )
     candidates = rankings.get("candidates")
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("ranking contains no candidates")
-    _assert_non_increasing_win_probability(candidates)
+    _assert_non_decreasing_multipass_rank(candidates)
     if not 0.0 <= value_share <= 1.0:
         raise ValueError("value_share is a fraction of the fleet")
     chosen: list[str] = []
@@ -609,73 +609,58 @@ def distinct_sequences(
     return chosen
 
 
-def _assert_non_increasing_win_probability(candidates: Sequence[Any]) -> None:
-    """Verify the file really is ordered best-first.
+#: Floating-point tolerance for the multipass ordering guard.  multipass_rank
+#: is a mean of dense rank-sums and can carry sub-ulp jitter from the per-pass
+#: averaging; treating that as an ordering violation was the failure mode that
+#: took the fleet down under the old win-probability assertion.  A genuine
+#: inversion is whole rank points, never below this epsilon.
+MULTIPASS_ORDER_TOLERANCE = 1e-6
 
-    Best-first is a two-level order, not a single column.  Settled-site
-    breakage is the coarse key -- a deviation costs ~14 rank points, while our
-    screened metrics agree with the validator at only r=0.19 -- and win
-    probability orders within a tier.  Asserting win probability alone was
-    correct until the tier became a sort key and then killed every publication
-    cycle with "0.0148 follows 0.0" while the fleet committed nothing; the
-    invariant has to describe the order the ranker actually writes, or it stops
-    being a check and becomes an outage.
 
-    Two things are still guaranteed and are what the callers below rely on:
-    candidates with a chance of winning all precede candidates with none, and
-    within one deviation tier the order is non-increasing by win probability.
+def _assert_non_decreasing_multipass_rank(candidates: Sequence[Any]) -> None:
+    """Verify the ranking file is ordered best-first by multipass_rank.
 
-    CHANCE IS THE OUTER KEY.  rank_exact.win_probability_order_key sorts on
-    ``(0 if has_chance else 1, deviation_tier)``, so every candidate that cannot
-    win goes last whatever its tier -- a clean tier-0 sequence with no chance
-    follows a tier-2 one that has one.  Checking tiers across that boundary
-    read a legitimate order as a regression and raised "tier 0 follows tier 2",
-    which is this function's own failure mode a second time: the check, not the
-    ranker, is what takes the fleet down.  The tier ladder therefore restarts
-    at the boundary, exactly as it restarts between tiers.
+    multipass_rank is the validator's actual metric (dense sum-of-10 rank-sum
+    against the live last-10-epochs field), and LOWER is better, so a
+    best-first file must be NON-DECREASING in multipass_rank.  The old
+    win-probability assertion was a silent no-op under multipass -- every
+    candidate carries win_probability=None -- so it certified files it had
+    never inspected.  This one reads the field the ranker actually sorts on
+    (``rank_exact._order_candidates`` with ``selection_order="multipass"``).
+
+    Lenient on purpose -- an over-strict ordering guard has twice taken the
+    fleet down by raising on an order the ranker legitimately writes.  Two
+    leniencies are deliberate: candidates missing multipass_rank (an older
+    ranking file, or a sequence with no field) are skipped rather than treated
+    as violations, and float differences at or below the tolerance are not
+    inversions.  It only raises on a genuine regression -- a later candidate
+    strictly better than an earlier one.
     """
     previous: float | None = None
-    previous_tier: int | None = None
-    seen_no_chance = False
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
-        value = candidate.get("win_probability")
+        value = candidate.get("multipass_rank")
         if value is None:
             continue
-        probability = float(value)
-        if not math.isfinite(probability):
-            raise SelectionOrderError("candidate win_probability is not finite")
-        if probability >= CHANCE_FLOOR and seen_no_chance:
+        rank = float(value)
+        if not math.isfinite(rank):
+            # inf is _mean_pass_rank's "no field" sentinel, not an order.
+            continue
+        if previous is not None and rank < previous - MULTIPASS_ORDER_TOLERANCE:
             raise SelectionOrderError(
-                "ranking puts a candidate that cannot win ahead of one that "
-                f"can ({probability} follows a win probability below {CHANCE_FLOOR})"
+                "ranking is not ordered best-first by multipass_rank "
+                f"({rank} follows {previous})"
             )
-        if probability < CHANCE_FLOOR and not seen_no_chance:
-            # Crossing into the group that cannot win. It is ordered by tier
-            # among itself, but its first member may sit at any tier, so both
-            # ladders start again here rather than comparing across the break.
-            seen_no_chance = True
-            previous = None
-            previous_tier = None
-        tier = candidate.get("settled_deviations")
-        tier = int(tier) if tier is not None else None
-        if tier is not None and previous_tier is not None:
-            if tier < previous_tier:
-                raise SelectionOrderError(
-                    "ranking is not ordered best-first by settled-site "
-                    f"deviations (tier {tier} follows tier {previous_tier})"
-                )
-            if tier > previous_tier:
-                # A new tier legitimately restarts the win-probability ladder.
-                previous = None
-        if previous is not None and probability > previous + 1e-12:
-            raise SelectionOrderError(
-                "ranking is not ordered best-first by win probability "
-                f"({probability} follows {previous})"
-            )
-        previous = probability
-        previous_tier = tier if tier is not None else previous_tier
+        previous = rank
+
+
+#: The validator reads a commitment only when start_block < commit_block <
+#: end - BLACKOUT_BLOCKS. A commitment scheduled at or after end - 16 lands in
+#: the blackout and is silently never read, so the reserve schedule must stop
+#: at end - 17. Shared definition with tools/pi_epoch_loop.py,
+#: tools/publish_current_nanobody.py and nanobody_opt/reconcile_commitments.py.
+BLACKOUT_BLOCKS = 16
 
 
 def commitment_blocks(
@@ -691,6 +676,11 @@ def commitment_blocks(
     ``max_regs_per_block`` is 1, so one extrinsic per block is the pace the chain
     accepts; the reserve is the only part of the epoch where scoring work has
     stopped, so commitments placed there are not overwritten by a later refresh.
+
+    The deadline is ``epoch_end - BLACKOUT_BLOCKS``, not ``epoch_end``: the
+    validator reads a commit only while ``commit_block < end - 16``, so the last
+    block this schedule may name is ``epoch_end - 17`` and anything later is
+    inside the blackout and never read.
     """
     if epoch_length < 1:
         raise ValueError("epoch length must be positive")
@@ -702,7 +692,8 @@ def commitment_blocks(
     first = epoch_end - reserve_blocks
     if block is not None and block >= first:
         first = block + 1
-    available = epoch_end - first
+    deadline = epoch_end - BLACKOUT_BLOCKS
+    available = max(0, deadline - first)
     if count > available:
         raise ValueError(
             f"{count} commitments do not fit in {available} block(s) left of the "

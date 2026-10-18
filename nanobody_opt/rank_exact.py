@@ -299,6 +299,7 @@ def _order_candidates(
         ranked = rank_by_fresh_draw_probability(
             ranked, workers=rank_workers,
             workers_minimum_candidates=rank_workers_minimum_candidates,
+            competitive_score_threshold=competitive_score_threshold,
         )
         ranked = consensus_policy.ordered_candidates(ranked, consensus_ranking_policy)
     elif selection_order == "p90":
@@ -309,6 +310,18 @@ def _order_candidates(
             -item["observation_competitive_rate"],
             -item["competitive_rate"],
             item["score_worst"],
+            item["sequence"],
+        ))
+    elif selection_order == "multipass":
+        # The validator's actual metric: dense sum-of-10 rank-sum against the
+        # current last-10-epochs field (rank_metrics_against_field), the same
+        # formula the dashboard and competitor_lane parent pool use. Do NOT
+        # lead with deviation_tier here: the consensus (few settled deviations)
+        # is the blocked basin that scores worst on multipass, so tier-first
+        # would surface it ahead of the diverse/admissible candidates.
+        ranked.sort(key=lambda item: (
+            item["multipass_rank"],
+            item["score_median"],
             item["sequence"],
         ))
     else:
@@ -502,6 +515,250 @@ def _historical_observations(database: Path, target: str,
     finally:
         connection.close()
     return found, added
+
+
+def _parse_fold_blob(blob: str) -> dict[str, float] | None:
+    """One metrics_json blob -> per-metric float values, or None if skipped.
+
+    The single validation the historical read applies to every fold: all ten
+    METRICS present and finite.  Shared by the full-read fallback and the
+    incremental-aggregate candidate read so the two can never disagree on
+    which folds count (Fix 2).
+    """
+    try:
+        metrics = json.loads(blob)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metrics, dict) or not set(METRICS).issubset(metrics):
+        return None
+    try:
+        values = {name: float(metrics[name]) for name in METRICS}
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in values.values()):
+        return None
+    return values
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _history_snapshot(database):
+    from nanobody_opt import mutation_network
+    try:
+        connection = mutation_network._connect(Path(database))
+    except Exception:
+        yield None
+        return
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _read_aggregate_stats(
+    database: Path, target: str, *, _connection=None,
+) -> tuple[dict[str, dict[str, tuple[float, float, int]]] | None, int | None]:
+    """Read the incremental per-(sequence, metric) aggregate (Fix 2).
+
+    Returns ``(stats, watermark)`` where ``stats`` maps sequence ->
+    {metric: (sum, sum_sq, count)} for the full pool, and ``watermark`` is the
+    aggregate's source ``MAX(exact_run_observations.rowid)``.  When the
+    aggregate is absent, unreadable, or stale (its watermark does not match the
+    live ``MAX(rowid)``), returns ``(None, watermark)`` so the caller falls back
+    to the exact old full-pool read rather than rank on out-of-date numbers.
+    """
+    from nanobody_opt import mutation_network
+    try:
+        connection = _connection if _connection is not None else mutation_network._connect(Path(database))
+    except Exception:
+        return None, None
+    try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
+        if not mutation_network._aggregate_ready(connection):
+            return None, None
+        rows = connection.execute(
+            f"SELECT sequence, metric, sum_value, sum_sq, count_value "
+            f"FROM exact_observation_aggregate WHERE target={p}",
+            (target,),
+        ).fetchall()
+        meta_row = connection.execute(
+            "SELECT value FROM exact_observation_meta WHERE key='source_max_rowid'"
+        ).fetchone()
+        live_row = connection.execute(
+            "SELECT MAX(rowid) FROM exact_run_observations"
+        ).fetchone()
+    except Exception:
+        return None, None
+    finally:
+        if _connection is None:
+            connection.close()
+    live_max = int(live_row[0]) if live_row and live_row[0] is not None else 0
+    watermark = int(meta_row[0]) if meta_row else None
+    if watermark is None or watermark != live_max:
+        return None, watermark
+    stats: dict[str, dict[str, tuple[float, float, int]]] = defaultdict(dict)
+    for sequence, metric, total, total_sq, count in rows:
+        key = str(sequence).strip().upper()
+        stats[key][str(metric)] = (float(total), float(total_sq), int(count))
+    return dict(stats), watermark
+
+
+def _candidate_observation_folds(
+    database: Path,
+    target: str,
+    sequences: set[str],
+    excluded_run_ids: set[str] | None, *, _connection=None,
+) -> dict[str, list[dict[str, float]]]:
+    """Full per-observation vectors for the small candidate set only (Fix 2).
+
+    Reads the same four-way join the old full-pool read used, restricted to
+    ``sequences`` so it json.loads a few hundred folds instead of 1.04M, and
+    applies the same excluded_run_ids filter and per-row validation.
+    """
+    from nanobody_opt import mutation_network
+    found: dict[str, list[dict[str, float]]] = defaultdict(list)
+    if not sequences:
+        return found
+    ordered = sorted(sequences)
+    try:
+        connection = _connection if _connection is not None else mutation_network._connect(Path(database))
+    except Exception:
+        return found
+    try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
+        placeholders = ",".join([p] * len(ordered))
+        rows = connection.execute(
+            "SELECT n.sequence, o.metrics_json, x.run_id "
+            "FROM observations o "
+            "JOIN nodes n ON n.id = o.node_id "
+            "JOIN exact_run_observations x "
+            "ON x.observation_id=o.observation_id AND x.target=n.target "
+            "JOIN exact_runs r ON r.target=x.target "
+            "AND r.run_id=x.run_id AND r.complete=1 "
+            f"WHERE n.target = {p} AND o.source='local_exact_raw' "
+            "AND o.metrics_json IS NOT NULL "
+            f"AND n.sequence IN ({placeholders})",
+            (target, *ordered),
+        )
+        excluded = excluded_run_ids or set()
+        for sequence, blob, run_id in rows:
+            if str(run_id or "") in excluded:
+                continue
+            values = _parse_fold_blob(blob)
+            if values is None:
+                continue
+            found[str(sequence)].append(values)
+    finally:
+        if _connection is None:
+            connection.close()
+    return found
+
+
+def _excluded_run_stats(
+    database: Path, target: str, excluded_run_ids: set[str], *, _connection=None,
+) -> dict[str, dict[str, tuple[float, float, int]]]:
+    """(sum, sum_sq, count) per (sequence, metric) for complete runs whose
+    ``run_id`` is in ``excluded_run_ids`` (the current epoch's runs already
+    read from the --exact files).  Subtracting these from the aggregate
+    reproduces the old excluded_run_ids filter for the shrinkage pool."""
+    from nanobody_opt import mutation_network
+    if not excluded_run_ids:
+        return {}
+    ordered = sorted(excluded_run_ids)
+    stats: dict[str, dict[str, tuple[float, float, int]]] = defaultdict(dict)
+    try:
+        connection = _connection if _connection is not None else mutation_network._connect(Path(database))
+    except Exception:
+        return {}
+    try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
+        placeholders = ",".join([p] * len(ordered))
+        rows = connection.execute(
+            "SELECT n.sequence, o.metrics_json "
+            "FROM observations o "
+            "JOIN nodes n ON n.id = o.node_id "
+            "JOIN exact_run_observations x "
+            "ON x.observation_id=o.observation_id AND x.target=n.target "
+            "JOIN exact_runs r ON r.target=x.target "
+            "AND r.run_id=x.run_id AND r.complete=1 "
+            f"WHERE n.target = {p} AND o.source='local_exact_raw' "
+            "AND o.metrics_json IS NOT NULL "
+            f"AND x.run_id IN ({placeholders})",
+            (target, *ordered),
+        )
+        for sequence, blob in rows:
+            values = _parse_fold_blob(blob)
+            if values is None:
+                continue
+            key = str(sequence).strip().upper()
+            for metric, value in values.items():
+                total, total_sq, count = stats[key].get(metric, (0.0, 0.0, 0))
+                stats[key][metric] = (
+                    total + value, total_sq + value * value, count + 1)
+    finally:
+        if _connection is None:
+            connection.close()
+    return dict(stats)
+
+
+def _folds_to_stats(
+    folds_by_sequence: dict[str, list[dict[str, float]]],
+) -> dict[str, dict[str, tuple[float, float, int]]]:
+    """(sum, sum_sq, count) per (sequence, metric) from full fold vectors."""
+    stats: dict[str, dict[str, tuple[float, float, int]]] = {}
+    for sequence, folds in folds_by_sequence.items():
+        key = str(sequence).strip().upper()
+        row: dict[str, tuple[float, float, int]] = {}
+        for fold in folds:
+            for metric, value in fold.items():
+                if isinstance(value, (int, float)):
+                    total, total_sq, count = row.get(metric, (0.0, 0.0, 0))
+                    row[metric] = (total + value, total_sq + value * value,
+                                   count + 1)
+        stats[key] = row
+    return stats
+
+
+def _add_stats(
+    target: dict[str, dict[str, tuple[float, float, int]]],
+    source: dict[str, dict[str, tuple[float, float, int]]],
+    sign: int,
+) -> None:
+    """In place: ``target[seq][metric] += sign * source[seq][metric]``."""
+    for sequence, metrics in source.items():
+        row = target.setdefault(sequence, {})
+        for metric, (total, total_sq, count) in metrics.items():
+            have = row.get(metric, (0.0, 0.0, 0))
+            row[metric] = (
+                have[0] + sign * total,
+                have[1] + sign * total_sq,
+                have[2] + sign * count,
+            )
+
+
+def _candidate_set(
+    pool_sequences: object,
+    only_sequences: set[str] | None,
+    historical_sequences: set[str],
+    excluded_sequences: set[str],
+) -> set[str]:
+    """Sequences in the pool that would survive _rank_candidate's filters.
+
+    Mirrors the three early-return filters in :func:`_rank_candidate` so the
+    candidate set (the only sequences that need full per-observation vectors)
+    is known before the expensive per-candidate read.
+    """
+    candidates: set[str] = set()
+    for sequence in pool_sequences:
+        normalized = str(sequence).strip().upper()
+        if only_sequences is not None and normalized not in only_sequences:
+            continue
+        if normalized in historical_sequences or normalized in excluded_sequences:
+            continue
+        candidates.add(normalized)
+    return candidates
 
 
 def _excluded_sequences(paths: list[Path]) -> set[str]:
@@ -698,6 +955,29 @@ def rank_metrics_against_field(
     return dict(zip(keys, total.tolist()))
 
 
+def _mean_pass_rank(
+    sequence: str, observations: list[dict[str, float]],
+    pooled_field: pd.DataFrame,
+) -> float:
+    """The validator's true multipass: rank EACH fold against the field, then
+    mean the per-pass rank-sums.
+
+    competitor_lane.multipass_scores / rescale_epoch rank each of a sequence's
+    ~10 passes and average; ranking a single pooled aggregate instead would be a
+    subtly different (lower-variance, but wrong) metric. A candidate with one
+    observation so far is a 1-pass estimate of that mean -- it is returned
+    as-is (the shrinkage/aggregation upstream already regularises the folds).
+    """
+    per_pass = {
+        f"{sequence}::{index}": fold
+        for index, fold in enumerate(observations)
+    }
+    ranks = rank_metrics_against_field(per_pass, pooled_field)
+    if not ranks:
+        return float("inf")
+    return float(np.mean(list(ranks.values())))
+
+
 #: Read-only context for _rank_candidate, set once per process: directly
 #: in the main process for a serial run, or via _init_rank_worker in each
 #: pool worker (a separate process, so it cannot see main()'s closure).
@@ -849,13 +1129,26 @@ def _rank_candidate(item):
         ),
         "observations": selections,
     }
+    multipass_rank = _mean_pass_rank(
+        normalized_sequence, observations, ctx["multipass_field"],
+    ) if ctx.get("multipass_field") is not None else float("inf")
     return {
         "sequence": normalized_sequence,
         "settled_deviations": settled_deviation_count(
             normalized_sequence, consensus
         ),
         "observation_count": len(observations),
-        "selection_score": score_p90,
+        # The selection value IS the multipass field-rank under the multipass
+        # selection order; score_p90 is only a robustness qualification guard,
+        # never the selection metric. Persisting the rank under selection_score
+        # keeps every downstream consumer (checkpoint, fleet) honest even when
+        # they read selection_score directly instead of multipass_rank.
+        "selection_score": (
+            multipass_rank
+            if args.selection_order == "multipass"
+            else score_p90
+        ),
+        "multipass_rank": multipass_rank,
         "competitive_score_threshold": args.competitive_score_threshold,
         "competitive_rate": competitive_rate,
         "observation_competitive_rate": observation_competitive_rate,
@@ -995,7 +1288,7 @@ def main() -> None:
     parser.add_argument("--leaderboard-api-root", default=LEADERBOARD_API_ROOT)
     parser.add_argument(
         "--selection-order",
-        choices=("competitive-rate", "p90", "win-probability"),
+        choices=("competitive-rate", "p90", "win-probability", "multipass"),
         default="competitive-rate",
         help="ordering after all fail-closed qualification gates pass",
     )
@@ -1230,46 +1523,125 @@ def main() -> None:
                     if isinstance(selection, dict):
                         sample_selections.setdefault(sequence, []).append(selection)
     observations_by_sequence = _observations(args.exact, args.target)
+    only_sequences = None
+    if args.only_sequences is not None:
+        only_sequences = {line.strip().upper() for line in
+                          args.only_sequences.read_text().splitlines() if line.strip()}
+    # pool_depths always maps every sequence in the merged pool to its fold
+    # count; it feeds the depth print and the observation-floor relaxation
+    # without materialising every fold (Fix 2).
+    pool_depths: dict[str, int] = {}
+    aggregate_stats: dict[str, dict[str, tuple[float, float, int]]] | None = None
     if args.observation_history is not None:
-        exact_run_ids = _exact_run_ids(args.exact)
-        history, added = _historical_observations(
-            args.observation_history,
-            args.target,
-            observations_by_sequence,
-            excluded_run_ids=exact_run_ids,
-        )
-        for sequence, folds in history.items():
-            observations_by_sequence[sequence].extend(folds)
-        depths = [len(v) for v in observations_by_sequence.values()] or [0]
-        print(
-            "EXACT_OBSERVATION_HISTORY merged=%d sequences=%d median_depth=%d"
-            % (added, len(observations_by_sequence),
-               sorted(depths)[len(depths) // 2]),
-            flush=True,
-        )
+        with _history_snapshot(args.observation_history) as history_connection:
+            exact_run_ids = _exact_run_ids(args.exact)
+            aggregate_stats, _watermark = _read_aggregate_stats(
+                args.observation_history, args.target, _connection=history_connection)
+            if aggregate_stats is not None:
+                # Fix 2 fast path.  Reconstruct the same merged pool the old
+                # full-pool read produced, but from the numeric aggregate; read the
+                # full per-observation vectors ONLY for the small candidate set.
+                if exact_run_ids:
+                    _add_stats(
+                        aggregate_stats,
+                        _excluded_run_stats(
+                            args.observation_history, args.target, exact_run_ids,
+                            _connection=history_connection),
+                        -1,
+                    )
+                _add_stats(aggregate_stats,
+                           _folds_to_stats(observations_by_sequence), 1)
+                pool_depths = {
+                    seq: max((count for _, _, count in metrics.values()), default=0)
+                    for seq, metrics in aggregate_stats.items()
+                }
+                current_folds = sum(len(v) for v in observations_by_sequence.values())
+                added = sum(pool_depths.values()) - current_folds
+                candidates = _candidate_set(
+                    pool_depths.keys(), only_sequences,
+                    historical_sequences, excluded_sequences,
+                )
+                candidate_folds = _candidate_observation_folds(
+                    args.observation_history, args.target,
+                    candidates, excluded_run_ids=exact_run_ids,
+                    _connection=history_connection,
+                )
+                for sequence in candidates:
+                    observations_by_sequence[sequence] = (
+                        observations_by_sequence.get(sequence, [])
+                        + candidate_folds.get(sequence, [])
+                    )
+                # Non-candidates keep an entry so _rank_candidate can apply its
+                # own filters and count the pool; their observations are never read
+                # (they return before touching them).
+                for sequence in pool_depths:
+                    observations_by_sequence.setdefault(sequence, [])
+                history_mode = "aggregate"
+            else:
+                # Aggregate absent or stale: fall back to the exact old full-pool
+                # read, preserving the previous behaviour verbatim.
+                history, added = _historical_observations(
+                    args.observation_history,
+                    args.target,
+                    observations_by_sequence,
+                    excluded_run_ids=exact_run_ids,
+                )
+                for sequence, folds in history.items():
+                    observations_by_sequence[sequence].extend(folds)
+                pool_depths = {
+                    seq: len(v) for seq, v in observations_by_sequence.items()
+                }
+                history_mode = "full_read"
+            depths = sorted(pool_depths.values())
+            print(
+                "EXACT_OBSERVATION_HISTORY merged=%d sequences=%d median_depth=%d mode=%s"
+                % (added, len(pool_depths),
+                   depths[len(depths) // 2] if depths else 0, history_mode),
+                flush=True,
+            )
+    else:
+        pool_depths = {
+            seq: len(v) for seq, v in observations_by_sequence.items()
+        }
     # Depth is uneven once history is merged -- a new proposal has one fold
     # and a previous finalist has scores of them -- so the means are not
     # equally trustworthy and must not be compared as if they were.
     shrunk_by_sequence: dict[str, dict[str, float]] = {}
     if args.metric_shrinkage:
         try:
-            shrunk_by_sequence = shrinkage.shrunk_metrics(
-                observations_by_sequence, tuple(METRICS))
+            if aggregate_stats is not None:
+                shrunk_by_sequence = shrinkage.shrunk_metrics_from_stats(
+                    aggregate_stats, tuple(METRICS))
+            else:
+                shrunk_by_sequence = shrinkage.shrunk_metrics(
+                    observations_by_sequence, tuple(METRICS))
         except (ValueError, statistics.StatisticsError):
             shrunk_by_sequence = {}
     ranked = []
-    only_sequences = None
-    if args.only_sequences is not None:
-        only_sequences = {line.strip().upper() for line in
-                          args.only_sequences.read_text().splitlines() if line.strip()}
     items = [
         (sequence, observations)
         for sequence, observations in observations_by_sequence.items()
     ]
+    # The multipass selection order needs the CURRENT last-10-epochs field,
+    # recomputed at selection time (the field shifts as epochs roll, so a
+    # cached field would rank against a stale cohort).
+    multipass_field = None
+    if args.selection_order == "multipass":
+        if args.observation_history is not None and args.before_epoch is not None:
+            multipass_field = pool_recent_fields(fetch_recent_fields_from_db(
+                args.observation_history, target=args.target,
+                before_epoch=args.before_epoch, count=10))
+            if multipass_field.empty:
+                raise SystemExit("multipass selection requires a non-empty field")
+        elif compiled_fields:
+            # Rare explicit-exact path has no DB history: fall back to the
+            # compiled (archive/API) field rather than hard-failing.
+            multipass_field = compiled_fields[0]
     global _RANK_CONTEXT
     _RANK_CONTEXT = {
         "args": args,
         "compiled_fields": compiled_fields,
+        "multipass_field": multipass_field,
         "shrunk_by_sequence": shrunk_by_sequence,
         "consensus": consensus,
         "sample_selections": sample_selections,
@@ -1311,8 +1683,8 @@ def main() -> None:
         # floor, and an epoch whose candidates all fail the gates publishes
         # nothing under either basis.
         deepest = max(
-            len(records)
-            for records in observations_by_sequence.values()
+            pool_depths.values(),
+            default=0,
         )
         observation_floor = max(1, min(observation_floor, deepest))
         if observation_floor < args.minimum_observations:
@@ -1348,26 +1720,29 @@ def main() -> None:
             print(f"CONSTRUCTION_CONSTRAINTS_SKIPPED kept={len(constrained)} of={len(ranked)} "
                   f"minimum={args.minimum_constrained_pool}", flush=True)
 
-    # Pose stability dominates strict runtime.  Order the cheap scalar evidence
-    # first, then walk that order.  Early stopping is used only where removing a
-    # pose failure provably cannot change the order; mixed-depth win-probability
-    # pools retain the exhaustive behavior and therefore the exact old result.
-    preliminary = _order_candidates(
-        ranked, args.selection_order, args.competitive_score_threshold,
-        args.consensus_ranking_policy,
-        rank_workers=args.rank_workers,
-        rank_workers_minimum_candidates=args.rank_workers_minimum_candidates,
-    )
-    pose_early_stop = (
-        pose_challenge is not None
-        and not args.paired_consensus_shortlist
-        and not args.diversity_reserve_count
-        and _pose_order_is_subset_invariant(
-            preliminary,
-            args.selection_order,
-            args.competitive_score_threshold,
+    # Pose stability dominates strict runtime.  The preliminary ordering is only
+    # needed when there is a pose challenge to walk; without one it is a discarded
+    # duplicate of the final ordering below, so it is skipped to avoid paying the
+    # exact fresh-draw tournament twice per invocation.
+    if pose_challenge is not None:
+        preliminary = _order_candidates(
+            ranked, args.selection_order, args.competitive_score_threshold,
+            args.consensus_ranking_policy,
+            rank_workers=args.rank_workers,
+            rank_workers_minimum_candidates=args.rank_workers_minimum_candidates,
         )
-    )
+        pose_early_stop = (
+            not args.paired_consensus_shortlist
+            and not args.diversity_reserve_count
+            and _pose_order_is_subset_invariant(
+                preliminary,
+                args.selection_order,
+                args.competitive_score_threshold,
+            )
+        )
+    else:
+        preliminary = ranked
+        pose_early_stop = False
     if pose_challenge is not None:
         pose_survivors: list[dict[str, Any]] = []
         target_chain = str(pose_challenge["structure_chain"])

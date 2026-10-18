@@ -140,17 +140,124 @@ def _ordered_candidate_records(items: list) -> list[dict[str, Any]]:
     return records
 
 
+def _already_scored(database: Path | None, target: str) -> dict[str, int]:
+    """{sequence: exact observation count} across ALL epochs.
+
+    The screen must not re-fold the bulk of already-scored candidates (the
+    cached fold answers them), but the count is kept so the soft-dedup below
+    can re-deepen the top candidates that still need passes. Reads the
+    mutation DB the same way the write side does; a failed read returns empty
+    (never blocks screening).
+    """
+    if not database:
+        return {}
+    try:
+        from nanobody_opt import mutation_network
+        connection = mutation_network._connect(Path(database))
+    except Exception:
+        return {}
+    try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
+        rows = connection.execute(
+            "SELECT n.sequence, COUNT(o.observation_id) FROM observations o "
+            "JOIN nodes n ON n.id = o.node_id "
+            f"WHERE n.target = {p} AND o.source IN "
+            "('live_exact_screen', 'local_exact_raw', 'live_exact_repeat') "
+            "GROUP BY n.sequence",
+            (target,),
+        ).fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
+    except Exception:
+        return {}
+    finally:
+        connection.close()
+
+
+#: Soft dedup: re-deepen the top this many already-scored candidates per screen
+#: (best multipass rank first, regardless of their current pass count).
+RESCORE_TOP = int(os.environ.get("NANOBODY_RESCORE_TOP", "1000"))
+
+
+def _multipass_rank_map(database: Path, target: str,
+                        before_epoch: int) -> dict[str, float]:
+    """{sequence: mean-of-passes multipass rank} for every exact-scored seq.
+
+    Same formula as rank_exact._mean_pass_rank: rank each stored fold against
+    the live last-10-epochs field, mean the per-pass rank-sums. A read failure
+    returns empty (never blocks screening).
+    """
+    try:
+        import numpy as np
+        from nanobody_opt.rank_exact import (
+            fetch_recent_fields_from_db, pool_recent_fields,
+            rank_metrics_against_field, METRICS,
+        )
+        field = pool_recent_fields(fetch_recent_fields_from_db(
+            database, target=target, before_epoch=before_epoch, count=10))
+        if field.empty:
+            return {}
+        from nanobody_opt import mutation_network
+        connection = mutation_network._connect(Path(database))
+        try:
+            p = "?" if mutation_network._is_local(connection) else "%s"
+            rows = connection.execute(
+                "SELECT n.sequence, o.metrics_json FROM observations o "
+                "JOIN nodes n ON n.id = o.node_id "
+                f"WHERE n.target = {p} AND o.source IN "
+                "('live_exact_screen', 'local_exact_raw', 'live_exact_repeat') "
+                "AND o.metrics_json IS NOT NULL AND o.metrics_json != ''",
+                (target,),
+            ).fetchall()
+        finally:
+            connection.close()
+    except Exception:
+        return {}
+    folds_by_seq: dict[str, list[dict[str, float]]] = {}
+    for seq, blob in rows:
+        try:
+            metrics = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(metrics, dict) and set(METRICS).issubset(metrics):
+            folds_by_seq.setdefault(seq, []).append(
+                {name: float(metrics[name]) for name in METRICS})
+    result: dict[str, float] = {}
+    for seq, folds in folds_by_seq.items():
+        per_pass = {f"{seq}::{i}": fold for i, fold in enumerate(folds)}
+        ranks = rank_metrics_against_field(per_pass, field)
+        if ranks:
+            result[seq] = float(np.mean(list(ranks.values())))
+    return result
+
+
 def _carry_pending_records(local: list[dict], pooled_root: Path | None,
-                          output_dir: Path, target: str) -> list[dict]:
-    """Keep unscored proposals; only a complete exact vector consumes a case."""
+                          output_dir: Path, target: str,
+                          database: Path | None = None,
+                          epoch: int | None = None) -> list[dict]:
+    """Keep unscored proposals, plus a top slice of already-scored to deepen.
+
+    Only a complete exact vector consumes a case, so the bulk of already-scored
+    candidates is skipped (GPU saving). But the top RESCORE_TOP already-scored
+    by MULTIPASS rank are re-screened -- regardless of their current pass count,
+    so a strong contender at 25 passes is still deepened while a weak 1-pass
+    sequence is not. Fresh (never-scored) candidates always screen.
+    """
     if pooled_root is None:
         return local
     from nanobody_opt.rank_exact import _observations
     records = list(local)
     for path in sorted(pooled_root.glob("iteration_[0-9][0-9]/layer2.json")):
         records.extend(_candidate_records(path))
+    records = _ordered_candidate_records(records)
     scored = set(_observations(_pooled_exact_paths([], pooled_root, output_dir), target))
-    return [r for r in _ordered_candidate_records(records) if r["sequence"] not in scored]
+    scored |= set(_already_scored(database, target))
+    fresh = [r for r in records if r["sequence"] not in scored]
+    already = [r for r in records if r["sequence"] in scored]
+    if database is not None and epoch is not None and already:
+        rank_map = _multipass_rank_map(database, target, epoch)
+        already.sort(key=lambda r: rank_map.get(r["sequence"], float("inf")))
+    deepen = already[:RESCORE_TOP]
+    return fresh + deepen
 
 
 def _candidate_sequences(path: Path, limit: int) -> list[str]:
@@ -314,11 +421,12 @@ def _initial_repeat_candidate(
     """
     unseen = [sequence for sequence in ranked_sequences if sequence not in repeated]
     for sequence in unseen:
-        score = float(
-            candidates[sequence].get(
-                "basin_adjusted_score", candidates[sequence]["score_p90"]
-            )
-        )
+        # basin_adjusted_score is now on the MULTIPASS field-rank scale (see
+        # _apply_basin_shrinkage), so it must never be compared against the p90
+        # ceiling this gate uses; read the raw one-shot p90 instead. This gate
+        # is only reached in single-stage, no-replication mode (two-stage mode
+        # skips it), but the scales must not be mixed if it is ever re-enabled.
+        score = float(candidates[sequence]["score_p90"])
         if score <= maximum_screen_p90:
             return sequence, False
     if allow_weak_fallback and unseen:
@@ -920,11 +1028,16 @@ def _rank_command(
         else:
             command.extend(["--api-field-count", "10"])
         command.extend(strict_rank_arguments(strict_gate_overrides))
-        # Strict qualification decides what actually gets published, so it is the
-        # one ordering that must target a winning draw rather than a good average.
-        command.extend(["--selection-order", "win-probability"])
+        # Strict qualification decides what actually gets published: align its
+        # winner on the validator's actual metric (multipass field-rank), not
+        # the p90/win-probability surrogate.
+        command.extend(["--selection-order", "multipass"])
     else:
-        command.extend(["--selection-order", "p90"])
+        # Screen ranking re-points onto the validator's actual metric: the
+        # multipass field-rank (dense sum-of-10 vs the last-10-epochs field),
+        # not p90 -- 25793 published the best-p90 candidate and it ranked
+        # horribly on multipass.
+        command.extend(["--selection-order", "multipass", "--before-epoch", str(epoch)])
         if minimum_selection_observations is not None:
             command.extend(["--minimum-observations", str(minimum_selection_observations)])
     if only_sequences is not None:
@@ -1275,6 +1388,7 @@ def _try_strict_rank(
     strict_gate_overrides: dict[str, Any] | None = None,
     selection_metric_policy: str = "plain",
     consensus_ranking_policy: str = "tier",
+    mutation_database: Path | None = None,
 ) -> bool:
     try:
         subprocess.run(
@@ -1290,6 +1404,7 @@ def _try_strict_rank(
                 strict_gate_overrides=strict_gate_overrides,
                 selection_metric_policy=selection_metric_policy,
                 consensus_ranking_policy=consensus_ranking_policy,
+                observation_history=mutation_database,
             ),
             check=True,
         )
@@ -1305,6 +1420,24 @@ def _ranking_by_sequence(path: Path) -> dict[str, dict[str, Any]]:
         for candidate in payload.get("candidates", [])
         if isinstance(candidate, dict) and candidate.get("sequence")
     }
+
+
+def _candidate_rank(item: dict[str, Any]) -> float:
+    """The selection metric (multipass field-rank), fail-loud if absent.
+
+    Every post-ranking step (basin shrinkage, replication shortlist) must use
+    this, never score_p90 directly -- the race now selects on multipass and a
+    p90 read here would silently re-order the pool back onto p90. A missing
+    multipass_rank in the live path means rank_exact did not emit it (e.g. an
+    empty multipass field), which must surface as an error, never a silent p90
+    fallback.
+    """
+    if "multipass_rank" not in item:
+        raise KeyError(
+            "multipass_rank missing from candidate; the live path must always "
+            "emit it (rank_exact --selection-order multipass). Refusing to "
+            "fall back to p90.")
+    return float(item["multipass_rank"])
 
 
 def _apply_basin_shrinkage(
@@ -1340,7 +1473,11 @@ def _apply_basin_shrinkage(
     for identifier, items in grouped.items():
         if len(items) < minimum_samples:
             continue
-        scores = sorted(float(item["score_p90"]) for item in items)
+        # Shrinkage operates on the SELECTION metric (multipass field-rank),
+        # not p90 -- the multipass order must survive into the replication
+        # shortlist, so a #1-multipass candidate outside the p90 top-150 still
+        # reaches replication. Fall back to p90 only for pre-multipass ranks.
+        scores = sorted(_candidate_rank(item) for item in items)
         midpoint = len(scores) // 2
         basin_median = (
             scores[midpoint]
@@ -1348,7 +1485,7 @@ def _apply_basin_shrinkage(
             else (scores[midpoint - 1] + scores[midpoint]) / 2
         )
         for item in items:
-            raw = float(item["score_p90"])
+            raw = _candidate_rank(item)
             adjusted = (
                 raw + prior_strength * basin_median
             ) / (1.0 + prior_strength)
@@ -1362,8 +1499,8 @@ def _apply_basin_shrinkage(
         str(candidate["sequence"]): index for index, candidate in enumerate(candidates)
     }
     candidates.sort(key=lambda item: (
-        float(item.get("basin_adjusted_score", item["score_p90"])),
-        float(item["score_p90"]),
+        float(item.get("basin_adjusted_score", _candidate_rank(item))),
+        _candidate_rank(item),
         original_order[str(item["sequence"])],
     ))
     payload["candidates"] = candidates
@@ -1380,9 +1517,10 @@ def _apply_basin_shrinkage(
     return payload
 
 
-def _best_confirmed_p90(path: Path) -> float:
+def _best_confirmed_rank(path: Path) -> float:
+    """Best (lowest) multipass field-rank among the qualified candidates."""
     scores = [
-        float(candidate["score_p90"])
+        _candidate_rank(candidate)
         for candidate in _ranking_by_sequence(path).values()
     ]
     if not scores:
@@ -1391,10 +1529,10 @@ def _best_confirmed_p90(path: Path) -> float:
 
 
 def _challenger_can_overtake(
-    *, screen_p90: float, incumbent_p90: float, margin: float
+    *, screen_rank: float, incumbent_rank: float, margin: float
 ) -> bool:
     """Reject only challengers that clearly trail the confirmed incumbent."""
-    return screen_p90 <= incumbent_p90 + margin
+    return screen_rank <= incumbent_rank + margin
 
 
 def _store_ranking(
@@ -1558,10 +1696,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--challenger-p90-margin",
         type=float,
-        default=20.0,
+        default=float(os.environ.get("NANOBODY_CHALLENGER_MARGIN", "150")),
         help=(
-            "repeat a challenger after qualification only when its one-shot "
-            "screen p90 is within this rank-sum margin of the incumbent"
+            "repeat a challenger after qualification only when its multipass "
+            "field-rank is within this margin of the incumbent. Re-derived for "
+            "the multipass scale (thin field ~200-900, rich ~800-2400): 150 is "
+            "~20% of the thin-field spread, mirroring the old p90 margin of 20 "
+            "on a ~78-106 p90 range. Env NANOBODY_CHALLENGER_MARGIN overrides."
         ),
     )
     parser.add_argument(
@@ -1815,7 +1956,8 @@ def main() -> None:
     candidate_records = _candidate_records(args.layer2)
     if args.carry_pending_candidates:
         candidate_records = _carry_pending_records(candidate_records, args.pooled_exact_root,
-                                                  args.output_dir, args.target)
+                                                  args.output_dir, args.target,
+                                                  args.mutation_database, args.epoch)
     # Confirmation can use the complete scored pool even when no pending case remains.
     if not candidate_records and args.replication_rounds:
         candidate_records = _candidate_records(args.layer2)
@@ -1843,7 +1985,7 @@ def main() -> None:
     repeated_finalists: list[str] = []
     skipped_finalists: list[str] = []
     deferred_weak_leaders: list[str] = []
-    incumbent_p90: float | None = None
+    incumbent_rank: float | None = None
     weak_initial_fallback_spent = False
     screened_parent_counts: Counter[str] = Counter()
     screened_source_counts: Counter[str] = Counter()
@@ -2061,7 +2203,7 @@ def main() -> None:
             repeated=set(repeated_finalists),
             maximum_screen_p90=args.maximum_initial_screen_p90,
             allow_weak_fallback=(
-                incumbent_p90 is None
+                incumbent_rank is None
                 and not weak_initial_fallback_spent
                 and screened >= weak_fallback_boundary
             ),
@@ -2075,7 +2217,7 @@ def main() -> None:
                 if leader not in deferred_weak_leaders:
                     deferred_weak_leaders.append(leader)
                 print(
-                    f"EXACT_INITIAL_REPEAT_DEFERRED screen_p90="
+                    f"EXACT_INITIAL_REPEAT_DEFERRED screen_rank="
                     f"{float(screen_candidates[leader]['score_p90']):.1f} "
                     f"ceiling={args.maximum_initial_screen_p90:.1f} "
                     f"screened={screened}/{weak_fallback_boundary}",
@@ -2086,21 +2228,17 @@ def main() -> None:
         if weak_fallback:
             weak_initial_fallback_spent = True
         finalist_index = len(repeated_finalists) + 1
-        screen_p90 = float(
-            screen_candidates[sequence].get(
-                "basin_adjusted_score", screen_candidates[sequence]["score_p90"]
-            )
-        )
-        if incumbent_p90 is not None and not _challenger_can_overtake(
-            screen_p90=screen_p90,
-            incumbent_p90=incumbent_p90,
+        screen_rank = _candidate_rank(screen_candidates[sequence])
+        if incumbent_rank is not None and not _challenger_can_overtake(
+            screen_rank=screen_rank,
+            incumbent_rank=incumbent_rank,
             margin=args.challenger_p90_margin,
         ):
             if sequence not in skipped_finalists:
                 skipped_finalists.append(sequence)
             print(
                 f"EXACT_CHALLENGER_SKIPPED index={finalist_index} "
-                f"screen_p90={screen_p90:.1f} incumbent_p90={incumbent_p90:.1f} "
+                f"screen_rank={screen_rank:.1f} incumbent_rank={incumbent_rank:.1f} "
                 f"margin={args.challenger_p90_margin:.1f}",
                 flush=True,
             )
@@ -2161,6 +2299,7 @@ def main() -> None:
             strict_gate_overrides=strict_gate_overrides,
             selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
             consensus_ranking_policy=args.consensus_ranking_policy,
+            mutation_database=args.mutation_database,
         ):
             _store_ranking(
                 args.mutation_database,
@@ -2171,10 +2310,10 @@ def main() -> None:
                 candidate_metadata=candidate_metadata,
             )
             qualified_outputs.append(output)
-            incumbent_p90 = _best_confirmed_p90(output)
+            incumbent_rank = _best_confirmed_rank(output)
             print(
                 f"EXACT_CANDIDATE_QUALIFIED index={finalist_index} "
-                f"incumbent_p90={incumbent_p90:.1f} output={output}",
+                f"incumbent_rank={incumbent_rank:.1f} output={output}",
                 flush=True,
             )
         else:
@@ -2362,6 +2501,7 @@ def main() -> None:
                 strict_gate_overrides=strict_gate_overrides,
                 selection_metric_policy=getattr(args, "selection_metric_policy", "plain"),
                 consensus_ranking_policy=args.consensus_ranking_policy,
+            mutation_database=args.mutation_database,
             ):
                 _store_ranking(
                     args.mutation_database,
@@ -2372,10 +2512,10 @@ def main() -> None:
                     candidate_metadata=candidate_metadata,
                 )
                 qualified_outputs.append(output)
-                incumbent_p90 = _best_confirmed_p90(output)
+                incumbent_rank = _best_confirmed_rank(output)
                 print(
                     "EXACT_REPLICATION_QUALIFIED "
-                    f"incumbent_p90={incumbent_p90:.1f} output={output}",
+                    f"incumbent_rank={incumbent_rank:.1f} output={output}",
                     flush=True,
                 )
             else:
@@ -2405,12 +2545,12 @@ def main() -> None:
             "skipped_finalists": skipped_finalists,
             "deferred_weak_leaders": deferred_weak_leaders,
             "challenger_p90_margin": args.challenger_p90_margin,
-            "maximum_initial_screen_p90": args.maximum_initial_screen_p90,
+            "maximum_initial_screen_rank": args.maximum_initial_screen_p90,
             "weak_initial_fallback_after": args.weak_initial_fallback_after,
             "weak_initial_fallback_spent": weak_initial_fallback_spent,
             "basin_shrinkage_strength": args.basin_shrinkage_strength,
             "minimum_basin_samples": args.minimum_basin_samples,
-            "incumbent_p90": incumbent_p90,
+            "incumbent_rank": incumbent_rank,
             "qualified_rankings": [str(path) for path in qualified_outputs],
             "exact_files": [str(path) for path in _exact_paths(args.output_dir)],
         },

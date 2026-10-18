@@ -119,20 +119,18 @@ def test_local_hotkeys_resolve_by_public_address_only(tmp_path):
     assert "NEVER READ" not in json.dumps(resolved)
 
 
-def _ranking(sequences, probabilities=None, order="win-probability"):
-    probabilities = probabilities or [
-        1.0 - index * 0.1 for index in range(len(sequences))
-    ]
+def _ranking(sequences, ranks=None, order="multipass"):
+    ranks = ranks or [float(index) for index in range(len(sequences))]
     return {
         "selection_order": order,
         "candidates": [
-            {"sequence": sequence, "win_probability": probability}
-            for sequence, probability in zip(sequences, probabilities)
+            {"sequence": sequence, "multipass_rank": rank}
+            for sequence, rank in zip(sequences, ranks)
         ],
     }
 
 
-def test_k_sequences_are_taken_in_win_probability_order():
+def test_k_sequences_are_taken_in_multipass_order():
     ranking = _ranking(["AAA", "CCC", "DDD", "EEE"])
 
     assert fleet.distinct_sequences(ranking, 3) == ["AAA", "CCC", "DDD"]
@@ -141,12 +139,12 @@ def test_k_sequences_are_taken_in_win_probability_order():
 def test_a_ranking_ordered_any_other_way_is_refused():
     ranking = _ranking(["AAA", "CCC"], order="p90")
 
-    with pytest.raises(fleet.SelectionOrderError, match="win-probability"):
+    with pytest.raises(fleet.SelectionOrderError, match="multipass"):
         fleet.distinct_sequences(ranking, 2)
 
 
-def test_a_misordered_win_probability_file_is_refused():
-    ranking = _ranking(["AAA", "CCC", "DDD"], probabilities=[0.4, 0.9, 0.2])
+def test_a_misordered_multipass_file_is_refused():
+    ranking = _ranking(["AAA", "CCC", "DDD"], ranks=[2.0, 0.0, 1.0])
 
     with pytest.raises(fleet.SelectionOrderError, match="not ordered"):
         fleet.distinct_sequences(ranking, 3)
@@ -154,7 +152,7 @@ def test_a_misordered_win_probability_file_is_refused():
 
 def test_repeated_sequences_are_dropped_because_the_validator_dedupes():
     ranking = _ranking(
-        ["AAA", "aaa", "CCC"], probabilities=[0.9, 0.9, 0.5]
+        ["AAA", "aaa", "CCC"], ranks=[0.0, 0.0, 1.0]
     )
 
     assert fleet.distinct_sequences(ranking, 3) == ["AAA", "CCC"]
@@ -304,12 +302,12 @@ def test_the_fleet_fingerprint_changes_when_the_uid_set_changes():
 
 
 def _pool(entries):
-    """entries: (sequence, win_probability, score_p90) in win-probability order."""
+    """entries: (sequence, multipass_rank) in multipass (best-first) order."""
     return {
         "selection_order": fleet.REQUIRED_SELECTION_ORDER,
         "candidates": [
-            {"sequence": s, "win_probability": w, "score_p90": p}
-            for s, w, p in entries
+            {"sequence": s, "multipass_rank": r}
+            for s, r in entries
         ],
     }
 
@@ -318,42 +316,42 @@ def test_the_value_share_knob_buys_expected_score_when_asked():
     """Off by default -- variance seeking is the right objective -- but the
     knob must work, so an estimator that goes wrong can be sidestepped."""
     pool = _pool([
-        ("AAA", 0.30, 200.0),
-        ("BBB", 0.20, 190.0),
-        ("CCC", 0.10, 100.0),   # best expected score, worst draw odds
-        ("DDD", 0.05, 110.0),
+        ("CCC", 100.0),   # best multipass rank
+        ("DDD", 110.0),
+        ("BBB", 190.0),
+        ("AAA", 200.0),
     ])
     chosen = fleet.distinct_sequences(pool, 4, value_share=0.5)
     assert set(chosen) == {"AAA", "BBB", "CCC", "DDD"}
-    # The two best expected scores are picked first, then the tail seekers.
+    # The two best multipass ranks are the value half, picked first.
     assert chosen[:2] == ["CCC", "DDD"]
 
 
 def test_the_lead_ticket_is_chosen_as_it_was_in_our_best_epoch():
-    """Epoch 25096 tied the winner at 43 under pure win-probability order.
+    """Epoch 25096 tied the winner at 43 under the multipass field-rank.
     Every selection change after it coincided with worse results, so the first
     pick is frozen there until several epochs of a fixed configuration say
     otherwise. Changes affecting only slots two onward are kept."""
     assert fleet.DEFAULT_VALUE_SHARE == 0.0
-    pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
+    pool = _pool([("BBB", 100.0), ("AAA", 200.0)])
     assert set(fleet.distinct_sequences(pool, 2)) == {"AAA", "BBB"}
 
 
-def test_a_zero_value_share_is_pure_win_probability_order():
-    pool = _pool([("AAA", 0.3, 200.0), ("BBB", 0.2, 100.0)])
-    assert fleet.distinct_sequences(pool, 2, value_share=0.0) == ["AAA", "BBB"]
+def test_a_zero_value_share_is_pure_multipass_order():
+    pool = _pool([("BBB", 100.0), ("AAA", 200.0)])
+    assert fleet.distinct_sequences(pool, 2, value_share=0.0) == ["BBB", "AAA"]
 
 
 def test_the_fleet_never_repeats_a_sequence_across_the_two_halves():
-    """A molecule that is both the best expected score and the best draw must
+    """A molecule that is both the best expected rank and the best draw must
     not consume two uids: the validator scores one sequence once."""
-    pool = _pool([("AAA", 0.9, 100.0), ("BBB", 0.2, 200.0), ("CCC", 0.1, 300.0)])
+    pool = _pool([("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0)])
     chosen = fleet.distinct_sequences(pool, 3, value_share=0.5)
     assert len(chosen) == len(set(chosen)) == 3
 
 
 def test_value_share_must_be_a_fraction():
-    pool = _pool([("AAA", 0.3, 200.0)])
+    pool = _pool([("AAA", 200.0)])
     with pytest.raises(ValueError, match="fraction"):
         fleet.distinct_sequences(pool, 1, value_share=1.5)
 
@@ -370,7 +368,7 @@ def _variant(base, swaps):
 
 
 def test_a_near_duplicate_is_kept_over_a_weaker_separated_candidate():
-    """A one-residue neighbour is a second draw, so win probability decides.
+    """A one-residue neighbour is a second draw, so multipass rank decides.
 
     The old reading of epochs 25093-25095 -- dropped uids sat at 0.9685-0.9843
     identity to a uid that scored -- inferred causation that is not there.
@@ -381,8 +379,8 @@ def test_a_near_duplicate_is_kept_over_a_weaker_separated_candidate():
     """
     twin = _variant(REAL, [(2, "M")])          # one residue apart
     far = _variant(REAL, [(i, "G") for i in range(30, 50)])
-    # The twin outranks the separated candidate on win probability.
-    pool = _pool([(REAL, 0.30, 100.0), (twin, 0.29, 101.0), (far, 0.10, 150.0)])
+    # The twin outranks the separated candidate on multipass rank.
+    pool = _pool([(REAL, 100.0), (twin, 101.0), (far, 150.0)])
 
     chosen = fleet.distinct_sequences(pool, 2)
 
@@ -399,7 +397,7 @@ def test_an_exact_repeat_is_the_only_wasted_ticket():
     at 0.98-0.999 differ by a median of 45.5 rank-sum. So a repeat buys nothing
     and a neighbour buys a draw.
     """
-    repeated = [(REAL, 0.30, 100.0), (REAL, 0.29, 101.0)]
+    repeated = [(REAL, 100.0), (REAL, 101.0)]
     assert len(fleet.distinct_sequences(_pool(repeated), 2)) == 1
 
 
@@ -422,7 +420,7 @@ def test_a_candidate_the_field_is_sitting_on_is_avoided():
     """
     contested = _variant(REAL, [(2, "M")])
     clear = _variant(REAL, [(i, "G") for i in range(30, 50)])
-    pool = _pool([(contested, 0.30, 100.0), (clear, 0.10, 150.0)])
+    pool = _pool([(contested, 100.0), (clear, 150.0)])
 
     chosen = fleet.distinct_sequences(pool, 1, crowd=[REAL])
 
@@ -432,14 +430,14 @@ def test_a_candidate_the_field_is_sitting_on_is_avoided():
 def test_crowding_does_not_force_an_exact_repeat():
     """Contested beats nothing, and neighbours are still separate draws."""
     contested = [_variant(REAL, [(2, aa)]) for aa in "MVQ"]
-    pool = _pool([(s, 0.3 - i * 0.01, 100.0 + i) for i, s in enumerate(contested)])
+    pool = _pool([(s, 100.0 + i) for i, s in enumerate(contested)])
     chosen = fleet.distinct_sequences(pool, 2, crowd=[REAL])
     assert len(chosen) == len(set(chosen)), "an exact repeat is never committed"
 
 
 def test_no_crowd_is_the_previous_behaviour():
     far = _variant(REAL, [(i, "G") for i in range(30, 50)])
-    pool = _pool([(REAL, 0.3, 100.0), (far, 0.2, 110.0)])
+    pool = _pool([(REAL, 100.0), (far, 110.0)])
     assert fleet.distinct_sequences(pool, 2) == fleet.distinct_sequences(
         pool, 2, crowd=[]
     )
@@ -454,7 +452,7 @@ def test_near_identical_siblings_are_all_committed():
     all carry a score on BOTH tickets, 0.9843 pairs included, and the validator
     folds per distinct sequence string. Five siblings are five lottery tickets.
     """
-    twins = [(_variant(REAL, [(2, aa)]), 0.3 - i * 0.01, 100.0 + i)
+    twins = [(_variant(REAL, [(2, aa)]), 100.0 + i)
              for i, aa in enumerate("MVQTA")]
     chosen = fleet.distinct_sequences(_pool(twins), 5)
     assert len(chosen) == 5, "near-identical siblings must all be committed"
@@ -493,7 +491,7 @@ def test_selection_refuses_a_second_ticket_of_the_same_clonotype(monkeypatch):
     first = _variant(REAL, [(30, "K")])
     twin = _variant(REAL, [(i, "K") for i in range(30, 38)])   # far by identity
     far = _variant(REAL, [(i, "G") for i in range(30, 50)])
-    pool = _pool([(first, 0.30, 100.0), (twin, 0.29, 101.0), (far, 0.10, 150.0)])
+    pool = _pool([(first, 100.0), (twin, 101.0), (far, 150.0)])
     cdrs = {first: CDR_A, twin: CDR_B, far: CDR_FAR}
 
     chosen = fleet.distinct_sequences(pool, 3, cdrs=cdrs)
@@ -508,50 +506,56 @@ def test_an_unannotated_candidate_falls_back_to_identity_alone():
     clonotype check, nor block the fleet."""
     a = _variant(REAL, [(30, "K")])
     b = _variant(REAL, [(i, "G") for i in range(30, 50)])
-    pool = _pool([(a, 0.3, 100.0), (b, 0.2, 110.0)])
+    pool = _pool([(a, 100.0), (b, 110.0)])
     assert len(fleet.distinct_sequences(pool, 2, cdrs={})) == 2
 
 
-def test_a_new_deviation_tier_restarts_the_win_probability_ladder():
-    """The order the ranker writes is two-level, and the invariant must say so.
+def test_a_monotonic_multipass_file_is_accepted():
+    """The order the ranker writes is multipass_rank ascending (best-first).
 
-    rank_exact sorts by settled-deviation tier and keeps win probability
-    ordered inside each tier.  Asserting win probability alone raised
-    "ranking is not ordered best-first by win probability (0.0148 follows 0.0)"
-    on every publication cycle, and the fleet committed nothing at all.
+    Lower multipass_rank is better, so a best-first file is NON-DECREASING.
+    The old win-probability assertion was a silent no-op under multipass --
+    every candidate carries win_probability=None -- so it certified files it
+    had never inspected. This guard reads the field the ranker sorts on.
     """
-    fleet._assert_non_increasing_win_probability([
-        {"win_probability": 0.30, "settled_deviations": 0},
-        {"win_probability": 0.10, "settled_deviations": 0},
-        {"win_probability": 0.25, "settled_deviations": 1},
-        {"win_probability": 0.05, "settled_deviations": 1},
+    fleet._assert_non_decreasing_multipass_rank([
+        {"multipass_rank": 217.5, "settled_deviations": 3},
+        {"multipass_rank": 218.0, "settled_deviations": 0},
+        {"multipass_rank": 900.0, "settled_deviations": 1},
     ])
 
 
-def test_win_probability_must_still_fall_inside_one_tier():
-    with pytest.raises(fleet.SelectionOrderError, match="win probability"):
-        fleet._assert_non_increasing_win_probability([
-            {"win_probability": 0.10, "settled_deviations": 0},
-            {"win_probability": 0.30, "settled_deviations": 0},
+def test_a_multipass_rank_regression_is_refused():
+    with pytest.raises(fleet.SelectionOrderError, match="multipass_rank"):
+        fleet._assert_non_decreasing_multipass_rank([
+            {"multipass_rank": 100.0},
+            {"multipass_rank": 50.0},
         ])
 
 
-def test_tiers_must_not_go_backwards():
-    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
-        fleet._assert_non_increasing_win_probability([
-            {"win_probability": 0.30, "settled_deviations": 2},
-            {"win_probability": 0.20, "settled_deviations": 0},
-        ])
+def test_missing_multipass_rank_is_skipped_not_a_violation():
+    """Older ranking files, or a sequence with no field, carry no
+    multipass_rank. The guard must not turn those into outages."""
+    fleet._assert_non_decreasing_multipass_rank([
+        {"multipass_rank": 100.0},
+        {"sequence": "NO_FIELD"},
+        {"multipass_rank": 101.0},
+    ])
 
 
-def test_a_candidate_that_cannot_win_never_precedes_one_that_can():
-    """The deviation rule chooses between molecules that can win.
+def test_float_ties_are_not_inversions():
+    """multipass_rank is a mean of dense rank-sums; sub-ulp jitter from the
+    per-pass averaging must not read as an ordering regression."""
+    fleet._assert_non_decreasing_multipass_rank([
+        {"multipass_rank": 100.0},
+        {"multipass_rank": 100.0},
+        {"multipass_rank": 100.0000005},
+    ])
 
-    A clean molecule with no chance of a winning draw outranking a molecule
-    with one would spend a uid on a certainty of zero.
-    """
-    with pytest.raises(fleet.SelectionOrderError, match="cannot win"):
-        fleet._assert_non_increasing_win_probability([
-            {"win_probability": 0.0, "settled_deviations": 0},
-            {"win_probability": 0.0148, "settled_deviations": 1},
-        ])
+
+def test_a_non_finite_multipass_rank_is_skipped():
+    """inf is _mean_pass_rank's 'no field' sentinel, not an order."""
+    fleet._assert_non_decreasing_multipass_rank([
+        {"multipass_rank": float("inf")},
+        {"multipass_rank": 100.0},
+    ])

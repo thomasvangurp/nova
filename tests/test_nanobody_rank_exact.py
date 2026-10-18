@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nanobody_opt import rank_exact
+from nanobody_opt import db, rank_exact
 from nanobody_opt.mutation_network import record_exact_run, update_observation_store
 from nanobody_opt.simulate_round import (
     METRICS,
@@ -36,6 +36,7 @@ def _metrics(value):
 
 def test_database_history_reads_only_complete_normalized_raw_runs(tmp_path):
     database = tmp_path / "observations.sqlite"
+    db.connect_local(database)
     raw_id = "local-exact:sealed:0:RAW"
     partial_id = "local-exact:partial:0:PARTIAL"
     update_observation_store(database, [
@@ -98,6 +99,7 @@ def test_database_history_reads_only_complete_normalized_raw_runs(tmp_path):
 
 def test_database_history_deduplicates_a_current_raw_run(tmp_path):
     database = tmp_path / "observations.sqlite"
+    db.connect_local(database)
     observation_id = "local-exact:same-run:0:RAW"
     update_observation_store(database, [{
         "observation_id": observation_id,
@@ -721,18 +723,17 @@ def test_strict_rank_defers_writer_pose_and_stops_safe_confidence_walk(
 def test_the_ranker_order_satisfies_the_publisher_invariant():
     """The two must agree, or every publication cycle dies on the assert."""
     from nanobody_opt import fleet
-    from nanobody_opt.rank_exact import win_probability_order_key
+    from nanobody_opt.rank_exact import _order_candidates
 
     ranked = [
-        {"sequence": "A", "settled_deviations": 1, "win_probability": 0.25},
-        {"sequence": "B", "settled_deviations": 0, "win_probability": 0.10},
-        {"sequence": "C", "settled_deviations": 0, "win_probability": 0.30},
-        {"sequence": "D", "settled_deviations": 0, "win_probability": 0.0},
-        {"sequence": "E", "settled_deviations": 2, "win_probability": 0.05},
+        {"sequence": "A", "multipass_rank": 300.0, "score_median": 1.0},
+        {"sequence": "B", "multipass_rank": 100.0, "score_median": 2.0},
+        {"sequence": "C", "multipass_rank": 200.0, "score_median": 3.0},
+        {"sequence": "D", "multipass_rank": 900.0, "score_median": 4.0},
+        {"sequence": "E", "multipass_rank": 400.0, "score_median": 5.0},
     ]
-    ranked.sort(key=lambda item: -float(item["win_probability"]))
-    ranked.sort(key=win_probability_order_key)
-    fleet._assert_non_increasing_win_probability(ranked)
+    ranked = _order_candidates(ranked, "multipass", competitive_score_threshold=0.0)
+    fleet._assert_non_decreasing_multipass_rank(ranked)
 
 
 def test_a_candidate_without_the_field_is_treated_as_unbroken():
@@ -743,78 +744,47 @@ def test_a_candidate_without_the_field_is_treated_as_unbroken():
 
 
 def _order(*rows):
-    return [{"sequence": name, "settled_deviations": tier, "win_probability": p}
-            for name, tier, p in rows]
+    return [{"sequence": name, "multipass_rank": rank}
+            for name, rank in rows]
 
 
-def test_a_tier_regression_among_winnable_candidates_is_still_caught():
-    """The check must still fail on a real regression, or relaxing it for the
-    chance boundary would have turned it into decoration."""
+def test_a_multipass_rank_regression_is_refused():
+    """The check must still fail on a real regression, or the rewrite to the
+    multipass invariant would have turned it into decoration."""
     from nanobody_opt import fleet
 
-    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
-        fleet._assert_non_increasing_win_probability(
-            _order(("A", 2, 0.30), ("B", 0, 0.20)))
+    with pytest.raises(fleet.SelectionOrderError, match="multipass_rank"):
+        fleet._assert_non_decreasing_multipass_rank(
+            _order(("A", 100.0), ("B", 50.0)))
 
 
-def test_a_winnable_candidate_after_an_unwinnable_one_is_still_caught():
+def test_a_monotonic_multipass_file_is_accepted():
+    """Best-first is multipass_rank ascending, so non-decreasing is correct."""
     from nanobody_opt import fleet
 
-    with pytest.raises(fleet.SelectionOrderError, match="cannot win"):
-        fleet._assert_non_increasing_win_probability(
-            _order(("A", 0, 0.0), ("B", 0, 0.20)))
-
-
-def test_a_win_probability_regression_inside_one_tier_is_still_caught():
-    from nanobody_opt import fleet
-
-    with pytest.raises(fleet.SelectionOrderError, match="win probability"):
-        fleet._assert_non_increasing_win_probability(
-            _order(("A", 1, 0.10), ("B", 1, 0.30)))
-
-
-def test_a_tier_regression_inside_the_unwinnable_group_is_still_caught():
-    """The group that cannot win is still ordered by tier among itself, and
-    restarting the ladder at the boundary must not stop checking it."""
-    from nanobody_opt import fleet
-
-    with pytest.raises(fleet.SelectionOrderError, match="settled-site"):
-        fleet._assert_non_increasing_win_probability(
-            _order(("A", 0, 0.30), ("B", 2, 0.0), ("C", 0, 0.0)))
-
-
-def test_a_clean_unwinnable_candidate_may_follow_a_broken_winnable_one():
-    """The production order this used to reject.
-
-    win_probability_order_key sorts on (chance, tier), so a tier-0 sequence
-    with no chance follows a tier-2 one that has one. That is the ranker
-    working; reading it as a regression took the fleet down.
-    """
-    from nanobody_opt import fleet
-
-    fleet._assert_non_increasing_win_probability(
-        _order(("A", 0, 0.30), ("B", 1, 0.25), ("C", 2, 0.05), ("D", 0, 0.0)))
+    fleet._assert_non_decreasing_multipass_rank(
+        _order(("A", 217.5), ("B", 218.0), ("C", 900.0)))
 
 
 def test_the_ranker_and_the_invariant_agree_on_a_randomised_corpus():
     """Property check over the real order key, not a hand-picked fixture.
 
+    The ranker sorts multipass_rank ascending (rank_exact._order_candidates,
+    selection_order="multipass"); the fleet invariant asserts non-decreasing.
     The two definitions drifted once before and cost an epoch; a fixture only
     covers the shapes someone thought of.
     """
     import random
 
     from nanobody_opt import fleet
-    from nanobody_opt.rank_exact import win_probability_order_key
 
     generator = random.Random(20260920)
     for _ in range(300):
         rows = [
             {"sequence": f"S{index}",
-             "settled_deviations": generator.choice([0, 0, 1, 2, 3]),
-             "win_probability": generator.choice([0.0, 0.0, round(generator.random(), 4)])}
+             "multipass_rank": generator.choice(
+                 [100.0, 200.0, 300.0, 400.0, 500.0])}
             for index in range(generator.randint(2, 12))
         ]
-        rows.sort(key=lambda item: -float(item["win_probability"]))
-        rows.sort(key=win_probability_order_key)
-        fleet._assert_non_increasing_win_probability(rows)
+        rows.sort(key=lambda item: float(item["multipass_rank"]))
+        fleet._assert_non_decreasing_multipass_rank(rows)

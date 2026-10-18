@@ -156,8 +156,8 @@ def test_the_publisher_source_holds_no_threshold_of_its_own():
         assert stale not in source, f"a hardcoded gate value {stale} is back"
 
 
-def test_the_shortlist_is_ordered_by_win_probability():
-    assert SELECTION_ORDER == "win-probability"
+def test_the_shortlist_is_ordered_by_multipass():
+    assert SELECTION_ORDER == "multipass"
     assert SELECTION_ORDER == fleet.REQUIRED_SELECTION_ORDER
 
 
@@ -213,6 +213,10 @@ def _chain_state(path, *, epoch=EPOCH, age=0.0, neurons=None, block=None):
         "epoch_length": EPOCH_LENGTH,
         "epoch": epoch,
         "updated_at_unix": time.time() - age,
+        # The publisher now refuses a chain-state file whose roster predates
+        # the roster-age reporting; a fixture that omits it is a frozen-roster
+        # failure, not a valid chain view.
+        "roster_block": block,
     }
     if neurons is not None:
         payload["neurons"] = neurons

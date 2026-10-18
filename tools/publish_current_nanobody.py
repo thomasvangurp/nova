@@ -1346,6 +1346,11 @@ def _publish_fleet(
 
 
 BLOCK_SECONDS = 12.0
+# The validator reads a commitment only while start_block < commit_block <
+# end - BLACKOUT_BLOCKS. Canonical definition lives in nanobody_opt.fleet; the
+# publisher re-exports it so the reserve schedule and the commit wait share one
+# blackout boundary.
+BLACKOUT_BLOCKS = fleet_module.BLACKOUT_BLOCKS
 # Poll faster than the miner rewrites the chain view (~11s), so the reserve
 # opening is noticed within a block rather than two or three. Epoch 25098's
 # first commit landed at elapsed 313 against a schedule of 306, and epoch
@@ -1368,7 +1373,7 @@ def _sleep(seconds: float) -> None:
 
 def _await_commit_block(
     args: argparse.Namespace, target_block: int, epoch: int
-) -> None:
+) -> bool:
     """Hold until the chain reaches this assignment's scheduled block.
 
     Every scored submission in the field commits inside the end-of-epoch
@@ -1377,8 +1382,11 @@ def _await_commit_block(
     early were not scored at all. fleet.commitment_blocks() already computes
     that schedule; this is what honours it.
 
-    The wait is bounded by the epoch: a commitment that would land after the
-    rollover is worthless, so we stop rather than spend the next epoch's time.
+    The wait is bounded by the epoch and by the blackout: the validator reads a
+    commit only while commit_block < end - BLACKOUT_BLOCKS, so a scheduled block
+    in the blackout -- or a live block that drifted there while we waited --
+    returns False and the caller skips the commit rather than spending an
+    extrinsic the validator will never read.
     """
     while True:
         chain = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
@@ -1387,8 +1395,13 @@ def _await_commit_block(
                 f"epoch rolled to {chain.epoch} while waiting for the "
                 f"commitment reserve of epoch {epoch}"
             )
+        epoch_end = (epoch + 1) * int(chain.epoch_length)
+        if target_block >= epoch_end - BLACKOUT_BLOCKS:
+            return False
+        if chain.block >= epoch_end - BLACKOUT_BLOCKS:
+            return False
         if chain.block >= target_block:
-            return
+            return True
         remaining = target_block - chain.block
         _sleep(min(BLOCK_SECONDS * remaining, COMMIT_WAIT_POLL_SECONDS))
 
@@ -1533,13 +1546,14 @@ def _next_reserve_block(args: argparse.Namespace, epoch: int) -> int | None:
     A uid gained mid-reserve was not in the planned schedule, so it has no block
     of its own. One extrinsic per block is the pace the chain accepts, so it
     takes the next one still ahead of us, and None once the epoch's reserve is
-    spent.
+    spent -- where "spent" now means the blackout boundary (end - BLACKOUT_BLOCKS),
+    not the literal rollover, because a commit at or after end - 16 is never read.
     """
     view = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
     block = int(view.block)
     epoch_end = (epoch + 1) * int(view.epoch_length)
     candidate = block + 1
-    return candidate if candidate < epoch_end else None
+    return candidate if candidate < epoch_end - BLACKOUT_BLOCKS else None
 
 
 def load_molecules_by_uid(path: str | None) -> dict[int, str]:
@@ -1670,7 +1684,15 @@ def _commit_fleet(
             for part in shlex.split(template)
         ]
         # The schedule, not a fixed delay: one block apart INSIDE the reserve.
-        _await_commit_block(args, assignment.commit_block, epoch)
+        if not _await_commit_block(args, assignment.commit_block, epoch):
+            print(
+                f"commit: uid {assignment.uid} skipped; its scheduled block "
+                f"{assignment.commit_block} falls inside the validator's "
+                f"blackout (end - {BLACKOUT_BLOCKS})",
+                flush=True,
+            )
+            unused.insert(0, assignment.sequence)
+            continue
 
         held = _fresh_fleet()
         if held is not None:
@@ -1757,7 +1779,14 @@ def _commit_fleet(
             uid=member.uid, hotkey=member.hotkey,
             sequence=sequence, commit_block=block,
         )
-        _await_commit_block(args, block, epoch)
+        if not _await_commit_block(args, block, epoch):
+            print(
+                f"commit: uid {member.uid} skipped; block {block} is inside "
+                f"the validator's blackout (end - {BLACKOUT_BLOCKS})",
+                flush=True,
+            )
+            unused.insert(0, sequence)
+            continue
         command = [
             part.format(
                 uid=late.uid, hotkey=late.hotkey, sequence=late.sequence,
@@ -1872,7 +1901,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reserve-blocks",
         type=int,
-        default=55,
+        default=36,
         help="end-of-epoch blocks reserved for commitments, one uid per block",
     )
     parser.add_argument(
@@ -1920,7 +1949,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict-qualification-reserve-blocks",
         type=int,
-        default=220,
+        default=60,
         help=(
             "only start the strict upgrade when at least this many blocks "
             "remain in the epoch. The epoch check that follows the strict rank "

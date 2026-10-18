@@ -352,10 +352,16 @@ _STAGED = threading.local()
 
 def _run(command: list[str]) -> None:
     print("+ " + " ".join(command), flush=True)
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"stderr": subprocess.PIPE, "text": True}
     if getattr(_STAGED, "nice", False):
         kwargs["preexec_fn"] = lambda: os.nice(10)   # staged preparation yields to scoring
-    subprocess.run(command, check=True, **kwargs)
+    try:
+        subprocess.run(command, check=True, **kwargs)
+    except subprocess.CalledProcessError as error:
+        print(f"COMMAND_FAILED rc={error.returncode}: {' '.join(command)}", flush=True)
+        if error.stderr:
+            print("STDERR:\n" + error.stderr, flush=True)
+        raise
 
 
 def _prepare_epoch(
@@ -1035,6 +1041,22 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     remaining_blocks = int(state["epoch_length"]) - (
         int(state["block"]) % int(state["epoch_length"])
     )
+    # The race's own top-level gate (sequential_exact_race.main) refuses ALL
+    # work -- screening and replication alike -- once the epoch is inside the
+    # handoff reserve, and answers with a bare SystemExit(1).  Dispatching it
+    # there only manufactures a failed.json and, before stderr was captured, a
+    # silent "return code 1".  Re-check the FRESH re-read here so a closing
+    # iteration that ran long (slow generation, mid-epoch restarts) never
+    # hands the race work it is guaranteed to refuse.
+    if remaining_blocks <= _handoff_reserve(args):
+        print(
+            f"PRODUCER_RACE_SKIPPED epoch={epoch} iteration={iteration} "
+            f"remaining_blocks={remaining_blocks} "
+            f"handoff_reserve={_handoff_reserve(args)}; "
+            "inside the handoff window, the race would refuse all work",
+            flush=True,
+        )
+        return
     # A non-closing generation stops screening at the same boundary and then
     # exits immediately, because two-stage mode spends no budget on greedy
     # per-tranche repeats.  The closing generation therefore starts with the
@@ -1477,7 +1499,8 @@ def _parser() -> argparse.ArgumentParser:
         default=150,
         help="first-cut width; candidates advanced to the replication tournament",
     )
-    parser.add_argument("--challenger-p90-margin", type=float, default=20.0)
+    parser.add_argument("--challenger-p90-margin", type=float,
+                        default=float(os.environ.get("NANOBODY_CHALLENGER_MARGIN", "150")))
     parser.add_argument("--basin-shrinkage-strength", type=float, default=2.0)
     parser.add_argument("--minimum-basin-samples", type=int, default=3)
     parser.add_argument(

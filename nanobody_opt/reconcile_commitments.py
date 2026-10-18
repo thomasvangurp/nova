@@ -19,6 +19,12 @@ from urllib.request import urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt.commit_submission import write_receipt
 
+#: The validator reads a commitment only while start_block < commit_block <
+#: end - BLACKOUT_BLOCKS. Canonical definition lives in nanobody_opt.fleet
+#: (BLACKOUT_BLOCKS = 16); reconciliation must not count a commit the
+#: validator never read.
+BLACKOUT_BLOCKS = 16
+
 
 def reconciled_documents(epoch: int, target: str, recovered: list[dict],
                          previous: dict, legacy: dict) -> tuple[dict, dict]:
@@ -96,13 +102,13 @@ def recover(subtensor, timelock, *, epoch: int, epoch_length: int, coldkey: str,
         metadata = None
         for probe in probes:
             found = subtensor.get_commitment_metadata(68, hotkey, block=probe)
-            if isinstance(found, dict) and start < int(found.get("block", 0)) < end - 10:
+            if isinstance(found, dict) and start < int(found.get("block", 0)) < end - BLACKOUT_BLOCKS:
                 metadata = found
                 break
         if not isinstance(metadata, dict):
             continue
         block = int(metadata["block"])
-        if not start < block < end - 10:
+        if not start < block < end - BLACKOUT_BLOCKS:
             continue
         readable = eligible.get(uid) == hotkey
         if not readable:

@@ -112,7 +112,17 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
-    """Enforce the live publisher's stochastic-repeat qualification floor."""
+    """Enforce the live publisher's stochastic-repeat qualification floor.
+
+    The p90 gates here are ROBUSTNESS floors on a separate field -- the p90 tail
+    of the per-observation rank-sum distribution (``score_p90`` and
+    ``p90_category_rank_sums``) -- not the selection metric. Selection is the
+    multipass field-rank (see :func:`selection_identity`), so a winner chosen on
+    multipass rank is gated here only on whether its tail is catastrophic, which
+    remains a real risk under any selection order. The winner already cleared
+    these same gates during ranking, so this is a redundant fail-closed re-check,
+    not a new rejection source.
+    """
     observation_count = int(winner.get("observation_count", 0))
     if observation_count < MINIMUM_EXACT_OBSERVATIONS:
         raise ValueError(
@@ -139,6 +149,7 @@ def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
             f"{observation_rate!r} is below "
             f"{MINIMUM_OBSERVATION_COMPETITIVE_RATE:.0%}"
         )
+    # Robustness floor on the p90 tail (separate from the multipass selection).
     score_p90 = float(winner.get("score_p90", float("nan")))
     if not math.isfinite(score_p90) or score_p90 > MAXIMUM_P90_RANK_SUM:
         raise ValueError(
@@ -201,6 +212,45 @@ def validate_provisional_exact_evidence(winner: dict) -> tuple[int, float, float
     return observation_count, competitive_rate, observation_rate
 
 
+def selection_identity(
+    winner: dict, ranking: dict, *, provisional: bool
+) -> tuple[str, float]:
+    """The selection label and value the checkpoint stores.
+
+    The race now selects on multipass field-rank (``rank_exact
+    --selection-order multipass``), so a multipass ranking's checkpoint must
+    record THAT metric -- not the legacy ``p90-observation-field-dense-rank-sum``
+    (``selection_score`` is p90), which is only a robustness qualification
+    guard and would mislabel both the method and the reason this sequence was
+    chosen.  The pre-multipass labels are kept for the legacy selection orders
+    so an old ranking file still round-trips.
+    """
+    selection_order = str(ranking.get("selection_order") or "")
+    if selection_order == "multipass":
+        raw = winner.get("multipass_rank")
+        if raw is None:
+            raise SystemExit(
+                "winner has no multipass_rank; the ranking was not produced by "
+                "--selection-order multipass"
+            )
+        value = float(raw)
+        method = (
+            "multipass-field-rank"
+            if provisional
+            else "competitive-rate-then-multipass-field-rank"
+        )
+    else:
+        value = float(winner["selection_score"])
+        method = (
+            "p90-observation-field-dense-rank-sum"
+            if provisional
+            else "competitive-rate-then-p90-observation-field-dense-rank-sum"
+        )
+    if not math.isfinite(value):
+        raise SystemExit("winner contains a non-finite selection score")
+    return method, value
+
+
 def checkpoint_is_better(
     previous: object, candidate: dict, assigned_sequence: str | None = None
 ) -> bool:
@@ -224,8 +274,18 @@ def checkpoint_is_better(
         if held != assigned_sequence.strip().upper():
             return True
     try:
-        previous_score = float(previous["selection"]["score"])
-        candidate_score = float(candidate["selection"]["score"])
+        # The selection metric is the multipass field-rank (lower = better)
+        # under the multipass selection order. Prefer it explicitly; fall back
+        # to selection.score for pre-multipass checkpoints that never carried a
+        # multipass_rank field.
+        previous_selection = previous["selection"]
+        candidate_selection = candidate["selection"]
+        previous_score = float(
+            previous_selection.get("multipass_rank", previous_selection["score"])
+        )
+        candidate_score = float(
+            candidate_selection.get("multipass_rank", candidate_selection["score"])
+        )
         previous_observations = int(previous["exact"]["observation_count"])
         candidate_observations = int(candidate["exact"]["observation_count"])
         previous_sequence = str(previous["sequences"][0])
@@ -340,9 +400,9 @@ def main() -> None:
     metrics = {name: float(winner["metrics"][name]) for name in METRICS}
     if not all(math.isfinite(value) for value in metrics.values()):
         raise SystemExit("winner contains non-finite exact metrics")
-    selection_score = float(winner["selection_score"])
-    if not math.isfinite(selection_score):
-        raise SystemExit("winner contains a non-finite selection score")
+    selection_method, selection_score = selection_identity(
+        winner, ranking, provisional=args.provisional
+    )
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -383,11 +443,7 @@ def main() -> None:
             "pose_stability": winner.get("pose_stability", {}),
         },
         "selection": {
-            "method": (
-                "p90-observation-field-dense-rank-sum"
-                if args.provisional
-                else "competitive-rate-then-p90-observation-field-dense-rank-sum"
-            ),
+            "method": selection_method,
             "score": selection_score,
             "competitive_rate": competitive_rate,
             "observation_competitive_rate": observation_rate,
@@ -398,20 +454,23 @@ def main() -> None:
             "score_p90": float(winner["score_p90"]),
             "score_worst": float(winner["score_worst"]),
             "p90_category_rank_sums": winner.get("p90_category_rank_sums", {}),
-            # Carried through for the fleet artifact: the reason this sequence was
-            # chosen for a uid is its chance of a winning draw, not its average.
+            # Carried through for the fleet artifact: multipass field-rank is
+            # the reason this sequence was chosen for a uid; p90 above is only
+            # a robustness qualification guard.
+            "multipass_rank": winner.get("multipass_rank"),
             "win_probability": winner.get("win_probability"),
             "win_probability_method": winner.get("win_probability_method"),
             "selection_order": ranking.get("selection_order"),
             "consensus_ranking_policy": ranking.get("consensus_ranking_policy", "tier"),
             "selection_metric_policy": ranking.get("selection_metric_policy", "plain"),
             "selection_metric_weights": ranking.get("selection_metric_weights"),
-            "prediction_event": "best_selection_rank_sum_on_one_fresh_draw",
+            "prediction_event": "best_multipass_field_rank",
             "score_semantics": (
                 "published raw metrics are the arithmetic mean of independent "
-                "local observations, matching validator score sharing; the current "
-                "field is unavailable before reveal, while p90 is only a robustness "
-                "qualification guard"
+                "local observations, matching validator score sharing; the "
+                "selection score is the multipass field-rank (dense sum-of-10 "
+                "rank-sum against the live last-10-epochs field), while p90 is "
+                "only a robustness qualification guard"
             ),
             "reference": ranking.get("reference", {}),
             "aggregate_median_rank_sum": float(
@@ -449,7 +508,7 @@ def main() -> None:
     stage = payload["publication_stage"]
     print(
         f"published {stage} epoch {args.epoch} {args.target} checkpoint to "
-        f"{args.output}: robustness_p90={selection_score:.1f} sequence={sequence}"
+        f"{args.output}: multipass_rank={selection_score:.1f} sequence={sequence}"
     )
 
 

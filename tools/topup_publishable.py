@@ -29,6 +29,7 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -48,7 +49,9 @@ EPOCH_LENGTH = 361
 FIRST_OFFSET = 200         # the strict cycle is fast now, so passes can start while the confirmation is still finishing
 MIN_REMAINING_BLOCKS = 30  # leave the commit window alone
 FINAL_CYCLE_OFFSET = 285   # the publisher's last strict cycle starts around here; every round must be imported before it
-BLOCKS_PER_ROUND = 3       # ~34 s per round measured while sharing the GPUs with the confirmation
+BLOCKS_PER_BATCH = 3       # ~30 s per batch of 4 concurrent rounds on GPU pairs
+GROUPS = 4                 # rounds scored at once, each on its own pair of GPUs
+MARKER = Path("/root/artifacts/topup_running.json")   # tells the race its rounds are sharing the GPUs with us
 PREDICT_BATCH = 2          # the producer's --screen-predict-batch-size
 SCORER = Path("/root/nanobody_opt/score_boltzgen_fast_adapter.py")   # the producer's --exact-scorer
 PY = "/root/.pixi/envs/bgen/bin/python"
@@ -74,6 +77,33 @@ def latest_ranking(epoch: int) -> tuple[Path, float] | None:
     return best, best.stat().st_mtime
 
 
+def run_rank_command(command, env, timeout=600):
+    """Reap the whole ranking group on timeout, cancellation, or failure."""
+    process = None
+    def terminated(signum, frame):
+        raise SystemExit(128 + signum)
+    previous = {sig: signal.signal(sig, terminated)
+                for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env, process_group=0)
+        process.communicate(timeout=timeout)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
+    finally:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=10)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def fresh_ranking(epoch: int) -> Path | None:
     """The publisher's own provisional ranking, recomputed NOW from the database.
 
@@ -95,10 +125,13 @@ def fresh_ranking(epoch: int) -> Path | None:
                "--db-field-count", "10", "--minimum-api-fields", "3",
                "--minimum-observations", defaults["--minimum-observations"],
                "--competitive-score-threshold", str(defaults["--competitive-score-threshold"]),
-               "--selection-order", "win-probability"]
+               "--selection-order", "multipass", "--rank-workers", "8"]
     env = {**os.environ, "NOVA_FULL_ARCHIVE_FIELD": "0"}
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=600, env=env)
+        run_rank_command(command, env)
+    except subprocess.TimeoutExpired:
+        log(error="fresh ranking failed: TimeoutExpired")
+        return None
     except Exception as error:  # noqa: BLE001 -- fall back to the publisher's own file
         log(error=f"fresh ranking failed: {type(error).__name__}")
         return None
@@ -149,7 +182,7 @@ def run_once(dry_run: bool = False, force: bool = False) -> dict:
     if not need:
         return {**result, "skipped": "nothing short of the target"}
     if not force:
-        affordable = max(0, (FINAL_CYCLE_OFFSET - offset) // BLOCKS_PER_ROUND)
+        affordable = max(0, (FINAL_CYCLE_OFFSET - offset) // BLOCKS_PER_BATCH) * GROUPS
         if affordable < 1:
             return {**result, "skipped": "no time left before the final publication cycle"}
         if max(need.values()) > affordable:     # give every candidate as many of its missing rounds as fit
@@ -171,29 +204,45 @@ def run_once(dry_run: bool = False, force: bool = False) -> dict:
     order = list(need)                                  # publication order
     started = time.monotonic()
     done_dirs, added = [], {}
-    for round_number in range(1, max(need.values()) + 1):
-        subset = [s for s in order if need[s] >= round_number]
-        if not subset:
-            break
-        _, offset_now = chain()
-        if offset_now + BLOCKS_PER_ROUND > FINAL_CYCLE_OFFSET + 5 and not force:
-            result["stopped"] = "final publication cycle is near"
-            break
-        out_dir = root / f"round_{stamp}_{round_number:02d}"
-        source = out_dir / "source.json"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        source.write_text(json.dumps({"target": TARGET, "sequences": subset}))
-        try:
-            _run_screen(source=source, config=config, target=TARGET, output_dir=out_dir, gpus=gpus,
-                        candidate_limit=len(subset), scorer=SCORER, predict_batch_size=PREDICT_BATCH)
-        except Exception as error:  # noqa: BLE001 -- never hurt the live race
-            result["round_failed"] = f"round {round_number}: {type(error).__name__}"
-            break
-        if (out_dir / "exact_all.json").is_file():
-            done_dirs.append(out_dir)
-            for s in subset:
-                added.setdefault(s, 0)
-                added[s] += 1
+    pairs = [gpus[i::GROUPS] if len(gpus) % GROUPS else gpus[i * (len(gpus) // GROUPS):(i + 1) * (len(gpus) // GROUPS)]
+             for i in range(min(GROUPS, len(gpus)))]
+    rounds = [(r, [s for s in order if need[s] >= r]) for r in range(1, max(need.values()) + 1)]
+    rounds = [(r, subset) for r, subset in rounds if subset]
+    MARKER.write_text(json.dumps({"pid": os.getpid(), "epoch": epoch, "at": time.time()}))
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        for first in range(0, len(rounds), len(pairs)):
+            batch = rounds[first:first + len(pairs)]
+            _, offset_now = chain()
+            if offset_now + BLOCKS_PER_BATCH > FINAL_CYCLE_OFFSET + 5 and not force:
+                result["stopped"] = "final publication cycle is near"
+                break
+            MARKER.touch()
+
+            def score(item):
+                (round_number, subset), group = item
+                out_dir = root / f"round_{stamp}_{round_number:02d}"
+                source = out_dir / "source.json"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                source.write_text(json.dumps({"target": TARGET, "sequences": subset}))
+                try:
+                    _run_screen(source=source, config=config, target=TARGET, output_dir=out_dir, gpus=group,
+                                candidate_limit=len(subset), scorer=SCORER, predict_batch_size=PREDICT_BATCH)
+                except Exception as error:  # noqa: BLE001 -- never hurt the live race
+                    return round_number, subset, None, f"{type(error).__name__}"
+                return round_number, subset, out_dir, None
+
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                for round_number, subset, out_dir, error in pool.map(score, zip(batch, pairs)):
+                    if error:
+                        result.setdefault("round_failed", []).append(f"round {round_number}: {error}")
+                    elif (out_dir / "exact_all.json").is_file():
+                        done_dirs.append(out_dir)
+                        for s in subset:
+                            added[s] = added.get(s, 0) + 1
+    finally:
+        MARKER.unlink(missing_ok=True)
     result["rounds_scored"] = len(done_dirs)
     if done_dirs:
         command = [PY, "-m", "nanobody_opt.import_exact_screens", "--database", str(DB), "--target", TARGET,
