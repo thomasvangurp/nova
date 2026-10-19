@@ -93,7 +93,8 @@ EXTERNAL_GATES = (
     "classify_vhh_vh",            # enforce_vhh_hallmarks: reject domain_type == VH
     "tnp_developability",         # 6 TNP red regions
     "historical_uniqueness",      # HF registry, all previous submissions
-    "diversity_vs_top50",         # MinHash Jaccard >= 0.9 against top 50
+    "similarity_vs_top50",        # is_duplicate: alignment identity >= 0.95
+                                  #   + CDR3 clonotype >= 0.85 (NOT k-mer Jaccard)
 )
 
 

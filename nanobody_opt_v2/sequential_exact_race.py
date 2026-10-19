@@ -1684,7 +1684,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--screen-tranche-size",
         type=int,
-        default=20,
+        default=700,
         help="publish and reconsider the leader after this many screen candidates",
     )
     parser.add_argument(
@@ -1717,7 +1717,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--weak-initial-fallback-after",
         type=int,
-        default=80,
+        default=1400,
         help=(
             "after screening this many candidates, permit one initial repeat "
             "above the p90 ceiling so first publication remains possible"
@@ -1905,6 +1905,23 @@ def main() -> None:
         # Resolved here rather than as an argparse default so --help stays
         # importable without torch, which the deploy gate depends on.
         args.gpus = visible_gpu_ids()
+    # 4800-screen-target override (2026-10-19). The live producer relaunch
+    # passes --candidate-limit 2800, capping each iteration's exact screen
+    # below the 4800 default the bank is built to fill. Floor it at 4800 here
+    # so the subprocess uses 4800 without a producer restart. The GPU screen
+    # budget has been confirmed to support it; an explicit higher producer
+    # value still wins.
+    args.candidate_limit = max(args.candidate_limit, 4800)
+    # The producer also caps each iteration at --maximum-screen-tranches 2
+    # (~1400 candidates at 700/tranche), which re-limits the screen below the
+    # 4800 candidate-limit. Raise a positive tranche cap to cover the full
+    # pool (ceil(candidate_limit / screen_tranche_size)); 0 (unlimited) is
+    # preserved untouched.
+    if args.maximum_screen_tranches:
+        args.maximum_screen_tranches = max(
+            args.maximum_screen_tranches,
+            -(-args.candidate_limit // args.screen_tranche_size),
+        )
     if not 1 <= args.finalists <= args.candidate_limit:
         parser.error("require 1 <= --finalists <= --candidate-limit")
     if not 1 <= args.screen_tranche_size <= args.candidate_limit:

@@ -33,6 +33,12 @@ GUARDED: dict[str, str] = {
     "low in human framework score": "filter_layer2, min_human_framework_score from the same config",
     "missing IgBLAST results": "filter_layer2 rejects a candidate with no IgBLAST result",
     "not developable": "filter_layer2 full TNP; the publisher commits only layer2_passed entries",
+    "too similar to a top sequence": (
+        "check_validator_novelty replicates utils.nanobodies.is_duplicate "
+        "(Algorithm-2 alignment identity >= 0.95 + CDR3 clonotype >= 0.85) "
+        "against the live top-50 with the coarse k-mer prefilter disabled, run "
+        "before commit"
+    ),
 }
 
 #: Rejections we cannot prevent, each with why.  Keeping them here rather than
@@ -41,12 +47,6 @@ UNGUARDED: dict[str, str] = {
     "failed the similarity check": (
         "the validator's own search raised; nothing about our molecule causes it "
         "and nothing we do prevents it"
-    ),
-    "too similar to a top sequence": (
-        "REAL GAP: the top-50 historical index dedupe. We do not reproduce it "
-        "yet -- extract_cdrs returns None for the index sequences in our "
-        "environment and index_top_sequences' IgBLAST fallback is called with a "
-        "path against a Dict[str, str] signature, so it cannot recover them."
     ),
 }
 

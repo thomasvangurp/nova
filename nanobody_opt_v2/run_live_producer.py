@@ -485,7 +485,15 @@ def _screen_budget(args: argparse.Namespace, state: dict, producer_root: Path,
     not spend the confirmation reserve on an oversized screening tranche.
     """
     gpu_count = len(args.gpus.split(","))
-    per_candidate = float(plan["gpu_seconds_per_candidate"]) / gpu_count
+    # Fit the SCREEN's own cost from its tranche timings, candidate-weighted.
+    # The replication model's per-candidate is the wrong floor here: replication
+    # folds batch-one finalists (load-dominated, ~9.6 GPU-s/candidate) while the
+    # screen folds hundreds per call (~5.1 measured). Floored at the replication
+    # value the screen cost is over-estimated ~2x and the tranches narrow
+    # against a window the screen would actually fill -- 25782 screened 1915 of
+    # 4800 with gpu_seconds_per_candidate reported 11.0 vs 5.1 actual.
+    total_seconds = 0.0
+    total_candidates = 0
     bookkeeping = float(args.budget_cpu_guard_seconds)
     for path in producer_root.glob("iteration_[0-9][0-9]/race/timings.jsonl"):
         try:
@@ -493,10 +501,15 @@ def _screen_budget(args: argparse.Namespace, state: dict, producer_root: Path,
                 row = json.loads(line)
                 count = int(row.get("candidates", 0))
                 if row.get("phase") == "screen_tranche" and count > 0:
-                    per_candidate = max(per_candidate, float(row["scoring_seconds"]) / count)
+                    total_seconds += float(row["scoring_seconds"])
+                    total_candidates += count
                     bookkeeping = max(bookkeeping, float(row["bookkeeping_seconds"]))
         except (OSError, ValueError, KeyError):
             continue
+    if total_candidates:
+        per_candidate = total_seconds / total_candidates
+    else:
+        per_candidate = float(plan["gpu_seconds_per_candidate"]) / gpu_count
     per_candidate *= 1.15
     remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
     window = (remaining - _handoff_reserve(args) - plan["replication_reserve_blocks"]) * 12
@@ -737,7 +750,17 @@ def _run_iteration(
     # the single-edit competitor lane. Both are scored and the source column
     # tracks which pool each observation came from.
     children_parents = producer_root / "elite_parents.json"
-    if not children_parents.is_file():
+    if (not children_parents.is_file() or json.loads(children_parents.read_text()).get(
+            "selection_policy") != "agreedfix-2026-10-20-complete"):
+        # Keep any cached human-readable evidence; regenerate dependent Layer 2.
+        cached_layer2 = producer_root / "elite_parents_layer2.json"
+        import shutil
+        for cached in (children_parents, cached_layer2):
+            if cached.is_file():
+                backup = Path(str(cached) + ".pre-agreedfix-2026-10-20")
+                if not backup.exists():
+                    shutil.copy2(cached, backup)
+        cached_layer2.unlink(missing_ok=True)
         _run([
             sys.executable,
             "-m", "nanobody_opt_v2.select_elite_parents",
@@ -769,6 +792,7 @@ def _run_iteration(
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
             "--priority-parents", str(top50),
+            "--top50", str(top50),
             "--rival-coldkey", args.rival_coldkey,
             "--limit", "2000",
             "--mutation-database", str(args.mutation_database),
@@ -811,6 +835,78 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ])
+    # ROOT-CAUSE FIX (2026-10-18): the seed-level parent-novelty gate below was
+    # the v1->v2 diversity regression. v1 passed the FULL elite layer-2 pool
+    # straight into local_neighborhood with NO seed-level novelty gate (v1
+    # run_live_producer.py line 847: "--layer2-seeds children_seed"). The v2
+    # rewrite added check_validator_novelty --identity-threshold 0.97 here,
+    # which rejects every parent >=97% identical to the top-50 -- and that is
+    # ALL of them once the frontier converges on our own consensus -- so
+    # _floor_seeds then fell back to the 8 highest-scoring (the consensus
+    # itself), collapsing every child onto QWNLVES/QFYLVES. The child-level
+    # 0.95 gate is untouched: it still runs downstream (check_validator_novelty
+    # on layer2_dedup, plus _validator_novel_sequences on children_candidates
+    # below), so everything we actually submit remains novelty-checked. A seed
+    # is a proposal centre, never a submission; gating it only starves
+    # generation of diverse parents. Seed from ALL parents and let the merge +
+    # child gate do the filtering.
+    seed_novel = seed
+    children_seed_novel = children_seed
+    # Safety net only: if the loose filter still leaves < --minimum-seeds
+    # (a whole basin >=97%), fall back to the top-`floor` unfiltered seeds.
+    def _floor_seeds(filtered: Path, unfiltered: Path, floor: int) -> Path:
+        try:
+            kept = json.loads(filtered.read_text()).get("candidates", [])
+        except (OSError, ValueError):
+            kept = []
+        if len(kept) >= floor:
+            return filtered
+        try:
+            candidates = json.loads(unfiltered.read_text()).get("candidates", [])[:floor]
+        except (OSError, ValueError):
+            candidates = kept
+        floored = producer_root / f"{filtered.stem}.floored.json"
+        _atomic_json(floored, {"candidates": candidates, "floored": True, "floor": floor})
+        return floored
+
+    def _merge_seed_pools(elite_path: Path, competitor_path: Path, root: Path) -> Path:
+        """Merge elite + competitor/frontier parents into ONE seed pool.
+
+        local_neighborhood only accepts a seed whose ``selection_score`` is set
+        (or whose sequence is in the recent archive tail); the competitor lane
+        emits single-edits without a score, so a bare concatenation is silently
+        dropped by the eligibility gate. Assign a rank-preserving score from the
+        lane's best-first order so the competitor parents actually become
+        proposal centres, and leave the strict 0.95 child gate untouched (it
+        runs downstream on every generated child).
+        """
+        elite = json.loads(elite_path.read_text()).get("candidates", [])
+        competitor = json.loads(competitor_path.read_text()).get("candidates", [])
+        merged: list[dict[str, Any]] = [dict(c) for c in elite]
+        for index, candidate in enumerate(competitor):
+            record = dict(candidate)
+            if record.get("selection_score") is None:
+                # Elite parents carry validator_final_score (~100-101, lower is
+                # better); rank the competitor parents just behind them while
+                # preserving their best-first order within the pool.
+                record["selection_score"] = 150.0 + float(index)
+            record.setdefault("parent_selection_lane", "epoch_elite")
+            merged.append(record)
+        out = root / "merged_parents_layer2_novel.json"
+        _atomic_json(out, {
+            "candidates": merged,
+            "merged": True,
+            "elite_count": len(elite),
+            "competitor_count": len(competitor),
+        })
+        return out
+
+    seed_floor = max(1, int(getattr(args, "minimum_seeds", 8)))
+    seed_use = _floor_seeds(seed_novel, seed, seed_floor)
+    children_seed_use = _floor_seeds(children_seed_novel, children_seed, seed_floor)
+    # Seed candidate generation from ALL parents (elite + competitor/frontier),
+    # merged -- never just the (possibly floored) elite pool on its own.
+    merged_seed_use = _merge_seed_pools(children_seed_use, seed_use, producer_root)
     # Scout, then exploit.  The first generation spreads across the strongest
     # historical cores; later generations narrow onto the cores that scored best
     # in this epoch's own observations, which the race has already written to
@@ -838,7 +934,7 @@ def _run_iteration(
         # Two pools, each tagged with its source so the race's observations can
         # be attributed per pool: single-edits (competitor lane, exploitation)
         # and multi-edit children (elite parents + neighbourhood, breadth).
-        single_rows = json.loads(seed.read_text()).get("candidates", [])
+        single_rows = json.loads(seed_use.read_text()).get("candidates", [])
         with candidates.open("w", newline="") as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=["sequence", "source", "parent_sequence"]
@@ -860,7 +956,7 @@ def _run_iteration(
                 "-m", "nanobody_opt.local_neighborhood",
                 "--archive", str(archive),
                 "--config", str(config),
-                "--layer2-seeds", str(children_seed),
+                "--layer2-seeds", str(merged_seed_use),
                 "--winner-priors", str(winner_priors),
                 "--output", str(children_candidates),
                 "--seed-count", str(args.seed_count),
@@ -870,7 +966,7 @@ def _run_iteration(
                 "--generation-workers", str(args.generation_workers),
                 "--generation-workers-minimum-candidates",
                 str(args.generation_workers_minimum_candidates),
-                "--proposal-limit", str(args.proposal_limit),
+                "--proposal-limit", str(max(8000, args.proposal_limit)),
                 "--basin-fraction", str(basin_fraction),
                 "--basin-routes-per-core", str(args.basin_routes_per_core),
                 "--basin-evidence-fraction", str(args.basin_evidence_fraction),
@@ -901,23 +997,44 @@ def _run_iteration(
             for previous in sorted(producer_root.glob("iteration_*/children_candidates.csv")):
                 if previous != children_candidates:
                     command.extend(["--exclude", str(previous)])
-            _run(command)
+            try:
+                _run(command)
+            except subprocess.CalledProcessError:
+                # Keep preparation moving to the independently gated historical
+                # fallback even when the neighbourhood cannot produce seeds.
+                children_candidates.write_text("sequence\n")
+                _atomic_json(Path(str(children_candidates) + ".shortage.json"),
+                             {"fallback_required": True, "generation_failed": True})
+                print("CHILD_GENERATION_FAILED historical fallback required", flush=True)
+        # Filter the children pool (which includes the framework lane) through
+        # the validator's exact child novelty gate BEFORE it joins candidates.csv.
+        # Framework mutations of a near-boundary parent reproduce top-50 framework
+        # variants (DWALVES/AWALVES/QWVLVES/KWVLVES...): they rank well, then are
+        # blocked by the child gate only after scoring and re-surfaced by the
+        # re-deepen pool. Drop them here so they are never generated further.
+        with children_candidates.open(newline="") as ch:
+            child_rows = list(csv.DictReader(ch))
+        children_novel: set[str] = set()
+        if child_rows:
+            children_novel = _validator_novel_sequences(
+                runtime_root=args.runtime_root, hf_archive=hf_archive,
+                target=target, input_path=children_candidates,
+            )
         # Append the children pool to candidates.csv with its source tag.
         with candidates.open("a", newline="") as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=["sequence", "source", "parent_sequence"]
             )
-            with children_candidates.open(newline="") as ch:
-                for row in csv.DictReader(ch):
-                    seq = str(row.get("sequence", "")).strip().upper()
-                    if seq:
-                        writer.writerow({
-                            "sequence": seq,
-                            "source": "children",
-                            "parent_sequence": str(
-                                row.get("parent_sequence", "")
-                            ).strip().upper(),
-                        })
+            for row in child_rows:
+                seq = str(row.get("sequence", "")).strip().upper()
+                if seq and seq in children_novel:
+                    writer.writerow({
+                        "sequence": seq,
+                        "source": "children",
+                        "parent_sequence": str(
+                            row.get("parent_sequence", "")
+                        ).strip().upper(),
+                    })
 
         if args.public_neighbourhood_distance:
             # Every winner in the leakage-free replay sat one substitution from
@@ -957,7 +1074,24 @@ def _run_iteration(
                 donors=args.graft_donors,
             )
         if grafts is not None:
-            merge_graft_candidates(candidates, grafts)
+            # Donor grafts copy the teacher paratope onto validator-proven
+            # frameworks; with a top-50 teacher that produces near-duplicates by
+            # construction (shared CDR3 clonotype). Run the same child novelty
+            # gate over the graft cases before they join candidates.csv so a
+            # graft is never scored only to be blocked afterwards.
+            graft_payload = json.loads(grafts.read_text())
+            if graft_payload.get("cases"):
+                graft_novel = _validator_novel_sequences(
+                    runtime_root=args.runtime_root, hf_archive=hf_archive,
+                    target=target, input_path=grafts,
+                )
+                graft_payload["cases"] = [
+                    case for case in graft_payload["cases"]
+                    if str(case.get("sequence", "")).strip().upper() in graft_novel
+                ]
+            grafts_novel = grafts.with_name(grafts.stem + ".novel.json")
+            _atomic_json(grafts_novel, graft_payload)
+            merge_graft_candidates(candidates, grafts_novel)
     layer2 = iteration_root / "layer2.json"
     if not layer2.is_file():
         _run([
@@ -998,6 +1132,22 @@ def _run_iteration(
             "--input", str(layer2),
             "--output", str(layer2_dedup),
         ])
+    child_floor = max(24, args.minimum_seeds)
+    current = json.loads(layer2_dedup.read_text())
+    shortage_path = iteration_root / "children_candidates.csv.shortage.json"
+    seed_shortage = (shortage_path.is_file() and json.loads(
+        shortage_path.read_text()).get("fallback_required", False))
+    if seed_shortage or len(current.get("candidates", [])) < child_floor:
+        _historical_child_fallback(args=args, target=target, config=config,
+                                   hf_archive=hf_archive, iteration_root=iteration_root,
+                                   destination=layer2_dedup, floor=child_floor)
+    # The race's soft-dedup re-deepen pool (sequential_exact_race
+    # _carry_pending_records) reads layer2.json -- NOT layer2_dedup.json -- so a
+    # duplicate blocked above is otherwise re-screened by the next iteration and
+    # re-surfaced as a "best multipass" candidate. Overwrite layer2.json with the
+    # novelty-filtered content so a pre-filter/stale candidate can never be
+    # re-deepened. The current race still uses layer2_dedup directly.
+    _atomic_json(layer2, json.loads(layer2_dedup.read_text()))
     if not adopted:        # an adopted staging keeps its real preparation time
         _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
     if prepare_only:
@@ -1064,13 +1214,13 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     # the observation count strict qualification requires.
     plan = _budget_plan(args, state, producer_root)
     closing = force_confirmation or remaining_blocks <= plan["replication_reserve_blocks"] + _handoff_reserve(args)
-    screen_tranche_size = args.screen_tranche_size
+    screen_tranche_size = min(args.screen_tranche_size, max(4800, args.candidate_limit))
     screen_gpu_seconds = plan.get("gpu_seconds_per_candidate")
     if args.budget_mode == "adaptive" and args.replication_rounds and not closing:
         screen_tranche_size, screen_gpu_seconds = _screen_budget(args, state, producer_root, plan)
         if screen_tranche_size < 1:
             closing = force_confirmation = True
-            screen_tranche_size = args.screen_tranche_size
+            screen_tranche_size = min(args.screen_tranche_size, max(4800, args.candidate_limit))
         print(f"PRODUCER_SCREEN_BUDGET epoch={epoch} iteration={iteration} "
               f"tranche_size={screen_tranche_size} gpu_seconds_per_candidate={screen_gpu_seconds:.3f} "
               f"confirmation_due={closing}", flush=True)
@@ -1096,7 +1246,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         "--reserve-blocks", str(_handoff_reserve(args)),
         "--gpus", args.gpus,
         "--scorer", str(args.exact_scorer),
-        "--candidate-limit", str(args.candidate_limit),
+        "--candidate-limit", str(max(4800, args.candidate_limit)),
         "--screen-tranche-size", str(screen_tranche_size),
         "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
         "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
@@ -1126,7 +1276,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     if args.budget_mode == "adaptive":
         race_command.extend([
             "--carry-pending-candidates", "--maximum-screen-tranches",
-            str(getattr(args, "maximum_screen_tranches_override", 1)),
+            str(getattr(args, "maximum_screen_tranches_override", 0)),
             "--replication-load-seconds", str(plan["load_seconds"]),
             "--replication-seconds-per-observation", str(plan["gpu_seconds_per_candidate"]),
             "--screen-gpu-seconds-per-candidate", str(screen_gpu_seconds),
@@ -1157,7 +1307,120 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     _run(race_command)
 
 
+def _historical_child_fallback(*, args, target, config, hf_archive,
+                               iteration_root, destination, floor):
+    """Top up a starved batch with historical singles through BOTH live gates.
+
+    Do not submit public parents or relax novelty/Layer 2. A genuine lack of
+    qualified children is a visible failure, never an empty successful batch.
+    """
+    from nanobody_opt_v2.select_elite_parents import _validator_parent_pool
+    reservoir = json.loads((args.runtime_root / "artifacts/agreedfix_historical_parents.json").read_text())
+    if reservoir.get("target") not in (None, target):
+        raise RuntimeError("historical reservoir target mismatch")
+    parents = [c for c in _validator_parent_pool(reservoir["candidates"], target=target)
+               if c["parent_validator_duplicate"] is False and c.get("layer2_passed")]
+    # Parent order cycles distinct historical CDR3s before revisiting a family.
+    families = {}
+    for parent in parents:
+        if parent.get("parent_cdr3"):
+            families.setdefault(parent["parent_cdr3"], []).append(parent)
+    parents = [family[i] for i in range(max(map(len, families.values()), default=0))
+               for family in families.values() if i < len(family)]
+    current = json.loads(destination.read_text())
+    kept = {c["sequence"]: c for c in current.get("candidates", [])}
+    # Two bounded attempts broaden the mutation positions without endlessly
+    # retrying a physically exhausted reservoir. All diagnostics are counts.
+    seen = set(kept)
+    for attempt in range(2):
+        candidates = []
+        for offset in range(0, 57):
+            for parent in parents:
+                seq = parent["sequence"]
+                position = (offset + attempt * (len(seq) // 2)) % len(seq)
+                for residue in "ACDEFGHIKLMNPQRSTVWY":
+                    child = seq[:position] + residue + seq[position + 1:]
+                    if residue == seq[position] or child in seen:
+                        continue
+                    seen.add(child)
+                    candidates.append({"sequence": child, "parent_sequence": seq,
+                                       "proposal_type": "historical_fallback_single",
+                                       "parent_source": "historical_nonduplicate_reservoir"})
+                    if len(candidates) >= 16000:
+                        break
+                if len(candidates) >= 16000:
+                    break
+            if len(candidates) >= 16000:
+                break
+        source = iteration_root / f"fallback_{attempt}.json"
+        qualified = iteration_root / f"fallback_{attempt}.layer2.json"
+        _atomic_json(source, {"target": target, "candidates": candidates})
+        _run(["/usr/local/bin/pixi", "run", "--manifest-path", str(args.runtime_root / "pixi.toml"),
+              "--locked", "--environment", "metanano", "filter-layer2", "--",
+              "--input", str(source), "--config", str(config), "--output", str(qualified),
+              "--concurrency", str(args.layer2_concurrency),
+              "--igblast-concurrency", str(args.layer2_concurrency),
+              "--igblast-batch-size", str(args.igblast_batch_size),
+              "--cache-dir", str(args.runtime_root / "layer2_cache")])
+        novel = _validator_novel_sequences(runtime_root=args.runtime_root,
+                    hf_archive=hf_archive, target=target, input_path=qualified)
+        for child in json.loads(qualified.read_text()).get("candidates", []):
+            if child["sequence"] in novel:
+                kept.setdefault(child["sequence"], child)
+        if len(kept) >= floor:
+            break
+    current.update(candidates=list(kept.values()), sequences=list(kept),
+                   historical_fallback=True, fallback_floor=floor)
+    _atomic_json(destination, current)
+    print(f"HISTORICAL_CHILD_FALLBACK parents={len(parents)} "
+          f"clonotypes={len(families)} passed={len(kept)} floor={floor}", flush=True)
+    if not kept:
+        raise RuntimeError("historical fallback exhausted: zero qualified novel children")
+    if len(kept) < floor:
+        print(f"HISTORICAL_CHILD_SHORTAGE passed={len(kept)} floor={floor}; "
+              "racing all available qualified children", flush=True)
+
+
+def _validator_novel_sequences(
+    *, runtime_root: Path, hf_archive: Path, target: str, input_path: Path
+) -> set[str]:
+    """Pass an input through the validator's exact child novelty gate.
+
+    Mirrors the layer2_dedup gate (default 0.95 whole-sequence identity plus
+    the full CDR3-clonotype / conserved-CDR rules; NOT --no-cdr-gate) so a
+    generation lane can drop top-50-near duplicates BEFORE they merge into
+    candidates.csv or into the re-deepen pool. Returns the passed sequences
+    (upper-cased), the same set the child gate would admit.
+    """
+    output = input_path.with_name(input_path.stem + ".novel.json")
+    _run([
+        "/usr/local/bin/pixi", "run",
+        "--manifest-path", str(runtime_root / "pixi.toml"),
+        "--locked", "--environment", "metanano",
+        "python", "-m", "nanobody_opt.check_validator_novelty",
+        "--archive", str(hf_archive),
+        "--target", target,
+        "--input", str(input_path),
+        "--output", str(output),
+        "--summary-only",
+    ])
+    payload = json.loads(output.read_text())
+    return {str(sequence).strip().upper() for sequence in payload.get("sequences", [])}
+
+
 GRAFT_PROPOSAL_TYPE = "donor_graft"
+
+
+def _closing_finished(producer_root: Path, iteration: int) -> bool:
+    """True once this epoch's closing replication-only pass has completed.
+
+    A replication-only iteration IS the closing pass. Whether it completed
+    rounds or not, the epoch is done: a second closing attempt only re-enters
+    the reserve with a collapsed window (25782 iteration 4: shortlist 150->1,
+    0 rounds, qualified=0 after iteration 3 had already published).
+    """
+    root = producer_root / f"iteration_{iteration:02d}"
+    return (root / "replication_only.json").exists() and (root / "race/complete.json").exists()
 
 
 def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
@@ -1332,7 +1595,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--exact-scorer",
         type=Path,
-        default=Path("/root/nanobody_opt/score_boltzgen_batch.py"),
+        default=Path("/root/nanobody_opt/score_boltzgen_fast_adapter.py"),
         help="validator-protocol-compatible exact scorer entry point",
     )
     parser.add_argument(
@@ -1351,7 +1614,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--recent-parent-epoch-window", type=int, default=16)
     parser.add_argument("--recent-anchor-parent-limit", type=int, default=16)
     parser.add_argument("--recent-neighbor-parent-limit", type=int, default=16)
-    parser.add_argument("--basin-core-limit", type=int, default=5)
+    parser.add_argument("--basin-core-limit", type=int, default=32)
     parser.add_argument("--basin-parent-limit", type=int, default=32)
     parser.add_argument(
         "--priority-coldkeys",
@@ -1379,9 +1642,9 @@ def _parser() -> argparse.ArgumentParser:
         default="repair-only",
         help="forwarded to local_neighborhood; 'off' is the rollback lever",
     )
-    parser.add_argument("--proposal-limit", type=int, default=384)
+    parser.add_argument("--proposal-limit", type=int, default=8000)
     parser.add_argument("--basin-fraction", type=float, default=0.70)
-    parser.add_argument("--basin-routes-per-core", type=int, default=192)
+    parser.add_argument("--basin-routes-per-core", type=int, default=512)
     parser.add_argument("--basin-evidence-fraction", type=float, default=0.40)
     parser.add_argument("--basin-evidence-core-limit", type=int, default=1)
     parser.add_argument("--basin-top-core-weight", type=int, default=2)
@@ -1390,7 +1653,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument("--framework-per-seed", type=int, default=64)
-    parser.add_argument("--haplotype-lane-fraction", type=float, default=0.5,
+    parser.add_argument("--haplotype-lane-fraction", type=float, default=1.0,
                         help="forwarded to local_neighborhood; share of the framework_terminal/lineage budget reserved for haplotype candidates")
     parser.add_argument(
         "--donor-grafts",
@@ -1490,9 +1753,9 @@ def _parser() -> argparse.ArgumentParser:
         default=4800,
         help="maximum exact screens per iteration, published in small tranches",
     )
-    parser.add_argument("--screen-tranche-size", type=int, default=20)
+    parser.add_argument("--screen-tranche-size", type=int, default=700)
     parser.add_argument("--maximum-initial-screen-p90", type=float, default=90.0)
-    parser.add_argument("--weak-initial-fallback-after", type=int, default=80)
+    parser.add_argument("--weak-initial-fallback-after", type=int, default=1400)
     parser.add_argument(
         "--finalists",
         type=int,
@@ -1695,6 +1958,10 @@ def refresh_prescreen_inputs(producer_root: Path) -> None:
 
 def main() -> None:
     args = _parser().parse_args()
+    # Normalize before staging, neighbourhood filtering, and race budgeting.
+    args.proposal_limit = max(8000, args.proposal_limit)
+    args.candidate_limit = max(4800, args.candidate_limit)
+    args.screen_tranche_size = min(args.screen_tranche_size, args.candidate_limit)
     if not 0 < args.confirmation_time_share < 1:
         raise SystemExit("--confirmation-time-share must be between zero and one")
     if min(args.budget_load_seconds, args.budget_gpu_seconds, args.budget_cpu_guard_seconds) <= 0:
@@ -1779,10 +2046,8 @@ def main() -> None:
                     completed_iterations[epoch] = iteration
                     root = producer_root / f"iteration_{iteration:02d}"
                     complete = root / "race/complete.json"
-                    if args.budget_mode == "adaptive" and (root / "replication_only.json").exists() and complete.exists():
-                        done = json.loads(complete.read_text())
-                        if not done.get("screened") and not done.get("replication_rounds_completed"):
-                            finished_epochs.add(epoch)
+                    if args.budget_mode == "adaptive" and _closing_finished(producer_root, iteration):
+                        finished_epochs.add(epoch)
             if args.once:
                 return
         except Exception as error:

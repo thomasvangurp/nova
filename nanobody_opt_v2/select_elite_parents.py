@@ -1,11 +1,17 @@
-"""Build a live, score-qualified parent bank from completed public rounds.
+"""Build the live parent bank from completed public rounds (frontier path).
 
-Parent sequences are public and are therefore never submitted. They are used
-only as proposal centers. Eligibility spans every public observation in the
-persistent mutation database; recency is provenance, never an exclusion rule.
-Selection is based on validator-published score and family coverage. A bounded
-family-neighbour lane inspects ranks immediately below the epoch elites and is
-reserved capacity even when the global elite anchor set is already large.
+Parent sequences are public and are therefore never submitted; they are used
+only as proposal centres. The pool is the latest public observation per
+sequence from the completed-epoch leaderboard API.
+
+The bank retains nonduplicates first, caps duplicates at 25% of actual size,
+and reserves distinct nonduplicate CDR3s from a pinned historical reservoir.
+Every generated child must pass
+the unchanged exact novelty gate before submission.
+
+Measured parents retain multipass relative-rank ordering, then CDR3-family
+median and validator_final_score. A quarter of available slots is interleaved
+for unmeasured parents ordered by public epoch percentile.
 """
 from __future__ import annotations
 
@@ -13,13 +19,13 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 
-from nanobody_opt.basins import basin_id
 from urllib.request import Request, urlopen
 
 from nanobody_opt.basins import basin_id, rank_basin_evidence
@@ -29,12 +35,14 @@ from nanobody_opt.simulate_round import METRICS
 
 
 def _fetch(api_root: str, epoch: int) -> tuple[int, Any | None]:
-    url = f"{api_root.rstrip('/')}/api/competitions/leaderboard/{epoch}/nanobodies"
+    url = f"{api_root.rstrip('/')}/api/competitions/leaderboard/{epoch}/nanobodies?limit=10000"
     request = Request(url, headers={"User-Agent": "nova-elite-parent-selector/1"})
     try:
         with urlopen(request, timeout=30) as response:  # noqa: S310
             return epoch, json.load(response)
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+    except HTTPError as error:
+        return epoch, {"success": False, "http_status": error.code}
+    except (URLError, TimeoutError, json.JSONDecodeError):
         return epoch, None
 
 
@@ -572,6 +580,187 @@ def select_elite_parents(
     return with_priority(allocate_by_basin([*selected_anchors, *chosen, *backfill][:limit]))
 
 
+def _validator_parent_pool(
+    pool: list[dict[str, Any]], *, target: str,
+) -> list[dict[str, Any]]:
+    """Build one fresh HF Algorithm-2 index in metanano per selection.
+
+    Dependency/network diagnostics stay private because they may contain auth
+    data. Any failure aborts selection before the parent output is written.
+    """
+    with tempfile.TemporaryDirectory(prefix="validator-parent-gate-") as directory:
+        request = Path(directory) / "request.json"
+        response = Path(directory) / "response.json"
+        sequences = sorted({str(item["sequence"]) for item in pool})
+        request.write_text(json.dumps({"target": target, "sequences": sequences}))
+        try:
+            result = subprocess.run(
+                ["/usr/local/bin/pixi", "run", "--manifest-path", "/root/pixi.toml",
+                 "--locked", "--environment", "metanano", "python",
+                 str(Path(__file__).with_name("validator_parent_gate.py")),
+                 "--input", str(request), "--output", str(response)],
+                cwd="/root", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=900, check=False,
+            )
+            if result.returncode:
+                raise ValueError("metanano gate failed")
+            payload = json.loads(response.read_text())
+            rows = payload["results"]
+            if (payload["target"] != target or payload["algorithm2_top_count"] != 50
+                    or not isinstance(rows, dict) or set(rows) != set(sequences)
+                    or any(not isinstance(row, dict)
+                           or type(row.get("duplicate")) is not bool
+                           or not isinstance(row.get("cdr3"), str)
+                           for row in rows.values())):
+                raise ValueError("incomplete gate response")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            raise SystemExit("validator parent gate unavailable; refusing unsafe seeds") from None
+    return [
+        {**item, "parent_cdr3": rows[str(item["sequence"])]["cdr3"],
+         "parent_validator_duplicate": rows[str(item["sequence"])]["duplicate"]}
+        for item in pool
+    ]
+
+
+def _same_cdr3_family(left: str, right: str) -> bool:
+    """Group CDR3s within 15% edit distance; never use whole-VHH identity.
+
+    Length-normalized edit distance handles insertions/deletions as well as
+    substitutions. Fresh validator nonduplicate status supplies novelty
+    headroom; this additional separation keeps reserved families distinct.
+    """
+    if not left or not right:
+        return False
+    previous = list(range(len(right) + 1))
+    for index, residue in enumerate(left, 1):
+        current = [index]
+        for column, other in enumerate(right, 1):
+            current.append(min(current[-1] + 1, previous[column] + 1,
+                               previous[column - 1] + (residue != other)))
+        previous = current
+    return previous[-1] <= 0.15 * max(len(left), len(right))
+
+
+def _frontier_parents(
+    pool: list[dict[str, Any]],
+    comparison: dict[str, Any],
+    *,
+    before_epoch: int,
+    limit: int,
+    diversity_k: int = 8,
+) -> list[dict[str, Any]]:
+    """Exploit multipass-ranked parents with a quarter reserved for exploration.
+
+    Nonduplicates are retained first; duplicates are at most a quarter of the bank.
+    Unmeasured parents are interleaved using their public epoch percentile.
+    """
+    from statistics import median
+
+    # Normalize sum-of-ten ranks by ten times the replay field size, not by
+    # the selectively measured cohort. Use the latest eligible measurement.
+    measured: dict[str, tuple[int, float, float]] = {}
+    for epoch_text, result in comparison.items():
+        if not str(epoch_text).isdigit() or not isinstance(result, dict):
+            continue
+        epoch = int(epoch_text)
+        method = result.get("method") or {}
+        if (epoch >= before_epoch or method.get("formula") != "sum10"
+                or method.get("field") != "recent_validator_epochs"
+                or (method.get("minimum_passes") or 0) < 10):
+            continue
+        field_rows = method.get("field_rows")
+        if not isinstance(field_rows, (int, float)) or not math.isfinite(field_rows) or field_rows <= 0:
+            continue
+        values = {
+            seq: float(value) for seq, value in (result.get("sequences") or {}).items()
+            if isinstance(value, (int, float)) and math.isfinite(value)
+        }
+        for sequence, value in values.items():
+            if sequence not in measured or epoch > measured[sequence][0]:
+                measured[sequence] = (epoch, value / (10 * field_rows), value)
+
+    families: dict[str, list[float]] = {}
+    for item in pool:
+        sequence = str(item["sequence"])
+        loop = item["parent_cdr3"]
+        if sequence in measured:
+            epoch, relative_rank, mean = measured[sequence]
+            item.update(parent_multipass_epoch=epoch,
+                        parent_multipass_relative_rank=relative_rank,
+                        parent_multipass_mean=mean)
+            families.setdefault(loop or sequence, []).append(relative_rank)
+    family_medians = {loop: median(values) for loop, values in families.items()}
+
+    def quality(item: dict[str, Any]) -> tuple[Any, ...]:
+        return (measured.get(str(item["sequence"]), (0, math.inf, 0))[1],
+                family_medians.get(item["parent_cdr3"] or item["sequence"], math.inf),
+                item["validator_final_score"], item["sequence"])
+
+    ranked = sorted(pool, key=quality)
+    selected: list[dict[str, Any]] = []
+    used: set[str] = set()
+
+    def add(item: dict[str, Any], lane: str) -> None:
+        if item["sequence"] not in used and len(selected) < limit:
+            item["parent_selection_lane"] = "frontier"
+            item["parent_frontier_lane"] = lane
+            selected.append(item)
+            used.add(item["sequence"])
+
+    unmeasured = [item for item in pool if str(item["sequence"]) not in measured]
+    def public_quality(item: dict[str, Any]) -> tuple[Any, ...]:
+        observation = (item.get("public_observations") or [{}])[0]
+        return (item.get("public_epoch_percentile", math.inf),
+                -int(observation.get("epoch", 0)),
+                observation.get("epoch_rank", math.inf), item["sequence"])
+    unmeasured.sort(key=public_quality)
+    exploitation = [item for item in ranked if str(item["sequence"]) in measured]
+    exploration = min(len(unmeasured), max(1, (limit + 3) // 4)) if limit > 1 else 0
+    explored = 0
+    for position in range(1, limit + 1):
+        explore_now = explored < (position * exploration // limit)
+        if unmeasured and (explore_now or not exploitation):
+            add(unmeasured.pop(0), "frontier_exploration")
+            explored += 1
+        elif exploitation:
+            add(exploitation.pop(0), "frontier_multipass")
+        else:
+            break
+    # Refill from the FULL gated pool, before imposing the actual-bank cap.
+    # Reserve distinct nonduplicate CDR3 families only from the pinned historical bank.
+    ordered = selected + [item for item in ranked if item["sequence"] not in used]
+    nondup = [item for item in ordered if item.get("parent_validator_duplicate") is False]
+    duplicate = [item for item in ordered if item.get("parent_validator_duplicate") is True]
+    reserve = []
+    loops = set()
+    for item in nondup:
+        if not item.get("historical_reservoir", False):
+            continue
+        loop = item.get("parent_cdr3")
+        if (loop and not any(_same_cdr3_family(loop, other) for other in loops)
+                and len(reserve) < diversity_k):
+            reserve.append(item)
+            loops.add(loop)
+    if diversity_k < 2 or limit < diversity_k or len(reserve) < diversity_k:
+        raise ValueError(f"diversity reserve unavailable: require {diversity_k} "
+                         f"historical nonduplicate CDR3 families, found {len(reserve)}; bank not written")
+    reserved = {item["sequence"] for item in reserve}
+    selected = (reserve + [item for item in nondup if item["sequence"] not in reserved])[:limit]
+    # 3*dup <= nondup is equivalent to dup <= 25% of the ACTUAL bank.
+    selected += duplicate[:min(limit - len(selected), len(selected) // 3)]
+    for item in selected:
+        item["parent_selection_lane"] = "frontier"
+        item.setdefault("parent_frontier_lane", "frontier_nonduplicate_refill")
+        item["diversity_reserved"] = item["sequence"] in reserved
+    assert 3 * sum(item.get("parent_validator_duplicate") is True for item in selected) <= sum(
+        item.get("parent_validator_duplicate") is False for item in selected)
+    # The consumer sorts selection_score and accepts only lane="frontier".
+    for rank, item in enumerate(selected, start=1):
+        item["selection_score"] = float(rank)
+        item["selection_score_kind"] = "frontier_policy_rank"
+    return selected
+
+
 def _database_payloads(
     path: Path,
     *,
@@ -660,6 +849,9 @@ def _parser() -> argparse.ArgumentParser:
              "its best recent submission regardless of capacity limits; "
              "empty disables the lane entirely",
     )
+    parser.add_argument("--diversity-k", type=int, default=8)
+    parser.add_argument("--historical-reservoir", type=Path,
+                        default=Path("/root/artifacts/agreedfix_historical_parents.json"))
     parser.add_argument("--scan-limit", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--api-root", default=LEADERBOARD_API_ROOT)
@@ -698,13 +890,29 @@ def main() -> None:
         max(args.before_epoch - args.scan_limit - 1, 0),
         -1,
     )
+    # Multipass evidence affects ordering only; it does not define novelty.
+    comparison = {}
+    if args.target == "P20809":
+        try:
+            comparison = json.loads(
+                Path("/root/artifacts/multipass_comparison.json").read_text()
+            )
+        except (OSError, ValueError):
+            raise SystemExit("multipass comparison unavailable; refusing unsafe seeds")
+        if not isinstance(comparison, dict) or not comparison:
+            raise SystemExit("multipass comparison empty; refusing unsafe seeds")
     payloads: dict[int, Any] = {}  # DB read skipped: frontier uses the API only
     api_payloads: dict[int, Any] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(_fetch, args.api_root, epoch) for epoch in epochs]
+        futures = [
+            executor.submit(_fetch, args.api_root, epoch)
+            for epoch in epochs
+        ]
         for future in as_completed(futures):
             epoch, payload = future.result()
-            if payload is not None and _epoch_candidates(payload, args.target):
+            if (isinstance(payload, dict) and payload.get("success") is True
+                    and isinstance(payload.get("data"), list)
+                    and _epoch_candidates(payload, args.target)):
                 payloads[epoch] = payload
                 api_payloads[epoch] = payload
     if args.observation_database is not None and api_payloads:
@@ -734,36 +942,56 @@ def main() -> None:
     complete_epochs = (
         ordered_epochs[: args.epochs] if args.epochs else ordered_epochs
     )
-    # Frontier selection: the competitive frontier (validator_final_score >= 100)
-    # instead of the slow dedup-locked basin. The score selection above is
-    # skipped (it read the DB + basin allocation, ~3 min); select from the full
-    # API pool instead.
+    # Latest public observation per sequence, with real provenance.
     _pool = {}
-    for _epoch in complete_epochs:
-        for _cand in _epoch_candidates(payloads[_epoch], target=args.target):
+    for _epoch in ordered_epochs:
+        epoch_candidates = _epoch_candidates(payloads[_epoch], target=args.target)
+        for _rank, _cand in enumerate(epoch_candidates, start=1):
+            _cand["public_epoch_percentile"] = _rank / len(epoch_candidates)
+            _cand["public_observations"] = [{
+                "epoch": _epoch, "epoch_rank": _rank,
+                "validator_final_score": _cand["validator_final_score"],
+            }]
             _pool.setdefault(_cand["sequence"], _cand)
-    _frontier = sorted(
-        (c for c in _pool.values() if c["validator_final_score"] >= 100),
-        key=lambda c: (c["validator_final_score"], c["sequence"]),
+    # Reservoir carries public parent evidence, never the 1733-row merged pool.
+    reservoir = json.loads(args.historical_reservoir.read_text())
+    if reservoir.get("target") not in (None, args.target):
+        raise SystemExit("historical parent reservoir target mismatch")
+    for candidate in reservoir.get("candidates", []):
+        sequence = str(candidate["sequence"])
+        item = _pool.setdefault(sequence, dict(candidate))
+        item["historical_reservoir"] = True
+    if not payloads:
+        raise SystemExit("no complete public nanobody parents were available")
+    eligible_pool = _validator_parent_pool(list(_pool.values()), target=args.target)
+    selected = _frontier_parents(
+        eligible_pool, comparison,
+        before_epoch=args.before_epoch, limit=max(args.limit, 155), diversity_k=args.diversity_k,
     )
-    selected = _frontier[: args.limit]
     for _cand in selected:
         _cand.setdefault("parent_source", "public_leaderboard_api")
-        _cand["parent_selection_lane"] = "frontier"
         _cand.setdefault("nearest_elite_distance", 0)
         _cand.setdefault("public_observations", [{
             "epoch": 0, "epoch_rank": 0,
             "validator_final_score": _cand["validator_final_score"],
         }])
-    print(f"frontier selection: pool={len(_pool)} frontier={len(_frontier)} "
-          f"selected={len(selected)}", flush=True)
     if not selected:
-        raise SystemExit("no complete public nanobody parents were available")
+        raise SystemExit("no public nanobody parents were available")
+    print(f"frontier selection: pool={len(_pool)} selected={len(selected)} "
+          f"multipass={sum('parent_multipass_mean' in c for c in selected)} "
+          f"score_range={min(c['validator_final_score'] for c in selected):.0f}.."
+          f"{max(c['validator_final_score'] for c in selected):.0f}", flush=True)
     _atomic_json(args.output, {
         "target": args.target,
         "before_epoch": args.before_epoch,
         "source": args.api_root.rstrip("/"),
-        "complete_epochs": complete_epochs,
+        "complete_epochs": ordered_epochs,
+        "diversity_k": args.diversity_k,
+        "historical_reservoir": str(args.historical_reservoir),
+        "selection_policy": "agreedfix-2026-10-20-complete",
+        "gated_pool_size": len(eligible_pool),
+        "nonduplicate_count": sum(c["parent_validator_duplicate"] is False for c in selected),
+        "duplicate_count": sum(c["parent_validator_duplicate"] is True for c in selected),
         "per_epoch": args.per_epoch,
         "neighbor_per_epoch": args.neighbor_per_epoch,
         "neighbor_distance": args.neighbor_distance,

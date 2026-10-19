@@ -47,22 +47,35 @@ def _rank_binders(archive: pd.DataFrame, top: int, max_violations: int):
     ).head(top)
 
 
-def duplicate_reason(identity: float, cdr_similarity: dict[str, float] | None) -> str | None:
-    """Mirror ``utils.nanobodies.is_duplicate`` without importing miner code."""
-    if identity >= 0.95:
+def duplicate_reason(
+    identity: float, cdr_similarity: dict[str, float] | None,
+    identity_threshold: float = 0.95,
+    no_cdr_gate: bool = False,
+) -> str | None:
+    """Mirror ``utils.nanobodies.is_duplicate`` without importing miner code.
+
+    ``identity_threshold`` relaxes only the whole-sequence identity bar (the
+    parent/seed gate passes 0.97 so near-boundary parents whose offspring can
+    cross below 0.95 are kept). ``no_cdr_gate`` disables the CDR3 clonotype and
+    conserved-CDR checks entirely -- used ONLY by the parent/seed gate, because
+    a parent that shares the CDR3 clonotype can still mutate the CDR3 into an
+    admissible child. The child/candidate gate keeps the full rule.
+    """
+    if identity >= identity_threshold:
         return "near-identical sequence"
-    if cdr_similarity is not None:
-        cdr3 = cdr_similarity.get("CDR3", 0.0)
-        if cdr3 >= 0.85:
-            return f"CDR3 identity {cdr3:.0%} (same clonotype)"
-        if (
-            cdr3 >= 0.80
-            and cdr_similarity.get("CDR1", 0.0) >= 0.90
-            and cdr_similarity.get("CDR2", 0.0) >= 0.90
-        ):
-            return f"CDR3={cdr3:.0%} with conserved CDR1/CDR2"
-    if identity >= 0.90 and cdr_similarity is None:
-        return f"whole-sequence identity {identity:.0%} (no CDR data)"
+    if not no_cdr_gate:
+        if cdr_similarity is not None:
+            cdr3 = cdr_similarity.get("CDR3", 0.0)
+            if cdr3 >= 0.85:
+                return f"CDR3 identity {cdr3:.0%} (same clonotype)"
+            if (
+                cdr3 >= 0.80
+                and cdr_similarity.get("CDR1", 0.0) >= 0.90
+                and cdr_similarity.get("CDR2", 0.0) >= 0.90
+            ):
+                return f"CDR3={cdr3:.0%} with conserved CDR1/CDR2"
+        if identity >= 0.90 and cdr_similarity is None:
+            return f"whole-sequence identity {identity:.0%} (no CDR data)"
     return None
 
 
@@ -80,9 +93,11 @@ def _build_search_engine(top: pd.DataFrame):
         sequence = str(row.sequence).strip().upper()
         cdrs = extract_cdrs(sequence)
         if cdrs is None:
-            raise RuntimeError(
-                f"failed to annotate Algorithm-2 top-50 sequence {selection_rank}"
-            )
+            # Match index_top_sequences: a top-50 sequence whose CDRs cannot be
+            # annotated is skipped (its igblast fallback is broken upstream --
+            # called with a path against a Dict[str, str] signature), so it is
+            # simply not indexed and cannot produce a duplicate match.
+            continue
         sequence_id = str(getattr(row, "sequence_hash", "")) or hashlib.sha256(
             sequence.encode("ascii")
         ).hexdigest()
@@ -96,32 +111,47 @@ def _build_search_engine(top: pd.DataFrame):
 #: processes directly -- each worker builds its own SearchEngine from `top`.
 _WORKER_ENGINE = None
 _WORKER_HISTORICAL: set[str] = set()
+_WORKER_IDENTITY_THRESHOLD = 0.95
+_WORKER_NO_CDR_GATE = False
 
 
-def _init_worker(top: pd.DataFrame, historical: set[str]) -> None:
-    global _WORKER_ENGINE, _WORKER_HISTORICAL
+def _init_worker(top: pd.DataFrame, historical: set[str],
+                 identity_threshold: float = 0.95,
+                 no_cdr_gate: bool = False) -> None:
+    global _WORKER_ENGINE, _WORKER_HISTORICAL, _WORKER_IDENTITY_THRESHOLD, _WORKER_NO_CDR_GATE
     _WORKER_ENGINE = _build_search_engine(top)
     _WORKER_HISTORICAL = historical
+    _WORKER_IDENTITY_THRESHOLD = identity_threshold
+    _WORKER_NO_CDR_GATE = no_cdr_gate
 
 
 def _search_one(candidate: dict[str, Any]) -> dict[str, Any]:
     """Exactly the per-candidate body of the old serial loop, unchanged --
     only the engine's origin (built once per worker, not once per process
-    overall) and the dispatch (pool.map instead of a for loop) differ. See
-    the parent docstring for why coarse_min_shared=0/coarse_jaccard=0.0 is
-    not optional."""
+    overall) and the dispatch (pool.map instead of a for loop) differ.
+
+    coarse_min_shared/coarse_jaccard are None here, matching the validator's
+    nanobody_validity.py call: None resolves to the SearchEngine's configured
+    coarse-filter defaults (min_shared_kmers/jaccard_threshold), so the
+    candidate set -- and therefore is_duplicate -- is byte-identical to the
+    validator's, not a superset.
+    """
     sequence = candidate["sequence"]
     exact_historical = sequence in _WORKER_HISTORICAL
     search = _WORKER_ENGINE.search(
         sequence,
         include_alignment=True,
         exclude_ids=None,
-        coarse_min_shared=0,
-        coarse_jaccard=0.0,
+        coarse_min_shared=None,
+        coarse_jaccard=None,
     )
     matches = []
     for match in search.matches:
-        reason = duplicate_reason(match.identity, match.cdr_similarity)
+        reason = duplicate_reason(
+            match.identity, match.cdr_similarity,
+            identity_threshold=_WORKER_IDENTITY_THRESHOLD,
+            no_cdr_gate=_WORKER_NO_CDR_GATE,
+        )
         matches.append(
             {
                 "target_id": match.target_id,
@@ -154,12 +184,44 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=50)
     parser.add_argument("--max-liability-violations", type=int, default=50)
     parser.add_argument(
+        "--identity-threshold", type=float, default=0.95,
+        help=(
+            "whole-sequence identity bar for 'near-identical sequence'; the "
+            "parent/seed gate passes 0.97 so near-boundary parents whose 1-edit "
+            "offspring can cross below 0.95 are kept. The child/candidate gate "
+            "uses the default 0.95."
+        ),
+    )
+    parser.add_argument(
+        "--no-cdr-gate", action="store_true",
+        help=(
+            "disable the CDR3 clonotype and conserved-CDR duplicate rules, "
+            "leaving ONLY whole-sequence identity. Used by the parent/seed gate "
+            "(a parent sharing the CDR3 clonotype can still mutate the CDR3 into "
+            "an admissible child); the child/candidate gate never passes this."
+        ),
+    )
+    parser.add_argument(
         "--concurrency", type=int, default=64,
         help=(
             "candidate searches run in parallel worker processes (each "
             "candidate's search only reads the shared top-50 index, so "
             "this is embarrassingly parallel); 1 reproduces the old serial "
             "behavior exactly, including error messages"
+        ),
+    )
+    parser.add_argument(
+        "--rejected-output", type=Path, default=None,
+        help=(
+            "also write the input sequences the validator would reject, one "
+            "per line; the publisher's pre-shortlist gate reads this"
+        ),
+    )
+    parser.add_argument(
+        "--summary-only", action="store_true",
+        help=(
+            "leave the per-candidate detail out of --output and stdout; a "
+            "20,000-candidate pre-filter would otherwise write ~770 MB"
         ),
     )
     args = parser.parse_args()
@@ -175,17 +237,14 @@ def main() -> None:
     if len(top) != args.top:
         raise SystemExit(f"expected {args.top} top sequences, got {len(top)}")
 
-    # Exactly the call neurons/validator/nanobody_validity.py makes. The
-    # engine's DEFAULT coarse k-mer prefilter discards every top sequence
-    # before alignment -- this replay reported coarse=0, max_identity=0.000
-    # and "30/30 novel" for a fleet that was 0.95-0.98 identical to the
-    # live rank-1 sequence. The validator disables that prefilter, so a
-    # replay that leaves it on proves nothing.
-    # Explicit zeros, not None. None means "use the configured coarse
-    # filter", not "skip it", so every top-50 sequence was discarded before
-    # alignment and this replay reported coarse_candidates=0,
-    # maximum_identity=0.000 and 350/350 novel -- a gate that compared
-    # nothing and had never rejected a candidate.
+    # Exactly the call neurons/validator/nanobody_validity.py makes: it passes
+    # coarse_min_shared=None, coarse_jaccard=None, which the SearchEngine
+    # resolves to its configured coarse-filter defaults (min_shared_kmers /
+    # jaccard_threshold). _search_one passes None/None too, so the candidate
+    # set -- and therefore is_duplicate -- is byte-identical to the validator.
+    # (A previous comment here claimed the validator "disables" the prefilter
+    # and that explicit zeros were required; the checked validator source and
+    # SearchEngine show the opposite: None = configured defaults.)
     #
     # PARALLELIZED (2026-10-10): each candidate's full alignment search
     # against the fixed top-50 index is independent of every other
@@ -195,14 +254,15 @@ def main() -> None:
     # per candidate), amortizing its cost across however many candidates
     # that worker handles.
     if args.concurrency <= 1:
-        _init_worker(top, historical)
+        _init_worker(top, historical, args.identity_threshold, args.no_cdr_gate)
         results = [_search_one(candidate) for candidate in candidates]
     else:
         import concurrent.futures
 
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=min(args.concurrency, len(candidates)),
-            initializer=_init_worker, initargs=(top, historical),
+            initializer=_init_worker,
+            initargs=(top, historical, args.identity_threshold, args.no_cdr_gate),
         ) as pool:
             results = list(pool.map(_search_one, candidates))
 
@@ -215,19 +275,25 @@ def main() -> None:
         "input_count": len(results),
         "pass_count": len(passed),
         "sequences": [item["sequence"] for item in passed],
+    }
+    if not args.summary_only:
         # `candidates` = the survivors, so a downstream race reads the filtered
         # set the same way pre_gpu_dedup emitted it. Full per-candidate detail
         # (including rejects + `validator_novel`) stays in `all_results`.
-        "candidates": passed,
-        "all_results": results,
-    }
+        payload["candidates"] = passed
+        payload["all_results"] = results
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
+    if args.rejected_output is not None:
+        args.rejected_output.parent.mkdir(parents=True, exist_ok=True)
+        args.rejected_output.write_text("".join(
+            f"{item['sequence']}\n" for item in results if not item["validator_novel"]
+        ))
     print(
         f"validator novelty: {len(passed)}/{len(results)} pass against "
         f"{len(archive):,} historical sequences and Algorithm-2 top {len(top)}"
     )
-    for item in results:
+    for item in () if args.summary_only else results:
         label = item.get("mutation", item["sequence"][:12])
         print(
             f"  {'PASS' if item['validator_novel'] else 'FAIL'} {label}: "

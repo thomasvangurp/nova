@@ -1328,46 +1328,35 @@ def round_robin_families(
     limit,
     family_identity=SEED_FAMILY_IDENTITY,
     exploration_share=EXPLORATION_SEED_SHARE,
+    cdr3_by_sequence=None,
 ):
-    """Give the leading family the bulk of the seeds, the rest a reserved slice.
+    """Reserve two seats per CDR3 family, nonduplicate parents first.
 
-    Seeds were taken in pure score order, so the leading family filled all
-    thirty-two slots and every ticket of every epoch came from one molecule's
-    neighbourhood. Best-first within a family is preserved throughout; what
-    changes is that the other families hold seats they cannot be outranked out
-    of, and that the leader still gets most of the budget.
+    Metadata appended to seed tuples is intentionally avoided: callers retain
+    the established nine-field tuple. main orders the nonduplicate pool first.
+    Unknown CDR3s do not earn a fictitious distinct clonotype reservation.
     """
     if limit <= 0 or not seeds:
         return []
-    families: list[list] = []
+    from nanobody_opt_v2.select_elite_parents import _same_cdr3_family
+    families = {}
     for seed in seeds:
-        sequence = seed[1]
-        for family in families:
-            if _identity(sequence, family[0][1]) >= family_identity:
-                family.append(seed)
-                break
-        else:
-            families.append([seed])
-    if len(families) == 1:
-        return families[0][:limit]
-
-    others = families[1:]
-    reserved = min(len(others), max(1, int(round(limit * exploration_share))))
-    leader_share = max(1, limit - reserved)
-    leader = families[0]
-
-    taken: list = list(leader[:leader_share])
-    while len(taken) < limit and any(others):
-        for family in others:
-            if not family:
+        loop = (cdr3_by_sequence or {}).get(seed[1])
+        if loop is None:
+            try:
+                start, end = find_regions(seed[1]).cdr3
+                loop = seed[1][start:end]
+            except ValueError:
                 continue
-            taken.append(family.pop(0))
-            if len(taken) == limit:
-                break
-    # Fewer exploration seeds than reserved seats: give the rest to the leader
-    # rather than leave the budget unspent.
-    if len(taken) < limit:
-        taken.extend(leader[leader_share:leader_share + (limit - len(taken))])
+        if loop:
+            identifier = next((representative for representative in families
+                               if _same_cdr3_family(loop, representative)), loop)
+            families.setdefault(identifier, []).append(seed)
+    taken = []
+    for seat in range(2):
+        for family in families.values():
+            if seat < len(family) and len(taken) < limit:
+                taken.append(family[seat])
     return taken[:limit]
 
 
@@ -1586,9 +1575,6 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
 
-    #: Seeds whose neighbourhood could not supply the requested novel candidates.
-    #: Collected rather than raised on, so one saturated seed does not end the run.
-    exhausted_seeds: list[str] = []
     for name in (
         "recent", "seed_count", "minimum_seeds", "per_seed", "donor_count",
         "min_support", "proposal_limit",
@@ -1607,12 +1593,102 @@ def main() -> None:
     if args.basin_evidence_core_limit < 0:
         parser.error("--basin-evidence-core-limit cannot be negative")
 
+    # 4800-novel-target override (2026-10-19). The producer passes
+    # --basin-routes-per-core 192 and --proposal-limit 5000, which cap the
+    # frontier single-edit lane at ~2.3k proposals (~1.3k novel/iteration and
+    # ~3.6 iterations to fill the 4800 screen budget). The measured frontier
+    # (5GhR-adjacent) single-edit pass rate is 78.5%, so ~6.2k basin
+    # proposals are needed to yield ~4.8k novel in one iteration. Raise both
+    # floors here; the downstream exact-race still caps its own screen at
+    # --candidate-limit, so this only widens the novelty pool -- it cannot
+    # over-screen. These are FLOORS: a higher explicit producer value wins.
+    args.basin_routes_per_core = max(args.basin_routes_per_core, 600)
+    args.proposal_limit = max(args.proposal_limit, 8000)
+    # Bias generation toward the terminal/haplotype lanes (2026-10-19): across
+    # 25810-25812 the top molecules come from c_terminal_haplotype,
+    # n_terminal_haplotype, framework_haplotype and lineage_terminal_single
+    # (exact_shortlist), while core_cdr (exhaustive/local, top-50-anchored) is
+    # the weak lane. Raise the framework share over core in the baseline.
+    args.framework_fraction = max(args.framework_fraction, 0.8)
+
     config_payload = yaml.safe_load(args.config.read_text())
     requirements = config_payload["nanobody_requirements"]
     target = str(config_payload["protein_selection"]["nanobody"]["target"])
     frame = pd.read_csv(args.archive).drop_duplicates("sequence", keep="first")
-    length = int(frame.sequence.str.len().mode()[0])
-    frame = frame[frame.sequence.str.len() == length].reset_index(drop=True)
+    mode = int(frame.sequence.str.len().mode()[0])
+    parent_candidates = _layer2_candidates(args.layer2_seeds)
+    # Existing producer caches predate duplicate metadata. Re-admit ONLY the
+    # pinned historical bank, with a fresh gate, rather than gating merged seeds.
+    from nanobody_opt_v2.select_elite_parents import _validator_parent_pool
+    reservoir_path = Path("/root/artifacts/agreedfix_historical_parents.json")
+    reservoir_payload = json.loads(reservoir_path.read_text())
+    if reservoir_payload.get("target") not in (None, target):
+        raise SystemExit("historical reservoir target mismatch")
+    historical = _validator_parent_pool(reservoir_payload["candidates"], target=target)
+    historical = [dict(c, historical_reservoir=True, parent_selection_lane="frontier")
+                  for c in historical if c["parent_validator_duplicate"] is False
+                  and c.get("layer2_passed")]
+    known = {c["sequence"]: c for c in parent_candidates}
+    known.update({c["sequence"]: c for c in historical})
+    parent_candidates = list(known.values())
+    args._seed_candidates = parent_candidates
+    lengths = sorted({len(str(c["sequence"]).strip()) for c in parent_candidates
+                      if abs(len(str(c["sequence"]).strip()) - mode) <= 5})
+    outputs = []
+    seed_shortages = []
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    original_output = args.output
+    original_network_output = args.mutation_network_output
+    total_budget = args.proposal_limit
+    # Share the overall floor across exact-length contexts, reserving enough
+    # breadth for rarer lengths without multiplying the proposal workload.
+    counts = {length: sum(len(c["sequence"]) == length for c in parent_candidates)
+              for length in lengths}
+    minimum_context_budget = min(512, total_budget // max(1, len(lengths)))
+    remainder = total_budget - minimum_context_budget * len(lengths)
+    weight = sum(counts.values()) or 1
+    budgets = {length: minimum_context_budget + remainder * counts[length] // weight
+               for length in lengths}
+    if lengths:
+        budgets[max(lengths, key=lambda value: counts[value])] += total_budget - sum(budgets.values())
+    for length in lengths:
+        args.proposal_limit = budgets[length]
+        exact_frame = frame[frame.sequence.str.len() == length].reset_index(drop=True)
+        if exact_frame.empty:
+            # Public, Layer-2-qualified parents provide an exact-length background
+            # even if this archive snapshot has no rows of that length.
+            rows = [dict(c.get("metrics") or {}, sequence=c["sequence"])
+                    for c in parent_candidates if len(c["sequence"]) == length]
+            exact_frame = pd.DataFrame(rows)
+        args.output = original_output.with_name(original_output.stem + f".length{length}.csv")
+        args.mutation_network_output = (original_network_output.with_name(
+            original_network_output.stem + f".length{length}" + original_network_output.suffix)
+            if original_network_output else None)
+        seed_shortages.append(_generate_exact_length(args, exact_frame, length, requirements, target))
+        outputs.append(pd.read_csv(args.output))
+    args.output = original_output
+    args.proposal_limit = total_budget
+    args.mutation_network_output = original_network_output
+    # Each context has its own proposal budget; preserve its emitted candidates.
+    # Interleave lengths and do not impose a second post-generation cap.
+    rows = []
+    for index in range(max((len(output) for output in outputs), default=0)):
+        rows.extend(output.iloc[index].to_dict() for output in outputs if index < len(output))
+    output = pd.DataFrame(rows).drop_duplicates("sequence", keep="first") if rows else pd.DataFrame(columns=["sequence"])
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output.to_csv(args.output, index=False)
+    report = {"mode_length": mode, "length_window": [mode - 5, mode + 5],
+              "contexts": lengths, "context_budgets": budgets,
+              "seed_shortage": not lengths or any(seed_shortages),
+              "fallback_required": not lengths or any(seed_shortages),
+              "emitted": len(output), "proposal_floor": args.proposal_limit,
+              "shortage": max(0, args.proposal_limit - len(output))}
+    Path(str(args.output) + ".shortage.json").write_text(json.dumps(report, indent=2))
+    print("GENERATION_SHORTAGE " + json.dumps(report), flush=True)
+
+
+def _generate_exact_length(args, frame, length, requirements, target):
+    exhausted_seeds = []
     recent = frame.tail(min(args.recent, len(frame))).reset_index(drop=True)
     recent = recent.assign(recent_rank_sum=_rank_sum(recent))
 
@@ -1624,7 +1700,8 @@ def main() -> None:
     eligible: list[
         tuple[float, str, float, str, set[int], str, str, int, bool]
     ] = []
-    for candidate in _layer2_candidates(args.layer2_seeds):
+    seed_metadata = {str(c["sequence"]): c for c in args._seed_candidates}
+    for candidate in seed_metadata.values():
         sequence = str(candidate["sequence"]).strip().upper()
         if len(sequence) != length:
             continue
@@ -1674,25 +1751,47 @@ def main() -> None:
         item[0],
         item[1],
     ))
+    eligible.sort(key=lambda item: seed_metadata[item[1]].get("parent_validator_duplicate") is not False)
     reserved_seeds = [item for item in eligible if item[8]]
     reserved_sequences = {item[1] for item in reserved_seeds}
     legacy_seeds = [
         item for item in eligible
         if item[5] in ("epoch_elite", "frontier") and item[1] not in reserved_sequences
     ]
-    core_seeds = round_robin_families(
-        [*reserved_seeds, *legacy_seeds], args.seed_count
-    )
-    if len(core_seeds) < args.minimum_seeds:
-        raise SystemExit(
-            f"only {len(core_seeds)} elite seeds passed current Layer-2 and diversity; "
-            f"require at least {args.minimum_seeds}"
-        )
+    seed_pool = [*reserved_seeds, *legacy_seeds]
+    seed_pool.sort(key=lambda item: not seed_metadata[item[1]].get("historical_reservoir", False))
+    nondup = [item for item in seed_pool if seed_metadata[item[1]].get("parent_validator_duplicate") is False]
+    other = [item for item in seed_pool if seed_metadata[item[1]].get("parent_validator_duplicate") is not False]
+    # First reserve CDR3 seats entirely within nonduplicates; fill from the rest.
+    cdr3_by_sequence = {sequence: c.get("parent_cdr3") for sequence, c in seed_metadata.items()
+                        if c.get("parent_cdr3")}
+    core_seeds = round_robin_families(nondup, args.seed_count, cdr3_by_sequence=cdr3_by_sequence)
+    core_seeds += round_robin_families(other, args.seed_count - len(core_seeds),
+                                     cdr3_by_sequence=cdr3_by_sequence)
+    seed_shortage = len(core_seeds) < max(24, args.minimum_seeds)
+    if seed_shortage:
+        print(f"SEED_SHORTAGE length={length} selected={len(core_seeds)} "
+              f"floor={max(24, args.minimum_seeds)}; historical single-edit fallback enabled", flush=True)
+    if not core_seeds:
+        pd.DataFrame(columns=["sequence"]).to_csv(args.output, index=False)
+        return True
     neighbor_seeds = [
         item for item in eligible
         if item[5] == "family_neighbor" and item[1] not in {seed[1] for seed in core_seeds}
     ][: args.neighbor_seed_count]
     seeds = [*core_seeds, *neighbor_seeds]
+
+    # Single-edit seed pool: the full core_seeds pool -- no <0.95 pre-filter.
+    # The <0.95 identity filter previously applied here was backwards: it
+    # removed exactly the >=0.95 parents that dominate the rival 5GhREcsK's
+    # family (104/106 of his molecules are >=0.95 identical to the current
+    # top-50), collapsing the single-edit lane's within-1-edit match to his
+    # basin from 71.7% to 1.9%. Seed single-edits from the same full
+    # eligible/core pool the multi-edit/haplotype lane uses, so the lane
+    # re-anchors on the competitor/frontier parents instead of our stale
+    # <0.95 tail. No selection_score elite-ordering is re-introduced: this
+    # only removes the identity pre-filter.
+    single_edit_seeds = list(core_seeds)
 
     donor_sequences = [
         item[1] for item in eligible[: min(args.donor_count, len(eligible))]
@@ -1850,11 +1949,20 @@ def main() -> None:
         failures = gates.check_sequence(candidate, requirements)
         if failures:
             return False
-        diverse, max_jaccard = diversity.passes_diversity(
+        # Cheap k-mer/Jaccard "crowded family" gate DISABLED (2026-10-19):
+        # the authoritative duplicate gate is check_validator_novelty /
+        # utils.nanobodies.is_duplicate -- Algorithm-2 alignment identity
+        # (reject at whole-sequence identity >= 0.95) plus the CDR3 clonotype
+        # rule. A 5-mer Jaccard of 0.9 corresponds to a single edit (identity
+        # ~0.98), far stricter than the validator's bar: the validator still
+        # admits 0.933-identity (9-edit) children such as rival 5GhREcsK's
+        # single-edits. The k-mer gate rejected near-top-50 children before
+        # they could reach the authoritative Algorithm-2 gate, so it is
+        # removed; check_validator_novelty remains the only novelty authority
+        # before commit. max_jaccard is still recorded for observability.
+        _, max_jaccard = diversity.passes_diversity(
             candidate, top_kmers, threshold=0.9, k=5
         )
-        if not diverse:
-            return False
         changed = [
             (index, before, after)
             for index, (before, after) in enumerate(
@@ -1901,6 +2009,10 @@ def main() -> None:
         pending_evidence.append((record, parent, candidate, protected))
         return True
 
+    # Multi-edit / haplotype lane: the full diverse core_seeds pool, including
+    # >=0.95 frontier elite (a multi-edit child of a near-boundary parent can
+    # still cross below 0.95). Single-edit generation runs in the dedicated
+    # single_edit_seeds loop below, seeded from the same full core pool.
     for parent_record in core_seeds:
         (
             parent_score,
@@ -1917,54 +2029,6 @@ def main() -> None:
         cdr_positions = list(regions.cdr_positions())
         bounds = [regions.cdr1, regions.cdr2, regions.cdr3]
         attempts = 0
-
-        # Deterministic coverage floor: every novel, supported, one-residue CDR
-        # substitution is emitted before stochastic exploration.  The exact
-        # race recognizes this proposal_type and scores the whole bounded lane.
-        single_candidates = []
-        for position in cdr_positions:
-            if position in protected:
-                continue
-            # This lane enumerates the residue pool directly, so it has to
-            # consult the same policy the stochastic draw does or it walks
-            # straight past it.  Measured on a full epoch-25138 run it was the
-            # single largest remaining source of breakage under repair-only --
-            # 304 of 709 candidates carrying a new settled deviation, 43% of the
-            # total, from a lane the rule never touched.  Under repair-only a
-            # settled position the parent has right now yields only the parent
-            # residue, which the next line skips, and one it has wrong yields
-            # only the repair.
-            for residue in settled_site_options(
-                position,
-                parent=parent,
-                consensus=consensus,
-                allowed=allowed,
-                anchor=None,
-                repair_only=repair_only,
-            ):
-                if residue == parent[position]:
-                    continue
-                candidate = parent[:position] + residue + parent[position + 1 :]
-                single_candidates.append((
-                    -priors[position][residue],
-                    position,
-                    residue,
-                    candidate,
-                ))
-        for _, _, _, candidate in sorted(single_candidates):
-            if add_candidate(
-                parent_record,
-                candidate,
-                "exhaustive_single_substitution",
-                "core_cdr",
-                core_proposals,
-            ):
-                exhaustive_single_count += 1
-                if exhaustive_single_count > args.maximum_exhaustive_singles:
-                    raise SystemExit(
-                        "supported single-substitution lane exceeds "
-                        f"--maximum-exhaustive-singles={args.maximum_exhaustive_singles}"
-                    )
 
         stochastic_accepted = 0
         while (
@@ -2015,18 +2079,12 @@ def main() -> None:
                 )
                 sequence[start:end] = list(selected_motif)
             else:
-                if (
-                    args.min_mutations == 1
-                    and rng.random() < args.single_mutation_fraction
-                ):
-                    mutation_count = 1
-                else:
-                    lower = max(2, args.min_mutations)
-                    mutation_count = (
-                        int(rng.integers(lower, args.max_mutations + 1))
-                        if lower <= args.max_mutations
-                        else args.min_mutations
-                    )
+                lower = max(2, args.min_mutations)
+                mutation_count = (
+                    int(rng.integers(lower, args.max_mutations + 1))
+                    if lower <= args.max_mutations
+                    else args.min_mutations
+                )
                 mutable = [
                     position for position in cdr_positions
                     if position not in protected
@@ -2127,6 +2185,121 @@ def main() -> None:
             # time is worth far more spent replicating what we already have:
             # reliability goes 0.16 -> 0.61 across eight observations, while a
             # forty-fourth pass over an exhausted basin adds nothing.
+            exhausted_seeds.append(
+                f"{stochastic_accepted}/{args.per_seed} at score {parent_score:.1f}"
+            )
+
+    # Single-edit lane: one-residue substitutions seeded from the full
+    # core_seeds pool (see single_edit_seeds above). The deterministic
+    # exhaustive coverage floor runs first, then stochastic single
+    # substitutions. The edit-position set is the CDR positions extended with
+    # the two boundary/framework positions the rival 5GhREcsK's QWALVES basin
+    # differs from our core at, 46 and 61 (1-indexed): 61 (0-indexed 60) is
+    # already inside CDR2, and 46 (0-indexed 45) is the FR2 residue on the
+    # CDR2 boundary, added here so the lane can anchor on his basin.
+    for parent_record in single_edit_seeds:
+        (
+            parent_score,
+            parent,
+            _,
+            _,
+            protected,
+            _,
+            _,
+            _,
+            _,
+        ) = parent_record
+        regions = find_regions(parent)
+        cdr_positions = sorted(set(regions.cdr_positions()) | {45, 60})
+        attempts = 0
+
+        single_candidates = []
+        for position in cdr_positions:
+            if position in protected:
+                continue
+            for residue in settled_site_options(
+                position,
+                parent=parent,
+                consensus=consensus,
+                allowed=allowed,
+                anchor=None,
+                repair_only=repair_only,
+            ):
+                if residue == parent[position]:
+                    continue
+                candidate = parent[:position] + residue + parent[position + 1 :]
+                single_candidates.append((
+                    -priors[position][residue],
+                    position,
+                    residue,
+                    candidate,
+                ))
+        for _, _, _, candidate in sorted(single_candidates):
+            if add_candidate(
+                parent_record,
+                candidate,
+                "exhaustive_single_substitution",
+                "core_cdr",
+                core_proposals,
+            ):
+                exhaustive_single_count += 1
+                if exhaustive_single_count > args.maximum_exhaustive_singles:
+                    raise SystemExit(
+                        "supported single-substitution lane exceeds "
+                        f"--maximum-exhaustive-singles={args.maximum_exhaustive_singles}"
+                    )
+
+        stochastic_accepted = 0
+        while (
+            stochastic_accepted < args.per_seed
+            and attempts < args.per_seed * 500
+        ):
+            attempts += 1
+            mutable = [
+                position for position in cdr_positions
+                if position not in protected
+                if any(
+                    residue != parent[position]
+                    for residue in settled_site_options(
+                        position,
+                        parent=parent,
+                        consensus=consensus,
+                        allowed=allowed,
+                        anchor=None,
+                        repair_only=repair_only,
+                    )
+                )
+            ]
+            if not mutable:
+                continue
+            position = int(rng.choice(mutable, size=1, replace=False)[0])
+            options = settled_site_options(
+                position,
+                parent=parent,
+                consensus=consensus,
+                allowed=allowed,
+                anchor=position,
+                repair_only=repair_only,
+            )
+            candidate = (
+                parent[:position]
+                + _weighted_choice(
+                    rng,
+                    options,
+                    [priors[position][residue] for residue in options],
+                )
+                + parent[position + 1 :]
+            )
+            if add_candidate(
+                parent_record,
+                candidate,
+                "local_substitution",
+                "core_cdr",
+                core_proposals,
+            ):
+                stochastic_accepted += 1
+
+        if stochastic_accepted < args.per_seed:
             exhausted_seeds.append(
                 f"{stochastic_accepted}/{args.per_seed} at score {parent_score:.1f}"
             )
@@ -2353,10 +2526,31 @@ def main() -> None:
             lineage_proposals.append(item)
             accepted += 1
 
+    fallback_proposals = []
+    if seed_shortage:
+        for parent_record in core_seeds:
+            if seed_metadata[parent_record[1]].get("parent_validator_duplicate") is not False:
+                continue
+            parent = parent_record[1]
+            for position in range(length):
+                if position in parent_record[4]:
+                    continue
+                for residue in sorted(gates.ALLOWED_AAS):
+                    if residue != parent[position]:
+                        add_candidate(parent_record, parent[:position] + residue + parent[position + 1:],
+                                      "historical_fallback_single", "core_cdr", fallback_proposals)
+
     _resolve_pending_evidence(
         pending_evidence, mutation_network,
         workers=args.generation_workers,
         workers_minimum_candidates=args.generation_workers_minimum_candidates,
+    )
+
+    # Order the basin lane by proposal quality. Retain its generated tail
+    # for the exact novelty gate rather than truncating it before that gate.
+    basin_proposals = sorted(
+        _deduplicate_proposals(basin_proposals),
+        key=_proposal_ranking_key,
     )
 
     baseline_proposals = balanced_proposal_order(
@@ -2371,18 +2565,35 @@ def main() -> None:
         limit=args.proposal_limit,
         novel_fraction=args.lineage_fraction,
     )
+    # Corrected lane priority (2026-10-19, epoch-25809 origin analysis): the
+    # STRONG candidates come from exact_shortlist (current frontier elite) via
+    # lineage_terminal_single / lineage_cdr_single / c-terminal + n-terminal
+    # haplotypes, while the WEAK tail comes from historical_basin_member via
+    # basin_terminal_single (stale archive basin). Put the lineage + framework
+    # (strong) lanes first so they fill the budget, and let the stale-archive
+    # basin lane backfill -- it no longer takes the primary 70% share.
     proposals = interleave_novel_lane(
+        baseline_with_lineage,
         ordered_basin_proposals(
             _deduplicate_proposals(basin_proposals),
             evidence_fraction=args.basin_evidence_fraction,
             evidence_core_limit=args.basin_evidence_core_limit,
             top_core_weight=args.basin_top_core_weight,
         ),
-        baseline_with_lineage,
         limit=args.proposal_limit,
-        novel_fraction=1.0 - args.basin_fraction,
+        novel_fraction=0.0,
     )
-    output = pd.DataFrame(proposals)
+    # The shortage reserve is additive after normal lane truncation; do not
+    # discard its novelty headroom to satisfy an emitted-pool cap.
+    emitted = {item["sequence"] for item in proposals}
+    # Lane budgets order the head; retain every already-generated proposal for
+    # the exact novelty gate. Screening alone imposes the candidate cap.
+    for item in [*core_proposals, *framework_proposals, *lineage_proposals,
+                 *basin_proposals, *fallback_proposals]:
+        if item["sequence"] not in emitted:
+            proposals.append(item)
+            emitted.add(item["sequence"])
+    output = pd.DataFrame(proposals) if proposals else pd.DataFrame(columns=["sequence"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(args.output, index=False)
     print(f"eligible current-gate seeds: {len(eligible)}")
@@ -2400,7 +2611,10 @@ def main() -> None:
         )
     print(f"wrote {len(output)} balanced proposals to {args.output}")
     print(f"exhaustive supported single substitutions: {exhaustive_single_count}")
-    print(output.groupby(["proposal_type", "edit_distance"]).size().to_string())
+    if not output.empty:
+        print(output.groupby(["proposal_type", "edit_distance"]).size().to_string())
+
+    return seed_shortage
 
 
 if __name__ == "__main__":

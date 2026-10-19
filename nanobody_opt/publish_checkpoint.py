@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -385,17 +386,38 @@ def main() -> None:
     archive_sequences = set(archive.sequence.astype(str).str.strip().str.upper())
     if sequence in archive_sequences:
         raise SystemExit("winner is already present in the current archive")
-    top = diversity.minmax_weighted_rank(
-        archive, k=int(requirements["num_top_sequences"])
-    )
-    diverse, max_jaccard = diversity.passes_diversity(
-        sequence,
-        [diversity.kmers(item, 5) for item in top.sequence],
-        threshold=float(requirements["max_similarity_score"]),
-        k=5,
-    )
-    if not diverse:
-        raise SystemExit("winner fails the current top-sequence diversity gate")
+    # Validator duplicate gate (2026-10-19): the old cheap k-mer Jaccard gate
+    # here missed the validator's CDR3-clonotype (>= 0.85) and 2-6-edit
+    # near-identity rules, so near-duplicates passed this checkpoint and then
+    # scored zero on-chain (4 of 9 UIDs at 25812). Re-run the SAME Algorithm-2
+    # is_duplicate gate the generation pipeline uses (check_validator_novelty)
+    # so the publish filter matches the validator's is_duplicate instead of the
+    # looser k-mer Jaccard gate.
+    with tempfile.TemporaryDirectory() as td:
+        inp = Path(td) / "novelty_input.json"
+        out = Path(td) / "novelty_output.json"
+        inp.write_text(json.dumps({"sequences": [sequence]}))
+        subprocess.run(
+            [
+                "/usr/local/bin/pixi", "run",
+                "--manifest-path", "/root/pixi.toml",
+                "--locked", "--environment", "metanano",
+                "python", "-m", "nanobody_opt.check_validator_novelty",
+                "--archive", str(args.archive),
+                "--target", args.target,
+                "--input", str(inp),
+                "--output", str(out),
+                "--summary-only",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        novel = json.loads(out.read_text())
+    if sequence not in novel.get("sequences", []):
+        raise SystemExit(
+            "winner fails the validator duplicate gate (is_duplicate): "
+            "too similar to a top sequence"
+        )
 
     metrics = {name: float(winner["metrics"][name]) for name in METRICS}
     if not all(math.isfinite(value) for value in metrics.values()):
@@ -416,8 +438,8 @@ def main() -> None:
             "layer_1": {
                 "passed": True,
                 "historically_unique": True,
-                "diversity_passed": True,
-                "max_jaccard_to_top50": max_jaccard,
+                "duplicate_gate_passed": True,
+                "duplicate_check": "validator is_duplicate (check_validator_novelty)",
             },
             "layer_2": {"passed": True},
             "boltzgen": {
