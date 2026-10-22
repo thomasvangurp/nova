@@ -83,6 +83,8 @@ while true; do
         || start_session shadow-tournament /root/tools/shadow_tournament_loop.sh
     tmux has-session -t topup-publishable 2>/dev/null \
         || start_session topup-publishable /root/tools/topup_loop.sh
+    tmux has-session -t topup-slave 2>/dev/null \
+        || start_session topup-slave /root/tools/topup_slave_loop.sh
 
     if ! tmux has-session -t nova-nanobody-publisher 2>/dev/null; then
         log "session nova-nanobody-publisher MISSING - restarting"
