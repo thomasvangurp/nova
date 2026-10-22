@@ -64,16 +64,50 @@ def connect(database: Path = DATABASE_PATH) -> sqlite3.Connection:
     return connection
 
 
-def gap_history_rows(connection: sqlite3.Connection) -> list[dict]:
+def gap_history_rows(
+        connection: sqlite3.Connection, status: dict | None = None) -> list[dict]:
     """Read gap_history with an already-open connection (build.py's own --
     never open a second one). Ensures the table exists first since build.py
-    may run before compound.py's collect() ever has."""
+    may run before compound.py's collect() ever has.
+
+    The status JSON and sqlite history are committed separately.  Merge the
+    newest successful live-gate snapshot into the plotted rows so a dashboard
+    build can never show a current value in the table while leaving the chart
+    one collection behind (for example after an interrupted sqlite commit).
+    """
     connection.executescript(SCHEMA)
     cursor = connection.execute(
         "SELECT checked_at, reaction, selected_score, floor, gap, clears_now, pool_size "
         "FROM gap_history ORDER BY reaction, checked_at")
     columns = [d[0] for d in cursor.description]
-    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    latest = {}
+    for row in rows:
+        latest[int(row["reaction"])] = max(
+            float(row["checked_at"]), latest.get(int(row["reaction"]), 0.0))
+    for key, gap in ((status or {}).get("gap_checks") or {}).items():
+        if not isinstance(gap, dict):
+            continue
+        try:
+            reaction = int(key)
+            checked_at = float(gap["checked_at"])
+            selected_score = float(gap["selected_score"])
+            floor = float(gap["floor"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if checked_at <= latest.get(reaction, 0.0):
+            continue
+        rows.append(dict(
+            checked_at=checked_at,
+            reaction=reaction,
+            selected_score=selected_score,
+            floor=floor,
+            gap=float(gap.get("gap", selected_score - floor)),
+            clears_now=int(bool(gap.get("clears_now", selected_score >= floor))),
+            pool_size=gap.get("pool_size"),
+        ))
+    return sorted(rows, key=lambda row: (row["reaction"], row["checked_at"]))
 
 PI_HOST = os.environ.get("NOVA_PI_SSH", "thomasg@raspberrypi.local")
 PI_LOOP_LOG = "/opt/nova-submit/loop.log"
@@ -94,6 +128,16 @@ LEADERBOARD_API = (
     "{epoch}/molecules?limit=10000"
 )
 
+# 2026-10-13: compound moved to the SANQI space (44 reactions, one ~42 min sprint on the drawn
+# reaction across the nova-sanqi-N boxes, no standing per-reaction bank).  The five per-reaction
+# boxes above no longer exist; checking them only produced "gate_error" rows and kept the refresh
+# in short-retry mode.  NOVA_DASH_LEGACY_BOX_CHECKS=1 brings the old checks back.
+LEGACY_BOX_CHECKS = os.environ.get("NOVA_DASH_LEGACY_BOX_CHECKS") == "1"
+PI_SANQI_DIR = "/opt/nova-submit"
+SANQI_FIRST_EPOCH = 25692
+SANQI_SPRINT_LOG = "sprint_trigger.log"
+SANQI_FILES = ("reaction_count.json", "reaction_health.json", "sprint_state.json")
+
 # Measured 2026-10-02: offline (de-noised, 3-pass) selected_score vs the real
 # on-chain score, across 9 epochs with clean (non -999.99) on-chain data.
 # Context for the dashboard reader: clearing the baseline offline is not the
@@ -106,8 +150,13 @@ def _ssh(host: str, *args: str, timeout: int = 30) -> str | None:
     """Run one read-only remote command. Returns stdout, or None on any
     failure -- a Pi/box outage must not take down the whole collector."""
     try:
+        # These are fixed read-only collector commands; the Pi must not SSH
+        # back into itself or depend on the Mac's SSH configuration.
+        local = os.environ.get("NOVA_DASH_LOCAL_PI") == "1" and host == PI_HOST
+        command = (["/bin/sh", "-c", args[0]] if len(args) == 1 else list(args)) if local else [
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, *args]
         completed = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, *args],
+            command,
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -419,6 +468,17 @@ def _real_outcome(epoch: int, uids: list[int]) -> dict | None:
         default=(None, None),
     )
     winner_score = float(ranked[0].get("final_score") or 0) if ranked else None
+    # -999.99 on EVERY row is not a field of rejected submissions: it is an epoch
+    # in which the validator ranked no molecule at all (epoch 25681: three of its
+    # ten boltz shards died on a shared GPU, every UID had a molecule it could not
+    # score, and the log said "No valid molecule submissions to rank").  There is
+    # no winner, no payout and nobody was rejected, so show it as unranked rather
+    # than as a -999.99 "winner" that we were "rejected" against.
+    if ranked and all(float(item.get("final_score") or -999999) <= -999 for item in ranked):
+        return dict(field_size=len(ranked), rank=None, score=None, won=False,
+                    rejected=False, unranked=True, winner_score=None)
+    if winner_score is not None and winner_score <= -999:
+        winner_score = None
     if best_rank is None or best_rank >= 10**9:
         return dict(field_size=len(ranked), rank=None, score=None, won=False,
                     winner_score=winner_score)
@@ -814,6 +874,74 @@ def refresh_strategy_only() -> dict:
     return checks
 
 
+def _parse_sanqi(text: str) -> dict:
+    """Parse the one-shot dump of the Pi's SANQI files (sections introduced by '##name')."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in text.splitlines():
+        if line.startswith("##"):
+            current = line[2:].strip()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+
+    def load_json(name: str) -> dict:
+        try:
+            value = json.loads("\n".join(sections.get(name, [])) or "{}")
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    config = load_json("reaction_count.json")
+    health = load_json("reaction_health.json")
+    state = load_json("sprint_state.json")
+    sprints: dict[int, dict] = {}
+    for line in sections.get(SANQI_SPRINT_LOG, []):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        epoch, kind = event.get("epoch"), event.get("event")
+        if not isinstance(epoch, int):
+            continue                                   # sprint_forced rehearsals carry no epoch
+        row = sprints.setdefault(epoch, dict(epoch=epoch, status="none", late_joins=0, gave_up=0))
+        if kind == "sprint_started":
+            first = row["status"] != "sprint"
+            row.update(status="sprint", reaction=event.get("reaction"),
+                       minutes=event.get("minutes") if first else row.get("minutes"),
+                       started_at=row.get("started_at") if not first else event.get("at"))
+            row["boxes"] = max(int(event.get("boxes") or 0), int(row.get("boxes") or 0))
+            row["pushed"] = max(int(event.get("pushed") or 0), int(row.get("pushed") or 0))
+        elif kind == "sprint_joined_late":
+            row["late_joins"] += 1
+        elif kind == "sprint_retry_gave_up":
+            row["gave_up"] += 1
+        elif kind in ("dead_reaction", "sprint_too_late", "sprint_push_failed"):
+            if row["status"] != "sprint":
+                row.update(status={"dead_reaction": "dead", "sprint_too_late": "too_late",
+                                   "sprint_push_failed": "push_failed"}[kind],
+                           reaction=event.get("reaction"))
+    rows = [row for row in sprints.values() if row["status"] != "none"]
+    rows.sort(key=lambda row: -row["epoch"])
+    return dict(
+        config=dict(count=config.get("count"), from_epoch=config.get("from_epoch"),
+                    sprint_from_epoch=config.get("sprint_from_epoch")),
+        dead=sorted(int(r) for r in (health.get("dead") or [])),
+        weak=sorted(int(r) for r in (health.get("weak") or [])) if isinstance(health.get("weak"), list) else [],
+        current_epoch=state.get("epoch"),
+        sprints=rows[:40],
+    )
+
+
+def _sanqi_snapshot() -> dict | None:
+    command = (f"cd {PI_SANQI_DIR} && for f in {' '.join(SANQI_FILES)}; do echo \"##$f\"; cat $f 2>/dev/null; echo; done; "
+               f"echo \"##{SANQI_SPRINT_LOG}\"; tail -n 400 {SANQI_SPRINT_LOG} 2>/dev/null")
+    text = _ssh(PI_HOST, command, timeout=30)
+    if not text:
+        return None
+    return _parse_sanqi(text)
+
+
 def collect(live_gap_check: bool = True) -> dict:
     """One full snapshot. live_gap_check=False skips the expensive per-box
     SELECT (useful for a quick/forced refresh); the rendered page falls back
@@ -834,7 +962,7 @@ def collect(live_gap_check: bool = True) -> dict:
         status["collected_at"] = failed_at
         status["pi_reachable"] = False
         status["gap_refresh_attempted_at"] = failed_at
-        status["gap_refresh_failed_reactions"] = list(REACTION_BOXES)
+        status["gap_refresh_failed_reactions"] = list(REACTION_BOXES) if LEGACY_BOX_CHECKS else []
         status["gap_refresh_complete"] = False
         for reaction, gap in list((status.get("gap_checks") or {}).items()):
             if isinstance(gap, dict):
@@ -882,7 +1010,7 @@ def collect(live_gap_check: bool = True) -> dict:
         gate = final_gates.get(row["epoch"]) or {}
         baseline = gate.get("raw_floor")
         if baseline is None:
-            baseline = REACTION_BOXES[row["reaction"]][2]
+            baseline = REACTION_BOXES.get(row["reaction"], (None, None, 0.0))[2]
         entry["baseline"] = baseline
         entry["gap"] = row["best"] - baseline
         if gate:
@@ -912,17 +1040,30 @@ def collect(live_gap_check: bool = True) -> dict:
             entry["winner_score"] = row["outcome"].get("winner_score")
             entry["field_size"] = row["outcome"].get("field_size")
             entry["real_rejected"] = bool(row["outcome"].get("rejected"))
+            entry["real_unranked"] = bool(row["outcome"].get("unranked"))
 
     wallclock = _attach_wallclock(parsed["ordered_window_events"], collected_at=time.time())
     for entry in history.values():
         entry["at"] = wallclock.get((entry["epoch"], entry["reaction"]))
 
+    sanqi = _sanqi_snapshot() or previous.get("sanqi")
+    if sanqi:
+        sprint_by_epoch = {row["epoch"]: row for row in sanqi.get("sprints") or []}
+        for epoch, sprint in sprint_by_epoch.items():
+            entry = history.get(epoch)
+            if entry is None and sprint.get("reaction") is not None and window and epoch >= min(window):
+                entry = history[epoch] = dict(epoch=epoch, reaction=sprint["reaction"], outcome="unknown")
+            if entry is None:
+                continue
+            entry["sprint"] = {k: sprint.get(k) for k in ("status", "boxes", "pushed", "late_joins", "minutes")}
+            if sprint["status"] == "dead" and entry.get("outcome") != "cleared":
+                entry["outcome"] = "dead"
     recent = sorted(history.values(), key=lambda row: -row["epoch"])[:30]
 
     gap_checks = dict(previous.get("gap_checks") or {})
     strategy_checks = dict(previous.get("search_strategy") or {})
     floor_details = dict(previous.get("dynamic_floor_details") or {})
-    if live_gap_check:
+    if live_gap_check and LEGACY_BOX_CHECKS:
         _pull_submitted_archive()
         floors, details = _dynamic_floors((max(window) + 1) if window else 0)
         DYNAMIC_FLOORS.update(floors)
@@ -982,6 +1123,12 @@ def collect(live_gap_check: bool = True) -> dict:
                     gap_db.commit()
         finally:
             gap_db.close()
+    elif not LEGACY_BOX_CHECKS:
+        # SANQI: no per-reaction boxes to check.  Drop the retired checks instead of showing
+        # them as permanently stale.
+        gap_checks, strategy_checks, floor_details = {}, {}, {}
+        gap_refresh_attempted_at = time.time()
+        gap_refresh_failed_reactions = []
     else:
         gap_refresh_attempted_at = previous.get("gap_refresh_attempted_at")
         gap_refresh_failed_reactions = list(
@@ -1003,6 +1150,8 @@ def collect(live_gap_check: bool = True) -> dict:
         dynamic_floor_details=floor_details,
         search_strategy=strategy_checks,
         winners_curse_gap=WINNERS_CURSE_GAP,
+        sanqi=sanqi,
+        legacy_boxes=LEGACY_BOX_CHECKS,
     )
     return status
 
@@ -1036,12 +1185,142 @@ def _safe(value) -> str:
     return html_lib.escape(str(value), quote=True)
 
 
+def _sanqi_when(started_at) -> str:
+    """'2026-10-13 16:07:23' (Pi local time) -> '16:07'."""
+    text = str(started_at or "")
+    return text[11:16] if len(text) >= 16 else "—"
+
+
+def _sanqi_header(sanqi: dict) -> str:
+    cfg = sanqi.get("config") or {}
+    dead = ", ".join(str(r) for r in sanqi.get("dead") or []) or "none"
+    weak = ", ".join(str(r) for r in sanqi.get("weak") or [])
+    latest = (sanqi.get("sprints") or [{}])[0]
+    state = ""
+    if latest.get("epoch") is not None:
+        state = f" Latest epoch {latest['epoch']}: "
+        if latest.get("status") == "sprint":
+            state += (f"reaction {latest.get('reaction')} sprinted on {latest.get('pushed') or 0}/"
+                      f"{latest.get('boxes') or 0} boxes")
+            if latest.get("late_joins"):
+                state += f" (+{latest['late_joins']} joined late)"
+            state += "."
+        elif latest.get("status") == "dead":
+            state += f"reaction {latest.get('reaction')} can never validate, skipped."
+        else:
+            state += f"{_safe(latest.get('status'))}."
+    return (
+        f'<p class="note"><b>SANQI: {int(cfg.get("count") or 44)} reactions.</b> Each epoch the validator '
+        'draws one (block hash mod count + 1); every box then races a sprint on that reaction until the '
+        'Pi\'s submit window opens. There is no standing per-reaction bank and no floor: the best 20 of the '
+        f'sprint are committed every epoch. Dead reactions (no product can pass the validator): {_safe(dead)}'
+        + (f'; nearly dead: {_safe(weak)}' if weak else '') + f'.{state}</p>'
+    )
+
+
+def _sanqi_status_table(status: dict) -> str:
+    sanqi = status["sanqi"]
+    draws = {int(k): v for k, v in (status.get("draws_by_reaction") or {}).items()}
+    clears = {int(k): v for k, v in (status.get("clears_by_reaction") or {}).items()}
+    wins = {int(k): v for k, v in (status.get("wins_by_reaction") or {}).items()}
+    dead = set(sanqi.get("dead") or [])
+    last_sprint, last_hist = {}, {}
+    actual = {row["epoch"]: row.get("reaction") for row in status.get("recent_history") or []}
+    for row in sanqi.get("sprints") or []:
+        if row.get("reaction") is None or row.get("status") != "sprint":
+            continue
+        if actual.get(row["epoch"]) not in (None, row["reaction"]):
+            continue          # the trigger's guess differed from the validator's draw (25692: rule uncertainty)
+        if int(row["reaction"]) not in last_sprint:
+            last_sprint[int(row["reaction"])] = row
+    for row in status.get("recent_history") or []:
+        if (row.get("reaction") is not None and int(row["reaction"]) not in last_hist
+                and isinstance(row.get("selected_score"), (int, float))):
+            last_hist[int(row["reaction"])] = row
+    seen = sorted(set(draws) | set(clears) | set(wins) | set(last_sprint))
+    first_sanqi = SANQI_FIRST_EPOCH
+    rows = []
+    for reaction in seen:
+        d, c, w = draws.get(reaction, 0), clears.get(reaction, 0), wins.get(reaction, 0)
+        sprint, hist = last_sprint.get(reaction), last_hist.get(reaction)
+        if sprint:
+            cell = (f"epoch {sprint['epoch']} {_sanqi_when(sprint.get('started_at'))}: "
+                    f"{sprint.get('pushed') or 0}/{sprint.get('boxes') or 0} boxes, {sprint.get('minutes') or '—'} min")
+            if sprint.get("late_joins"):
+                cell += f", +{sprint['late_joins']} late"
+        elif reaction in dead:
+            cell = "dead reaction: never sprinted"
+        elif reaction <= 5 and not sprint:
+            cell = f"legacy bank, retired at epoch {first_sanqi}"
+        else:
+            cell = "—"
+        pred = hist.get("selected_score") if hist else None
+        pred_cell = f"{pred:.3f}" if isinstance(pred, (int, float)) else "—"
+        css = ' class="us"' if w else ""
+        rate = f"{100 * c / d:.0f}%" if d else "—"
+        rows.append(f"<tr{css}><td>rxn {reaction}</td><td>{c}/{d}</td><td>{rate}</td><td>{w}</td>"
+                    f"<td>{pred_cell}</td><td>{_safe(cell)}</td></tr>")
+    drawn_sanqi = len([r for r in seen if r > 5])
+    return (
+        _sanqi_header(sanqi) +
+        '<table class="grid"><thead><tr><th>reaction</th><th>cleared/drawn</th><th>clear rate</th>'
+        '<th>real wins</th><th>last predicted</th><th>last sprint</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        f'<p class="note">{drawn_sanqi} reactions drawn so far. "Cleared" means the final gate passed and '
+        'molecules were committed; real wins count rank 1 on the validator leaderboard, which only appears '
+        'after the epoch has been scored.</p>'
+    )
+
+
+def _sanqi_sprint_table(status: dict) -> str:
+    sanqi = status["sanqi"]
+    hist = {row["epoch"]: row for row in status.get("recent_history") or []}
+    rows = []
+    for sprint in sanqi.get("sprints") or []:
+        h = hist.get(sprint["epoch"]) or {}
+        stat = sprint.get("status")
+        label = {"sprint": "sprint", "dead": "skipped: dead reaction", "too_late": "too late to start",
+                 "push_failed": "no box reachable"}.get(stat, _safe(stat))
+        boxes = f"{sprint.get('pushed') or 0}/{sprint.get('boxes') or 0}" if stat == "sprint" else "—"
+        late = sprint.get("late_joins") or 0
+        differs = (f" (sprinted rxn {sprint['reaction']})"
+                   if h.get("reaction") not in (None, sprint.get("reaction")) and sprint.get("reaction") is not None else "")
+        pred = h.get("selected_score")
+        real = h.get("real_score")
+        outcome = ("WON" if h.get("real_won") else f"#{h['real_rank']}" if h.get("real_rank") else
+                   "awaiting leaderboard" if h.get("outcome") == "cleared" else "—")
+        rows.append(
+            # the validator's actual draw (from the Pi loop log) wins over the trigger's guess
+            f"<tr><td>{sprint['epoch']}</td><td>rxn {_safe(h.get('reaction', sprint.get('reaction')))}{differs}</td><td>{label}</td>"
+            f"<td>{_sanqi_when(sprint.get('started_at'))}</td><td>{sprint.get('minutes') or '—'}</td>"
+            f"<td>{boxes}</td><td>{late or '—'}</td>"
+            f"<td>{f'{pred:.3f}' if isinstance(pred, (int, float)) else '—'}</td>"
+            f"<td>{f'{real:.3f}' if isinstance(real, (int, float)) else '—'}</td><td>{outcome}</td></tr>"
+        )
+    if not rows:
+        return '<p class="note">No SANQI sprints recorded yet.</p>'
+    full = [r for r in sanqi.get("sprints") or [] if r.get("status") == "sprint"]
+    short = [r for r in full if (r.get("pushed") or 0) < (r.get("boxes") or 0)]
+    note = (f'<p class="note">{len(full)} sprinted epochs shown; in {len(short)} of them at least one box '
+            'missed the first push (the Vast proxies flap) and was retried in the background until too late '
+            'to matter. Time is the Pi\'s local clock.</p>')
+    return (
+        note +
+        '<table class="grid"><thead><tr><th>epoch</th><th>reaction</th><th>what happened</th><th>start</th>'
+        '<th>budget (min)</th><th>boxes reached</th><th>joined late</th><th>predicted</th>'
+        '<th>validator score</th><th>result</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+    )
+
+
 def compound_status_table(status: dict | None = None) -> str:
     """Per-reaction: real historical clear rate, real win count, and the
     live real-gate check for "would this clear right now"."""
     status = status if status is not None else load()
     if not status or not status.get("pi_reachable", True) and not status.get("draws_by_reaction"):
         return '<p class="note">Compound status is not available yet -- the Pi was unreachable on the last collection attempt and no prior snapshot exists.</p>'
+    if status.get("sanqi"):
+        return _sanqi_status_table(status)
 
     draws = status.get("draws_by_reaction") or {}
     clears = status.get("clears_by_reaction") or {}
@@ -1106,6 +1385,8 @@ def compound_status_table(status: dict | None = None) -> str:
 def compound_strategy_table(status: dict | None = None) -> str:
     """Exact-score verdict for the active public-field recombination lane."""
     status = status if status is not None else load()
+    if (status or {}).get("sanqi"):
+        return _sanqi_sprint_table(status)
     checks = (status or {}).get("search_strategy") or {}
     if not checks:
         return '<p class="note">Search-strategy A/B evidence has not been collected yet.</p>'
@@ -1188,11 +1469,16 @@ def compound_history_table(status: dict | None = None) -> str:
         outcome = row.get("outcome", "unknown")
         if outcome == "cleared":
             won = row.get("real_won")
-            label = ("REJECTED by validator" if row.get("real_rejected") else
-                     "WON" if won else ("cleared, lost" if won is False else "cleared, outcome unknown"))
+            label = ("NO RANKING (validator scored no molecule)" if row.get("real_unranked") else
+                     "REJECTED by validator" if row.get("real_rejected") else
+                     "WON" if won else ("cleared, lost" if won is False else
+                                       "submitted, awaiting leaderboard" if status.get("sanqi") else "cleared, outcome unknown"))
             css = ' class="us"' if won else ""
         elif outcome == "blocked":
             label = "blocked"
+            css = ""
+        elif outcome == "dead":
+            label = "skipped: reaction can never validate"
             css = ""
         else:
             label = "unresolved"
@@ -1263,6 +1549,19 @@ def compound_caveat_note(status: dict | None = None) -> str:
     gap = (status or {}).get("winners_curse_gap") or WINNERS_CURSE_GAP
     collected = (status or {}).get("collected_at")
     age = "at " + _local_hhmm(collected) if collected else "unknown"
+    if (status or {}).get("sanqi"):
+        return (
+            '<p class="note"><b>How to read this tab (SANQI, since epoch 25692).</b> Every epoch a different '
+            'reaction is drawn and the boxes search it live, so there is no standing bank, no per-reaction '
+            'floor and no "ready / not ready" gate: we commit the best 20 of each sprint. "Predicted" is the '
+            'sprint\'s own estimate; the validator rescoring lands lower on average (winner\'s curse), so a '
+            'prediction is not a win forecast. The validator scores an epoch at the start of the next one and '
+            'the public leaderboard follows, which is why the newest rows read "awaiting leaderboard". '
+            'Compound is winner-take-all: only rank 1 earns anything.</p>'
+            '<p class="note">Cost: boxes labelled <code>nova-sanqi-N</code> are counted as compound spend. '
+            'The older per-reaction charts (readiness growth, proxy accuracy) only hold data up to the '
+            f'last pre-SANQI epoch. Snapshot collected {age}.</p>'
+        )
     return (
         '<p class="note"><b>The "live gate check" runs the real release gate</b> (a copy of the '
         'Pi\'s bank_release.py on each box): only molecules with at least 3 rescore passes AND '

@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard proxy independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=3600
+AccuracySec=5
+Unit=nova-dashboard@proxy.service
+
+[Install]
+WantedBy=timers.target

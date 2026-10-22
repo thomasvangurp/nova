@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard compound independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=600
+AccuracySec=5
+Unit=nova-dashboard@compound.service
+
+[Install]
+WantedBy=timers.target

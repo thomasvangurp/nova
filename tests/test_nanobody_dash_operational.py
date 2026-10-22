@@ -204,7 +204,7 @@ def _money_connection():
     return connection
 
 
-def test_daily_money_history_uses_portfolio_delta():
+def test_daily_money_history_does_not_treat_holdings_change_as_income():
     connection = _money_connection()
     # alpha rises 10 -> 12 at price 0.5 with free TAO constant 1.0, so the
     # portfolio (free + staked) rises 6.0 -> 7.0 = +1.0 TAO/day.
@@ -214,11 +214,10 @@ def test_daily_money_history_uses_portfolio_delta():
          (7300, 68, 12.0, 0.5, 1.0, 2.0)],
     )
     daily = money.daily_money_history(connection, tao_usd=10.0)
-    assert len(daily) == 1
-    assert daily[0]["gross_tao"] == 1.0
-    assert daily[0]["gross_usd"] == 10.0
-    assert daily[0]["net_usd"] == 10.0
-    assert daily[0]["portfolio_tao"] == 7.0
+    assert len(daily) == 2
+    assert all(row["gross_tao"] == 0.0 for row in daily)
+    assert all(row["net_usd"] == 0.0 for row in daily)
+    assert [row["portfolio_tao"] for row in daily] == [6.0, 7.0]
 
 
 def test_aws_cost_agent_is_read_only_and_keeps_daily_sn2_costs():
@@ -308,14 +307,14 @@ def test_cloud_cost_panel_keeps_aws_and_vast_scopes_explicit():
     })
 
     values = figure.data[0].cells.values
-    assert values[0] == ["AWS Bills", "AWS operations", "Vast.ai", "Funding guard"]
+    assert values[0] == ["AWS Bills", "AWS operations", "Vast.ai", "Vast.ai compound", "Funding guard"]
     assert "SN2" in values[1][0]
     assert "SN68" in values[1][2]
     assert values[2][0] == "$400.00 accrued bill"
     assert values[2][1] == "$375.00 operating MTD"
     assert values[3][1] == "$654.07 projected month-end"
     assert "$25.00 one-time excluded" in values[4][1]
-    assert values[3][3] == "agent cannot charge a real card"
+    assert values[3][4] == "agent cannot charge a real card"
 
 
 def test_aws_breakdown_matches_bills_categories_and_shows_usage():
@@ -422,6 +421,9 @@ def test_vast_runtime_separates_production_research_and_unattributed():
         "SELECT item, usd FROM costs ORDER BY item"
     ).fetchall())
     assert costs == {
+        "vast.ai:bank": 0.0,
+        "vast.ai:blueprint": 0.0,
+        "vast.ai:sn68-compound": 0.0,
         "vast.ai:research": 48.0,
         "vast.ai:sn68-research": 16.8,
         "vast.ai:sn68-prod": 24.0,
@@ -543,6 +545,42 @@ def test_pi_snapshot_is_allowlisted_and_atomically_saved(tmp_path, monkeypatch):
 def test_easynano_panel_is_not_rendered():
     assert all(name != "easynano_status"
                for _, _, entries in build.TABS for _, _, name in entries)
+
+
+def test_open_dashboard_reloads_when_a_new_public_build_exists():
+    assert 'meta name="nanodash-build"' in build.PAGE
+    assert "/version.json?_=" in build.PAGE
+    assert "window.location.replace" in build.PAGE
+    assert 'http-equiv="refresh" content="300"' in build.PAGE
+
+
+def test_compound_growth_chart_labels_small_real_endpoint_gain():
+    rows = [
+        {"reaction": 4, "checked_at": 100.0, "selected_score": 1.697,
+         "floor": 1.79},
+        {"reaction": 4, "checked_at": 200.0, "selected_score": 1.708,
+         "floor": 1.79},
+    ]
+
+    figure = panels.fig_gap_history(rows, [])
+
+    assert figure.layout.annotations[-1].text == "rxn 4: 1.708 (+0.011)"
+    assert figure.data[0].marker.size[-1] == 10
+
+
+def test_compound_growth_chart_has_no_white_marker_highlight():
+    rows = [
+        {"reaction": 1, "checked_at": 1.0, "selected_score": 1.40,
+         "floor": 1.50},
+        {"reaction": 1, "checked_at": 2.0, "selected_score": 1.41,
+         "floor": 1.50},
+    ]
+
+    figure = panels.fig_gap_history(rows, [])
+    score_trace = next(trace for trace in figure.data if trace.name == "rxn 1")
+
+    assert score_trace.marker.color == panels.REACTION_COLOURS[1]
+    assert score_trace.marker.line.width == 0
 
 
 def _rival_entries(coldkey, epochs, per_epoch, top10_every):

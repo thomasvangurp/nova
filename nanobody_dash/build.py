@@ -604,9 +604,12 @@ def easynano_status_table(
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="nanodash-build" content="{build_id}">
 <!-- The collector rebuilds this static document in the background.  An open
-     tab otherwise keeps the old DOM forever even after index.html changes. -->
-<meta http-equiv="refresh" content="60">
+     tab otherwise keeps the old DOM forever even after index.html changes.
+     The version heartbeat below normally refreshes only on a real deploy;
+     this is a belt-and-braces fallback for browsers that block fetch. -->
+<meta http-equiv="refresh" content="300">
 <title>Nanobody Tracker</title>
 <style>
  :root {{ color-scheme: dark; }}
@@ -631,6 +634,7 @@ PAGE = """<!doctype html>
  section[role=tabpanel].on {{ display:block; }}
  .panel {{ max-width:1180px; margin:22px auto; padding:0 16px; }}
  .panel h2 {{ font-size:15px; margin:0 0 2px; font-weight:600; }}
+ .panel h2::selection {{ background:transparent; color:inherit; }}
  .panel p.note {{ color:{muted}; font-size:12px; margin:0 0 8px; }}
  table.grid {{ width:100%; border-collapse:collapse; font-size:13px;
         background:{card}; border:1px solid #242a36; border-radius:10px; }}
@@ -685,6 +689,24 @@ PAGE = """<!doctype html>
   var start = location.hash.slice(1);
   if (!start) {{ try {{ start = localStorage.getItem('nanodash.tab'); }} catch (e) {{}} }}
   show(start && document.querySelector('[data-tab="' + start + '"]') ? start : '{first_tab}');
+
+  // A Vercel deployment cannot alter an already-open static DOM. Poll a tiny
+  // same-origin build marker and reload only when a newer dashboard exists.
+  // Preserve #compound (or any other selected tab) across the reload.
+  var currentBuild = document.querySelector('meta[name="nanodash-build"]').content;
+  function checkForNewBuild() {{
+    fetch('/version.json?_=' + Date.now(), {{cache: 'no-store'}})
+      .then(function (response) {{ return response.ok ? response.json() : null; }})
+      .then(function (version) {{
+        if (!version || !version.build_id || version.build_id === currentBuild) return;
+        var url = new URL(window.location.href);
+        url.searchParams.set('_build', version.build_id);
+        window.location.replace(url.pathname + url.search + url.hash);
+      }})
+      .catch(function () {{ /* local file:// and transient network failures */ }});
+  }}
+  window.setTimeout(checkForNewBuild, 5000);
+  window.setInterval(checkForNewBuild, 30000);
 }})();
 </script>
 </body></html>"""
@@ -694,8 +716,8 @@ TABS = [
     ("progress", "Our progress", [
         ("Are we getting better?", "Trailing 20-epoch field-beating-entry rate and top-10 rate per entry, with fleet size on the right axis. An entry wins when it beats the best molecule from every rival coldkey.", "progress"),
         ("Us against the strongest rivals", "Trailing 10-epoch mean of the multi-pass rank-sum for us versus the four strongest rivals (lowest all-time mean), per epoch from the first replay-scored epoch. Lower is better.", "vsrivals"),
-        ("Multi-pass vs rivals", "Multi-pass replay mean rank-sum for us versus every rival coldkey, per epoch. Lower is better. Error bars are the fleet stdev and the hover shows fleet size. Read from multipass_comparison.json, so only epochs that have been replay-scored appear.", "multipass"),
-        ("Multi-pass distribution", "Per-sequence multi-pass rank-sum distribution for us and every rival that recorded a scores list, as a grouped box per epoch. Lower is better. Empty until scores arrays are added to multipass_comparison.json.", "multipass_distribution"),
+        ("Multi-pass vs rivals", "Multi-pass replay mean rank-sum for us versus every rival coldkey, per epoch. Lower is better. Error bars are the fleet stdev and the hover shows fleet size. Only complete fleets with at least 10 stored passes per sequence appear. Gaps indicate missing replay coverage.", "multipass"),
+        ("Multi-pass distribution", "Per-sequence mean rank-sum, with at least 10 stored passes per sequence. Lower is better. Fleets with incomplete replay coverage are omitted; gaps mean missing evidence. Single validator draws are never substituted.", "multipass_distribution"),
     ]),
     ("performance", "Performance", [
         ("Score per epoch", "Our best entry against the winner, the top-10 cut and the field median. Lower is better.", "scores"),
@@ -733,10 +755,10 @@ TABS = [
         ("Slot purchases", "Every purchase grouped by UTC day: actual spend, median unit price and registration count.", "slots"),
     ]),
     ("compound", "Compound", [
-        ("Submission readiness", "Per-reaction real historical clear rate against the Pi's actual submission log, real win count (rank 1 on the live leaderboard, not just clearing the local gate), and the live gate check: the Pi's actual release gate (same code, byte-identical) run against each reaction's current bank for the next epoch -- novelty vs the public archive, recently-submitted molecules excluded, >=3 rescore passes, entropy-constrained top-20. Rechecked every ~10 min (time of the check shown per row); the score moves only when the eligible constrained top 20 changes. New single-pass discoveries intentionally do not move this line until adaptive confirmation promotes them, so a flat line is not evidence that discovery stopped.", "compound_status"),
-        ("Submission readiness growth", "Each reaction's absolute score over time (solid line) against its required margin (dashed line, same colour) -- where the solid crosses above the dashed we clear the bar. The margin projects the best external rival, corrects rival-model bias, and adds our empirically calibrated raw-to-realized optimism gap. Markers for real epoch draws from the Pi's own log (filled diamond = cleared and won, open diamond = cleared, x = blocked). The score line only accumulates forward from first deploy; the epoch markers do not have that limit -- see 'Reading this tab' below.", "gap_history"),
-        ("Search strategy verdict", "Exact-score online evidence for the active public-field block-recombination policy. It compares field-selected candidates with the uniform random arm sampled before proxy selection, reports bank-entry hits, and shows the reaction-specific recombination geometry and live allocation. The recent all-lane maximum prevents a locally positive A/B label from hiding a stronger lane.", "compound_strategy"),
-        ("Proxy model accuracy", "Held-out Spearman correlation between each reaction's proxy model and real scores, measured fresh after every ~4h retrain cycle (held_out_proxy_eval.py, wired into the live retrain loop 2026-10-02 -- no accuracy metric existed anywhere before this). Answers whether the model driving candidate search is actually getting more accurate over time, separately from whether the selected portfolio clears the floor. Starts empty and accumulates one point per reaction per retrain cycle going forward.", "proxy_accuracy"),
+        ("SANQI status by reaction", "Every reaction drawn so far: how often we cleared the final gate and committed molecules, real wins (rank 1 on the validator leaderboard), the last sprint's predicted score, and how many boxes took part in the last sprint. Reactions 1-5 are the retired pre-SANQI bank. The header lists dead reactions, which can never produce a valid molecule and are skipped.", "compound_status"),
+        ("Submission readiness growth (pre-SANQI)", "Legacy chart: each of reactions 1-5's score against its required margin up to the last pre-SANQI epoch. SANQI has no standing bank or margin, so no new points are added; see the sprint log below.", "gap_history"),
+        ("SANQI sprint log", "One row per epoch since SANQI began: which reaction was drawn, whether a sprint ran (or the reaction was skipped as dead), how many boxes received the sprint on the first push and how many joined late, our predicted score, the validator's realized score and our rank once the leaderboard is published.", "compound_strategy"),
+        ("Proxy model accuracy (pre-SANQI)", "Legacy chart: held-out Spearman of each pre-SANQI reaction's proxy model. The SANQI champion fits its model inside each sprint, so no new points are added.", "proxy_accuracy"),
         ("Recent submission history", "Every unique epoch drawn for compound, most recent first: cleared and won, cleared and lost, or blocked by the baseline gate. For epochs we submitted, the validator's realized score (our best uid's final_score, same 20-molecule-sum scale as our prediction) next to our predicted selection score and the epoch winner's score, plus our real on-chain rank.", "compound_history"),
         ("Reading this tab", "Context for interpreting the numbers above -- particularly why clearing a reaction's baseline is not the same as a likely win.", "compound_caveat"),
     ]),
@@ -789,15 +811,22 @@ def render(data, out: Path, extra=None) -> Path:
         '<div class="card"><div class="k">%s</div><div class="v">%s</div>'
         '<div class="n">%s</div></div>' % (k, v, n) for k, v, n in headline(data))
     order = sorted(data["epochs"])
-    built = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    built_at = dt.datetime.now(dt.timezone.utc)
+    built = built_at.strftime("%Y-%m-%d %H:%M UTC")
+    from .pi_refresh import status_text
+    build_id = built_at.strftime("%Y%m%dT%H%M%SZ")
     page = PAGE.format(
         paper=PAPER, card=CARD, ink=INK, muted=MUTED, ours=OURS, cards=cards,
         tabs="".join(tabs), panels="".join(panels), first_tab=TABS[0][0],
-        subtitle="epochs %s-%s \u00b7 built %s" % (order[0], order[-1], built),
+        build_id=build_id,
+        subtitle=html_lib.escape("epochs %s-%s \u00b7 built %s" % (order[0], order[-1], built) + status_text()),
         footer="%d leaderboard entries \u00b7 %d ours \u00b7 rebuilt by nanobody_dash"
                % (len(data["entries"]), len(data["ours"])))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page)
+    version_name = "version.json.next" if out.name.endswith(".next") else "version.json"
+    version = out.with_name(version_name)
+    version.write_text(json.dumps({"build_id": build_id, "built": built}) + "\n")
     return out
 
 
@@ -898,6 +927,7 @@ def main() -> int:
     current_held = next((slot["registered"] for slot in reversed(data["slots"])
                          if slot.get("registered") is not None), None)
     data["current_held"] = current_held
+    compound_snapshot = compound.load()
     extra = dict(
         pnl=lambda: panels.fig_subnet_pnl(pnl, tao_usd),
         pnl_history=lambda: panels.fig_subnet_pnl_history(pnl_history),
@@ -911,15 +941,15 @@ def main() -> int:
                                                 current_total=current_held),
         projection=lambda: panels.fig_projection(net_tao - vast_tao, tao_usd,
                                                  0.21, entries),
-        compound_status=lambda: compound.compound_status_table(),
+        compound_status=lambda: compound.compound_status_table(compound_snapshot),
         gap_history=lambda: panels.fig_gap_history(
-            compound.gap_history_rows(connection),
-            compound.load().get("recent_history") or []),
-        compound_strategy=lambda: compound.compound_strategy_table(),
+            compound.gap_history_rows(connection, compound_snapshot),
+            compound_snapshot.get("recent_history") or []),
+        compound_strategy=lambda: compound.compound_strategy_table(compound_snapshot),
         proxy_accuracy=lambda: panels.fig_proxy_accuracy(
             proxy_accuracy.proxy_accuracy_rows(connection)),
-        compound_history=lambda: compound.compound_history_table(),
-        compound_caveat=lambda: compound.compound_caveat_note())
+        compound_history=lambda: compound.compound_history_table(compound_snapshot),
+        compound_caveat=lambda: compound.compound_caveat_note(compound_snapshot))
     out = render(data, arguments.out, extra=extra)
     print(json.dumps(dict(
         written=str(out), bytes=out.stat().st_size, epochs=len(data["epochs"]),

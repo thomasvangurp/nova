@@ -112,6 +112,19 @@ def store_epoch(connection, epoch: int, rows) -> int:
     return len(ladder)
 
 
+def api_latest_epoch(timeout: float = 15.0) -> int | None:
+    """The newest epoch the compound API says it has results for, or None."""
+    try:
+        request = urllib.request.Request(
+            f"{ROOT}/competitions/latest_epoch", headers={"User-Agent": "nanobody-dash"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            value = json.load(response)["data"]["latest_epoch"]
+        return int(value) if value else None
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError,
+            json.JSONDecodeError):
+        return None
+
+
 def have(connection) -> set[int]:
     return {e for (e,) in connection.execute("SELECT epoch FROM epochs")}
 
@@ -205,6 +218,16 @@ def main() -> int:
         # generated twelve predictable 404s on every daemon tick and delayed
         # the useful newest-epoch refetch.
         last = (max(known) if known else 25256) + 2
+        # ... but never stop short of the epoch the API itself reports as the
+        # latest.  A fixed +2 cannot cross a gap of two unscored epochs: on
+        # 2026-10-12 the validator timed out on 25674 (empty leaderboard) and
+        # skipped 25675, so the newest stored epoch stayed 25673, the window
+        # ended at 25675, and 25676 (published) was never probed -- the card
+        # read "latest epoch 25673" for hours.  latest_epoch is the API's own
+        # statement of what exists, so using it invents nothing.
+        reported = api_latest_epoch()
+        if reported is not None:
+            last = max(last, reported)
     first = arguments.first if arguments.first is not None else last - arguments.history
     report = collect_leaderboard(connection, first, last)
     report.update(collect_slots(connection, arguments.slot_log))

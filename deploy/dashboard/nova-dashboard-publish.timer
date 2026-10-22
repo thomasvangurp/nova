@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard publish independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=nova-dashboard@publish.service
+
+[Install]
+WantedBy=timers.target

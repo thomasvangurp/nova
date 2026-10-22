@@ -9,6 +9,7 @@ the request headers back and that is how keys leak into transcripts.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import urllib.error
@@ -34,6 +35,9 @@ class TaostatsError(RuntimeError):
 
 
 def _api_key(service: str = KEYCHAIN_SERVICE) -> str:
+    key = os.environ.get("TAOSTATS_API_KEY")
+    if key:
+        return key
     try:
         done = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-w"],

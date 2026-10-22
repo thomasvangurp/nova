@@ -23,7 +23,10 @@ one consistent regime, and writes ONE file. Meant to run on a schedule (see
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -54,28 +57,39 @@ def _earliest_epoch() -> int | None:
         conn.close()
 
 
-def build(out_path: Path, *, lo: int | None, hi: int | None) -> dict:
-    lo = lo if lo is not None else (_earliest_epoch() or 0)
-    hi = hi if hi is not None else (_current_epoch() or lo)
+def _save(out_path: Path, result: dict) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=out_path.parent, delete=False) as handle:
+        handle.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        temporary = handle.name
+    os.replace(temporary, out_path)
+
+
+def build(out_path: Path, *, lo: int | None, hi: int | None, recent: int = 0) -> dict:
+    hi = hi if hi is not None else (_current_epoch() or lo or 0)
+    lo = lo if lo is not None else (max(0, hi - recent + 1) if recent else (_earliest_epoch() or 0))
     existing: dict = {}
     if out_path.is_file():
         try:
             existing = json.loads(out_path.read_text())
         except (OSError, json.JSONDecodeError):
             existing = {}
-    result: dict = {}
+    # An incremental refresh must never discard older measured epochs.
+    result: dict = dict(existing)
     ok, skipped = 0, 0
-    for epoch in range(lo, hi + 1):
+    for epoch in range(hi, lo - 1, -1):
         entry = rescale_epoch(epoch)
         if entry is None:
-            if str(epoch) in existing:
-                result[str(epoch)] = existing[str(epoch)]
+            prior = existing.get(str(epoch), {})
+            if prior.get("method", {}).get("coverage_policy") == "complete_fleet_minimum_10_passes":
+                result[str(epoch)] = prior
             skipped += 1
             continue
         result[str(epoch)] = entry
         ok += 1
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        # Publish progress before the next epoch's network/database work.
+        # A killed or timed-out older epoch cannot lose today's completed work.
+        _save(out_path, result)
     print(f"BUILD_DONE epochs={lo}-{hi} ok={ok} skipped_kept_prior={skipped} "
           f"out={out_path}", flush=True)
     return result
@@ -88,13 +102,20 @@ def main() -> int:
     parser.add_argument("--hi", type=int, default=None)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=int, default=600)
+    parser.add_argument("--recent", type=int, default=0,
+                        help="refresh only the newest N epochs, retaining all history")
     args = parser.parse_args()
 
     while True:
         try:
-            build(args.out, lo=args.lo, hi=args.hi)
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            with args.out.with_suffix(".lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                build(args.out, lo=args.lo, hi=args.hi, recent=args.recent)
         except Exception as exc:  # noqa: BLE001
-            print(f"BUILD_FAILED {type(exc).__name__}: {exc}", flush=True)
+            print(f"BUILD_FAILED {type(exc).__name__}", flush=True)
+            if not args.loop:
+                return 1
         if not args.loop:
             break
         time.sleep(args.interval)

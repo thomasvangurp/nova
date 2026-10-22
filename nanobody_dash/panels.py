@@ -147,15 +147,43 @@ def fig_gap_history(gap_rows, recent_history) -> go.Figure:
         colour = REACTION_COLOURS.get(reaction)
         xs = [dt.datetime.fromtimestamp(row["checked_at"], dt.timezone.utc)
               for row in series]
+        latest_score = float(series[-1]["selected_score"])
+        previous_distinct = next(
+            (float(row["selected_score"]) for row in reversed(series[:-1])
+             if abs(float(row["selected_score"]) - latest_score) > 1e-9),
+            None,
+        )
+        change = latest_score - previous_distinct if previous_distinct is not None else None
+        endpoint = f"rxn {reaction}: {latest_score:.3f}"
+        if change is not None and abs(change) >= 0.0005:
+            endpoint += f" ({change:+.3f})"
         figure.add_trace(go.Scatter(
             x=xs, y=[row["selected_score"] for row in series],
             name=f"rxn {reaction}", mode="lines+markers",
-            line=dict(color=colour, width=2.2), marker=dict(size=5),
+            line=dict(color=colour, width=2.2),
+            # Plotly's implicit marker styling can render pale/white centres
+            # on the dark theme.  Keep this series reaction-coloured and
+            # borderless instead of letting the renderer add a highlight.
+            marker=dict(
+                size=[4] * (len(series) - 1) + [10],
+                color=colour,
+                line=dict(width=0),
+            ),
             legendgroup=f"rxn{reaction}",
             hovertemplate=(
                 "%{x}<br>rxn " + str(reaction) + " score: %{y:.4f}<extra></extra>"
             ),
         ))
+        # A multi-reaction absolute axis is useful for clearance context but
+        # visually compresses small real gains (RXN4's +0.011 looked flat).
+        # Keep the shared scale and make the current value/change explicit at
+        # the right edge instead of relying on pixel height or hover.
+        figure.add_annotation(
+            x=1.005, xref="paper", y=latest_score, yref="y",
+            text=endpoint, showarrow=False, xanchor="left",
+            font=dict(color=colour, size=11),
+            bgcolor="rgba(14,17,23,.88)", bordercolor=colour, borderwidth=1,
+        )
         # required margin as a separate same-colour dashed line
         figure.add_trace(go.Scatter(
             x=xs, y=[row["floor"] for row in series],
@@ -195,6 +223,7 @@ def fig_gap_history(gap_rows, recent_history) -> go.Figure:
     layout = dict(LAYOUT)
     layout["hovermode"] = "closest"
     layout["hoverdistance"] = -1
+    layout["margin"] = dict(LAYOUT["margin"], r=180)
     figure.update_layout(**layout)
     figure.update_yaxes(title="score (solid) vs required margin (dashed)", gridcolor="#242a36")
     figure.update_xaxes(title="time (UTC)", gridcolor="#242a36", type="date")

@@ -391,11 +391,16 @@ def collect_current_balances_chain(connection: sqlite3.Connection,
     are NOT populated here (their Taostats endpoints stay down until the quota
     resets), so the daily revenue degrades to the raw balance delta.
     """
-    completed = subprocess.run(
+    import os
+    command = (["/opt/nova-submit/.pixi/envs/default/bin/python",
+                "/opt/nova-submit/tools/chain_money.py"]
+               if os.environ.get("NOVA_DASH_LOCAL_PI") == "1" else
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
          f"{pi_user}@{pi_host}",
          "/opt/nova-submit/.pixi/envs/default/bin/python "
-         "/opt/nova-submit/tools/chain_money.py"],
+         "/opt/nova-submit/tools/chain_money.py"])
+    completed = subprocess.run(
+        command,
         capture_output=True, text=True, check=False, timeout=120,
     )
     if completed.returncode != 0 or not completed.stdout.strip():
@@ -438,10 +443,12 @@ def main() -> int:
     parser.add_argument("--pages", type=int, default=12)
     arguments = parser.parse_args()
     connection = connect(arguments.database)
-    report = dict(
-        delegations=collect_delegations(connection, arguments.coldkey),
-        transfers=collect_transfers(connection, arguments.coldkey),
-        balances=collect_current_balances_chain(connection))
+    report = dict(balances=collect_current_balances_chain(connection))
+    for name, collector in (("delegations", collect_delegations), ("transfers", collect_transfers)):
+        try:
+            report[name] = collector(connection, arguments.coldkey)
+        except TaostatsError:
+            report[name] = "unavailable; retained history"
     for label, query in (("netuids", "SELECT DISTINCT netuid FROM delegations"),
                          ("rows", "SELECT COUNT(*) FROM delegations")):
         report[label] = [r[0] for r in connection.execute(query)] if label == "netuids" \

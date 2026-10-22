@@ -400,6 +400,19 @@ def vast_keys(services=KEYCHAIN_CANDIDATES) -> dict[str, str]:
 
 
 def vast_get(path: str, key: str, timeout: int = 45):
+    if os.environ.get("NOVA_DASH_LOCAL_PI") == "1":
+        operation = {"instances/": "instances", "users/current/invoices/": "invoices"}.get(path)
+        if operation is None:
+            raise InfraError("Vast operation is not in the read-only allowlist")
+        try:
+            result = subprocess.run(
+                ["/opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/vastai",
+                 "show", operation, "--raw"], capture_output=True, timeout=timeout)
+            if result.returncode:
+                raise InfraError("Vast CLI read failed")
+            return json.loads(result.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            raise InfraError("Vast CLI read unavailable") from None
     request = urllib.request.Request(
         f"{ROOT}/{path.lstrip('/')}",
         headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
@@ -474,7 +487,7 @@ def funding_events(key: str, days: int = 14) -> list[dict]:
 #: as production compound cost.
 import re as _re
 
-_COMPOUND_LABEL = _re.compile(r"^nova-rxn[1-5]-nim-4x4090(-v\d+)?$")
+_COMPOUND_LABEL = _re.compile(r"^(nova-rxn[1-5]-nim-4x4090(-v\d+)?|nova-sanqi-\d+)$")
 _BLUEPRINT_LABEL = _re.compile(r"^blueprint-")
 
 
@@ -650,7 +663,7 @@ def main() -> int:
     state["payments"] = config.get("payments") or {}
     report: dict = {}
     try:
-        keys = vast_keys()
+        keys = {PRODUCTION_VAST_SERVICE: None} if os.environ.get("NOVA_DASH_LOCAL_PI") == "1" else vast_keys()
         production_service = (
             PRODUCTION_VAST_SERVICE if PRODUCTION_VAST_SERVICE in keys
             else next(iter(keys)))
@@ -807,8 +820,7 @@ def main() -> int:
             # reference.  Never replace cloud cost with a fictional zero.
             fallback = dict(previous_aws or manual)
             fallback["attempted_at"] = now
-            if fallback.get("status") != "live":
-                fallback["status"] = "manual reference; AWS read unavailable"
+            fallback["status"] = "stale; AWS read unavailable"
             state["aws"] = fallback
             report["aws_status"] = "unavailable; retained last known cost"
     else:

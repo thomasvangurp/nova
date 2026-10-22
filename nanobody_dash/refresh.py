@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "data" / "nanobody_dash.refresh.lock"
 NEXT = ROOT / "public" / "index.html.next"
 LIVE = ROOT / "public" / "index.html"
+VERSION_NEXT = ROOT / "public" / "version.json.next"
+VERSION_LIVE = ROOT / "public" / "version.json"
 SLOT_SNAPSHOT = ROOT / "data" / "subnet68_slots.jsonl"
 SLOT_SNAPSHOT_NEXT = ROOT / "data" / "subnet68_slots.jsonl.next"
 # The new dashboard Mac is on the same LAN as the Pi.  Use the direct address;
@@ -324,6 +326,11 @@ def main() -> int:
             check=True,
         )
         os.replace(NEXT, LIVE)
+        # Publish the version marker only after the matching HTML is live.
+        # Open browsers poll this tiny file and reload themselves when it
+        # changes, eliminating indefinitely stale Compound tabs.
+        if VERSION_NEXT.is_file():
+            os.replace(VERSION_NEXT, VERSION_LIVE)
         # Best-effort: the private Vercel mirror is a convenience for remote
         # viewing, throttled internally to avoid redeploying every 60s. Its
         # own failures must never take down the local dashboard that already

@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard refresh independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=nova-dashboard@refresh.service
+
+[Install]
+WantedBy=timers.target

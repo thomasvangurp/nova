@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard multipass independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=300
+AccuracySec=5
+Unit=nova-dashboard@multipass.service
+
+[Install]
+WantedBy=timers.target

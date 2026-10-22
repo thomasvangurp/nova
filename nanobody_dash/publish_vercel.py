@@ -1,33 +1,16 @@
-"""Publish the built dashboard to the private Vercel deployment.
+"""Publish the static dashboard using the Pi's own Vercel CLI authentication.
 
-refresh.py rebuilds public/index.html every 60 seconds; redeploying on every
-build would mean ~1,440 deploys/day for content that mostly hasn't moved
-between data-collection cycles. This throttles on BOTH a minimum interval and
-a content-hash change, and is fully optional -- a Vercel outage or missing
-CLI must not block the local dashboard refresh that already works today.
-
-Access control lives on Vercel's side (Vercel Authentication / SSO), not
-here: this script only ever pushes the already-built static file.
-
-User, 2026-10-11: the actual ``vercel deploy`` must run from the Pi, not
-this Mac -- the Mac's launchd jobs are session-gated (LimitLoadToSessionType
-Aqua) and silently stop firing whenever the lid closes or the screen locks,
-which is exactly the kind of fragile dependency the Pi's always-on
-submission loop was already moved off a laptop to avoid (see
-nova-submit-loop.service's own docstring). refresh.py keeps building
-public/index.html here (it reads from hosts the Pi does not have the same
-access path to), but the deploy step now rsyncs the built ``public/``
-directory to the Pi and triggers ``vercel deploy`` over SSH there, using the
-Vercel CLI auth transferred to the Pi's own
-~/.local/share/com.vercel.cli/auth.json (never re-read or displayed from
-this process -- SSH key auth only, no secret ever appears in an argv or in
-this script's own output).
+Production collection, rendering and deployment run as independent Pi systemd
+jobs. A deployment failure is persisted separately from an attempted publish;
+last successful content remains online. The legacy SSH transport is available
+for manual maintenance, but no scheduled Mac job is required.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -43,6 +26,28 @@ FAILED_RETRY_SECONDS = 60
 #: through the Pi (see module docstring).
 PI_HOST = os.environ.get("NOVA_DASH_DEPLOY_HOST", "thomasg@100.64.243.65")
 PI_PUBLISH_DIR = os.environ.get("NOVA_DASH_DEPLOY_DIR", "nova-dash-publish/public")
+
+
+def _deploy_local() -> bool:
+    """Use the Pi's existing CLI authentication without reading its store."""
+    destination = Path(PI_PUBLISH_DIR).expanduser()
+    if not destination.is_absolute():
+        destination = Path.home() / destination
+    destination.mkdir(parents=True, exist_ok=True)
+    # Only public artifacts: never copy/delete the CLI's project/auth state.
+    for name in ("index.html", "version.json"):
+        source = ROOT / "public" / name
+        if source.is_file():
+            pending = destination / (name + ".next")
+            shutil.copyfile(source, pending)
+            os.replace(pending, destination / name)
+    completed = subprocess.run(
+        ["npx", "--no-install", "vercel@65.1.0", "deploy", "--prod", "--yes", "--non-interactive"],
+        cwd=destination, capture_output=True, text=True, timeout=150,
+    )
+    if completed.returncode:
+        print(f"VERCEL_DEPLOY_FAILED rc={completed.returncode}", flush=True)
+    return completed.returncode == 0
 
 
 def _state() -> dict:
@@ -78,8 +83,7 @@ def _deploy_via_pi() -> bool:
         capture_output=True, text=True, timeout=60,
     )
     if rsync.returncode != 0:
-        print(f"PI_DEPLOY_RSYNC_FAILED rc={rsync.returncode} "
-              f"stderr={rsync.stderr[-500:]}", flush=True)
+        print(f"PI_DEPLOY_RSYNC_FAILED rc={rsync.returncode}", flush=True)
         return False
     deploy = subprocess.run(
         [
@@ -90,8 +94,7 @@ def _deploy_via_pi() -> bool:
         capture_output=True, text=True, timeout=120,
     )
     if deploy.returncode != 0:
-        print(f"PI_DEPLOY_VERCEL_FAILED rc={deploy.returncode} "
-              f"stderr={deploy.stderr[-500:]}", flush=True)
+        print(f"PI_DEPLOY_VERCEL_FAILED rc={deploy.returncode}", flush=True)
         return False
     return True
 
@@ -128,13 +131,18 @@ def publish(*, force: bool = False) -> bool:
             and now - published_at < MIN_INTERVAL_SECONDS):
         return False
 
-    ok = _deploy_via_pi()
+    try:
+        ok = _deploy_local() if os.environ.get("NOVA_DASH_LOCAL_PI") == "1" else _deploy_via_pi()
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
     STATE.parent.mkdir(parents=True, exist_ok=True)
     next_state = dict(state)
     next_state.update({"last_attempted_at": now, "ok": ok})
     if ok:
         next_state.update({"content_hash": content_hash, "published_at": now})
-    STATE.write_text(json.dumps(next_state))
+    pending = STATE.with_suffix(".json.next")
+    pending.write_text(json.dumps(next_state))
+    os.replace(pending, STATE)
     return True
 
 

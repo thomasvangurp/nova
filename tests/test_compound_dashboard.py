@@ -166,6 +166,7 @@ def test_partial_live_gate_refresh_is_failed_and_reuses_value_visibly(
         }
 
     monkeypatch.setattr(compound, "_live_gap_check", gap)
+    monkeypatch.setattr(compound, "LEGACY_BOX_CHECKS", True)
 
     status = compound.collect(live_gap_check=True)
 
@@ -173,3 +174,93 @@ def test_partial_live_gate_refresh_is_failed_and_reuses_value_visibly(
     assert status["gap_refresh_failed_reactions"] == [5]
     assert status["gap_checks"]["5"]["selected_score"] == 2.12
     assert status["gap_checks"]["5"]["refresh_error"] == "timeout_or_unreachable"
+
+
+def test_gap_history_plot_merges_newer_status_snapshot():
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(compound.SCHEMA)
+    connection.execute(
+        "INSERT INTO gap_history VALUES (?,?,?,?,?,?,?)",
+        (100.0, 4, 1.69, 1.79, -0.10, 0, 2000),
+    )
+    status = {"gap_checks": {"4": {
+        "checked_at": 200.0,
+        "selected_score": 1.708,
+        "floor": 1.79,
+        "gap": -0.082,
+        "clears_now": False,
+        "pool_size": 2652,
+    }}}
+
+    rows = compound.gap_history_rows(connection, status)
+
+    assert [row["selected_score"] for row in rows] == [1.69, 1.708]
+    assert rows[-1]["checked_at"] == 200.0
+
+
+SANQI_DUMP = """##reaction_count.json
+{"before": 5, "count": 44, "from_epoch": 25693}
+##reaction_health.json
+{"dead": [9, 14, 30, 41, 42]}
+##sprint_state.json
+{"epoch": 25697, "valid_until": 1791926333.1}
+##sprint_trigger.log
+{"at": "2026-10-13 10:06:23", "event": "sprint_started", "epoch": 25692, "reaction": 41, "minutes": 42.6, "boxes": 2, "pushed": 1}
+{"at": "2026-10-13 11:20:03", "event": "sprint_started", "epoch": 25693, "reaction": 31, "minutes": 41.8, "boxes": 2, "pushed": 1}
+{"at": "2026-10-13 11:21:03", "event": "sprint_started", "epoch": 25693, "reaction": 31, "minutes": 40.8, "boxes": 2, "pushed": 2}
+{"at": "2026-10-13 14:34:36", "event": "sprint_forced", "reaction": 35, "minutes": 3.0, "boxes": 3, "pushed": 2}
+{"at": "2026-10-13 14:55:45", "event": "sprint_started", "epoch": 25696, "reaction": 22, "minutes": 42.4, "boxes": 4, "pushed": 3}
+{"at": "2026-10-13 15:05:14", "event": "sprint_joined_late", "epoch": 25696, "box": 1, "attempt": 23, "seconds_left": 1932}
+{"at": "2026-10-13 16:50:00", "event": "dead_reaction", "epoch": 25698, "reaction": 9, "why": "x"}
+"""
+
+
+def test_parse_sanqi_reads_config_dead_list_and_per_epoch_sprints():
+    parsed = compound._parse_sanqi(SANQI_DUMP)
+
+    assert parsed["config"]["count"] == 44
+    assert parsed["dead"] == [9, 14, 30, 41, 42]
+    assert parsed["current_epoch"] == 25697
+    by_epoch = {row["epoch"]: row for row in parsed["sprints"]}
+    assert by_epoch[25693]["pushed"] == 2 and by_epoch[25693]["minutes"] == 41.8   # duplicate start: first budget, max pushed
+    assert by_epoch[25696]["late_joins"] == 1
+    assert by_epoch[25698]["status"] == "dead" and by_epoch[25698]["reaction"] == 9
+    assert [row["epoch"] for row in parsed["sprints"]] == sorted(by_epoch, reverse=True)   # the forced rehearsal has no epoch
+
+
+def test_sanqi_tables_show_drawn_reactions_beyond_the_legacy_five():
+    status = {
+        "pi_reachable": True,
+        "draws_by_reaction": {"1": 92, "22": 2},
+        "clears_by_reaction": {"1": 9, "22": 1},
+        "wins_by_reaction": {"1": 0},
+        "recent_history": [
+            {"epoch": 25696, "reaction": 22, "outcome": "cleared", "selected_score": 1.3239},
+            {"epoch": 25698, "reaction": 9, "outcome": "dead"},
+        ],
+        "sanqi": compound._parse_sanqi(SANQI_DUMP),
+    }
+
+    status_html = compound.compound_status_table(status)
+    sprint_html = compound.compound_strategy_table(status)
+    history_html = compound.compound_history_table(status)
+
+    assert "rxn 22" in status_html and "3/4 boxes" in status_html and "1.324" in status_html.replace("1.3239", "1.324")
+    assert "9, 14, 30, 41, 42" in status_html
+    assert "legacy bank" in status_html                      # rxn 1 has history but no SANQI sprint
+    assert "skipped: dead reaction" in sprint_html and "awaiting leaderboard" in sprint_html
+    assert "submitted, awaiting leaderboard" in history_html and "can never validate" in history_html
+    assert "nova-sanqi-N" in compound.compound_caveat_note(status)
+
+
+def test_unknown_reaction_baseline_does_not_crash_collect_path():
+    # reactions outside 1-5 have no REACTION_BOXES entry; the history code must not index it
+    assert compound.REACTION_BOXES.get(22, (None, None, 0.0))[2] == 0.0
+
+
+def test_sanqi_boxes_count_as_compound_spend():
+    from nanobody_dash import infra
+
+    assert infra.cost_scope("nova-sanqi-4") == "sn68-compound"
+    assert infra.cost_scope("nova-rxn3-nim-4x4090") == "sn68-compound"
+    assert infra.cost_scope("nova-sanqi-extra-test") == "research"

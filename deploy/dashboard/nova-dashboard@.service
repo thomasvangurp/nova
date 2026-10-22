@@ -1,0 +1,19 @@
+[Unit]
+Description=Nova dashboard %i on Pi
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=thomasg
+WorkingDirectory=/opt/nova-dashboard
+Environment=NOVA_DASH_LOCAL_PI=1
+Environment=NOVA_DASH_DEPLOY_DIR=/home/thomasg/nova-dash-publish/public
+Environment=HOME=/home/thomasg
+Environment=PATH=/opt/nova-dashboard/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/nova-dashboard/.venv/bin/python -m nanobody_dash.pi_refresh %i
+TimeoutStartSec=1300
+KillMode=control-group
+Nice=10
+IOSchedulingClass=idle
+UMask=0077

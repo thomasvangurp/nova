@@ -252,11 +252,12 @@ def _mark_method_boundaries(figure, segments, *, categorical_index=None) -> None
 def _normalize_multipass_actor(value):
     """Return ``{"mean", "stdev", "fleet_size", "scores"}`` or None.
 
-    Accepts both the new dict shape and the legacy flat float, so an old
-    ``multipass_comparison.json`` keeps rendering.  A zero or null ``stdev`` is
-    normalised to None so error bars are simply omitted.
+    Only explicitly verified complete fleets qualify. Legacy values lack
+    replicate coverage and cannot establish a comparable multipass mean.
     """
     if isinstance(value, dict):
+        if value.get("coverage_complete") is not True:
+            return None
         try:
             mean = float(value.get("mean"))
         except (TypeError, ValueError):
@@ -270,11 +271,9 @@ def _normalize_multipass_actor(value):
             stdev = None
         return dict(mean=mean, stdev=stdev,
                     fleet_size=value.get("fleet_size"),
-                    scores=value.get("scores"))
-    try:
-        return dict(mean=float(value), stdev=None, fleet_size=None, scores=None)
-    except (TypeError, ValueError):
-        return None
+                    scores=value.get("scores"),
+                    passes_min=value.get("passes_min"), passes_max=value.get("passes_max"))
+    return None
 
 
 def _multipass_rivals(row, rival):
@@ -309,12 +308,33 @@ def _multipass_all_rivals(row):
         yield str(coldkey), actor
 
 
+def _recent_strongest_rivals(payload, exclude_prefix, window=10, minimum_epochs=5, count=2):
+    """The ``count`` rivals with the best (lowest) mean of per-epoch means over the last ``window`` epochs.
+
+    The comparison used to follow one hard-wired rival (5GhREcsK).  When that coldkey stopped submitting (no scored
+    entry in 25692-25696) the panel lost its competitor, so the panel also follows whoever is currently strongest.
+    Only rivals seen in at least ``minimum_epochs`` of the window qualify, and ``exclude_prefix`` (already shown) is skipped.
+    """
+    keys = sorted((int(k) for k, row in payload.items() if isinstance(row, dict) and str(k).isdigit()))[-window:]
+    seen: dict[str, list[float]] = {}
+    for epoch in keys:
+        for coldkey, actor in _multipass_all_rivals(payload[str(epoch)]):
+            if coldkey.startswith(exclude_prefix) or not actor.get("scores"):
+                continue
+            seen.setdefault(coldkey, []).append(float(sum(actor["scores"])) / len(actor["scores"]))
+    ranked = sorted((sum(v) / len(v), coldkey) for coldkey, v in seen.items() if len(v) >= minimum_epochs)
+    return [coldkey for _, coldkey in ranked[:count]]
+
+
 def _multipass_hover(actor) -> str:
     """``fleet=13 · σ=88`` for the hover text, ``fleet n/a`` when empty."""
     parts = []
     fleet = actor.get("fleet_size")
     if fleet is not None:
         parts.append(f"fleet={int(fleet)}")
+    if actor.get("passes_min") is not None:
+        low, high = actor["passes_min"], actor.get("passes_max", actor["passes_min"])
+        parts.append(f"passes/sequence={low}" if low == high else f"passes/sequence={low}–{high}")
     if actor.get("stdev") is not None:
         parts.append(f"σ={actor['stdev']:,.0f}")
     return " · ".join(parts) if parts else "fleet n/a"
@@ -326,13 +346,14 @@ def _trailing_mean(xs, ys, window=10):
     A per-epoch multi-pass rank-sum is noisy (one epoch's sample is only ~10-20
     sequences), so the strongest-rivals chart plots this smoothed value instead
     of the raw per-epoch point.  Missing (``None``) values are kept as gaps and
-    are not fed into the window.
+    clear the window so smoothing restarts after missing coverage.
     """
     out_x, out_y, win = [], [], []
     for x, y in zip(xs, ys):
         if y is None:
             out_x.append(x)
             out_y.append(None)
+            win = []
             continue
         win.append(y)
         if len(win) > window:
@@ -396,6 +417,16 @@ def fig_multipass_vs_rival(path: Path | None = None,
             bucket["y"].append(actor["mean"])
             bucket["err"].append(actor["stdev"])
             bucket["hover"].append(_multipass_hover(actor) + "<br>" + tag)
+
+    # Plotly needs an explicit null at every missing epoch; simply dropping
+    # incomplete actors would connect lines across an unmeasured interval.
+    for bucket in rival_buckets.values():
+        observed = {x: (y, err, hover) for x, y, err, hover in
+                    zip(bucket["x"], bucket["y"], bucket["err"], bucket["hover"])}
+        bucket["x"] = list(epochs)
+        bucket["y"] = [observed.get(e, (None, None, ""))[0] for e in epochs]
+        bucket["err"] = [observed.get(e, (None, None, ""))[1] for e in epochs]
+        bucket["hover"] = [observed.get(e, (None, None, ""))[2] for e in epochs]
 
     ours_x, ours_y, ours_err, ours_hover = _gap_at_method_change(
         ours_x, ours_y, methods, ours_err, ours_hover)
@@ -477,6 +508,11 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
         return sum(bucket["y"]) / len(bucket["y"])
 
     strongest = sorted(rival_buckets, key=lambda ck: _mean(rival_buckets[ck]))[:top]
+    for bucket in rival_buckets.values():
+        observed = dict(zip(bucket["x"], zip(bucket["y"], bucket["hover"])))
+        bucket["x"] = list(epochs)
+        bucket["y"] = [observed.get(e, (None, ""))[0] for e in epochs]
+        bucket["hover"] = [observed.get(e, (None, ""))[1] for e in epochs]
 
     def _smooth(xs, ys, hover):
         """Trailing mean that restarts at every method boundary, with a gap
@@ -519,7 +555,8 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
 
 
 def fig_multipass_distribution(path: Path | None = None,
-                               rival: str = "5GhREcsK") -> go.Figure:
+                               rival: str = "5GhREcsK",
+                               strongest_recent: int = 2) -> go.Figure:
     """Per-sequence multi-pass rank-sum distribution for us and every rival.
 
     Only actors (and epochs) that carry a non-empty ``scores`` list appear,
@@ -547,11 +584,20 @@ def fig_multipass_distribution(path: Path | None = None,
             if isinstance(actor.get("scores"), list) and actor["scores"]:
                 rival_epochs.setdefault(coldkey, {})[epoch] = actor["scores"]
 
+    # Also follow whoever is strongest over the last 10 epochs, so the panel never loses its competitor.
+    current = _recent_strongest_rivals(payload, rival, count=strongest_recent) if strongest_recent else []
+    for key, row in payload.items():
+        if not isinstance(row, dict):
+            continue
+        for coldkey, actor in _multipass_all_rivals(row):
+            if coldkey in current and isinstance(actor.get("scores"), list) and actor["scores"]:
+                rival_epochs.setdefault(coldkey, {})[str(key)] = actor["scores"]
+
     epoch_order = sorted(
         set(ours_epochs) | {e for m in rival_epochs.values() for e in m},
         key=int)
     if not epoch_order:
-        return _empty_multipass(figure, "No per-sequence multi-pass scores yet",
+        return _empty_multipass(figure, "No complete fleets with ≥10 passes per sequence",
                                 "multi-pass rank-sum (lower = better)")
 
     def _add_boxes(label, per_epoch, colour, offset):
@@ -574,7 +620,24 @@ def fig_multipass_distribution(path: Path | None = None,
         _add_boxes(coldkey[:8] + "...", rival_epochs[coldkey],
                    RIVALS[(shown - 1) % len(RIVALS)], shown)
 
+    incomplete_epochs = []
+    for epoch, row in payload.items():
+        if not isinstance(row, dict):
+            continue
+        actors = [row.get("ours"), *row.get("rivals", {}).values()]
+        if any(isinstance(a, dict) and a.get("coverage_complete") is False
+               for a in actors):
+            incomplete_epochs.append(int(epoch))
+    if incomplete_epochs:
+        figure.add_annotation(
+            x=0, y=-0.30, xref="paper", yref="paper", xanchor="left",
+            text=(f"Incomplete replay coverage in {len(incomplete_epochs)} epochs "
+                  f"({min(incomplete_epochs)}–{max(incomplete_epochs)}). "
+                  "Incomplete fleets omitted; each sequence requires ≥10 passes."),
+            showarrow=False, font=dict(color=WARN, size=11))
     layout = dict(LAYOUT)
+    if incomplete_epochs:
+        layout["margin"] = {**layout.get("margin", {}), "b": 145}
     layout["boxmode"] = "group"
     layout["boxgap"] = 0.25
     layout["boxgroupgap"] = 0.05

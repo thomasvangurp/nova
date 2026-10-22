@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Nova dashboard money independently on Pi
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=3600
+AccuracySec=5
+Unit=nova-dashboard@money.service
+
+[Install]
+WantedBy=timers.target

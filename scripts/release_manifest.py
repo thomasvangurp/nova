@@ -14,12 +14,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SOURCE_PATHS = (
-    'nanobody_opt', 'nanobody_opt_v2', 'tools', 'neurons', 'compound_miner',
+    'nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons', 'compound_miner',
     'utils', 'config', 'combinatorial_db/reactions.py', 'tests', 'scripts',
     'deploy', 'ansible', '.github/workflows', 'requirements',
     'pixi.toml', 'pixi.lock', 'go_live_v2.sh', 'restart_v2.sh', 'deploy_gate.sh',
 )
-RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'tools', 'neurons',
+RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons',
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
                 'tests', 'scripts', 'deploy')
 LIVE_CONFIG = {'config/config.yaml', 'config/boltzgen_config.yaml'}
