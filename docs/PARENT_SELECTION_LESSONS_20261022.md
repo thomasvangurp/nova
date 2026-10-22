@@ -30,4 +30,12 @@ The HTTPS credential could not push workflow changes. Authenticated SSH successf
 
 The slave top-up was also blocked by a stale reviewed daemon hash. Review of both live sources confirmed the master's added short-shard retry sends the same scorer arguments and merges each shard once; the slave's replicate-only plumbing remains disabled for these unique-sequence rounds. Update only the exact reviewed hash pair, retain rejection of any further drift, and verify live preflight after testing. Do not overwrite the master's pinned scoring implementation to make hashes match.
 
+## Verified recovery
+
+The final code revision is `5c470d838076b3b28e9f4dc23e53874f64efc039`, on branch `fix/epoch-deadlines-parent-merit-20261022`. Its clean local shipping run and [GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/39806353073) passed 377 tests with zero failures, errors or skips. All eleven deployed incident files match this package by SHA-256; `/root/artifacts/incident_release_current_20261022.json` records the exact scope and receipt. The master scorer implementation was preserved.
+
+Epoch 25872's fresh published fleet contains eleven candidates, each with 21 observations, averaging 785.207792 against its current ten-epoch field. The Pi's normal `pi_submit.py --pull-only` path successfully fetched this artifact, and its embedded epoch, count, mean and observation depths were verified. This is a local multipass prediction and verified delivery, not a final validator score or a claim that the epoch's on-chain commit has already occurred.
+
+At epoch offset 193.1 the slave passed preflight and began a submission top-up pass: fifty candidates, twelve planned rounds and 600 requested observations. These are planned measurements, not yet a claimed successful import. At offset 196 the master had screened 2,486 of the 4,800 admitted candidates. Keep these progress snapshots separate from completed coverage and final confirmation.
+
 Regression coverage includes current-field parent merit, proposal/screen budgets, deferred TNP, value pricing, commit side effects, validator round trips, actual v2 imports, release tampering, and a real blocked-process rollover test that proves child termination and immediate next-epoch progress.
