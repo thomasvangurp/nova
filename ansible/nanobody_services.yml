@@ -672,9 +672,8 @@
           # was re-measured at ~67s (down from 25+ min after the Sept 28-29
           # vectorise/bisect/parallelise work). The reserve only needs to cover
           # the now-cheap rank plus the layer-2/novelty/CDR passes after it.
-          - --strict-qualification
           - --strict-qualification-reserve-blocks
-          - "{{ nanobody_strict_qualification_reserve_blocks | default(60) }}"
+          - "{{ nanobody_strict_qualification_reserve_blocks | default(150) }}"
           # Artifact-only by design. The Pi owns the fresh roster and is the
           # sole on-chain commitment writer. A second writer here can overwrite
           # Pi's earlier commitment near the validator blackout and silently
@@ -959,6 +958,9 @@
       when: nanobody_chain_writer_activate | bool
 
     # ---- Services ----------------------------------------------------------
+    - name: Verify the tested runtime before publisher activation
+      ansible.builtin.include_tasks: tasks/verify_tested_runtime.yml
+
     - name: Restart the checkpoint publisher on committed source
       ansible.builtin.command:
         argv: [tmux, kill-session, -t, "{{ publisher_session }}"]

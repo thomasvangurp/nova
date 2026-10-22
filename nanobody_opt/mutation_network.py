@@ -18,6 +18,7 @@ import numpy as np
 
 from nanobody_opt import db
 from nanobody_opt.regions import find_regions
+from nanobody_opt.simulate_round import METRICS
 
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
@@ -983,6 +984,274 @@ def update_observation_store(
     return len(prepared)
 
 
+# ---------------------------------------------------------------------------
+# Fix 2 (2026-10-15): incremental per-(sequence, target, metric) aggregate.
+#
+# rank_exact._historical_observations used to re-run the four-way join and
+# json.loads ~1.04M folds on every ranking cycle (~8 min before the pool even
+# forks).  These helpers maintain ``exact_observation_aggregate`` -- SUM,
+# SUM_SQ, COUNT per (sequence, target, metric) over the sealed local_exact_raw
+# folds -- in the same transaction that rewrites ``exact_run_observations``, so
+# rank_exact can read the numeric aggregate (cheap) instead of the raw folds.
+# The aggregate is a derived cache of already-replicated observations +
+# exact_runs and is deliberately NOT replicated to Hetzner.
+# ---------------------------------------------------------------------------
+
+
+def _aggregate_metric_values(blob: str) -> dict[str, float] | None:
+    """One metrics_json blob -> finite per-metric floats, or None if skipped.
+
+    Mirrors rank_exact._historical_observations' per-row validation exactly: a
+    row contributes to the aggregate only when every METRIC is present and
+    finite, which is precisely the set of folds the old full-pool read kept.
+    """
+    try:
+        metrics = json.loads(blob)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metrics, dict) or not set(METRICS).issubset(metrics):
+        return None
+    try:
+        values = {name: float(metrics[name]) for name in METRICS}
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in values.values()):
+        return None
+    return values
+
+
+def _run_folds(connection: Any, target: str, run_id: str, p: str,
+               ) -> list[tuple[str, dict[str, float]]]:
+    """(sequence, metric values) for every valid fold of one exact run.
+
+    Reads the run's ``exact_run_observations`` rows joined through the current
+    ``observations`` / ``nodes`` rows, so a re-import that changed a fold's
+    metrics (or dropped it) is reflected in the returned contribution.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT n.sequence, o.metrics_json
+        FROM exact_run_observations x
+        JOIN observations o ON o.observation_id = x.observation_id
+        JOIN nodes n ON n.id = o.node_id
+        WHERE x.target={p} AND x.run_id={p} AND x.target=n.target
+          AND o.source='local_exact_raw'
+        """,
+        (target, run_id),
+    ).fetchall()
+    folds: list[tuple[str, dict[str, float]]] = []
+    for sequence, blob in rows:
+        values = _aggregate_metric_values(blob)
+        if values is not None:
+            folds.append((str(sequence).strip().upper(), values))
+    return folds
+
+
+def _folds_net_delta(
+    old_folds: list[tuple[str, dict[str, float]]],
+    new_folds: list[tuple[str, dict[str, float]]],
+) -> dict[tuple[str, str], tuple[float, float, int]]:
+    """Net (sum, sum_sq, count) change per (sequence, metric) between two sets.
+
+    Computed as a NET delta (new minus old) so an idempotent re-seal of an
+    unchanged run produces an exactly-zero delta and no floating-point churn in
+    the aggregate (subtract-then-add of the same float is not associative).
+    """
+    def accumulate(
+        folds: list[tuple[str, dict[str, float]]],
+    ) -> dict[tuple[str, str], list[float]]:
+        acc: dict[tuple[str, str], list[float]] = {}
+        for sequence, values in folds:
+            for metric, value in values.items():
+                row = acc.get((sequence, metric))
+                if row is None:
+                    acc[(sequence, metric)] = [value, value * value, 1.0]
+                else:
+                    row[0] += value
+                    row[1] += value * value
+                    row[2] += 1.0
+        return acc
+
+    old = accumulate(old_folds)
+    new = accumulate(new_folds)
+    delta: dict[tuple[str, str], tuple[float, float, int]] = {}
+    for key in set(old) | set(new):
+        o = old.get(key, [0.0, 0.0, 0.0])
+        n = new.get(key, [0.0, 0.0, 0.0])
+        dsum = n[0] - o[0]
+        dsq = n[1] - o[1]
+        dcount = int(round(n[2] - o[2]))
+        if dcount or dsum or dsq:
+            delta[key] = (dsum, dsq, dcount)
+    return delta
+
+
+def _apply_aggregate_delta(
+    connection: Any, target: str,
+    delta: dict[tuple[str, str], tuple[float, float, int]], p: str,
+) -> None:
+    """Add a net (sum, sum_sq, count) delta to the aggregate for `target`."""
+    for (sequence, metric), (dsum, dsq, dcount) in delta.items():
+        if dcount > 0:
+            connection.execute(
+                f"""
+                INSERT INTO exact_observation_aggregate(
+                    target, sequence, metric, sum_value, sum_sq, count_value
+                ) VALUES({p}, {p}, {p}, {p}, {p}, {p})
+                ON CONFLICT(target, sequence, metric) DO UPDATE SET
+                    sum_value=sum_value + excluded.sum_value,
+                    sum_sq=sum_sq + excluded.sum_sq,
+                    count_value=count_value + excluded.count_value
+                """,
+                (target, sequence, metric, dsum, dsq, dcount),
+            )
+        else:
+            connection.execute(
+                f"""
+                UPDATE exact_observation_aggregate
+                SET sum_value=sum_value + {p},
+                    sum_sq=sum_sq + {p},
+                    count_value=count_value + {p}
+                WHERE target={p} AND sequence={p} AND metric={p}
+                """,
+                (dsum, dsq, dcount, target, sequence, metric),
+            )
+            connection.execute(
+                f"""
+                DELETE FROM exact_observation_aggregate
+                WHERE target={p} AND sequence={p} AND metric={p} AND count_value <= 0
+                """,
+                (target, sequence, metric),
+            )
+
+
+def _aggregate_ready(connection: Any) -> bool:
+    """Only a backfilled, explicitly valid cache may be maintained or read."""
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='exact_observation_aggregate'").fetchone()
+    if not exists:
+        return False
+    valid = connection.execute(
+        "SELECT value FROM exact_observation_meta WHERE key='valid'").fetchone()
+    return bool(valid and int(valid[0]) == 1)
+
+
+def _bump_aggregate_meta(connection: Any) -> None:
+    """Advance the change counter and pin the source MAX(rowid) watermark."""
+    row = connection.execute(
+        "SELECT MAX(rowid) FROM exact_run_observations"
+    ).fetchone()
+    max_rowid = int(row[0]) if row and row[0] is not None else 0
+    connection.execute(
+        """
+        INSERT INTO exact_observation_meta(key, value)
+        VALUES('change_counter', 1)
+        ON CONFLICT(key) DO UPDATE SET value=value + 1
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO exact_observation_meta(key, value)
+        VALUES('source_max_rowid', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (max_rowid,),
+    )
+
+
+def rebuild_exact_observation_aggregate(path: Path, *, target: str) -> dict[str, int]:
+    """One-time, idempotent backfill of the aggregate from existing history.
+
+    Streams the same four-way join the old full-pool read used (sealed
+    local_exact_raw folds), accumulates SUM/SUM_SQ/COUNT per (sequence, target,
+    metric), then atomically replaces the aggregate table's rows for `target`
+    and pins the change counter + source MAX(rowid) watermark.
+
+    The scan runs on a read-only connection so the ~8-minute streaming read
+    holds no write transaction (and cannot block or be blocked by the live
+    producer/topup writers); the write phase is a short second transaction.
+    Safe to re-run: the second pass overwrites the first with identical
+    numbers.
+    """
+    import sqlite3 as _sqlite3
+
+    stats: dict[tuple[str, str], list[float]] = {}
+    seen: set[str] = set()
+    folds = 0
+    read_only = _sqlite3.connect(
+        f"file:{path}?mode=ro", uri=True, isolation_level=None)
+    try:
+        read_only.execute("BEGIN")
+        counter_row = read_only.execute("SELECT value FROM exact_observation_meta WHERE key='change_counter'").fetchone()
+        snapshot_counter = int(counter_row[0]) if counter_row else 0
+        snapshot_row = read_only.execute(
+            "SELECT MAX(rowid) FROM exact_run_observations").fetchone()
+        snapshot_max = int(snapshot_row[0]) if snapshot_row and snapshot_row[0] else 0
+        rows = read_only.execute(
+            """
+            SELECT n.sequence, o.metrics_json
+            FROM observations o
+            JOIN nodes n ON n.id = o.node_id
+            JOIN exact_run_observations x
+              ON x.observation_id=o.observation_id AND x.target=n.target
+            JOIN exact_runs r
+              ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
+            WHERE n.target=? AND o.source='local_exact_raw'
+              AND o.metrics_json IS NOT NULL
+            """,
+            (target,),
+        )
+        for sequence, blob in rows:
+            values = _aggregate_metric_values(blob)
+            if values is None:
+                continue
+            seq = str(sequence).strip().upper()
+            seen.add(seq)
+            folds += 1
+            for metric, value in values.items():
+                row = stats.get((seq, metric))
+                if row is None:
+                    stats[(seq, metric)] = [value, value * value, 1.0]
+                else:
+                    row[0] += value
+                    row[1] += value * value
+                    row[2] += 1.0
+        read_only.execute("COMMIT")
+    finally:
+        read_only.close()
+    sequences = len(seen)
+    with _connect(path) as connection:
+        p = "?" if _is_local(connection) else "%s"
+        live_row = connection.execute(
+            "SELECT MAX(rowid) FROM exact_run_observations").fetchone()
+        live_max = int(live_row[0]) if live_row and live_row[0] else 0
+        counter_row = connection.execute("SELECT value FROM exact_observation_meta WHERE key='change_counter'").fetchone()
+        live_counter = int(counter_row[0]) if counter_row else 0
+        if live_max != snapshot_max or live_counter != snapshot_counter:
+            raise RuntimeError(
+                f"aggregate backfill raced a writer "
+                f"(snapshot max rowid {snapshot_max}, live {live_max}); retry"
+            )
+        connection.execute(
+            f"DELETE FROM exact_observation_aggregate WHERE target={p}", (target,)
+        )
+        connection.executemany(
+            f"""
+            INSERT INTO exact_observation_aggregate(
+                target, sequence, metric, sum_value, sum_sq, count_value
+            ) VALUES({p}, {p}, {p}, {p}, {p}, {p})
+            """,
+            (
+                (target, seq, metric, row[0], row[1], int(round(row[2])))
+                for (seq, metric), row in stats.items()
+            ),
+        )
+        _bump_aggregate_meta(connection)
+        connection.execute("INSERT INTO exact_observation_meta(key,value) VALUES('valid',1) ON CONFLICT(key) DO UPDATE SET value=1")
+    return {"folds": folds, "sequences": sequences, "aggregate_rows": len(stats)}
+
+
 @db.deadlock_retry()
 def record_exact_run(
     path: Path,
@@ -1005,6 +1274,21 @@ def record_exact_run(
     with _connect(path) as connection:
         local = _is_local(connection)
         p = "?" if local else "%s"
+        # Fix 2: capture the run's pre-update state so the aggregate delta is
+        # computed against what the aggregate actually held.  ``old_complete``
+        # must be read before the exact_runs UPSERT and ``old_folds`` before
+        # the exact_run_observations DELETE below.
+        old_complete = 0
+        old_folds: list[tuple[str, dict[str, float]]] = []
+        aggregate_ready = local and _aggregate_ready(connection)
+        if aggregate_ready:
+            old_row = connection.execute(
+                f"SELECT complete FROM exact_runs WHERE target={p} AND run_id={p}",
+                (target, run_id),
+            ).fetchone()
+            old_complete = int(old_row[0]) if old_row else 0
+            if old_complete:
+                old_folds = _run_folds(connection, target, run_id, p)
         present_ids = {
             str(row[0])
             for observation_id in expected
@@ -1077,6 +1361,17 @@ def record_exact_run(
             """,
             ((target, run_id, observation_id) for observation_id in present_ids),
         )
+        # Fix 2: reflect this run's net contribution in the aggregate, in the
+        # same transaction as the exact_run_observations rewrite, so a reader
+        # never sees the two out of sync.  Net-delta (not subtract-then-add)
+        # keeps an idempotent re-seal from drifting the floats.
+        if aggregate_ready:
+            new_folds = _run_folds(connection, target, run_id, p) if complete else []
+            delta = _folds_net_delta(old_folds, new_folds)
+            if delta:
+                _apply_aggregate_delta(connection, target, delta, p)
+        if local and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='exact_observation_meta'").fetchone():
+            _bump_aggregate_meta(connection)
     return {
         "target": target,
         "run_id": run_id,
@@ -1129,28 +1424,32 @@ def exact_run_is_complete(
 
 
 def load_exact_artifacts(
-    path: Path, *, target: str
+    path: Path, *, target: str, sequences: Iterable[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Load retained structure/sample metadata for authoritative raw folds."""
     try:
         with _connect(path) as connection:
             p = "?" if _is_local(connection) else "%s"
-            rows = connection.execute(
+            wanted = sorted(set(sequences)) if sequences is not None else None
+            batches = [None] if wanted is None else [wanted[i:i + 500] for i in range(0, len(wanted), 500)]
+            rows = []
+            for batch in batches:
+                restriction = "" if batch is None else " AND n.sequence IN (" + ",".join([p] * len(batch)) + ")"
+                rows.extend(connection.execute(
                 f"""
                 SELECT n.sequence, o.observation_id, x.run_id, a.confidence_path,
                        a.writer_path, a.structure_json, a.sample_selection_json
-                FROM observations o
-                JOIN nodes n ON n.id=o.node_id
+                FROM nodes n CROSS JOIN observations o ON n.id=o.node_id
                 JOIN exact_run_observations x
                   ON x.observation_id=o.observation_id AND x.target=n.target
                 JOIN exact_runs r
                   ON r.target=x.target AND r.run_id=x.run_id AND r.complete=1
                 JOIN observation_artifacts a ON a.observation_id=o.observation_id
-                WHERE n.target={p} AND o.source='local_exact_raw'
+                WHERE n.target={p} AND o.source='local_exact_raw'{restriction}
                 ORDER BY o.observation_id
                 """,
-                (target,),
-            ).fetchall()
+                (target, *(batch or [])),
+                ).fetchall())
     except Exception:
         return {}
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)

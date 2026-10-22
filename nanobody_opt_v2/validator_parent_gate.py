@@ -112,9 +112,28 @@ def main() -> None:
         if search.total_indexed != 50:
             raise ValueError('incomplete index')
         cdrs = extract_cdrs(sequence)
+        flags = [is_duplicate(m)[0] for m in search.matches]
+        identities = [
+            float(m.identity) for m in search.matches
+            if getattr(m, 'identity', None) is not None
+        ]
+        cdr3_similarities = [
+            float(m.cdr_similarity.get('CDR3', 0.0)) for m in search.matches
+            if getattr(m, 'cdr_similarity', None) is not None
+        ]
+        max_identity = max(identities) if identities else 0.0
+        max_cdr3 = max(cdr3_similarities) if cdr3_similarities else 0.0
+        # The duplicate decision is the exact is_duplicate predicate above.
+        # identity/cdr3_similarity are diagnostics ONLY: no scalar parent margin
+        # is asserted, because child-level safety cannot be certified by a flat
+        # threshold on a parent whose local-alignment denominator (and backend:
+        # parasail vs the BioPython fallback) varies per child. Child safety is
+        # established by the unchanged commit-time gate (check_validator_novelty).
         results[sequence] = {
-            'duplicate': any(is_duplicate(m)[0] for m in search.matches),
+            'duplicate': any(flags),
             'cdr3': (cdrs.get('CDR3') or cdrs.get('cdr3') or '') if cdrs is not None else '',
+            'identity': max_identity,
+            'cdr3_similarity': max_cdr3,
         }
     args.output.write_text(json.dumps({
         'target': target, 'algorithm2_top_count': len(top), 'results': results,

@@ -12,7 +12,10 @@ class TestRunLiveProducerFlags(unittest.TestCase):
     def test_new_defaults(self):
         a = rlp._parser().parse_args([])
         self.assertEqual(a.candidate_limit, 4800)
-        self.assertEqual(a.finalists, 150)
+        self.assertEqual(a.finalists, 200)  # Legacy iteration mode; epoch cycles use 64 below.
+        self.assertEqual(a.epoch_confirmation_finalists, 64)
+        self.assertEqual(a.epoch_proposal_budget, 8000)
+        self.assertEqual(a.epoch_candidate_budget, 4800)
         self.assertEqual(a.replication_rounds, 8)
         self.assertEqual(a.replication_rounds_per_stage, 1)
         self.assertAlmostEqual(a.replication_keep_fraction, 0.35)
@@ -21,7 +24,7 @@ class TestRunLiveProducerFlags(unittest.TestCase):
         self.assertEqual(a.parent_limit, 64)
         self.assertEqual(a.neighbor_parent_limit, 32)
         self.assertEqual(a.basin_parent_limit, 32)
-        self.assertEqual(a.proposal_limit, 384)
+        self.assertEqual(a.proposal_limit, 8000)
         # Commitment/handoff reserve: Pi commits at ~325 of 361.
         self.assertEqual(a.reserve_blocks, 36)
         self.assertAlmostEqual(a.budget_gpu_seconds, 4.8)

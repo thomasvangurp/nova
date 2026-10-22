@@ -41,9 +41,32 @@ ARCHIVE_URL = (
 #: plan of an epoch has real replication rows to fit; short enough that a
 #: genuine change in cost is reflected within an epoch or two.
 BUDGET_SEED_EPOCHS = 3
-DEFAULT_MINIMUM_FREE_GIB = 20.0
+DEFAULT_MINIMUM_FREE_GIB = 2.0
 DEFAULT_MAXIMUM_PERSISTED_RANKING_MIB = 64.0
-DEFAULT_RETAINED_EPOCHS = 16
+DEFAULT_RETAINED_EPOCHS = 2
+
+#: Generation-policy fingerprint. Bump whenever the generation/developability
+#: semantics change; every reuse site checks a per-epoch marker against this so
+#: a same-epoch restart after a code change cannot reuse stale iteration output.
+GENERATION_POLICY = "measured-parent-screen-2026-10-22-v2"
+
+
+def _artifact_policy_marker(path: Path) -> Path:
+    return Path(str(path) + ".policy")
+
+
+def _artifact_policy_stale(path: Path) -> bool:
+    """True when the artifact's own stored policy is absent or older than this
+    code. Each artifact is stamped at WRITE time, so a same-epoch restart after
+    a code change reads the OLD artifact policy and regenerates it."""
+    try:
+        return _artifact_policy_marker(path).read_text().strip() != GENERATION_POLICY
+    except (OSError, FileNotFoundError):
+        return True
+
+
+def _stamp_artifact_policy(path: Path) -> None:
+    _artifact_policy_marker(path).write_text(GENERATION_POLICY + "\n")
 
 
 def _sha256(path: Path) -> str:
@@ -137,6 +160,7 @@ def maintain_runtime_storage(
     removed_files = 0
     removed_bytes = 0
     removed_epoch_dirs = 0
+    pruned_epochs: list[int] = []
     if live_root.is_dir():
         for epoch_root in live_root.glob("epoch[0-9]*"):
             suffix = epoch_root.name.removeprefix("epoch")
@@ -176,18 +200,33 @@ def maintain_runtime_storage(
                     report = prune_generated_tree(epoch_root / name)
                     removed_bytes += report["removed_bytes"]
                     removed_files += report["removed_files"]
+                pruned_epochs.append(int(suffix))
     free_bytes = shutil.disk_usage(runtime_root).free
     minimum_bytes = int(minimum_free_gib * 1024**3)
     if free_bytes < minimum_bytes:
-        raise RuntimeError(
-            "producer disk reserve violated: "
-            f"free={free_bytes} required={minimum_bytes}; refusing new GPU work"
+        # Degrade instead of aborting the whole loop: log, keep the CPU pruning
+        # running, and let the caller skip only the GPU-heavy race this pass.
+        print(
+            "PRODUCER_DISK_RESERVE_DEGRADED "
+            f"free={free_bytes} required={minimum_bytes}; "
+            "refusing GPU work this pass (CPU pruning continues)",
+            flush=True,
         )
-    if removed_files or removed_epoch_dirs:
+        return {
+            "removed_files": removed_files,
+            "removed_bytes": removed_bytes,
+            "removed_epoch_dirs": removed_epoch_dirs,
+            "free_bytes": free_bytes,
+            "disk_reserve_violated": True,
+        }
+    if removed_files or pruned_epochs:
+        epoch_range = (
+            f"{min(pruned_epochs)}..{max(pruned_epochs)}" if pruned_epochs else "none"
+        )
         print(
             "PRODUCER_STORAGE_PRUNED "
-            f"epoch_dirs={removed_epoch_dirs} files={removed_files} "
-            f"bytes={removed_bytes} free={free_bytes}",
+            f"PRUNE epoch{epoch_range} freed={removed_bytes} "
+            f"files={removed_files} free_after={free_bytes}",
             flush=True,
         )
     return {
@@ -195,6 +234,7 @@ def maintain_runtime_storage(
         "removed_bytes": removed_bytes,
         "removed_epoch_dirs": removed_epoch_dirs,
         "free_bytes": free_bytes,
+        "disk_reserve_violated": False,
     }
 
 
@@ -248,6 +288,12 @@ def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> 
                              rounds_per_stage=args.replication_rounds_per_stage,
                              keep_fraction=args.replication_keep_fraction,
                              minimum_keep=args.replication_minimum_keep)
+    if getattr(args, "complete_screen_until_epoch", None) is not None and epoch < args.complete_screen_until_epoch:
+        # The current fleet is already qualified. Use the rest of this epoch
+        # to screen the frozen pool for the explicitly requested next epoch.
+        plan.update(replication_reserve_blocks=0, confirmation_rounds=0,
+                    confirmation_planned_seconds=0,
+                    screen_cutoff_block=int(state["epoch_length"]) - _handoff_reserve(args))
     _atomic_json(producer_root / "budget.json", {"epoch": int(state["epoch"]),
                  "commitment_reserve_blocks": args.reserve_blocks,
                  "publication_prepare_blocks": args.publication_prepare_blocks, **plan})
@@ -356,11 +402,10 @@ def _run(command: list[str]) -> None:
     if getattr(_STAGED, "nice", False):
         kwargs["preexec_fn"] = lambda: os.nice(10)   # staged preparation yields to scoring
     try:
-        subprocess.run(command, check=True, **kwargs)
+        from nanobody_opt.epoch_deadline import run as run_epoch_command
+        run_epoch_command(command, deadline=getattr(_STAGED, 'deadline', None), **kwargs)
     except subprocess.CalledProcessError as error:
         print(f"COMMAND_FAILED rc={error.returncode}: {' '.join(command)}", flush=True)
-        if error.stderr:
-            print("STDERR:\n" + error.stderr, flush=True)
         raise
 
 
@@ -379,6 +424,19 @@ def _prepare_epoch(
     archive = epoch_root / "archive.csv"
     _download(ARCHIVE_URL.format(target=target), archive)
     return config, archive, target
+
+
+def _graft_file_has_cases(grafts: Path) -> bool:
+    """A graft file with no cases is an empty pool, not a usable cache.
+
+    generate_donor_grafts writes ``{"cases": []}`` when zero donors are
+    eligible; keeping that file forever silently drops the graft lane.
+    """
+    try:
+        payload = json.loads(grafts.read_text())
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("cases"))
 
 
 def refresh_donor_grafts(
@@ -404,7 +462,7 @@ def refresh_donor_grafts(
     """
     teachers = epoch_root / "structural_teachers.json"
     grafts = epoch_root / "donor_grafts.json"
-    if grafts.is_file():
+    if grafts.is_file() and _graft_file_has_cases(grafts) and not _artifact_policy_stale(grafts):
         return grafts
     base = [
         str(pixi), "run", "--manifest-path", str(manifest), "-e", "metanano",
@@ -427,6 +485,7 @@ def refresh_donor_grafts(
             "--donors", str(donors),
             "--output", str(grafts),
         ])
+        _stamp_artifact_policy(grafts)
     except (subprocess.CalledProcessError, OSError) as error:
         print(
             f"donor grafts unavailable this epoch ({error}); continuing with "
@@ -645,6 +704,8 @@ def _run_iteration(
     iteration_root_override: Path | None = None,
 ) -> None:
     preparation_started = time.monotonic()
+    generation_budget = getattr(args, "generation_proposal_budget", None)
+    quotas = _generation_quotas(args, generation_budget) if generation_budget else None
     epoch = int(state["epoch"])
     target = str(state["nanobody_target"])
     config, archive, target = _prepare_epoch(
@@ -751,7 +812,7 @@ def _run_iteration(
     # tracks which pool each observation came from.
     children_parents = producer_root / "elite_parents.json"
     if (not children_parents.is_file() or json.loads(children_parents.read_text()).get(
-            "selection_policy") != "agreedfix-2026-10-20-complete"):
+            "selection_policy") != "agreedfix-2026-10-20-complete+developability-hoist"):
         # Keep any cached human-readable evidence; regenerate dependent Layer 2.
         cached_layer2 = producer_root / "elite_parents_layer2.json"
         import shutil
@@ -761,6 +822,9 @@ def _run_iteration(
                 if not backup.exists():
                     shutil.copy2(cached, backup)
         cached_layer2.unlink(missing_ok=True)
+        # GAP 6: the merged seed input derives from the old-policy parents;
+        # regenerate it too so a stale parent pool cannot be reused by existence.
+        (producer_root / "merged_parents_layer2_novel.json").unlink(missing_ok=True)
         _run([
             sys.executable,
             "-m", "nanobody_opt_v2.select_elite_parents",
@@ -786,15 +850,25 @@ def _run_iteration(
             "--output", str(children_parents),
         ])
     elite_parents = producer_root / "competitor_parents.json"
-    if not elite_parents.is_file():
+    if not elite_parents.is_file() or _artifact_policy_stale(elite_parents):
+        # Framework-only singles cannot repair a blocked parent clonotype.
+        # Prioritize the measured, freshly gated parent bank rather than raw
+        # Algorithm-2 top-50 parents whose children exhaust the cap then fail.
+        bank = json.loads(children_parents.read_text())
+        priority = [c for c in bank.get("candidates", [])
+                    if c.get("parent_validator_duplicate") is False
+                    and c.get("parent_top50_identity_in_basin") is False
+                    and c.get("parent_cdr_developability_in_range") is True]
+        priority_path = producer_root / "competitor_priority_parents.json"
+        _atomic_json(priority_path, {"target": target, "candidates": priority,
+                                    "sequences": [c["sequence"] for c in priority]})
         lane_argv = [
             sys.executable,
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
-            "--priority-parents", str(top50),
+            "--priority-parents", str(priority_path),
             "--top50", str(top50),
-            "--rival-coldkey", args.rival_coldkey,
-            "--limit", "2000",
+            "--limit", str(quotas["singles"] if quotas else 4800),
             "--mutation-database", str(args.mutation_database),
             "--elite-history-limit", str(args.elite_history_limit),
             "--elite-history-min-passes", str(args.elite_history_min_passes),
@@ -803,8 +877,12 @@ def _run_iteration(
         if args.ranker_model.is_file():
             lane_argv += ["--ranker-model", str(args.ranker_model)]
         _run(lane_argv)
+        _stamp_artifact_policy(elite_parents)
+    # This lane contains thousands of proposed single-edit children. Honor
+    # shortlist-deferred TNP here too; full TNP remains mandatory in the race
+    # shortlist gate and the independent publisher.
     seed = producer_root / "competitor_parents_layer2.json"
-    if not seed.is_file():
+    if not seed.is_file() or _artifact_policy_stale(seed):
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
@@ -818,9 +896,14 @@ def _run_iteration(
             "--igblast-concurrency", str(args.layer2_concurrency),
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
-        ])
+        ] + (["--igblast-only"] if args.layer2_igblast_only else []))
+        _stamp_artifact_policy(seed)
     children_seed = producer_root / "elite_parents_layer2.json"
     if not children_seed.is_file():
+        # Gap 2: the parent bank gate is IgBLAST-only. Full six-flag TNP runs
+        # on the CHILDREN (below), not here -- a repair-pool parent with an
+        # out-of-range CDR must survive this stage so the multi-edit lane can
+        # repair its CDR3; running TNP here would drop it before repair.
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
@@ -834,6 +917,7 @@ def _run_iteration(
             "--igblast-concurrency", str(args.layer2_concurrency),
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
+            "--igblast-only",
         ])
     # ROOT-CAUSE FIX (2026-10-18): the seed-level parent-novelty gate below was
     # the v1->v2 diversity regression. v1 passed the FULL elite layer-2 pool
@@ -869,44 +953,14 @@ def _run_iteration(
         _atomic_json(floored, {"candidates": candidates, "floored": True, "floor": floor})
         return floored
 
-    def _merge_seed_pools(elite_path: Path, competitor_path: Path, root: Path) -> Path:
-        """Merge elite + competitor/frontier parents into ONE seed pool.
-
-        local_neighborhood only accepts a seed whose ``selection_score`` is set
-        (or whose sequence is in the recent archive tail); the competitor lane
-        emits single-edits without a score, so a bare concatenation is silently
-        dropped by the eligibility gate. Assign a rank-preserving score from the
-        lane's best-first order so the competitor parents actually become
-        proposal centres, and leave the strict 0.95 child gate untouched (it
-        runs downstream on every generated child).
-        """
-        elite = json.loads(elite_path.read_text()).get("candidates", [])
-        competitor = json.loads(competitor_path.read_text()).get("candidates", [])
-        merged: list[dict[str, Any]] = [dict(c) for c in elite]
-        for index, candidate in enumerate(competitor):
-            record = dict(candidate)
-            if record.get("selection_score") is None:
-                # Elite parents carry validator_final_score (~100-101, lower is
-                # better); rank the competitor parents just behind them while
-                # preserving their best-first order within the pool.
-                record["selection_score"] = 150.0 + float(index)
-            record.setdefault("parent_selection_lane", "epoch_elite")
-            merged.append(record)
-        out = root / "merged_parents_layer2_novel.json"
-        _atomic_json(out, {
-            "candidates": merged,
-            "merged": True,
-            "elite_count": len(elite),
-            "competitor_count": len(competitor),
-        })
-        return out
-
     seed_floor = max(1, int(getattr(args, "minimum_seeds", 8)))
     seed_use = _floor_seeds(seed_novel, seed, seed_floor)
     children_seed_use = _floor_seeds(children_seed_novel, children_seed, seed_floor)
-    # Seed candidate generation from ALL parents (elite + competitor/frontier),
-    # merged -- never just the (possibly floored) elite pool on its own.
-    merged_seed_use = _merge_seed_pools(children_seed_use, seed_use, producer_root)
+    # The competitor lane already emits children for direct screening below.
+    # Do not turn those unmeasured children into elite parents with synthetic
+    # scores (index / 1000), or profile thousands of them before screening.
+    # Multi-edit proposals use the independently measured elite parent bank.
+    merged_seed_use = children_seed_use
     # Scout, then exploit.  The first generation spreads across the strongest
     # historical cores; later generations narrow onto the cores that scored best
     # in this epoch's own observations, which the race has already written to
@@ -930,14 +984,20 @@ def _run_iteration(
         flush=True,
     )
     candidates = iteration_root / "candidates.csv"
-    if not candidates.is_file():
+    if not candidates.is_file() or _artifact_policy_stale(candidates):
         # Two pools, each tagged with its source so the race's observations can
         # be attributed per pool: single-edits (competitor lane, exploitation)
         # and multi-edit children (elite parents + neighbourhood, breadth).
         single_rows = json.loads(seed_use.read_text()).get("candidates", [])
+        if quotas and len(single_rows) > quotas["singles"]:
+            raise ValueError("cached competitor pool exceeds its generation quota")
         with candidates.open("w", newline="") as handle:
             writer = csv.DictWriter(
-                handle, fieldnames=["sequence", "source", "parent_sequence"]
+                handle,
+                fieldnames=["sequence", "source", "parent_sequence",
+                            "screen_priority", "parent_source", "proposal_type",
+                            "parent_basin_core_id", "parent_basin_rank",
+                            "basin_core_id", "proposal_lane"],
             )
             writer.writeheader()
             for row in single_rows:
@@ -947,16 +1007,25 @@ def _run_iteration(
                         "sequence": seq,
                         "source": "single_edit",
                         "parent_sequence": str(row.get("parent", "")).strip().upper(),
+                        "screen_priority": "",
+                        "parent_source": "",
+                        "proposal_type": "",
+                        "parent_basin_core_id": "",
+                        "parent_basin_rank": "",
+                        "basin_core_id": "",
+                        "proposal_lane": "",
                     })
+        _stamp_artifact_policy(candidates)
 
         children_candidates = iteration_root / "children_candidates.csv"
-        if not children_candidates.is_file():
+        if not children_candidates.is_file() or _artifact_policy_stale(children_candidates):
             command = [
                 sys.executable,
                 "-m", "nanobody_opt.local_neighborhood",
                 "--archive", str(archive),
                 "--config", str(config),
                 "--layer2-seeds", str(merged_seed_use),
+                "--top50-index", str(iteration_root / "top50_index.json"),
                 "--winner-priors", str(winner_priors),
                 "--output", str(children_candidates),
                 "--seed-count", str(args.seed_count),
@@ -966,7 +1035,8 @@ def _run_iteration(
                 "--generation-workers", str(args.generation_workers),
                 "--generation-workers-minimum-candidates",
                 str(args.generation_workers_minimum_candidates),
-                "--proposal-limit", str(max(8000, args.proposal_limit)),
+                "--proposal-limit", str(quotas["children"] if quotas else max(8000, args.proposal_limit)),
+                *(["--bounded-generation"] if quotas else []),
                 "--basin-fraction", str(basin_fraction),
                 "--basin-routes-per-core", str(args.basin_routes_per_core),
                 "--basin-evidence-fraction", str(args.basin_evidence_fraction),
@@ -1006,6 +1076,7 @@ def _run_iteration(
                 _atomic_json(Path(str(children_candidates) + ".shortage.json"),
                              {"fallback_required": True, "generation_failed": True})
                 print("CHILD_GENERATION_FAILED historical fallback required", flush=True)
+        _stamp_artifact_policy(children_candidates)
         # Filter the children pool (which includes the framework lane) through
         # the validator's exact child novelty gate BEFORE it joins candidates.csv.
         # Framework mutations of a near-boundary parent reproduce top-50 framework
@@ -1014,16 +1085,28 @@ def _run_iteration(
         # re-deepen pool. Drop them here so they are never generated further.
         with children_candidates.open(newline="") as ch:
             child_rows = list(csv.DictReader(ch))
+        if quotas and len(child_rows) > quotas["children"]:
+            raise ValueError("child generator exceeded its generation quota")
         children_novel: set[str] = set()
         if child_rows:
             children_novel = _validator_novel_sequences(
                 runtime_root=args.runtime_root, hf_archive=hf_archive,
                 target=target, input_path=children_candidates,
             )
-        # Append the children pool to candidates.csv with its source tag.
+        # Append the children pool to candidates.csv with its source tag, and
+        # PRESERVE screen_priority/parent_source/proposal_type so the race
+        # screens the winner-family (low screen_priority, exact_shortlist)
+        # children FIRST instead of in file order (competitor single-edits
+        # first, children last) which starves them, and so the
+        # historical_basin_member lane is NOT amplified. Empty screen_priority
+        # sorts last.
         with candidates.open("a", newline="") as handle:
             writer = csv.DictWriter(
-                handle, fieldnames=["sequence", "source", "parent_sequence"]
+                handle,
+                fieldnames=["sequence", "source", "parent_sequence",
+                            "screen_priority", "parent_source", "proposal_type",
+                            "parent_basin_core_id", "parent_basin_rank",
+                            "basin_core_id", "proposal_lane"],
             )
             for row in child_rows:
                 seq = str(row.get("sequence", "")).strip().upper()
@@ -1034,6 +1117,13 @@ def _run_iteration(
                         "parent_sequence": str(
                             row.get("parent_sequence", "")
                         ).strip().upper(),
+                        "screen_priority": str(row.get("screen_priority", "")),
+                        "parent_source": str(row.get("parent_source", "")),
+                        "proposal_type": str(row.get("proposal_type", "")),
+                        "parent_basin_core_id": str(row.get("parent_basin_core_id", "")),
+                        "parent_basin_rank": str(row.get("parent_basin_rank", "")),
+                        "basin_core_id": str(row.get("basin_core_id", "")),
+                        "proposal_lane": str(row.get("proposal_lane", "")),
                     })
 
         if args.public_neighbourhood_distance:
@@ -1070,7 +1160,7 @@ def _run_iteration(
                 pixi=Path("/usr/local/bin/pixi"),
                 manifest=args.runtime_root / "pixi.toml",
                 teacher_rank=args.graft_teacher_rank,
-                limit=args.graft_limit,
+                limit=quotas["grafts"] if quotas else args.graft_limit,
                 donors=args.graft_donors,
             )
         if grafts is not None:
@@ -1080,6 +1170,8 @@ def _run_iteration(
             # gate over the graft cases before they join candidates.csv so a
             # graft is never scored only to be blocked afterwards.
             graft_payload = json.loads(grafts.read_text())
+            if quotas and len(graft_payload.get("cases", [])) > quotas["grafts"]:
+                raise ValueError("graft pool exceeds its generation quota")
             if graft_payload.get("cases"):
                 graft_novel = _validator_novel_sequences(
                     runtime_root=args.runtime_root, hf_archive=hf_archive,
@@ -1093,7 +1185,7 @@ def _run_iteration(
             _atomic_json(grafts_novel, graft_payload)
             merge_graft_candidates(candidates, grafts_novel)
     layer2 = iteration_root / "layer2.json"
-    if not layer2.is_file():
+    if not layer2.is_file() or _artifact_policy_stale(layer2):
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
@@ -1108,6 +1200,7 @@ def _run_iteration(
             "--igblast-batch-size", str(args.igblast_batch_size),
             "--cache-dir", str(args.runtime_root / "layer2_cache"),
         ] + (["--igblast-only"] if args.layer2_igblast_only else []))
+        _stamp_artifact_policy(layer2)
     # The validator's EXACT novelty gate (Algorithm-2 top-50 + SearchEngine fine
     # alignment + is_duplicate), indexed from the FULL HF archive (all history),
     # not the live leaderboard. Our old gates ranked the last 15 API epochs, a
@@ -1121,7 +1214,7 @@ def _run_iteration(
             str(hf_archive),
         ])
     layer2_dedup = iteration_root / "layer2_dedup.json"
-    if not layer2_dedup.is_file():
+    if not layer2_dedup.is_file() or _artifact_policy_stale(layer2_dedup):
         _run([
             "/usr/local/bin/pixi", "run",
             "--manifest-path", str(args.runtime_root / "pixi.toml"),
@@ -1132,21 +1225,37 @@ def _run_iteration(
             "--input", str(layer2),
             "--output", str(layer2_dedup),
         ])
-    child_floor = max(24, args.minimum_seeds)
+        _stamp_artifact_policy(layer2_dedup)
+    child_floor = max(args.child_floor, args.minimum_seeds)
+    if generation_budget:
+        child_floor = min(child_floor, generation_budget)
     current = json.loads(layer2_dedup.read_text())
+    if generation_budget and len(current.get("candidates", [])) > generation_budget:
+        raise ValueError("eligible pool exceeds the epoch candidate budget")
     shortage_path = iteration_root / "children_candidates.csv.shortage.json"
     seed_shortage = (shortage_path.is_file() and json.loads(
         shortage_path.read_text()).get("fallback_required", False))
-    if seed_shortage or len(current.get("candidates", [])) < child_floor:
-        _historical_child_fallback(args=args, target=target, config=config,
-                                   hf_archive=hf_archive, iteration_root=iteration_root,
-                                   destination=layer2_dedup, floor=child_floor)
     # The race's soft-dedup re-deepen pool (sequential_exact_race
     # _carry_pending_records) reads layer2.json -- NOT layer2_dedup.json -- so a
     # duplicate blocked above is otherwise re-screened by the next iteration and
     # re-surfaced as a "best multipass" candidate. Overwrite layer2.json with the
     # novelty-filtered content so a pre-filter/stale candidate can never be
     # re-deepened. The current race still uses layer2_dedup directly.
+    #
+    # Replace the carry-over file BEFORE the optional fallback: if the fallback
+    # raises (empty historical bank / seed shortage), the rejected candidates
+    # must not remain in layer2.json for _carry_pending_records to re-read.
+    _atomic_json(layer2, json.loads(layer2_dedup.read_text()))
+    if seed_shortage or len(current.get("candidates", [])) < child_floor:
+        _historical_child_fallback(args=args, target=target, config=config,
+                                   hf_archive=hf_archive, iteration_root=iteration_root,
+                                   destination=layer2_dedup, floor=child_floor)
+        # Re-copy so the fallback's additions are visible in the carry-over too.
+        _atomic_json(layer2, json.loads(layer2_dedup.read_text()))
+    _annotate_parent_screen_scores(args=args, epoch=epoch, target=target,
+                                  producer_root=producer_root, pool=layer2_dedup)
+    if generation_budget and len(json.loads(layer2_dedup.read_text())["candidates"]) > generation_budget:
+        raise ValueError("fallback exceeded the epoch candidate budget")
     _atomic_json(layer2, json.loads(layer2_dedup.read_text()))
     if not adopted:        # an adopted staging keeps its real preparation time
         _atomic_json(iteration_root / "producer_preparation.json", {"seconds": round(time.monotonic() - preparation_started, 1)})
@@ -1160,6 +1269,32 @@ def _run_iteration(
               config=config, archive=archive, target=target,
               producer_root=producer_root, iteration_root=iteration_root,
               layer2=layer2_dedup)
+
+
+def _annotate_parent_screen_scores(*, args, epoch, target, producer_root, pool):
+    """Carry measured parent ranks into admission and tranche scheduling."""
+    from nanobody_opt.competitor_lane import multipass_scores
+    payload = json.loads(pool.read_text())
+    candidates = payload.get("candidates", [])
+    parents = {str(c.get("parent_sequence") or c.get("parent") or "")
+               for c in candidates} - {""}
+    bank = json.loads((producer_root / "elite_parents.json").read_text())
+    scores = {c["sequence"]: c["parent_multipass_mean"]
+              for c in bank.get("candidates", [])
+              if c.get("parent_multipass_mean") is not None}
+    # Recompute public replay parents against today's same ten-epoch field.
+    live = multipass_scores(sorted(parents), args.mutation_database,
+                            min_passes=10, epoch=epoch) if target == "P20809" else {}
+    scores.update(live)
+    for candidate in candidates:
+        parent = str(candidate.get("parent_sequence") or candidate.get("parent") or "")
+        if parent in scores:
+            candidate["parent_multipass_mean"] = scores[parent]
+            candidate["parent_score_source"] = ("live_public_multipass" if parent in live
+                                                else "measured_parent_bank")
+    _atomic_json(pool, payload)
+    print(f"PARENT_SCREEN_SCORES measured={sum(c.get('parent_multipass_mean') is not None for c in candidates)} "
+          f"candidates={len(candidates)}", flush=True)
 
 
 def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
@@ -1247,6 +1382,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         "--gpus", args.gpus,
         "--scorer", str(args.exact_scorer),
         "--candidate-limit", str(max(4800, args.candidate_limit)),
+        "--screen-top-n", str(getattr(args, "screen_top_n", 0)),
         "--screen-tranche-size", str(screen_tranche_size),
         "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
         "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
@@ -1271,6 +1407,8 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     ]
     if getattr(args, "dry_run", False):
         race_command.append("--dry-run")
+    if getattr(args, "screen_all_candidates", False):
+        race_command.append("--screen-all-candidates")
     if getattr(args, "minimum_selection_observations", None) is not None:
         race_command.extend(["--minimum-selection-observations", str(args.minimum_selection_observations)])
     if args.budget_mode == "adaptive":
@@ -1314,12 +1452,24 @@ def _historical_child_fallback(*, args, target, config, hf_archive,
     Do not submit public parents or relax novelty/Layer 2. A genuine lack of
     qualified children is a visible failure, never an empty successful batch.
     """
-    from nanobody_opt_v2.select_elite_parents import _validator_parent_pool
+    from nanobody_opt_v2.select_elite_parents import (
+        _validator_parent_pool, _developability_parent_pool,
+    )
     reservoir = json.loads((args.runtime_root / "artifacts/agreedfix_historical_parents.json").read_text())
     if reservoir.get("target") not in (None, target):
         raise RuntimeError("historical reservoir target mismatch")
-    parents = [c for c in _validator_parent_pool(reservoir["candidates"], target=target)
-               if c["parent_validator_duplicate"] is False and c.get("layer2_passed")]
+    gated = _validator_parent_pool(reservoir["candidates"], target=target)
+    # GAP 5: the historical fallback enumerates all-position singles, which
+    # preserve the parent CDR3. Freshly check each parent's CDR developability
+    # (cached) so an out-of-range parent cannot seed doomed single-edits.
+    gated = _developability_parent_pool(
+        gated, target=target, cache_dir=args.runtime_root / "layer2_cache",
+    )
+    parents = [c for c in gated
+               if c["parent_validator_duplicate"] is False
+               and not c.get("parent_top50_identity_in_basin", True)
+               and c.get("layer2_passed")
+               and c.get("parent_cdr_developability_in_range")]
     # Parent order cycles distinct historical CDR3s before revisiting a family.
     families = {}
     for parent in parents:
@@ -1329,29 +1479,53 @@ def _historical_child_fallback(*, args, target, config, hf_archive,
                for family in families.values() if i < len(family)]
     current = json.loads(destination.read_text())
     kept = {c["sequence"]: c for c in current.get("candidates", [])}
-    # Two bounded attempts broaden the mutation positions without endlessly
-    # retrying a physically exhausted reservoir. All diagnostics are counts.
+    # GAP 3: budget ACCEPTED (post-gate) children, not proposals. The old loop
+    # subtracted every proposed batch from the budget BEFORE the Layer-2/novelty
+    # gates, so one all-rejected batch drained the budget and the reservoir
+    # stopped rotating. Now each rotation proposes a bounded batch, the gates
+    # run, and the loop keeps rotating until `floor` children are actually
+    # accepted or the reservoir genuinely produces no new proposals.
     seen = set(kept)
-    for attempt in range(2):
+    batch_size = max(2000, floor * 2)
+    attempt = 0
+    exhausted = False
+    # GAP 3: enumerate ALL positions exactly once, in flat (parent, position)
+    # order with a monotonic cursor -- no 57-offset stride that repeats and
+    # declares exhaustion with 12-14 positions / 228-266 substitutions unvisited.
+    flat = [
+        (parent, pos)
+        for parent in parents
+        for pos in range(len(parent["sequence"]))
+    ]
+    cursor = 0
+    residue_cursor = 0
+    while len(kept) < floor and not exhausted:
         candidates = []
-        for offset in range(0, 57):
-            for parent in parents:
-                seq = parent["sequence"]
-                position = (offset + attempt * (len(seq) // 2)) % len(seq)
-                for residue in "ACDEFGHIKLMNPQRSTVWY":
-                    child = seq[:position] + residue + seq[position + 1:]
-                    if residue == seq[position] or child in seen:
-                        continue
-                    seen.add(child)
-                    candidates.append({"sequence": child, "parent_sequence": seq,
-                                       "proposal_type": "historical_fallback_single",
-                                       "parent_source": "historical_nonduplicate_reservoir"})
-                    if len(candidates) >= 16000:
-                        break
-                if len(candidates) >= 16000:
-                    break
-            if len(candidates) >= 16000:
-                break
+        # Bound admission before filtering, so a successful fallback batch can
+        # never overshoot the fixed pool. Keep the residue cursor across batches.
+        limit = min(batch_size, floor - len(kept)) if getattr(args, "generation_proposal_budget", None) else batch_size
+        while cursor < len(flat) and len(candidates) < limit:
+            parent, pos = flat[cursor]
+            seq = parent["sequence"]
+            while residue_cursor < 20 and len(candidates) < limit:
+                residue = "ACDEFGHIKLMNPQRSTVWY"[residue_cursor]
+                residue_cursor += 1
+                child = seq[:pos] + residue + seq[pos + 1:]
+                if residue == seq[pos] or child in seen:
+                    continue
+                seen.add(child)
+                candidates.append({"sequence": child, "parent_sequence": seq,
+                                   "proposal_type": "historical_fallback_single",
+                                   "parent_source": "historical_nonduplicate_reservoir"})
+            if residue_cursor == 20:
+                cursor += 1
+                residue_cursor = 0
+        if not candidates:
+            # GAP 3: only when the cursor has swept the ENTIRE reservoir without
+            # producing a single unseen child is the reservoir truly exhausted.
+            exhausted = True
+            break
+        before = len(kept)
         source = iteration_root / f"fallback_{attempt}.json"
         qualified = iteration_root / f"fallback_{attempt}.layer2.json"
         _atomic_json(source, {"target": target, "candidates": candidates})
@@ -1361,14 +1535,16 @@ def _historical_child_fallback(*, args, target, config, hf_archive,
               "--concurrency", str(args.layer2_concurrency),
               "--igblast-concurrency", str(args.layer2_concurrency),
               "--igblast-batch-size", str(args.igblast_batch_size),
-              "--cache-dir", str(args.runtime_root / "layer2_cache")])
+              "--cache-dir", str(args.runtime_root / "layer2_cache")]
+             + (["--igblast-only"] if args.layer2_igblast_only else []))
         novel = _validator_novel_sequences(runtime_root=args.runtime_root,
                     hf_archive=hf_archive, target=target, input_path=qualified)
         for child in json.loads(qualified.read_text()).get("candidates", []):
             if child["sequence"] in novel:
                 kept.setdefault(child["sequence"], child)
-        if len(kept) >= floor:
-            break
+        print(f"HISTORICAL_CHILD_FALLBACK batch={attempt} proposals={len(candidates)} "
+              f"accepted={len(kept) - before} total={len(kept)} floor={floor}", flush=True)
+        attempt += 1
     current.update(candidates=list(kept.values()), sequences=list(kept),
                    historical_fallback=True, fallback_floor=floor)
     _atomic_json(destination, current)
@@ -1377,8 +1553,15 @@ def _historical_child_fallback(*, args, target, config, hf_archive,
     if not kept:
         raise RuntimeError("historical fallback exhausted: zero qualified novel children")
     if len(kept) < floor:
-        print(f"HISTORICAL_CHILD_SHORTAGE passed={len(kept)} floor={floor}; "
-              "racing all available qualified children", flush=True)
+        # GAP 3: distinguish true exhaustion (cursor swept every position) from
+        # an under-filled floor after the whole reservoir was enumerated.
+        if exhausted:
+            print(f"HISTORICAL_CHILD_SHORTAGE passed={len(kept)} floor={floor}; "
+                  "reservoir exhausted (every position visited), racing the available pool",
+                  flush=True)
+        else:
+            print(f"HISTORICAL_CHILD_SHORTAGE passed={len(kept)} floor={floor}; "
+                  "racing the available pool", flush=True)
 
 
 def _validator_novel_sequences(
@@ -1439,18 +1622,21 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
     nothing downstream needs to know where it came from.
     """
     if not grafts.is_file():
-        raise SystemExit(f"graft candidates file is missing: {grafts}")
+        print(f"donor grafts missing ({grafts}); skipping graft lane", flush=True)
+        return 0
     payload = json.loads(grafts.read_text())
     cases = payload.get("cases")
     if not isinstance(cases, list) or not cases:
-        raise SystemExit(f"{grafts} holds no graft cases")
+        print(f"{grafts} holds no graft cases; skipping graft lane", flush=True)
+        return 0
 
     with candidates.open(newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = list(reader.fieldnames or [])
         rows = list(reader)
     if "sequence" not in fieldnames:
-        raise SystemExit(f"{candidates} has no sequence column")
+        print(f"{candidates} has no sequence column; skipping graft lane", flush=True)
+        return 0
 
     known = {str(row["sequence"]).strip().upper() for row in rows}
     teacher = str(payload.get("teacher_sequence") or "").strip().upper()
@@ -1500,6 +1686,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
     parser.add_argument("--budget-mode", choices=("static", "adaptive"), default="static")
+    parser.add_argument("--complete-screen-pool", type=Path,
+                        help="frozen validated pool to finish across epochs before generating more")
+    parser.add_argument("--complete-screen-until-epoch", type=int,
+                        help="confirm the complete pool in this epoch; earlier epochs only screen")
+    parser.add_argument("--complete-screen-finalists", type=int, default=64,
+                        help="maximum first-cut width after the full pool has been screened")
+    parser.add_argument("--epoch-cycle-start", type=int,
+                        help="start a bounded, fully screened pool every epoch from this epoch")
+    parser.add_argument("--epoch-candidate-budget", type=int, default=4800)
+    parser.add_argument("--epoch-proposal-budget", type=int, default=8000,
+                        help="cheap proposal budget before eligibility checks and exact-screen admission")
+    parser.add_argument("--epoch-confirmation-finalists", type=int, default=64)
     parser.add_argument("--confirmation-time-share", type=float, default=.25,
                         help="fraction of the usable epoch reserved for repeat folds; CPU and commitments have separate guards")
     parser.add_argument("--budget-load-seconds", type=float, default=45.0)
@@ -1618,13 +1816,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--basin-parent-limit", type=int, default=32)
     parser.add_argument(
         "--priority-coldkeys",
-        default="",
+        default="5GhREcsK",
         help="forwarded to select_elite_parents: comma-separated coldkeys "
-             "each guaranteed a parent slot for their best recent submission",
+             "(full or prefix) each guaranteed a parent slot for their best "
+             "recent submission; empty disables the lane",
     )
     parser.add_argument("--seed-count", type=int, default=32)
     parser.add_argument("--neighbor-seed-count", type=int, default=32)
     parser.add_argument("--minimum-seeds", type=int, default=8)
+    parser.add_argument(
+        "--child-floor", type=int, default=4800,
+        help=(
+            "accepted-children replenishment target: keep iterating/falling back "
+            "until at least this many biologically-qualified (Layer-2 + novelty) "
+            "children are available for the race, instead of a ~24-child floor"
+        ),
+    )
     parser.add_argument(
         "--per-seed",
         type=int,
@@ -1740,7 +1947,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--layer2-igblast-only",
         type=int,
-        default=0,
+        default=1,
         help=(
             "screen the pool on IgBLAST alone and spend full TNP only on the "
             "replication shortlist; uncached TNP is about two seconds per "
@@ -1753,13 +1960,25 @@ def _parser() -> argparse.ArgumentParser:
         default=4800,
         help="maximum exact screens per iteration, published in small tranches",
     )
+    parser.add_argument(
+        "--screen-top-n",
+        type=int,
+        default=int(os.environ.get("NANOBODY_SCREEN_TOP_N", "0")),
+        help=(
+            "screen only this many candidates per iteration (0 = the full "
+            "candidate-limit). Cheap-rank screen: the list is already ordered "
+            "winner-family-first and, within a tier, by parent multipass, so a "
+            "small top-N folds the best parents' children and skips the tail. "
+            "Off by default; NANOBODY_SCREEN_TOP_N enables it."
+        ),
+    )
     parser.add_argument("--screen-tranche-size", type=int, default=700)
     parser.add_argument("--maximum-initial-screen-p90", type=float, default=90.0)
     parser.add_argument("--weak-initial-fallback-after", type=int, default=1400)
     parser.add_argument(
         "--finalists",
         type=int,
-        default=150,
+        default=200,
         help="first-cut width; candidates advanced to the replication tournament",
     )
     parser.add_argument("--challenger-p90-margin", type=float,
@@ -1956,8 +2175,331 @@ def refresh_prescreen_inputs(producer_root: Path) -> None:
     print(f"PRODUCER_PRESCREEN_REFRESHED {producer_root}", flush=True)
 
 
+PRODUCER_RETRY = "PRODUCER_RETRY"
+PRODUCER_WAIT = "PRODUCER_WAIT"
+PRODUCER_ADVANCED = "PRODUCER_ADVANCED"
+
+
+def _generation_quotas(args, budget: int) -> dict[str, int]:
+    """Reserve generation slots before merging lanes; rejection frees fallback slots."""
+    grafts = min(args.graft_limit, budget // 80) if (args.donor_grafts or args.graft_candidates) else 0
+    singles = budget * 2 // 3
+    return {"singles": singles, "children": budget - singles - grafts, "grafts": grafts}
+
+
+def _prepare_epoch_pool(args, state, epoch: int) -> Path:
+    """Prepare one immutable pool, optionally during the preceding epoch.
+
+    No GPU work uses the synthetic state. The real epoch refreshes the archive
+    and novelty gate before screening, and ranks against its own current field.
+    """
+    root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
+    manifest = root / "epoch_candidate_pool.json"
+    budget = args.epoch_candidate_budget
+    if manifest.is_file():
+        pool = json.loads(manifest.read_text())
+        if (pool["target"] != state["nanobody_target"] or pool["target_epoch"] != epoch
+                or pool["candidate_budget"] != budget
+                or pool["proposal_budget"] != args.epoch_proposal_budget
+                or len(pool["candidates"]) > args.epoch_proposal_budget):
+            raise ValueError("prepared epoch pool disagrees with the active cycle")
+        return manifest
+    synthetic = {**state, "epoch": epoch, "block": epoch * int(state["epoch_length"])}
+    bounded = argparse.Namespace(**{**vars(args), "generation_proposal_budget": args.epoch_proposal_budget,
+                                   "candidate_limit": budget, "child_floor": budget,
+                                   "finalists": args.epoch_confirmation_finalists,
+                                   "complete_screen_pool": None,
+                                   "complete_screen_until_epoch": None})
+    preparation = root / "pool_preparation"
+    from nanobody_opt.consensus_trial import write_immutable
+    write_immutable(preparation / "generation_budget.json", {
+        "target_epoch": epoch, "candidate_budget": budget,
+        "proposal_budget": args.epoch_proposal_budget,
+        "lane_quotas": _generation_quotas(bounded, args.epoch_proposal_budget),
+    })
+    was_nice = getattr(_STAGED, "nice", False)
+    previous_deadline = getattr(_STAGED, 'deadline', None)
+    from nanobody_opt.epoch_deadline import EpochDeadline
+    _STAGED.deadline = EpochDeadline(args.chain_state, int(state['epoch']), _handoff_reserve(args),
+                                     args.maximum_chain_state_age)
+    _STAGED.nice = True
+    try:
+        _run_iteration(args=bounded, state=synthetic, iteration=1,
+                       prepare_only=True, iteration_root_override=preparation)
+    finally:
+        _STAGED.nice = was_nice
+        _STAGED.deadline = previous_deadline
+    payload = json.loads((preparation / "layer2_dedup.json").read_text())
+    eligible = list({c["sequence"]: c for c in payload["candidates"]}.values())
+    if not eligible or len(eligible) > args.epoch_proposal_budget:
+        raise ValueError("prepared pool is empty or exceeds the proposal budget")
+    _atomic_json(manifest, {
+        **payload, "candidates": eligible, "sequences": [c["sequence"] for c in eligible],
+        "target": state["nanobody_target"], "origin_epoch": epoch, "target_epoch": epoch,
+        "prepared_during_epoch": int(state["epoch"]), "candidate_budget": budget,
+        "proposal_budget": args.epoch_proposal_budget,
+        "exact_admission_limit": budget,
+        "admission_policy": "measured_parent_priority_after_cheap_eligibility",
+        "lane_quotas": _generation_quotas(bounded, args.epoch_proposal_budget),
+        "target_multipass_score": 900,
+    })
+    print(f"PRODUCER_EPOCH_POOL target_epoch={epoch} eligible={len(eligible)} "
+          f"exact_screen_budget={budget}", flush=True)
+    return manifest
+
+
+def _prepare_following_epoch_pool(args, state) -> None:
+    start = getattr(args, "epoch_cycle_start", None)
+    epoch = int(state["epoch"])
+    if start is None or epoch + 1 < start:
+        return
+    root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
+    # Finish the current confirmation before spending spare CPU time on the next pool.
+    if not (root / "full_scan_confirmation.json").is_file():
+        return
+    fresh = _chain_state(args.chain_state, args.maximum_chain_state_age)
+    if int(fresh["epoch"]) == epoch:
+        _prepare_epoch_pool(args, fresh, epoch + 1)
+
+
+def _run_epoch_cycle(args, state) -> str:
+    epoch = int(state["epoch"])
+    manifest = _prepare_epoch_pool(args, state, epoch)
+    fresh = _chain_state(args.chain_state, args.maximum_chain_state_age)
+    if int(fresh["epoch"]) != epoch:
+        return PRODUCER_WAIT
+    bounded = argparse.Namespace(**{**vars(args), "complete_screen_pool": manifest,
+                                   "complete_screen_until_epoch": epoch,
+                                   "complete_screen_finalists": args.epoch_confirmation_finalists})
+    result = _run_complete_screen_pool(bounded, fresh)
+    _prepare_following_epoch_pool(args, fresh)
+    return result
+
+
+def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
+                            target: str, epoch: int, until_epoch: int) -> dict:
+    from nanobody_opt.rank_exact import _observations
+    from nanobody_opt_v2.sequential_exact_race import _already_scored, _pooled_exact_paths
+    sequences = {c["sequence"] for c in pool["candidates"]}
+    observed = set(_already_scored(database, target, sequences=sequences))
+    observed.update(_observations(
+        _pooled_exact_paths([], producer_root, producer_root / "coverage_probe"), target))
+    screened = len(sequences & observed)
+    report = {"epoch": epoch, "target_epoch": until_epoch, "target": target,
+              "eligible": len(sequences), "screened": screened,
+              "pending": len(sequences) - screened, "complete": screened == len(sequences)}
+    _atomic_json(producer_root / "full_scan_coverage.json", report)
+    return report
+
+
+def _run_complete_screen_pool(args, state) -> str:
+    """Finish a frozen pool, carrying raw evidence across the epoch boundary.
+
+    Each epoch rechecks novelty. All eligible proposals get one first pass;
+    generation and opportunistic re-screening cannot grow or displace the queue.
+    The target epoch confirms the pooled best with the normal biological gates.
+    """
+    epoch = int(state["epoch"])
+    until = args.complete_screen_until_epoch
+    source = json.loads(args.complete_screen_pool.read_text())
+    if source["target"] != state["nanobody_target"]:
+        raise ValueError("complete-screen pool target differs from the chain target")
+    root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "full_scan_confirmation.json").is_file():
+        return PRODUCER_WAIT
+    prior_roots = [root.parent.parent / f"epoch{e}" / "producer"
+                   for e in range(int(source["origin_epoch"]), epoch)]
+    _atomic_json(root / "pooled_roots.json", {"roots": [str(p) for p in prior_roots]})
+    config, archive, target = _prepare_epoch(
+        root=args.runtime_root, epoch=epoch, expected_target=source["target"],
+        live_subtree=_producer_subtree(args))
+    validated = root / "full_scan_pool.json"
+    if not validated.is_file():
+        novel = _validator_novel_sequences(
+            runtime_root=args.runtime_root, hf_archive=archive,
+            target=target, input_path=args.complete_screen_pool)
+        candidates = [c for c in source["candidates"] if c["sequence"] in novel]
+        eligible_count = len(candidates)
+        if source.get("exact_admission_limit") is not None:
+            from nanobody_opt_v2.sequential_exact_race import _ordered_candidate_records
+            candidates = _ordered_candidate_records(candidates)[:int(source["exact_admission_limit"])]
+        _atomic_json(validated, {**source, "candidates": candidates,
+                                "sequences": [c["sequence"] for c in candidates],
+                                "eligible_before_admission": eligible_count,
+                                "admitted": len(candidates), "deferred": eligible_count - len(candidates),
+                                "novelty_rejected": len(source["candidates"]) - eligible_count})
+        _stamp_artifact_policy(validated)
+    pool = json.loads(validated.read_text())
+    coverage = _complete_pool_coverage(
+        pool=pool, producer_root=root, database=args.mutation_database,
+        target=target, epoch=epoch, until_epoch=until)
+    print("PRODUCER_FULL_SCAN " + json.dumps(coverage), flush=True)
+    confirmed = root / "full_scan_confirmation.json"
+    if confirmed.is_file() or (coverage["complete"] and epoch < until):
+        return PRODUCER_WAIT
+    remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
+    if remaining <= _handoff_reserve(args):
+        return PRODUCER_WAIT
+    retained = [int(p.name.split("_")[-1]) for p in root.glob("iteration_*")
+                if p.is_dir() and p.name.split("_")[-1].isdigit()]
+    iteration = max(retained, default=0) + 1
+    iteration_root = root / f"iteration_{iteration:02d}"
+    layer2 = iteration_root / "layer2.json"
+    _atomic_json(layer2, pool)
+    _atomic_json(iteration_root / "layer2_dedup.json", pool)
+    _stamp_artifact_policy(layer2)
+    _stamp_artifact_policy(iteration_root / "layer2_dedup.json")
+    full = argparse.Namespace(**{**vars(args), "budget_mode": "adaptive",
+                                "screen_all_candidates": True, "screen_top_n": 0,
+                                "maximum_screen_tranches_override": 0,
+                                "finalists": args.complete_screen_finalists})
+    _run_race(args=full, state=state, iteration=iteration, config=config,
+              archive=archive, target=target, producer_root=root,
+              iteration_root=iteration_root, layer2=layer2,
+              force_confirmation=coverage["complete"] and epoch == until)
+    coverage = _complete_pool_coverage(
+        pool=pool, producer_root=root, database=args.mutation_database,
+        target=target, epoch=epoch, until_epoch=until)
+    completion = iteration_root / "race/complete.json"
+    if completion.is_file():
+        result = json.loads(completion.read_text())
+        if result.get("replication_rounds_completed", 0) >= args.minimum_publishable_observations - 1:
+            best = result.get("incumbent_rank")
+            score_target = float(source.get("target_multipass_score", 900))
+            _atomic_json(confirmed, {**coverage, "iteration": iteration,
+                                    "rounds": result["replication_rounds_completed"],
+                                    "best_confirmed_multipass": best,
+                                    "target_multipass_score": score_target,
+                                    "score_target_met": best is not None and best <= score_target})
+    return PRODUCER_ADVANCED
+
+
+def _one_pass(args, completed_iterations, exhausted_epochs, finished_epochs):
+    """Run one bounded pass, recovering worker exits without killing the loop.
+
+    SystemExit is handled explicitly; KeyboardInterrupt and GeneratorExit still
+    propagate. Poll after degraded passes so storage can recover.
+    """
+    def finish(result):
+        if not args.once:
+            time.sleep(max(1.0, args.poll_interval))
+        return result
+
+    outcome = PRODUCER_WAIT
+    try:
+        state = _chain_state(args.chain_state, args.maximum_chain_state_age)
+        epoch = int(state["epoch"])
+        from nanobody_opt.epoch_deadline import EpochDeadline
+        _STAGED.deadline = EpochDeadline(args.chain_state, epoch, _handoff_reserve(args),
+                                         args.maximum_chain_state_age)
+        storage = maintain_runtime_storage(
+            args.runtime_root,
+            epoch,
+            minimum_free_gib=args.minimum_free_gib,
+            maximum_persisted_ranking_mib=args.maximum_persisted_ranking_mib,
+            observation_database=args.mutation_database,
+            retained_epochs=args.retained_epoch_directories,
+        )
+        if storage.get("disk_reserve_violated"):
+            # Skip the GPU-heavy iteration this pass; the pruning inside
+            # maintain_runtime_storage keeps running so the reserve recovers
+            # instead of the whole loop stalling forever.
+            return finish(PRODUCER_RETRY)
+        if (getattr(args, "complete_screen_pool", None) is not None
+                and epoch <= args.complete_screen_until_epoch):
+            outcome = _run_complete_screen_pool(args, state)
+            _prepare_following_epoch_pool(args, state)
+            return finish(outcome)
+        if getattr(args, "epoch_cycle_start", None) is not None and epoch >= args.epoch_cycle_start:
+            return finish(_run_epoch_cycle(args, state))
+        offset = int(state["block"]) % int(state["epoch_length"])
+        if epoch in finished_epochs or offset >= int(state["epoch_length"]) - _handoff_reserve(args):
+            if not (args.prescreen_next_epoch and run_prescreen(args, state)):
+                label = ("PRODUCER_CONFIRMATION_FINISHED" if epoch in finished_epochs
+                         else "PRODUCER_RESERVE")
+                print(f"{label} epoch={epoch} offset={offset}; waiting", flush=True)
+        else:
+            producer_root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
+            refresh_prescreen_inputs(producer_root)
+            if epoch in exhausted_epochs and not (
+                args.budget_mode == "adaptive" and args.replication_rounds
+                and _closing(args, state, producer_root)
+            ):
+                # The neighbourhood is used up for this epoch. Generating
+                # again would exclude everything already proposed and come
+                # back empty, which is how this span was spent at 0% GPU
+                # before: 43 iterations into a basin with 13,504 candidates
+                # already excluded. Wait for the reserve and let replication
+                # have the rest of the epoch -- eight observations take
+                # reliability from 0.16 to 0.61, and a forty-fourth pass
+                # takes it nowhere.
+                print(
+                    f"PRODUCER_EXHAUSTED epoch={epoch} offset={offset}; "
+                    "generation complete, leaving the epoch to replication",
+                    flush=True,
+                )
+                return finish(PRODUCER_WAIT)
+            retained_iterations = [int(path.name.split("_")[-1])
+                for path in producer_root.glob("iteration_[0-9]*")
+                if path.is_dir() and path.name.split("_")[-1].isdigit()]
+            iteration = max([completed_iterations.get(epoch, 0), *retained_iterations]) + 1
+            print(
+                f"PRODUCER_ITERATION epoch={epoch} offset={offset} "
+                f"iteration={iteration}",
+                flush=True,
+            )
+            try:
+                _run_iteration(args=args, state=state, iteration=iteration)
+            except subprocess.CalledProcessError as error:
+                outcome = PRODUCER_RETRY
+                failure = (
+                    args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
+                    / f"iteration_{iteration:02d}" / "failed.json"
+                )
+                _atomic_json(failure, {
+                    "epoch": epoch,
+                    "iteration": iteration,
+                    "returncode": error.returncode,
+                    "command": error.cmd,
+                })
+                completed_iterations[epoch] = iteration
+                print(f"PRODUCER_ITERATION_FAILED {error}", flush=True)
+                if _looks_exhausted(failure.parent):
+                    exhausted_epochs.add(epoch)
+            else:
+                outcome = PRODUCER_ADVANCED
+                completed_iterations[epoch] = iteration
+                root = producer_root / f"iteration_{iteration:02d}"
+                complete = root / "race/complete.json"
+                if args.budget_mode == "adaptive" and _closing_finished(producer_root, iteration):
+                    finished_epochs.add(epoch)
+    except (Exception, SystemExit) as error:
+        print(
+            f"PRODUCER_RETRY {type(error).__name__}: {error}",
+            flush=True,
+        )
+        if args.once and isinstance(error, Exception):
+            raise
+        return finish(PRODUCER_RETRY)
+    return finish(outcome)
+
+
 def main() -> None:
     args = _parser().parse_args()
+    if bool(args.complete_screen_pool) != (args.complete_screen_until_epoch is not None):
+        raise SystemExit("complete-screen pool and target epoch must be supplied together")
+    if args.complete_screen_finalists < args.replication_minimum_keep:
+        raise SystemExit("complete-screen finalists must cover the tournament survivor floor")
+    if args.epoch_candidate_budget < max(3, args.minimum_seeds, args.epoch_confirmation_finalists):
+        raise SystemExit("epoch candidate budget must cover the seed and finalist floors")
+    if args.epoch_proposal_budget < args.epoch_candidate_budget:
+        raise SystemExit("epoch proposal budget must cover the exact-screen budget")
+    if args.epoch_confirmation_finalists < args.replication_minimum_keep:
+        raise SystemExit("epoch finalists must cover the tournament survivor floor")
+    if (args.epoch_cycle_start is not None and args.complete_screen_until_epoch is not None
+            and args.epoch_cycle_start <= args.complete_screen_until_epoch):
+        raise SystemExit("bounded epoch cycles must start after the existing full-pool run")
     # Normalize before staging, neighbourhood filtering, and race budgeting.
     args.proposal_limit = max(8000, args.proposal_limit)
     args.candidate_limit = max(4800, args.candidate_limit)
@@ -1977,87 +2519,9 @@ def main() -> None:
     exhausted_epochs: set[int] = set()
     finished_epochs: set[int] = set()
     while True:
-        try:
-            state = _chain_state(args.chain_state, args.maximum_chain_state_age)
-            epoch = int(state["epoch"])
-            maintain_runtime_storage(
-                args.runtime_root,
-                epoch,
-                minimum_free_gib=args.minimum_free_gib,
-                maximum_persisted_ranking_mib=args.maximum_persisted_ranking_mib,
-                observation_database=args.mutation_database,
-                retained_epochs=args.retained_epoch_directories,
-            )
-            offset = int(state["block"]) % int(state["epoch_length"])
-            if epoch in finished_epochs or offset >= int(state["epoch_length"]) - _handoff_reserve(args):
-                if not (args.prescreen_next_epoch and run_prescreen(args, state)):
-                    label = ("PRODUCER_CONFIRMATION_FINISHED" if epoch in finished_epochs
-                             else "PRODUCER_RESERVE")
-                    print(f"{label} epoch={epoch} offset={offset}; waiting", flush=True)
-            else:
-                producer_root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
-                refresh_prescreen_inputs(producer_root)
-                if epoch in exhausted_epochs and not (
-                    args.budget_mode == "adaptive" and args.replication_rounds
-                    and _closing(args, state, producer_root)
-                ):
-                    # The neighbourhood is used up for this epoch. Generating
-                    # again would exclude everything already proposed and come
-                    # back empty, which is how this span was spent at 0% GPU
-                    # before: 43 iterations into a basin with 13,504 candidates
-                    # already excluded. Wait for the reserve and let replication
-                    # have the rest of the epoch -- eight observations take
-                    # reliability from 0.16 to 0.61, and a forty-fourth pass
-                    # takes it nowhere.
-                    print(
-                        f"PRODUCER_EXHAUSTED epoch={epoch} offset={offset}; "
-                        "generation complete, leaving the epoch to replication",
-                        flush=True,
-                    )
-                    time.sleep(args.poll_interval)
-                    continue
-                retained_iterations = [int(path.name.split("_")[-1])
-                    for path in producer_root.glob("iteration_[0-9]*")
-                    if path.is_dir() and path.name.split("_")[-1].isdigit()]
-                iteration = max([completed_iterations.get(epoch, 0), *retained_iterations]) + 1
-                print(
-                    f"PRODUCER_ITERATION epoch={epoch} offset={offset} "
-                    f"iteration={iteration}",
-                    flush=True,
-                )
-                try:
-                    _run_iteration(args=args, state=state, iteration=iteration)
-                except subprocess.CalledProcessError as error:
-                    failure = (
-                        args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
-                        / f"iteration_{iteration:02d}" / "failed.json"
-                    )
-                    _atomic_json(failure, {
-                        "epoch": epoch,
-                        "iteration": iteration,
-                        "returncode": error.returncode,
-                        "command": error.cmd,
-                    })
-                    completed_iterations[epoch] = iteration
-                    print(f"PRODUCER_ITERATION_FAILED {error}", flush=True)
-                    if _looks_exhausted(failure.parent):
-                        exhausted_epochs.add(epoch)
-                else:
-                    completed_iterations[epoch] = iteration
-                    root = producer_root / f"iteration_{iteration:02d}"
-                    complete = root / "race/complete.json"
-                    if args.budget_mode == "adaptive" and _closing_finished(producer_root, iteration):
-                        finished_epochs.add(epoch)
-            if args.once:
-                return
-        except Exception as error:
-            print(
-                f"PRODUCER_RETRY {type(error).__name__}: {error}",
-                flush=True,
-            )
-            if args.once:
-                raise
-        time.sleep(max(1.0, args.poll_interval))
+        _one_pass(args, completed_iterations, exhausted_epochs, finished_epochs)
+        if args.once:
+            return
 
 
 if __name__ == "__main__":

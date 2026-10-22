@@ -29,6 +29,42 @@ from typing import Any
 # its mean falls.
 MINIMUM_SPREAD = 5.0
 
+# Only probabilities below this conservative upper bound may be skipped.
+# This is lower than the production 1e-3 eligibility floor.
+CHANCE_FLOOR_SKIP_MARGIN = 1e-4
+
+
+def fresh_draw_upper_bounds(candidates, scores_key="per_observation_median_rank_sum"):
+    """P(win all opponents) <= P(tie or beat a subset of opponents).
+
+    Conditional on each own score, multiply non-loss probabilities against a
+    small anchor set. Ties count as FULL wins here, hence this is always an
+    upper bound on the exact, tie-split tournament probability. Anchor choice
+    changes efficiency only; it cannot exclude a real floor-clearing winner.
+    """
+    distributions = [sorted(float(v) for v in (item.get(scores_key) or []))
+                     for item in candidates]
+    eligible = [i for i, values in enumerate(distributions) if values]
+    anchors = set()
+    for quantile in (0.0, 0.1, 0.5):
+        anchors.update(sorted(eligible, key=lambda i: distributions[i][
+            int((len(distributions[i]) - 1) * quantile)])[:128])
+    bounds = {}
+    for i, own in enumerate(distributions):
+        probability = 0.0
+        for score in own:
+            non_loss = 1.0
+            for j in anchors:
+                if i == j:
+                    continue
+                other = distributions[j]
+                non_loss *= (len(other) - bisect.bisect_left(other, score)) / len(other)
+                if non_loss == 0.0:
+                    break
+            probability += non_loss / len(own)
+        bounds[str(candidates[i].get("sequence", ""))] = probability
+    return bounds
+
 
 def pooled_spread(spreads: Sequence[float]) -> float:
     """A stand-in spread for candidates with too few observations to have one."""
@@ -236,6 +272,7 @@ def empirical_fresh_draw_probabilities(
     scores_key: str = "per_observation_median_rank_sum",
     workers: int = 1,
     workers_minimum_candidates: int = 64,
+    compute_sequences: set[str] | None = None,
 ) -> dict[str, float]:
     """Return each candidate's exact chance of winning one empirical draw.
 
@@ -277,20 +314,24 @@ def empirical_fresh_draw_probabilities(
         "sorted_distributions": sorted_distributions,
         "lengths": lengths,
     }
+    to_compute = eligible
+    if compute_sequences is not None:
+        to_compute = [index for index in eligible
+                      if sequences[index] in compute_sequences]
     pool_size = max(1, workers)
-    if pool_size > 1 and len(eligible) >= workers_minimum_candidates:
+    if pool_size > 1 and len(to_compute) >= workers_minimum_candidates:
         with ProcessPoolExecutor(
             max_workers=pool_size,
             initializer=_init_fresh_draw_worker,
             initargs=(_FRESH_DRAW_CONTEXT,),
         ) as pool:
             results = list(pool.map(
-                _fresh_draw_probability_for, eligible,
-                chunksize=max(1, len(eligible) // (pool_size * 4)),
+                _fresh_draw_probability_for, to_compute,
+                chunksize=max(1, len(to_compute) // (pool_size * 4)),
             ))
     else:
-        results = [_fresh_draw_probability_for(index) for index in eligible]
-    for candidate_index, probability in zip(eligible, results):
+        results = [_fresh_draw_probability_for(index) for index in to_compute]
+    for candidate_index, probability in zip(to_compute, results):
         probabilities[sequences[candidate_index]] = probability
     return probabilities
 
@@ -301,6 +342,7 @@ def rank_by_fresh_draw_probability(
     scores_key: str = "per_observation_median_rank_sum",
     workers: int = 1,
     workers_minimum_candidates: int = 64,
+    competitive_score_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     """Order candidates by empirical probability of winning a fresh draw.
 
@@ -308,22 +350,41 @@ def rank_by_fresh_draw_probability(
     normal tails or optimize a hand-picked threshold.  It directly asks the
     event that pays: which candidate is best when every candidate receives one
     new draw of the validator's full objective?
+
+    The optional fast path skips only candidates whose mathematically valid
+    upper bound is below 1e-4, preserving the production 1e-3 eligibility gate.
+    The legacy threshold argument enables the fast path for existing callers;
+    its numeric value is deliberately irrelevant to a relative tournament.
     """
+    candidates = list(candidates)
+    compute_sequences = None
+    if competitive_score_threshold is not None:
+        bounds = fresh_draw_upper_bounds(candidates, scores_key)
+        compute_sequences = {sequence for sequence, bound in bounds.items()
+                             if bound >= CHANCE_FLOOR_SKIP_MARGIN}
     probabilities = empirical_fresh_draw_probabilities(
         candidates, scores_key=scores_key,
         workers=workers, workers_minimum_candidates=workers_minimum_candidates,
+        compute_sequences=compute_sequences,
     )
     annotated: list[dict[str, Any]] = []
     for item in candidates:
         enriched = dict(item)
+        scores = item.get(scores_key) or []
+        enriched["score_mean"] = fmean(scores) if scores else float("inf")
         enriched["win_probability"] = probabilities.get(
             str(item.get("sequence", "")), 0.0
         )
         enriched["win_probability_method"] = "empirical-independent-fresh-draw"
         annotated.append(enriched)
+    # 2026-10-14: order by the mean of the candidate's own observations, not the
+    # variance-aware win probability. The empirical spread carries no signal
+    # (rho ~ -0.11) and win_probability collapses to a function of the mean, so
+    # a lower mean IS the winning chance; dropping the variance term removes a
+    # noise source without changing the objective.
     annotated.sort(
         key=lambda item: (
-            -float(item["win_probability"]),
+            float(item["score_mean"]),
             float(item.get("score_median", 0.0)),
             str(item.get("sequence", "")),
         )

@@ -31,11 +31,19 @@ def leaderboard_sequences(epoch: int) -> list[str] | None:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = json.load(resp)
     except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise
+        if error.code != 404:
+            raise
+        payload = {}
+    rows = payload.get("data") or []
+    if not rows:
+        # No published board (since 25693 the validator's upload is rejected): use the rebuilt-from-log one.
+        try:
+            from tools.leaderboard_fallback import load_rows
+        except ImportError:
+            from leaderboard_fallback import load_rows
+        rows = load_rows(epoch) or []
     seqs = []
-    for submission in payload.get("data") or []:
+    for submission in rows:
         for nb in submission.get("nanobodies") or []:
             if nb.get("protein_name") == TARGET and nb.get("sequence"):
                 seqs.append(str(nb["sequence"]).strip().upper())

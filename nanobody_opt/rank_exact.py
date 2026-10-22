@@ -1342,6 +1342,8 @@ def main() -> None:
     parser.add_argument("--only-sequences", type=Path, default=None,
                         help="rank only the sequences listed in this newline-delimited "
                              "file; history and shrinkage still use the full pool")
+    parser.add_argument("--current-exact-candidates-only", action="store_true",
+                        help="use history as evidence only for candidates present in --exact inputs")
     parser.add_argument("--rank-workers", type=int,
                         default=min(32, os.cpu_count() or 1),
                         help="process pool size for the per-candidate ranking loop "
@@ -1482,6 +1484,16 @@ def main() -> None:
         ],
         int(archive.sequence.dropna().astype(str).str.len().mode().iloc[0]),
     ) if "sequence" in archive.columns else {}
+    observations_by_sequence = _observations(args.exact, args.target)
+    only_sequences = None
+    if args.only_sequences is not None:
+        only_sequences = {line.strip().upper() for line in
+                          args.only_sequences.read_text().splitlines() if line.strip()}
+    if args.current_exact_candidates_only:
+        current = set(observations_by_sequence)
+        only_sequences = current if only_sequences is None else current & only_sequences
+        if not only_sequences:
+            raise SystemExit("current exact candidate cohort is empty")
     structure_paths: dict[str, list[Path]] = {}
     writer_structure_paths: dict[str, list[Path]] = {}
     sample_selections: dict[str, list[dict[str, Any]]] = {}
@@ -1501,32 +1513,6 @@ def main() -> None:
             args.exact, args.target, pose_kind="writer"
         )
         sample_selections = exact_sample_selections(args.exact, args.target)
-        if args.observation_history is not None:
-            current_run_ids = _exact_run_ids(args.exact)
-            for sequence, records in load_exact_artifacts(
-                args.observation_history, target=args.target
-            ).items():
-                for record in records:
-                    if str(record.get("run_id") or "") in current_run_ids:
-                        continue
-                    confidence = record.get("confidence_path")
-                    writer = record.get("writer_path")
-                    if confidence:
-                        structure_paths.setdefault(sequence, []).append(
-                            Path(str(confidence))
-                        )
-                    if writer:
-                        writer_structure_paths.setdefault(sequence, []).append(
-                            Path(str(writer))
-                        )
-                    selection = record.get("sample_selection")
-                    if isinstance(selection, dict):
-                        sample_selections.setdefault(sequence, []).append(selection)
-    observations_by_sequence = _observations(args.exact, args.target)
-    only_sequences = None
-    if args.only_sequences is not None:
-        only_sequences = {line.strip().upper() for line in
-                          args.only_sequences.read_text().splitlines() if line.strip()}
     # pool_depths always maps every sequence in the merged pool to its fold
     # count; it feeds the depth print and the observation-floor relaxation
     # without materialising every fold (Fix 2).
@@ -1621,7 +1607,29 @@ def main() -> None:
     items = [
         (sequence, observations)
         for sequence, observations in observations_by_sequence.items()
+        if len(observations) >= args.minimum_observations
+        and (only_sequences is None or sequence in only_sequences)
+        and sequence not in historical_sequences and sequence not in excluded_sequences
     ]
+    # Load structures only for candidates with enough independent evidence.
+    # The 11K screening pool used to load and qualify all retained poses before
+    # applying the depth floor, blocking both confirmation and publication.
+    if pose_challenge is not None and args.observation_history is not None:
+        current_run_ids = _exact_run_ids(args.exact)
+        for sequence, records in load_exact_artifacts(
+            args.observation_history, target=args.target,
+            sequences={sequence for sequence, _ in items},
+        ).items():
+            for record in records:
+                if str(record.get('run_id') or '') in current_run_ids:
+                    continue
+                for key, destination in [('confidence_path', structure_paths),
+                                         ('writer_path', writer_structure_paths)]:
+                    if record.get(key):
+                        destination.setdefault(sequence, []).append(Path(str(record[key])))
+                selection = record.get('sample_selection')
+                if isinstance(selection, dict):
+                    sample_selections.setdefault(sequence, []).append(selection)
     # The multipass selection order needs the CURRENT last-10-epochs field,
     # recomputed at selection time (the field shifts as epochs roll, so a
     # cached field would rank against a stale cohort).
@@ -1671,28 +1679,7 @@ def main() -> None:
     # the deepest evidence this epoch actually produced rather than either.
     observation_floor = args.minimum_observations
     if ranked:
-        # Relax against the depth of EVERY observed candidate, not only those
-        # that cleared qualification.  The publisher's strict-eligibility cache
-        # computes its own floor the same way, over all observations, because it
-        # cannot evaluate the gates -- so taking it post-gate here let the two
-        # disagree: when the deep candidates all failed, ranking dropped to a
-        # shallower floor the cache was not watching, and a change in the
-        # evidence ranking was actually using would not invalidate it.  Matching
-        # the cache's basis removes that by construction.  It costs nothing the
-        # relaxation was for: its purpose is a thin epoch that never reached the
-        # floor, and an epoch whose candidates all fail the gates publishes
-        # nothing under either basis.
-        deepest = max(
-            pool_depths.values(),
-            default=0,
-        )
-        observation_floor = max(1, min(observation_floor, deepest))
-        if observation_floor < args.minimum_observations:
-            print(
-                "EXACT_OBSERVATION_FLOOR_RELAXED "
-                f"from={args.minimum_observations} to={observation_floor}",
-                flush=True,
-            )
+        # The requested independent-observation floor is a hard requirement.
         ranked = [
             item for item in ranked
             if item["observation_count"] >= observation_floor

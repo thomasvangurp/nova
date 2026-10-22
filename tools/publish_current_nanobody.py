@@ -65,6 +65,9 @@ from compound_miner.nanobody_provider import (  # noqa: E402
 from nanobody_opt import fleet as fleet_module  # noqa: E402
 from nanobody_opt import publication_gates  # noqa: E402
 from nanobody_opt import db  # noqa: E402
+from nanobody_opt.epoch_deadline import EpochDeadline, run as run_epoch_command
+
+_COMMAND_DEADLINE: EpochDeadline | None = None
 
 
 CONFIG_URL = "https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml"
@@ -829,8 +832,7 @@ def _live_sequences(payload: dict[str, Any] | None, epoch: int) -> list[str]:
 
 
 def _run(command: list[str]) -> None:
-    print("+", " ".join(command), flush=True)
-    subprocess.run(command, check=True)
+    run_epoch_command(command, deadline=_COMMAND_DEADLINE, timeout=300)
 
 
 def _rank_command(
@@ -932,6 +934,7 @@ def _strict_pool(
     observation_history: Path | None,
     crew: Sequence[Any],
     previous: dict[str, Any] | None,
+    candidate_scope: Path | None = None,
 ) -> Path | None:
     """The sequences strict qualification should look at, or None for the whole shortlist.
 
@@ -940,7 +943,7 @@ def _strict_pool(
     """
     size = int(getattr(args, "strict_pool_size", 0) or 0)
     if size <= 0:
-        return None
+        size = 100
     pool_rankings = epoch_root / "strict_pool_rankings.json"
     try:
         _run(_rank_command(
@@ -957,21 +960,18 @@ def _strict_pool(
             strict=False,
             observation_history=observation_history,
             diversity_reserve_count=len(crew) * 2 + 1,
+            only_sequences=candidate_scope,
         ))
         candidates = json.loads(pool_rankings.read_text())["candidates"]
     except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as error:
-        print(f"strict pool unavailable ({type(error).__name__}); qualifying the whole shortlist",
-              flush=True)
-        return None
+        raise RuntimeError('strict pool unavailable; refusing an unbounded upgrade') from error
     sequences = list(dict.fromkeys(
         str(item["sequence"]).strip().upper() for item in candidates[:size]
     ))
     # whatever this epoch already published must stay selectable
     sequences += [s for s in _live_sequences(previous, epoch) if s not in sequences]
-    if len(sequences) < max(3 * len(crew), len(crew) + 4):
-        print(f"strict pool has only {len(sequences)} candidates; qualifying the whole shortlist",
-              flush=True)
-        return None
+    if not sequences:
+        raise RuntimeError('strict pool is empty; retaining the published artifact')
     path = epoch_root / "strict_pool_sequences.txt"
     path.write_text("\n".join(sequences) + "\n")
     print(f"strict pool: qualifying the top {len(sequences)} of {len(candidates)} candidates",
@@ -1050,6 +1050,38 @@ def _current_layer2_passes(layer2: Path) -> set[str]:
         for entry in candidates
         if isinstance(entry, Mapping) and entry.get("layer2_passed")
     }
+
+
+def _novel_layer2_rankings(rankings: Path, novelty: Path, output: Path) -> Path:
+    """Spend full TNP only on ranked candidates that can pass novelty."""
+    payload = _restrict_pool(
+        json.loads(rankings.read_text()), _validator_novel_sequences(novelty),
+        gate="validator-novelty", source=novelty,
+    )
+    _atomic_json(output, payload)
+    return output
+
+
+def _producer_candidate_scope(epoch_root: Path, target: str, previous=None) -> Path | None:
+    """Keep historical folds as evidence without re-admitting rejected parents."""
+    from nanobody_opt_v2.run_live_producer import _artifact_policy_stale
+    allowed = set()
+    found = False
+    for path in sorted((epoch_root / "producer").glob("iteration_[0-9][0-9]/layer2_dedup.json")):
+        if _artifact_policy_stale(path):
+            continue
+        payload = json.loads(path.read_text())
+        if payload.get("target") != target or not isinstance(payload.get("sequences"), list):
+            continue
+        found = True
+        allowed.update(str(s).strip().upper() for s in payload["sequences"] if str(s).strip())
+    if not found:
+        return None
+    epoch = int(epoch_root.name.removeprefix("epoch"))
+    allowed.update(_live_sequences(previous, epoch))
+    output = epoch_root / "producer_candidate_scope.txt"
+    output.write_text("".join(s + "\n" for s in sorted(allowed)))
+    return output
 
 
 def _restrict_pool(
@@ -1232,11 +1264,15 @@ def _publish_fleet(
         if sequence not in handoff_candidates:
             handoff_candidates.append(sequence)
     if minimum_pool_size > 0 and len(handoff_candidates) < pool_target:
-        raise SystemExit(
-            "nanobody sequence pool shortfall: "
-            f"need at least {pool_target} exact-distinct Layer-2-passed, "
-            "validator-novel sequences, "
-            f"got {len(handoff_candidates)}"
+        # Soft target, not a hard exit: publishing the safely-assignable fresh
+        # entries beats a whole-fleet outage when the pool is a few short.
+        uncovered = max(0, pool_target - len(handoff_candidates))
+        print(
+            f"nanobody sequence pool shortfall: need {pool_target} exact-distinct "
+            f"Layer-2-passed validator-novel sequences, got "
+            f"{len(handoff_candidates)}; publishing the available pool and "
+            f"reporting {uncovered} uncovered uids",
+            flush=True,
         )
     fleet_sequences = sequences[: len(crew)]
     sequence_pool = handoff_candidates[:pool_target]
@@ -1942,24 +1978,16 @@ def _parser() -> argparse.ArgumentParser:
         default=100,
         help=(
             "qualify only the top N candidates of a fresh provisional ranking in the strict pass "
-            "(plus anything already published this epoch); 0 qualifies the whole shortlist, which "
-            "takes ~25 minutes and so reflects a database snapshot that old"
+            "(plus anything already published this epoch); zero retains the bounded default of 100"
         ),
     )
     parser.add_argument(
         "--strict-qualification-reserve-blocks",
         type=int,
-        default=60,
+        default=150,
         help=(
-            "only start the strict upgrade when at least this many blocks "
-            "remain in the epoch. The epoch check that follows the strict rank "
-            "runs AFTER it, so a rank that overruns does not stop at the "
-            "boundary -- it delays the NEXT epoch's provisional publish, which "
-            "is the failure that had this whole stage switched off. Timed live "
-            "at over 25 minutes (125+ blocks), not the 20 the old comment "
-            "claimed; 220 is that measurement plus the layer-2, novelty and "
-            "CDR passes that follow it, plus margin. An upgrade is optional; "
-            "the commit it would delay is not"
+            "only start the optional strict upgrade with this many blocks remaining; "
+            "every child command also has a five-minute cap and live epoch cancellation"
         ),
     )
     parser.add_argument(
@@ -2012,6 +2040,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _publish_once(args: argparse.Namespace) -> None:
+    global _COMMAND_DEADLINE
     with _exclusive_lock(args.lock):
         if args.expected_gpus and _gpu_count() != args.expected_gpus:
             raise SystemExit(
@@ -2021,6 +2050,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             args.chain_state, args.netuid, args.maximum_chain_state_age
         )
         epoch, block, epoch_length = chain.epoch, chain.block, chain.epoch_length
+        _COMMAND_DEADLINE = EpochDeadline(args.chain_state, epoch, args.reserve_blocks,
+                                          args.maximum_chain_state_age)
         if args.epoch is not None and args.epoch != epoch:
             raise SystemExit(
                 f"requested epoch {args.epoch} is not the chain epoch {epoch}"
@@ -2170,19 +2201,42 @@ def _publish_once(args: argparse.Namespace) -> None:
             )
         ledger_fingerprint = _file_digest(args.ledger)
         publisher_state = _read_json(args.state)
-        if current_qualified and _publisher_state_matches(
-            publisher_state,
-            epoch=epoch,
-            target=target,
-            exact_fingerprint=exact_fingerprint,
-            ledger_fingerprint=ledger_fingerprint,
-            fleet_fingerprint=fleet_fingerprint,
+        # A fingerprint match means the QUALIFICATION is unchanged, not that
+        # every planned uid actually committed. _commit_fleet logs-and-skips
+        # failures, and the state is written BEFORE the commit, so a no-op here
+        # would silently forfeit any uid whose commit failed. Re-derive the
+        # planned uids and retry delivery when any is missing from the commit
+        # ledger.
+        committed_uids = _committed_this_epoch(commit_ledger, epoch)
+        prior_uids = {
+            int(assignment.uid)
+            for assignment in fleet_module.assignments_from_artifact(previous)
+        }
+        uncommitted = prior_uids - committed_uids
+        if (
+            current_qualified
+            and _publisher_state_matches(
+                publisher_state,
+                epoch=epoch,
+                target=target,
+                exact_fingerprint=exact_fingerprint,
+                ledger_fingerprint=ledger_fingerprint,
+                fleet_fingerprint=fleet_fingerprint,
+            )
+            and not uncommitted
         ):
             print(
                 f"qualified epoch {epoch} fleet, score bank and uid set are "
                 "unchanged; no-op"
             )
             return
+        if uncommitted:
+            print(
+                f"qualified epoch {epoch} fleet unchanged but {len(uncommitted)} "
+                "uid(s) lack a commitment; retrying delivery",
+                file=sys.stderr,
+                flush=True,
+            )
         exclusion_path = fleet_module.write_exclusion_file(
             epoch_root / "excluded_sequences.txt",
             args.ledger,
@@ -2220,6 +2274,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 f"need at least {len(crew)}, got {shortlist_floor}"
             )
         shortlist = max(shortlist_floor, len(crew) * SHORTLIST_PER_UID)
+        candidate_scope = _producer_candidate_scope(epoch_root, target, previous)
         if current_qualified:
             # The provisional pass is the net that keeps an epoch from submitting
             # nothing. A qualified fleet is already live for this epoch, so the
@@ -2255,15 +2310,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 strict=False,
                 observation_history=observation_history,
                 diversity_reserve_count=len(crew) * 2 + 1,
-            ))
-            _run(_layer2_command(
-                pixi_manifest=pixi_manifest,
-                rankings=rankings_path,
-                config=config_path,
-                output=current_layer2_path,
-                concurrency=args.layer2_concurrency,
-                cache_dir=args.layer2_cache_dir,
-                pixi=args.pixi,
+                only_sequences=candidate_scope,
             ))
             _run(_novelty_command(
                 pixi_manifest=pixi_manifest,
@@ -2271,6 +2318,19 @@ def _publish_once(args: argparse.Namespace) -> None:
                 archive=archive_path,
                 target=target,
                 output=novelty_path,
+                pixi=args.pixi,
+            ))
+            novel_rankings = _novel_layer2_rankings(
+                rankings_path, novelty_path,
+                epoch_root / "provisional_novel_rankings.json",
+            )
+            _run(_layer2_command(
+                pixi_manifest=pixi_manifest,
+                rankings=novel_rankings,
+                config=config_path,
+                output=current_layer2_path,
+                concurrency=args.layer2_concurrency,
+                cache_dir=args.layer2_cache_dir,
                 pixi=args.pixi,
             ))
             _run(_cdr_command(
@@ -2445,7 +2505,9 @@ def _publish_once(args: argparse.Namespace) -> None:
             observation_history=observation_history,
             crew=crew,
             previous=previous,
+            candidate_scope=candidate_scope,
         )
+        strict_only = strict_only or candidate_scope
         try:
             _run(_rank_command(
                 bgen_python=bgen_python,
@@ -2495,21 +2557,25 @@ def _publish_once(args: argparse.Namespace) -> None:
                 context=commit_context,
             )
             return
-        _run(_layer2_command(
-            pixi_manifest=pixi_manifest,
-            rankings=qualified_rankings,
-            config=config_path,
-            output=qualified_layer2,
-            concurrency=args.layer2_concurrency,
-            cache_dir=args.layer2_cache_dir,
-            pixi=args.pixi,
-        ))
         _run(_novelty_command(
             pixi_manifest=pixi_manifest,
             rankings=qualified_rankings,
             archive=archive_path,
             target=target,
             output=qualified_novelty,
+            pixi=args.pixi,
+        ))
+        qualified_novel_rankings = _novel_layer2_rankings(
+            qualified_rankings, qualified_novelty,
+            epoch_root / "qualified_novel_rankings.json",
+        )
+        _run(_layer2_command(
+            pixi_manifest=pixi_manifest,
+            rankings=qualified_novel_rankings,
+            config=config_path,
+            output=qualified_layer2,
+            concurrency=args.layer2_concurrency,
+            cache_dir=args.layer2_cache_dir,
             pixi=args.pixi,
         ))
         _run(_cdr_command(

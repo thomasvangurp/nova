@@ -103,6 +103,35 @@ def submission_message(sequence: str | None, molecules: object = None) -> str:
     return f"{molecule_section}{SUBMISSION_DELIMITER}{sequence_section}"
 
 
+def validate_plaintext(plaintext: str) -> str:
+    """Validate a fully framed ``mols|sequence`` submission without changing it.
+
+    Mirrors the Pi deploy's ``validate_plaintext``: the combined publisher has
+    already assembled validator wire text, which must be encrypted byte-for-byte.
+    Running it back through ``submission_message`` would rewrite it and
+    invalidate the payload, so this only checks shape and returns it unchanged.
+    """
+    if not isinstance(plaintext, str) or not plaintext:
+        raise ValueError("refusing to commit empty plaintext")
+    if not plaintext.isascii():
+        raise ValueError("a submission must be ascii")
+    if any(character.isspace() for character in plaintext):
+        raise ValueError("a submission may not contain whitespace")
+    if plaintext.count(SUBMISSION_DELIMITER) != 1:
+        raise ValueError("a submission must contain exactly one section delimiter")
+    molecule_section, sequence_section = plaintext.split(SUBMISSION_DELIMITER, 1)
+    if sequence_section in ("", NULL_TOKEN):
+        raise ValueError("a submission must carry a sequence section")
+    if set(sequence_section) - set("ACDEFGHIKLMNPQRSTVWY"):
+        raise ValueError("sequence must be nonempty canonical amino acids")
+    if molecule_section == NULL_TOKEN:
+        return plaintext
+    molecule_ids = [part for part in molecule_section.split(",") if part]
+    if len(molecule_ids) != 20 or len(set(molecule_ids)) != 20:
+        raise ValueError("molecule section must contain exactly 20 unique identifiers")
+    return plaintext
+
+
 def encoded_payload(message: str, uid: int, block: int, timelock) -> tuple[str, str]:
     """Timelock-encrypt one submission, returning (filename, base64 content).
 

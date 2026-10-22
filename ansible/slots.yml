@@ -45,17 +45,23 @@
     # ROOT does not survive, because the sync overwrites the manifest there with
     # the workspace root's, whose pinned pixi version the Pi does not have.
     slot_manager_python: "{{ (slot_host_workspace ~ '/.pixi/envs/default/bin/python') if ansible_system == 'Linux' else 'python3' }}"
-    # Hold what we can convert, and no more. We commit every uid we hold and
-    # only two to five of seven are scored -- epochs 25099, 25100 and 25101
-    # scored 5, 2 and 2 -- so a further registration buys a submission that
-    # probably will not appear. Raise this again when scored-per-held is close
-    # to one, not before.
-    slot_manager_minimum_hotkeys: 12
-    # Keep twelve as the working fleet, but use a cheap thirteenth registration
-    # as a one-slot churn buffer.  A clean 2026-09-22 replay put the best
-    # observed threshold at tau0.175: total spend stayed essentially flat while
-    # time below twelve fell 44%.  This is a cap, not a permanent target.
-    slot_manager_reserve_hotkeys: 1
+    # VALUE PRICING (2026-10-12).  Five is the FLOOR: below it we buy at any
+    # price up to slot_manager_max_recycle_tao, and renew an expiring slot so the
+    # fleet never dips under it.  Slots 6..slot_manager_maximum_hotkeys are bought
+    # whenever the price is at or below what that slot is worth -- the extra win
+    # probability it adds (concave: 6.1 points for the first ticket, about 1.2 for
+    # the twelfth, fitted to re-played epochs 25672-25680) times the value of a
+    # win (slot_manager_win_payout_alpha x the live alpha price) times the slot's
+    # MEASURED lifespan (about 18 epochs, tracked in the slot-life ledger).
+    # Cheap slots are burst-bought with no stagger; the price cap ends the burst.
+    slot_manager_minimum_hotkeys: 5
+    slot_manager_maximum_hotkeys: 13
+    slot_manager_win_payout_alpha: 41.6
+    slot_manager_burst_max: 8
+    # Ignored under value pricing (the cap comes from --maximum-hotkeys); kept at
+    # zero so the flag cannot imply a second source of truth.
+    slot_manager_reserve_hotkeys: 0
+    # Fallback ceiling for a spare slot when the alpha price cannot be read.
     slot_manager_reserve_max_recycle_tao: 0.175
     slot_manager_interval: 900
     slot_manager_wallet: mining_ops
@@ -63,8 +69,11 @@
     slot_manager_netuid: 68
     slot_manager_network: finney
     slot_manager_decision_log: "{{ ansible_env.HOME }}/.nova/subnet68_slots.jsonl"
-    slot_manager_max_recycle_tao: 0.20
-    slot_manager_max_spend_tao_per_day: 3.4560
+    slot_manager_max_recycle_tao: 0.25
+    # A rail, not the policy: value pricing already bounds what each slot costs.
+    # Sustaining the five-slot floor at the ceiling needs 1.8 TAO/day and a full
+    # thirteen at typical prices about 2.9, so this leaves room for a trough burst.
+    slot_manager_max_spend_tao_per_day: 4.5
     slot_manager_keychain_service_env: NOVA_COLDKEY_KEYCHAIN_SERVICE
     # auto resolves to keychain on macOS and systemd on Linux, matching what the
     # host actually has; the agent makes the same choice by platform.
@@ -200,6 +209,13 @@
           - "0.005"
           - --max-convert-alpha-per-day
           - "250"
+          - --value-pricing
+          - --maximum-hotkeys
+          - "{{ slot_manager_maximum_hotkeys }}"
+          - --win-payout-alpha
+          - "{{ slot_manager_win_payout_alpha }}"
+          - --burst-max
+          - "{{ slot_manager_burst_max }}"
           - --interval
           # Linux is timer-driven, so each run evaluates once and exits; the
           # decision log carries the price history between runs. macOS keeps the
@@ -321,8 +337,9 @@
         msg: >-
           {{ 'LIVE: this agent will SPEND up to ' ~ slot_manager_max_spend_tao_per_day
              ~ ' TAO/day, refusing any recycle above ' ~ slot_manager_max_recycle_tao
-             ~ ' TAO, at most one registration per 360-block interval, until it holds '
-             ~ slot_manager_minimum_hotkeys ~ ' hotkeys.'
+             ~ ' TAO, always holding at least ' ~ slot_manager_minimum_hotkeys
+             ~ ' and buying up to ' ~ slot_manager_maximum_hotkeys
+             ~ ' only while each slot is worth its price.'
              if slot_manager_execute | bool
              else 'DRY RUN: decisions are logged, nothing is bought. Pass
                    -e slot_manager_execute=true to spend.' }}
@@ -924,7 +941,7 @@
       ansible.builtin.debug:
         msg: >-
           {{ slot_manager_service if ansible_system == 'Linux' else slot_manager_session }}
-          holding >= {{ slot_manager_minimum_hotkeys }} registrations, checking every
+          holding {{ slot_manager_minimum_hotkeys }}-{{ slot_manager_maximum_hotkeys }} registrations (value priced), checking every
           {{ slot_manager_check_seconds if ansible_system == 'Linux' else slot_manager_interval }}s, {{ 'LIVE' if slot_manager_execute | bool else 'DRY RUN' }}
           (-e slot_manager_execute=true to spend);
           decisions appended to {{ slot_manager_decision_log }}

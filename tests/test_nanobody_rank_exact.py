@@ -308,6 +308,8 @@ def test_ranker_excludes_full_history_and_published_ledger(tmp_path, monkeypatch
             str(output),
             "--exclude-file",
             str(ledger),
+            "--minimum-observations",
+            "1",
             "--recent",
             "50",
             "--field-size",
@@ -473,10 +475,28 @@ def _rank(tmp_path, monkeypatch, exact, **overrides):
         "--field-size", "10",
     ]
     for flag, value in overrides.items():
-        argv += [flag, str(value)]
+        argv += [flag] if value is None else [flag, str(value)]
     monkeypatch.setattr(sys, "argv", argv)
     rank_exact.main()
     return json.loads(output.read_text())
+
+
+def test_current_exact_cohort_keeps_history_as_evidence_only(tmp_path, monkeypatch):
+    exact = _exact_bank(tmp_path, {"CURRENT": 1})
+    history = tmp_path / "history.sqlite"
+    db.connect_local(history).close()
+    monkeypatch.setattr(rank_exact, "_read_aggregate_stats", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(rank_exact, "_historical_observations", lambda *a, **kw: ({
+        "CURRENT": [_metrics(0.5)] * 3,
+        "OLD": [_metrics(0.1)] * 20,
+    }, 23))
+    payload = _rank(tmp_path, monkeypatch, exact, **{
+        "--current-exact-candidates-only": None,
+        "--observation-history": history,
+        "--minimum-observations": 1,
+    })
+    assert payload["sequences"] == ["CURRENT"]
+    assert payload["candidates"][0]["observation_count"] == 4
 
 
 def test_a_thin_candidate_loses_to_a_well_observed_one(tmp_path, monkeypatch):
@@ -490,28 +510,31 @@ def test_a_thin_candidate_loses_to_a_well_observed_one(tmp_path, monkeypatch):
     assert payload["observation_floor_applied"] == 4
 
 
-def test_a_thin_epoch_still_publishes_at_a_relaxed_floor(tmp_path, monkeypatch):
-    # Nothing reaches the floor.  Publishing nothing is the only outcome that
-    # certainly pays nothing, so the floor gives way rather than the epoch.
+def test_a_thin_epoch_cannot_relax_the_requested_evidence_floor(tmp_path, monkeypatch):
     exact = _exact_bank(tmp_path, {"THIN": 1, "ALSOTHIN": 1})
 
-    payload = _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 4})
-
-    assert payload["candidate_count"] == 2
-    assert payload["minimum_observations"] == 4
-    assert payload["observation_floor_applied"] == 1
+    with pytest.raises(SystemExit, match='observation floor 4'):
+        _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 4})
 
 
-def test_the_floor_gives_way_one_observation_at_a_time(tmp_path, monkeypatch):
-    # Three observations is the deepest evidence this epoch produced, so that is
-    # where the relaxation stops -- it does not fall straight to one and let a
-    # single-draw candidate back into the comparison.
+def test_the_deepest_candidate_still_has_to_meet_the_requested_floor(tmp_path, monkeypatch):
     exact = _exact_bank(tmp_path, {"DEEPEST": 3, "SHALLOW": 1})
 
-    payload = _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 8})
+    with pytest.raises(SystemExit, match='observation floor 8'):
+        _rank(tmp_path, monkeypatch, exact, **{"--minimum-observations": 8})
 
-    assert payload["sequences"] == ["DEEPEST"]
-    assert payload["observation_floor_applied"] == 3
+
+def test_underconfirmed_candidates_are_removed_before_expensive_ranking(tmp_path, monkeypatch):
+    exact = _exact_bank(tmp_path, {'SOLID': 20, 'THIN': 19})
+    ranked = []
+    original = rank_exact._rank_candidate
+    def record(item):
+        ranked.append(item[0])
+        return original(item)
+    monkeypatch.setattr(rank_exact, '_rank_candidate', record)
+    result = _rank(tmp_path, monkeypatch, exact, **{'--minimum-observations': 20})
+    assert ranked == ['SOLID']
+    assert result['sequences'] == ['SOLID']
 
 
 def test_a_molecule_that_breaks_nothing_outranks_a_better_scoring_one():
@@ -706,6 +729,7 @@ def test_strict_rank_defers_writer_pose_and_stops_safe_confidence_walk(
         exact,
         **{
             "--pose-config": config,
+            "--minimum-observations": 1,
             "--minimum-structure-observations": 1,
             "--selection-order": "win-probability",
             "--limit": 1,

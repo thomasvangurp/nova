@@ -35,14 +35,9 @@ def decaying(start_block: int, blocks: int, price: float, decay: float | None = 
     ]
 
 
-#: Enough held hotkeys that the urgency path is not in play, so a test about the
-#: decay floor is actually testing the decay floor.
-# A FULL fleet, which is what makes haggling over the decay floor rational:
-# below the target an affordable price beats a perfect one, so the floor gates
-# are deliberately skipped there. Sized from the policy so raising the target
-# cannot leave these tests quietly exercising the urgent path instead of the
-# gate they name.
-HOLDING_A_FLEET = tuple(range(5))
+# Default scenarios stay below the policy target. Tests for legacy decay-floor
+# haggling explicitly select a six-slot target and disable urgency below.
+HOLDING_A_FLEET = tuple(range(max(1, sm.SlotPolicy().target - 1)))
 
 # The live policy skips the decay-floor gates below target -- measured, the price
 # is within tolerance of the floor only 4.7% of the time, so haggling for it is a
@@ -50,6 +45,7 @@ HOLDING_A_FLEET = tuple(range(5))
 # tested; they just need a policy that reaches them.
 def haggling_policy(**kw):
     kw.setdefault("urgent_below", 0)
+    kw.setdefault("target", 6)  # Explicit legacy decay-floor scenario holding five slots.
     return sm.SlotPolicy(**kw)
 
 
@@ -301,7 +297,7 @@ def test_target_already_met_is_a_no_op():
 
 
 def test_a_cheap_single_reserve_is_bought_without_raising_the_working_target():
-    policy = sm.SlotPolicy(reserve_slots=1, reserve_max_recycle_tao=0.175)
+    policy = sm.SlotPolicy(target=12, reserve_slots=1, reserve_max_recycle_tao=0.175)
     history = decaying(1_000_000, 61, 0.17)
     full_working_fleet = tuple(range(policy.target))
 
@@ -845,7 +841,7 @@ def test_urgency_overrides_the_decay_floor_and_nothing_else():
     disables it -- and disables nothing else.  Both hard rails still outrank
     urgency, and so do both bounded pacing rules.
     """
-    policy = sm.SlotPolicy()
+    policy = sm.SlotPolicy(target=5)
     history = spiked(1_000_000, 40, 61, 0.135167)
     # Quiet interval, past the stagger, price well above the decay floor.
     state = state_at(history, registered=(1, 2, 3), last=1_000_000 - 100_000)
@@ -1181,42 +1177,63 @@ def test_the_stagger_keeps_renewals_in_separate_intervals_at_the_live_target():
     assert buys_per_block > deaths_per_block
 
 
-def test_the_deployed_target_matches_the_policy():
-    """ansible/slots.yml and SlotPolicy must not disagree about the fleet size."""
+def test_the_deployed_profile_is_value_pricing_and_both_playbooks_agree():
+    """slots.yml, the bounded live playbook and the policy must not disagree.
+
+    The deployed profile is value pricing: a floor of five, a cap of thirteen,
+    a 0.25 hard ceiling, and every slot between bought only while it is worth
+    its price.  The two playbooks both render the unit, so a drift between them
+    would silently revert the policy the next time the other one is run.
+    """
     import re
 
-    slots = (Path(__file__).resolve().parents[1] / "ansible" / "slots.yml").read_text()
-    deployed = re.search(r"slot_manager_minimum_hotkeys:\s*(\d+)", slots)
-    assert deployed, "slots.yml no longer sets slot_manager_minimum_hotkeys"
-    assert int(deployed.group(1)) == sm.SlotPolicy().target
+    ansible = Path(__file__).resolve().parents[1] / "ansible"
+    slots = (ansible / "slots.yml").read_text()
+    live = (ansible / "slot_policy_live.yml").read_text()
 
-    reserve = re.search(r"slot_manager_reserve_hotkeys:\s*(\d+)", slots)
-    reserve_price = re.search(
-        r"slot_manager_reserve_max_recycle_tao:\s*([0-9.]+)", slots
+    def var(text, name):
+        match = re.search(rf"{name}:\s*([0-9.]+)", text)
+        assert match, f"{name} is no longer set"
+        return float(match.group(1))
+
+    names = (
+        "slot_manager_minimum_hotkeys", "slot_manager_maximum_hotkeys",
+        "slot_manager_reserve_hotkeys", "slot_manager_reserve_max_recycle_tao",
+        "slot_manager_max_recycle_tao", "slot_manager_max_spend_tao_per_day",
+        "slot_manager_win_payout_alpha", "slot_manager_burst_max",
     )
-    assert reserve and int(reserve.group(1)) == 1
-    assert reserve_price and float(reserve_price.group(1)) == pytest.approx(0.175)
-    # Auto-conversion belongs in the same canonical ExecStart.  A hand-written
-    # systemd drop-in once replaced it wholesale and silently removed new policy
-    # flags even though the rendered base unit was correct.
-    assert "--auto-convert-alpha" in slots
+    for name in names:
+        assert var(slots, name) == pytest.approx(var(live, name)), (
+            f"{name} differs between slots.yml and slot_policy_live.yml"
+        )
+
+    assert var(slots, "slot_manager_minimum_hotkeys") == 5
+    assert var(slots, "slot_manager_maximum_hotkeys") == 13
+    assert var(slots, "slot_manager_max_recycle_tao") == pytest.approx(0.25)
+    assert var(slots, "slot_manager_win_payout_alpha") == pytest.approx(sm.DEFAULT_WIN_PAYOUT_ALPHA)
+    # The fallback ceiling for a spare slot must be a legal reserve ceiling.
+    assert var(slots, "slot_manager_reserve_max_recycle_tao") <= var(slots, "slot_manager_max_recycle_tao")
+
+    for text in (slots, live):
+        assert "--value-pricing" in text
+        assert "--maximum-hotkeys" in text and "--burst-max" in text
+        # Auto-conversion belongs in the same canonical ExecStart.  A hand-written
+        # systemd drop-in once replaced it wholesale and silently removed new
+        # policy flags even though the rendered base unit was correct.
+        assert "--auto-convert-alpha" in text
     assert "auto-convert.conf" in slots and "state: absent" in slots
 
-    spend = re.search(r"slot_manager_max_spend_tao_per_day:\s*([0-9.]+)", slots)
-    assert spend, "slots.yml no longer sets slot_manager_max_spend_tao_per_day"
-    # The budget is DERIVED from the target and the price ceiling, so the
-    # deployed literal is checked against the derivation rather than against a
-    # second literal.  A budget that cannot sustain the target is how the fleet
-    # was capped below it twice without any gate saying so.
-    # Exact, not approximate: a tolerance here lets the deployed number drift
-    # from the derivation it is supposed to BE.
-    assert float(spend.group(1)) == pytest.approx(
-        sm.SlotPolicy().daily_budget_tao, abs=1e-4
+    # The policy the flags build is the one the playbooks describe.
+    policy = sm.SlotPolicy(
+        target=5, reserve_slots=8, max_recycle_tao=0.25,
+        value_curve=sm.marginal_win_curve(13),
     )
-    assert float(spend.group(1)) >= (
-        sm.SlotPolicy().target * (24.0 / sm.IMMUNITY_HOURS)
-        * sm.SlotPolicy().max_recycle_tao - 0.01
-    ), "the deployed budget cannot sustain the deployed target at the ceiling"
+    assert policy.maximum_registered == var(slots, "slot_manager_maximum_hotkeys")
+    # The budget is a RAIL, but it must still be able to sustain the floor at the
+    # ceiling, or the wallet becomes the binding constraint and no gate says so.
+    spend = var(slots, "slot_manager_max_spend_tao_per_day")
+    sustain_floor = policy.target * (24.0 / sm.IMMUNITY_HOURS) * policy.max_recycle_tao
+    assert spend >= sustain_floor, "the deployed budget cannot sustain the floor at the ceiling"
 
 
 def test_haggling_stops_below_a_full_fleet():
@@ -1359,7 +1376,7 @@ def test_rushing_can_be_switched_off():
     # Probe past the interval quota so the STAGGER is the rule that answers;
     # otherwise own-interval masks it and the test proves nothing.
     history = decaying(1_000_000, 61, 0.12)
-    policy = sm.SlotPolicy(rush_below_target=False)
+    policy = sm.SlotPolicy(target=5, rush_below_target=False)
     probe = (policy.stagger + sm.ADJUSTMENT_INTERVAL) // 2
     decision = sm.decide(
         state_at(history, registered=(1, 2), last=history[-1].block - probe),

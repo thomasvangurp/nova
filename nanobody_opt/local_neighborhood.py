@@ -71,6 +71,23 @@ def _layer2_candidates(path: Path) -> list[dict[str, object]]:
     ]
 
 
+def _cdr3_top50_basin(cdr3: str, top50_cdr3s: list[str] | None) -> bool:
+    """True when a CDR3 sits at >= 0.85 positional identity to any archived
+    top-50 clonotype -- the validator's ``is_duplicate`` CDR3 rule. Fail-closed:
+    an empty clonotype index or an empty CDR3 is treated as in-basin (blocked),
+    so a missing index can never admit a top-50-adjacent child."""
+    if not cdr3 or not top50_cdr3s:
+        return True
+    length = len(cdr3)
+    for other in top50_cdr3s:
+        if not other:
+            continue
+        shared = sum(1 for a, b in zip(cdr3, other) if a == b)
+        if shared / max(length, len(other)) >= 0.85:
+            return True
+    return False
+
+
 def _rank_sum(frame: pd.DataFrame) -> np.ndarray:
     missing = set(METRICS) - set(frame.columns)
     if missing:
@@ -1320,7 +1337,12 @@ def _identity(left: str, right: str) -> float:
 #: no proposals, is never scored and disappears -- which is how the pool came
 #: to hold one clonotype while the validator scored two tickets of seven.
 #: Exploit the leader, keep the others alive.
-EXPLORATION_SEED_SHARE = 0.35
+#:
+#: Raised 0.35 -> 0.50 (2026-10-21, developability hoist): the field converged
+#: on one high-compactness CDR3 basin and the old 65/35 split starved every
+#: other family (SEED_SHORTAGE selected=6 floor=24), so there were too few
+#: in-range parents to reach the ~4800-accepted-children target.
+EXPLORATION_SEED_SHARE = 0.50
 
 
 def round_robin_families(
@@ -1330,11 +1352,15 @@ def round_robin_families(
     exploration_share=EXPLORATION_SEED_SHARE,
     cdr3_by_sequence=None,
 ):
-    """Reserve two seats per CDR3 family, nonduplicate parents first.
+    """Allocate the seed budget by CDR3 family, winner-first.
 
-    Metadata appended to seed tuples is intentionally avoided: callers retain
-    the established nine-field tuple. main orders the nonduplicate pool first.
-    Unknown CDR3s do not earn a fictitious distinct clonotype reservation.
+    The leading family (the winner's clonotype, first in seed order) receives
+    ``1 - exploration_share`` of the seats while every other family keeps a
+    two-seat floor, so no family silently starves. The former flat 2-per-family
+    pass spread the winner across every historical family and diluted the
+    anchor. Metadata appended to seed tuples is intentionally avoided: callers
+    retain the established nine-field tuple. Unknown CDR3s do not earn a
+    fictitious distinct clonotype reservation.
     """
     if limit <= 0 or not seeds:
         return []
@@ -1352,11 +1378,47 @@ def round_robin_families(
             identifier = next((representative for representative in families
                                if _same_cdr3_family(loop, representative)), loop)
             families.setdefault(identifier, []).append(seed)
+    if not families:
+        return []
+    leading_representative = next(iter(families))
+    leading = families[leading_representative]
+    others = [members for representative, members in families.items()
+              if representative != leading_representative]
+    leading_seats = max(2, round(limit * (1.0 - exploration_share)))
+    # True round-robin across families (one seat per family per pass). The
+    # leading family still goes first each pass, but it is CAPPED at
+    # `leading_seats` and can no longer backfill past every other family's
+    # seats (Gap 4: the old backfill gave ~22 leading + 2 others of 24).
     taken = []
-    for seat in range(2):
-        for family in families.values():
-            if seat < len(family) and len(taken) < limit:
-                taken.append(family[seat])
+    families = [leading, *others]
+    leading_count = 0
+    pass_index = 0
+    while len(taken) < limit:
+        # GAP 4: process the OTHER families first, and only then the leader, so
+        # the leader is never appended in a pass where every other family has
+        # already exhausted (which is how a single singleton family still let
+        # the leader reach ~66.7%).
+        others_progressed = False
+        for family_index, members in enumerate(families):
+            if family_index == 0:
+                continue
+            if pass_index >= len(members):
+                continue
+            if len(taken) >= limit:
+                break
+            taken.append(members[pass_index])
+            others_progressed = True
+        if not others_progressed and leading_count >= 1:
+            # Every other family is exhausted; do not backfill the leader.
+            break
+        progressed = others_progressed
+        if leading_count < leading_seats and pass_index < len(leading) and len(taken) < limit:
+            taken.append(leading[pass_index])
+            leading_count += 1
+            progressed = True
+        if not progressed:
+            break
+        pass_index += 1
     return taken[:limit]
 
 
@@ -1365,6 +1427,11 @@ def main() -> None:
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--layer2-seeds", required=True, type=Path)
+    parser.add_argument(
+        "--top50-index", type=Path, default=None,
+        help="build_top50_index.json; supplies the top-50 CDR3 clonotypes for "
+             "the clonotype-distance floor in add_candidate",
+    )
     parser.add_argument(
         "--parents-may-match-top-sequences",
         action="store_true",
@@ -1424,6 +1491,8 @@ def main() -> None:
         default=384,
         help="Layer-2 oversubscribed pool before the 320-candidate exact cutoff",
     )
+    parser.add_argument("--bounded-generation", action="store_true",
+                        help="honor the proposal limit without legacy floors or extra lane tails")
     parser.add_argument("--framework-fraction", type=float, default=0.5)
     parser.add_argument(
         "--haplotype-lane-fraction",
@@ -1603,7 +1672,8 @@ def main() -> None:
     # --candidate-limit, so this only widens the novelty pool -- it cannot
     # over-screen. These are FLOORS: a higher explicit producer value wins.
     args.basin_routes_per_core = max(args.basin_routes_per_core, 600)
-    args.proposal_limit = max(args.proposal_limit, 8000)
+    if not args.bounded_generation:
+        args.proposal_limit = max(args.proposal_limit, 8000)
     # Bias generation toward the terminal/haplotype lanes (2026-10-19): across
     # 25810-25812 the top molecules come from c_terminal_haplotype,
     # n_terminal_haplotype, framework_haplotype and lineage_terminal_single
@@ -1616,15 +1686,38 @@ def main() -> None:
     target = str(config_payload["protein_selection"]["nanobody"]["target"])
     frame = pd.read_csv(args.archive).drop_duplicates("sequence", keep="first")
     mode = int(frame.sequence.str.len().mode()[0])
+    # Top-50 CDR3 clonotypes for the add_candidate clonotype-distance floor.
+    # Empty list (no index) leaves the floor inactive here; the producer always
+    # passes build_top50_index.json, and the commit-time check_validator_novelty
+    # remains the authoritative backstop either way.
+    top50_cdr3s: list[str] = []
+    if args.top50_index is not None and args.top50_index.is_file():
+        try:
+            _top50_payload = json.loads(args.top50_index.read_text())
+            top50_cdr3s = [
+                str(item).strip().upper()
+                for item in (_top50_payload.get("cdr3s") or [])
+                if str(item).strip()
+            ]
+        except (OSError, ValueError, KeyError, TypeError):
+            top50_cdr3s = []
     parent_candidates = _layer2_candidates(args.layer2_seeds)
     # Existing producer caches predate duplicate metadata. Re-admit ONLY the
     # pinned historical bank, with a fresh gate, rather than gating merged seeds.
-    from nanobody_opt_v2.select_elite_parents import _validator_parent_pool
+    from nanobody_opt_v2.select_elite_parents import (
+        _validator_parent_pool, _developability_parent_pool,
+    )
     reservoir_path = Path("/root/artifacts/agreedfix_historical_parents.json")
     reservoir_payload = json.loads(reservoir_path.read_text())
     if reservoir_payload.get("target") not in (None, target):
         raise SystemExit("historical reservoir target mismatch")
     historical = _validator_parent_pool(reservoir_payload["candidates"], target=target)
+    # GAP 5: profile the pinned historical bank's CDR developability (cached)
+    # so an unprofiled parent is never silently treated as in-range; fail-closed
+    # parents route to repair, not to CDR3-preserving lanes.
+    historical = _developability_parent_pool(
+        historical, target=target, cache_dir=Path("/root/layer2_cache"),
+    )
     historical = [dict(c, historical_reservoir=True, parent_selection_lane="frontier")
                   for c in historical if c["parent_validator_duplicate"] is False
                   and c.get("layer2_passed")]
@@ -1640,19 +1733,38 @@ def main() -> None:
     original_output = args.output
     original_network_output = args.mutation_network_output
     total_budget = args.proposal_limit
-    # Share the overall floor across exact-length contexts, reserving enough
-    # breadth for rarer lengths without multiplying the proposal workload.
     counts = {length: sum(len(c["sequence"]) == length for c in parent_candidates)
               for length in lengths}
-    minimum_context_budget = min(512, total_budget // max(1, len(lengths)))
-    remainder = total_budget - minimum_context_budget * len(lengths)
-    weight = sum(counts.values()) or 1
-    budgets = {length: minimum_context_budget + remainder * counts[length] // weight
-               for length in lengths}
+    # Concentrate the generation budget on the winner's length (2026-10-20):
+    # the anchor clonotype is a single length, and spreading single-edit
+    # generation across every +/-5 context diluted it. Give the winner's length
+    # the bulk share; the remaining lengths split the rest by parent count.
+    ranked_parents = sorted(
+        (c for c in parent_candidates if c.get("selection_score") is not None),
+        key=lambda c: float(c["selection_score"]),
+    )
+    winner_length = len(str(ranked_parents[0]["sequence"])) if ranked_parents else mode
+    # Reduced 0.70 -> 0.50 (developability hoist): the old bias starved every
+    # other length context, further shrinking the already-thin in-range seed
+    # pool; the winner's length no longer monopolizes the generation budget.
+    winner_share = 0.50
+    winner_budget = int(total_budget * winner_share) if winner_length in lengths else 0
+    other_lengths = [length for length in lengths if length != winner_length]
+    other_weight = sum(counts[length] for length in other_lengths) or 1
+    budgets = {length: 0 for length in lengths}
+    if winner_length in lengths:
+        budgets[winner_length] = winner_budget
+    for length in other_lengths:
+        budgets[length] = (total_budget - winner_budget) * counts[length] // other_weight
     if lengths:
-        budgets[max(lengths, key=lambda value: counts[value])] += total_budget - sum(budgets.values())
+        # NOTE: budget_length is a NEW variable, not the protein target "P20809"
+        # which must stay intact for load_network_observations / load_mutation_effects.
+        budget_length = winner_length if winner_length in lengths else max(lengths, key=lambda value: counts[value])
+        budgets[budget_length] += total_budget - sum(budgets.values())
     for length in lengths:
         args.proposal_limit = budgets[length]
+        if args.proposal_limit == 0:
+            continue
         exact_frame = frame[frame.sequence.str.len() == length].reset_index(drop=True)
         if exact_frame.empty:
             # Public, Layer-2-qualified parents provide an exact-length background
@@ -1664,7 +1776,7 @@ def main() -> None:
         args.mutation_network_output = (original_network_output.with_name(
             original_network_output.stem + f".length{length}" + original_network_output.suffix)
             if original_network_output else None)
-        seed_shortages.append(_generate_exact_length(args, exact_frame, length, requirements, target))
+        seed_shortages.append(_generate_exact_length(args, exact_frame, length, requirements, target, top50_cdr3s))
         outputs.append(pd.read_csv(args.output))
     args.output = original_output
     args.proposal_limit = total_budget
@@ -1687,7 +1799,19 @@ def main() -> None:
     print("GENERATION_SHORTAGE " + json.dumps(report), flush=True)
 
 
-def _generate_exact_length(args, frame, length, requirements, target):
+def _append_proposal_tail(proposals, tail, *, limit=None):
+    """Keep unbounded legacy headroom, or fill only the explicit nomination budget."""
+    emitted = {item["sequence"] for item in proposals}
+    for item in tail:
+        if limit is not None and len(proposals) >= limit:
+            break
+        if item["sequence"] not in emitted:
+            proposals.append(item)
+            emitted.add(item["sequence"])
+    return proposals
+
+
+def _generate_exact_length(args, frame, length, requirements, target, top50_cdr3s):
     exhausted_seeds = []
     recent = frame.tail(min(args.recent, len(frame))).reset_index(drop=True)
     recent = recent.assign(recent_rank_sum=_rank_sum(recent))
@@ -1759,15 +1883,42 @@ def _generate_exact_length(args, frame, length, requirements, target):
         if item[5] in ("epoch_elite", "frontier") and item[1] not in reserved_sequences
     ]
     seed_pool = [*reserved_seeds, *legacy_seeds]
-    seed_pool.sort(key=lambda item: not seed_metadata[item[1]].get("historical_reservoir", False))
+    # Winner-first, not historical-first (2026-10-20): the most-recent-epoch
+    # anchor must lead the seed pool so round_robin_families gives its family
+    # the bulk share. Preserve basin-reserved seeds ahead of legacy seeds.
+    seed_pool.sort(key=lambda item: (0 if item[8] else 1, item[0], item[1]))
     nondup = [item for item in seed_pool if seed_metadata[item[1]].get("parent_validator_duplicate") is False]
     other = [item for item in seed_pool if seed_metadata[item[1]].get("parent_validator_duplicate") is not False]
     # First reserve CDR3 seats entirely within nonduplicates; fill from the rest.
     cdr3_by_sequence = {sequence: c.get("parent_cdr3") for sequence, c in seed_metadata.items()
                         if c.get("parent_cdr3")}
-    core_seeds = round_robin_families(nondup, args.seed_count, cdr3_by_sequence=cdr3_by_sequence)
-    core_seeds += round_robin_families(other, args.seed_count - len(core_seeds),
-                                     cdr3_by_sequence=cdr3_by_sequence)
+    # Reserve a share of the multi-edit seed budget for duplicate parents
+    # (including the min-multipass anchor): their single-edits are all
+    # duplicates, but their 2-3-edit children cross back under the novelty
+    # threshold, so the multi-edit lane must actually reach them.
+    dup_seed_budget = max(1, args.seed_count // 4)
+    # GAP 4: one round_robin_families call over the combined pool (nondup
+    # first, so the leading family still leads). The old two-call split let the
+    # leading family double-dip its 50% seat cap in each call, reaching ~91%
+    # of the budget and starving every other family. A single call applies the
+    # cap once across both the nondup and dup/repair families.
+    combined_pool = [*nondup, *other]
+    core_seeds = round_robin_families(
+        combined_pool, args.seed_count,
+        cdr3_by_sequence=cdr3_by_sequence,
+    )
+    # GAP 2: guarantee the multi-edit CDR3-repair lane at least one repair
+    # parent, independent of the round-robin -- a nondup-heavy bank can exhaust
+    # the seat budget before any out-of-range family is reached.
+    repair_pool = [
+        item for item in other
+        if seed_metadata[item[1]].get("parent_developability_repair")
+    ]
+    if repair_pool and not any(
+        seed_metadata[seed[1]].get("parent_developability_repair")
+        for seed in core_seeds
+    ):
+        core_seeds = [repair_pool[0], *core_seeds[: args.seed_count - 1]]
     seed_shortage = len(core_seeds) < max(24, args.minimum_seeds)
     if seed_shortage:
         print(f"SEED_SHORTAGE length={length} selected={len(core_seeds)} "
@@ -1780,6 +1931,14 @@ def _generate_exact_length(args, frame, length, requirements, target):
         if item[5] == "family_neighbor" and item[1] not in {seed[1] for seed in core_seeds}
     ][: args.neighbor_seed_count]
     seeds = [*core_seeds, *neighbor_seeds]
+    # GAP 2c: the framework and lineage lanes preserve the parent CDR3, so an
+    # out-of-range (repair) parent must not seed them -- only the multi-edit
+    # lane may touch a repair parent, and only with a CDR3 mismatch.
+    framework_lineage_seeds = [
+        seed for seed in seeds
+        if seed_metadata[seed[1]].get("parent_cdr_developability_in_range", False)
+        and not seed_metadata[seed[1]].get("parent_top50_identity_in_basin", True)
+    ]
 
     # Single-edit seed pool: the full core_seeds pool -- no <0.95 pre-filter.
     # The <0.95 identity filter previously applied here was backwards: it
@@ -1791,18 +1950,35 @@ def _generate_exact_length(args, frame, length, requirements, target):
     # re-anchors on the competitor/frontier parents instead of our stale
     # <0.95 tail. No selection_score elite-ordering is re-introduced: this
     # only removes the identity pre-filter.
-    single_edit_seeds = list(core_seeds)
+    # Single-edits of a KNOWN duplicate parent (>=0.95 to the HF top-50)
+    # reproduce >=0.95 children the commit-time gate blocks, so the single-edit
+    # lane is restricted to the winning family and other gate-clearing parents;
+    # duplicates stay in the multi-edit lane (a multi-edit child can cross back
+    # under 0.95). Ungated (competitor) parents count as gate-clearing.
+    single_edit_seeds = [
+        seed for seed in core_seeds
+        if seed_metadata[seed[1]].get("parent_validator_duplicate") is not True
+        and seed_metadata[seed[1]].get("parent_cdr_developability_in_range", False)
+        and not seed_metadata[seed[1]].get("parent_top50_identity_in_basin", True)
+    ]
 
     donor_sequences = [
         item[1] for item in eligible[: min(args.donor_count, len(eligible))]
     ]
-    if not donor_sequences:
-        raise SystemExit("no current-gate donor sequences found")
     background_sequences = [
         str(sequence).strip().upper()
         for sequence in recent.sequence
         if len(str(sequence).strip()) == length
     ]
+    if not donor_sequences:
+        # Degrade instead of aborting: the whole epoch must not die because the
+        # current-gate donor pool came back empty. Fall back to the recent
+        # archive as the donor pool so generation still proposes.
+        donor_sequences = list(dict.fromkeys(background_sequences))[
+            : args.donor_count
+        ]
+    if not donor_sequences:
+        raise SystemExit("no donor sequences found (archive and gates both empty)")
     all_background_sequences = [
         str(sequence).strip().upper()
         for sequence in frame.sequence
@@ -1949,6 +2125,21 @@ def _generate_exact_length(args, frame, length, requirements, target):
         failures = gates.check_sequence(candidate, requirements)
         if failures:
             return False
+        # FIX 2: clonotype-distance floor. A child whose CDR3 sits within 0.85
+        # positional identity of any archived top-50 clonotype would be rejected
+        # by entry_unique_for_protein_hf regardless of which lane produced it, so
+        # admit no such child. This is the single authoritative floor for every
+        # neighbourhood lane (single-edit, framework, lineage, basin-terminal,
+        # historical fallback, and multi-edit): they all funnel through here.
+        if top50_cdr3s:
+            try:
+                child_regions = find_regions(candidate)
+                child_cdr3 = candidate[child_regions.cdr3[0]:child_regions.cdr3[1]]
+            except Exception:
+                # Unannotatable candidate: fail-closed (treat as in-basin).
+                return False
+            if _cdr3_top50_basin(child_cdr3, top50_cdr3s):
+                return False
         # Cheap k-mer/Jaccard "crowded family" gate DISABLED (2026-10-19):
         # the authoritative duplicate gate is check_validator_novelty /
         # utils.nanobodies.is_duplicate -- Algorithm-2 alignment identity
@@ -2028,6 +2219,17 @@ def _generate_exact_length(args, frame, length, requirements, target):
         regions = find_regions(parent)
         cdr_positions = list(regions.cdr_positions())
         bounds = [regions.cdr1, regions.cdr2, regions.cdr3]
+        cdr3_start, cdr3_end = regions.cdr3
+        parent_cdr_in_range = bool(
+            seed_metadata.get(parent, {}).get("parent_cdr_developability_in_range", False)
+        )
+        parent_in_top50_basin = bool(
+            seed_metadata.get(parent, {}).get("parent_top50_identity_in_basin", True)
+        )
+        # Repair path: a parent whose CDR-only red flags are out of range OR
+        # whose CDR3 clonotype is already in the top-50 basin cannot seed a
+        # CDR3-preserving proposal. Both route into the forced-CDR3 branch below.
+        needs_cdr3_repair = (not parent_cdr_in_range) or parent_in_top50_basin
         attempts = 0
 
         stochastic_accepted = 0
@@ -2039,7 +2241,10 @@ def _generate_exact_length(args, frame, length, requirements, target):
             sequence = list(parent)
             source = "local_substitution"
 
-            if rng.random() < args.motif_fraction:
+            if rng.random() < args.motif_fraction and parent_cdr_in_range and not parent_in_top50_basin:
+                # Gap 5: same-length motif transfers must not bypass the CDR3
+                # repair -- an out-of-range parent goes straight to the
+                # multi-edit lane below, where a true CDR3 mismatch is forced.
                 source = "whole_cdr_motif"
                 cdr_index = int(rng.integers(3))
                 start, end = bounds[cdr_index]
@@ -2085,6 +2290,16 @@ def _generate_exact_length(args, frame, length, requirements, target):
                     if lower <= args.max_mutations
                     else args.min_mutations
                 )
+                # GAP 5: --max-mutations 1 must not bypass CDR3 repair. An
+                # out-of-range or top-50-basin parent needs at least a 2-edit
+                # (one forced CDR3 mismatch + one more) to move off the blocked
+                # clonotype; a single framework edit would preserve it.
+                if needs_cdr3_repair and mutation_count < 2:
+                    mutation_count = 2
+                # TWEAK 2: a top-50-basin parent needs 3 CDR3 mismatches (14/17 =
+                # 0.824 < 0.85) to escape the clonotype dedup; 2 is still a dup.
+                if parent_in_top50_basin and mutation_count < 3:
+                    mutation_count = 3
                 mutable = [
                     position for position in cdr_positions
                     if position not in protected
@@ -2102,7 +2317,43 @@ def _generate_exact_length(args, frame, length, requirements, target):
                 ]
                 if len(mutable) < mutation_count:
                     continue
-                positions = rng.choice(mutable, size=mutation_count, replace=False)
+                # CDR3 repair: a parent whose CDR-only red flags (L/L3/C) are
+                # out of range produces doomed framework-only edits (the child
+                # inherits the out-of-range compactness). Force one edit into
+                # CDR3 so the child's compactness can move back into range.
+                cdr3_mutable = [p for p in mutable if cdr3_start <= p < cdr3_end]
+                if needs_cdr3_repair and mutation_count >= 2:
+                    if not cdr3_mutable:
+                        # GAP 5: an out-of-range parent with no mutable CDR3
+                        # position cannot be repaired; reject it rather than
+                        # emitting an unchanged-CDR3 (doomed) child.
+                        continue
+                    if parent_in_top50_basin:
+                        # Escaping a top-50 clonotype needs a CDR3 that drops
+                        # below the validator's 0.85 CDR3-similarity bar: 3
+                        # mismatches (14/17 = 0.824) is the measured recipe
+                        # (J-region tail + leading residue); 2 (0.882) is still
+                        # a dup. Force 3 CDR3 edits where the CDR3 can hold them.
+                        if len(cdr3_mutable) < 3:
+                            continue
+                        forced_count = max(mutation_count, 3)
+                        forced_count = min(forced_count, len(cdr3_mutable))
+                        forced_positions = list(
+                            rng.choice(cdr3_mutable, size=forced_count, replace=False)
+                        )
+                        rest = [p for p in mutable if p not in forced_positions]
+                        positions = (
+                            list(rng.choice(rest, size=mutation_count - forced_count, replace=False))
+                            if mutation_count > forced_count else []
+                        )
+                        positions.extend(forced_positions)
+                    else:
+                        forced = int(rng.choice(cdr3_mutable, size=1, replace=False)[0])
+                        rest = [p for p in mutable if p != forced]
+                        positions = list(rng.choice(rest, size=mutation_count - 1, replace=False))
+                        positions.append(forced)
+                else:
+                    positions = list(rng.choice(mutable, size=mutation_count, replace=False))
                 # One position must genuinely change, or the proposal can come
                 # back identical to its parent and be rejected as already seen.
                 # That is not hypothetical: the producer measures consensus
@@ -2137,6 +2388,18 @@ def _generate_exact_length(args, frame, length, requirements, target):
                     return 1 if parent[position] != residue else 2
 
                 anchor = int(min(positions, key=lambda value: (_anchor_rank(int(value)), int(value))))
+                if needs_cdr3_repair and mutation_count >= 2 and cdr3_mutable:
+                    # GAP 5 + top-50 basin: the forced CDR3 position must BE the
+                    # anchor, so the mutation application actually changes the CDR3
+                    # residue and the child leaves the out-of-range compactness or
+                    # the blocked top-50 clonotype.
+                    if parent_in_top50_basin:
+                        anchor = int(min(
+                            forced_positions,
+                            key=lambda value: (_anchor_rank(int(value)), int(value)),
+                        ))
+                    else:
+                        anchor = int(forced)
                 for position_value in positions:
                     position = int(position_value)
                     # Everywhere else a mutation must change something, or the
@@ -2155,6 +2418,18 @@ def _generate_exact_length(args, frame, length, requirements, target):
                         anchor=anchor,
                         repair_only=repair_only,
                     )
+                    # Multi-edit lane: force a TRUE substitution. If the settled
+                    # draw would retain the parent residue (a settled position),
+                    # re-draw from the allowed alternatives so the child genuinely
+                    # changes -- a duplicate anchor's child must move away from
+                    # the parent/top-50 to escape the novelty gate.
+                    if len(options) == 1 and options[0] == parent[position]:
+                        alternatives = [
+                            residue for residue in allowed[position]
+                            if residue != parent[position]
+                        ]
+                        if alternatives:
+                            options = alternatives
                     sequence[position] = _weighted_choice(
                         rng,
                         options,
@@ -2327,6 +2602,21 @@ def _generate_exact_length(args, frame, length, requirements, target):
     ]] = {}
     reserved_core_seeds = [item for item in core_seeds if item[8]]
     for parent_record in reserved_core_seeds or core_seeds:
+        # GAP 2/5: basin-terminal routes mutate only terminal (non-CDR)
+        # residues and preserve the CDR3, so an out-of-range (repair) parent
+        # must not seed them -- only the multi-edit lane may repair its CDR3.
+        # Fail-closed: an UNPROFILED parent (field absent) is treated as
+        # out-of-range, never silently in-range.
+        if not seed_metadata[parent_record[1]].get(
+            "parent_cdr_developability_in_range", False
+        ):
+            continue
+        # Top-50-basin parents are also excluded: terminal-only edits keep the
+        # blocked CDR3 clonotype, so the child is rejected by
+        # entry_unique_for_protein_hf exactly like the parent. Absent flag =
+        # in-basin (fail-closed) so an unstamped parent never reopens the lane.
+        if seed_metadata[parent_record[1]].get("parent_top50_identity_in_basin", True):
+            continue
         basin_representatives.setdefault(parent_record[6], parent_record)
     # The nested enumeration inside supported_basin_terminal_candidates (every
     # historical basin member x every mutable position x every observed
@@ -2435,23 +2725,23 @@ def _generate_exact_length(args, frame, length, requirements, target):
     # below iterate the same `seeds` and need the same inputs. Only the
     # subsequent add_candidate calls in each loop touch shared dedup state,
     # so those stay sequential, fed by this pool's precomputed output.
-    if args.generation_workers > 1 and len(seeds) > 1:
+    if args.generation_workers > 1 and len(framework_lineage_seeds) > 1:
         with ProcessPoolExecutor(
-            max_workers=min(args.generation_workers, len(seeds)),
+            max_workers=min(args.generation_workers, len(framework_lineage_seeds)),
             mp_context=multiprocessing.get_context("fork"),
             initializer=_init_seed_worker,
             initargs=(framework_allowed, background_sequences,
                       args.terminal_width, args.maximum_terminal_haplotype_mutations,
                       priors),
         ) as pool:
-            seed_results = list(pool.map(_seed_candidates_for_parent, seeds))
+            seed_results = list(pool.map(_seed_candidates_for_parent, framework_lineage_seeds))
     else:
         _init_seed_worker(framework_allowed, background_sequences,
                           args.terminal_width, args.maximum_terminal_haplotype_mutations,
                           priors)
-        seed_results = [_seed_candidates_for_parent(item) for item in seeds]
+        seed_results = [_seed_candidates_for_parent(item) for item in framework_lineage_seeds]
 
-    for parent_record, (candidates, _lineage_candidates) in zip(seeds, seed_results):
+    for parent_record, (candidates, _lineage_candidates) in zip(framework_lineage_seeds, seed_results):
         singles = [item for item in candidates if "haplotype" not in item[1]]
         haplotypes = [item for item in candidates if "haplotype" in item[1]]
         lane_limits = _lane_limits(args.framework_per_seed, args.haplotype_lane_fraction)
@@ -2483,7 +2773,7 @@ def _generate_exact_length(args, frame, length, requirements, target):
             ):
                 accepted += 1
 
-    for parent_record, (_framework_candidates, candidates) in zip(seeds, seed_results):
+    for parent_record, (_framework_candidates, candidates) in zip(framework_lineage_seeds, seed_results):
         parent_proposals: list[dict[str, object]] = []
         for candidate, source in candidates:
             add_candidate(
@@ -2527,15 +2817,38 @@ def _generate_exact_length(args, frame, length, requirements, target):
             accepted += 1
 
     fallback_proposals = []
+    # Historical single fallback is a bounded safety net (2026-10-20): at most
+    # 10% of this length's proposal budget, so a starved fresh pool is topped
+    # up without being swamped by stale reservoir singles.
+    fallback_budget = max(0, args.proposal_limit // 10)
     if seed_shortage:
         for parent_record in core_seeds:
+            if len(fallback_proposals) >= fallback_budget:
+                break
             if seed_metadata[parent_record[1]].get("parent_validator_duplicate") is not False:
+                continue
+            # GAP 5: a single-edit historical fallback preserves the parent
+            # CDR3, so an out-of-range (repair) or unprofiled parent must not
+            # seed it -- only the multi-edit lane may repair the CDR3. Default
+            # False = fail-closed (unprofiled means not-in-range).
+            if not seed_metadata[parent_record[1]].get(
+                "parent_cdr_developability_in_range", False
+            ):
+                continue
+            # Top-50-basin parents are equally barred: a single-residue child
+            # keeps the blocked clonotype and dies at entry_unique_for_protein_hf.
+            # Absent flag = in-basin (fail-closed).
+            if seed_metadata[parent_record[1]].get("parent_top50_identity_in_basin", True):
                 continue
             parent = parent_record[1]
             for position in range(length):
+                if len(fallback_proposals) >= fallback_budget:
+                    break
                 if position in parent_record[4]:
                     continue
                 for residue in sorted(gates.ALLOWED_AAS):
+                    if len(fallback_proposals) >= fallback_budget:
+                        break
                     if residue != parent[position]:
                         add_candidate(parent_record, parent[:position] + residue + parent[position + 1:],
                                       "historical_fallback_single", "core_cdr", fallback_proposals)
@@ -2585,14 +2898,13 @@ def _generate_exact_length(args, frame, length, requirements, target):
     )
     # The shortage reserve is additive after normal lane truncation; do not
     # discard its novelty headroom to satisfy an emitted-pool cap.
-    emitted = {item["sequence"] for item in proposals}
     # Lane budgets order the head; retain every already-generated proposal for
-    # the exact novelty gate. Screening alone imposes the candidate cap.
-    for item in [*core_proposals, *framework_proposals, *lineage_proposals,
-                 *basin_proposals, *fallback_proposals]:
-        if item["sequence"] not in emitted:
-            proposals.append(item)
-            emitted.add(item["sequence"])
+    # the exact novelty gate unless this cycle has an explicit proposal budget.
+    _append_proposal_tail(
+        proposals, [*core_proposals, *framework_proposals, *lineage_proposals,
+                    *basin_proposals, *fallback_proposals],
+        limit=args.proposal_limit if getattr(args, "bounded_generation", False) else None,
+    )
     output = pd.DataFrame(proposals) if proposals else pd.DataFrame(columns=["sequence"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(args.output, index=False)

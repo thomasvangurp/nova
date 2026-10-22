@@ -233,3 +233,72 @@ CREATE TABLE IF NOT EXISTS replication_quarantine (
 -- proposal_scores has 0 rows and no reader or writer at HEAD. Their
 -- replicated_at columns are unused. They are still covered by the off-box file
 -- snapshot (tools/pull_local_sqlite_backup.sh), which copies the whole file.
+
+-- ---------------------------------------------------------------------------
+-- Fix 2 (2026-10-15): incremental per-(sequence, target, metric) aggregate.
+--
+-- rank_exact._historical_observations used to re-run the four-way join and
+-- json.loads ~1.04M sealed local_exact_raw folds on every ranking cycle (~8 min
+-- before the pool even forked).  This table holds SUM / SUM_SQ / COUNT per
+-- (sequence, target, metric) over exactly the folds the old full-pool read
+-- kept, maintained by mutation_network.record_exact_run in the same
+-- transaction that rewrites exact_run_observations.  It is a derived cache of
+-- already-replicated rows (observations + exact_runs), so it is NOT replicated
+-- to Hetzner -- like edges/mutation_effects above.
+--
+-- exact_observation_meta holds the aggregate's freshness watermark:
+--   change_counter     monotonic, bumped on every record_exact_run write;
+--   source_max_rowid   MAX(exact_run_observations.rowid) the aggregate was
+--                      last rebuilt/updated against.  A reader compares this
+--                      against the live MAX(rowid) to detect a stale aggregate
+--                      and fall back to the full-pool read.
+CREATE TABLE IF NOT EXISTS exact_observation_aggregate (
+  target TEXT NOT NULL,
+  sequence TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  sum_value REAL NOT NULL,
+  sum_sq REAL NOT NULL,
+  count_value INTEGER NOT NULL,
+  PRIMARY KEY (target, sequence, metric)
+);
+CREATE INDEX IF NOT EXISTS idx_exact_obs_agg_target ON exact_observation_aggregate(target);
+
+CREATE TABLE IF NOT EXISTS exact_observation_meta (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+
+
+-- Correcting an already sealed raw observation invalidates derived statistics.
+CREATE TRIGGER IF NOT EXISTS exact_aggregate_raw_update
+AFTER UPDATE OF metrics_json, node_id, source ON observations
+WHEN (OLD.source='local_exact_raw' OR NEW.source='local_exact_raw')
+ AND (OLD.metrics_json IS NOT NEW.metrics_json OR OLD.node_id IS NOT NEW.node_id OR OLD.source IS NOT NEW.source)
+ AND EXISTS (SELECT 1 FROM exact_run_observations x WHERE x.observation_id=OLD.observation_id)
+BEGIN
+ INSERT INTO exact_observation_meta(key,value) VALUES('valid',0)
+ ON CONFLICT(key) DO UPDATE SET value=0;
+ INSERT INTO exact_observation_meta(key,value) VALUES('change_counter',1)
+ ON CONFLICT(key) DO UPDATE SET value=value+1;
+END;
+CREATE TRIGGER IF NOT EXISTS exact_aggregate_raw_delete
+AFTER DELETE ON observations
+WHEN OLD.source='local_exact_raw'
+ AND EXISTS (SELECT 1 FROM exact_run_observations x WHERE x.observation_id=OLD.observation_id)
+BEGIN
+ INSERT INTO exact_observation_meta(key,value) VALUES('valid',0)
+ ON CONFLICT(key) DO UPDATE SET value=0;
+ INSERT INTO exact_observation_meta(key,value) VALUES('change_counter',1)
+ ON CONFLICT(key) DO UPDATE SET value=value+1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS exact_aggregate_raw_insert
+AFTER INSERT ON observations
+WHEN NEW.source='local_exact_raw'
+ AND EXISTS (SELECT 1 FROM exact_run_observations x WHERE x.observation_id=NEW.observation_id)
+BEGIN
+ INSERT INTO exact_observation_meta(key,value) VALUES('valid',0)
+ ON CONFLICT(key) DO UPDATE SET value=0;
+ INSERT INTO exact_observation_meta(key,value) VALUES('change_counter',1)
+ ON CONFLICT(key) DO UPDATE SET value=value+1;
+END;

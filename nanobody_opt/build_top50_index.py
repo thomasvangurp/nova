@@ -242,9 +242,14 @@ def main() -> int:
     # HF archive: the full-history rank_binders set is ~30 edits from the live
     # field and proved a bad selection reference. Use our stable 20x replay read.
 
+    # The CDR3 clonotype index must match what the validator's
+    # entry_unique_for_protein_hf / is_duplicate indexes: the HF archive's own
+    # rank-50 (hf_sequences), NOT our producer replay parents + fillers
+    # (`sequences`). Otherwise the blocked clonotypes (VFLGAHPCPLE/VFLGSHPCPLE)
+    # can be absent from `cdr3s` and the clonotype floor under-gates.
     cdr3s: list[str] = []
     missed = 0
-    for seq in sequences:
+    for seq in hf_sequences:
         try:
             cdrs = extract_cdrs(seq)
         except Exception:

@@ -110,7 +110,7 @@ class TimingModel:
     #: handful; pooling them fits a line through two unrelated regimes. On
     #: live records that pooling pushed gpu_seconds_per_candidate from 5.5 to
     #: 16.0 and throttled the shortlist to 20.
-    CONFIRMATION_PHASES = ("replication_round",)
+    CONFIRMATION_PHASES = ("replication_round", "replication_round_shared")
 
     def fit_from_measurements(self, records: list[dict], gpus: int, *,
                               window: int = 80, quantile: float = 0.90,

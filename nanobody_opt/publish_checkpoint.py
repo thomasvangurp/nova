@@ -366,62 +366,75 @@ def main() -> None:
                 f"requested sequence is not in {args.rankings}; a uid may only "
                 "publish a candidate that passed this epoch's qualification"
             )
-        winner = matches[0]
-    sequence = str(winner["sequence"]).strip().upper()
-    try:
-        validator = (
-            validate_provisional_exact_evidence
-            if args.provisional
-            else validate_exact_robustness
-        )
-        observation_count, competitive_rate, observation_rate = validator(winner)
-    except ValueError as error:
-        raise SystemExit(str(error)) from error
-    if gates.check_sequence(sequence, requirements):
-        raise SystemExit("winner fails current Layer-1 sequence gates")
-    if sequence not in _layer2_passes(args.layer2):
-        raise SystemExit("winner lacks a current Layer-2 pass")
+        candidates = matches  # a specific uid may only publish its own sequence
 
     archive = pd.read_csv(args.archive).drop_duplicates("sequence", keep="first")
     archive_sequences = set(archive.sequence.astype(str).str.strip().str.upper())
-    if sequence in archive_sequences:
-        raise SystemExit("winner is already present in the current archive")
-    # Validator duplicate gate (2026-10-19): the old cheap k-mer Jaccard gate
-    # here missed the validator's CDR3-clonotype (>= 0.85) and 2-6-edit
-    # near-identity rules, so near-duplicates passed this checkpoint and then
-    # scored zero on-chain (4 of 9 UIDs at 25812). Re-run the SAME Algorithm-2
-    # is_duplicate gate the generation pipeline uses (check_validator_novelty)
-    # so the publish filter matches the validator's is_duplicate instead of the
-    # looser k-mer Jaccard gate.
-    with tempfile.TemporaryDirectory() as td:
-        inp = Path(td) / "novelty_input.json"
-        out = Path(td) / "novelty_output.json"
-        inp.write_text(json.dumps({"sequences": [sequence]}))
-        subprocess.run(
-            [
-                "/usr/local/bin/pixi", "run",
-                "--manifest-path", "/root/pixi.toml",
-                "--locked", "--environment", "metanano",
-                "python", "-m", "nanobody_opt.check_validator_novelty",
-                "--archive", str(args.archive),
-                "--target", args.target,
-                "--input", str(inp),
-                "--output", str(out),
-                "--summary-only",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        novel = json.loads(out.read_text())
-    if sequence not in novel.get("sequences", []):
-        raise SystemExit(
-            "winner fails the validator duplicate gate (is_duplicate): "
-            "too similar to a top sequence"
-        )
 
-    metrics = {name: float(winner["metrics"][name]) for name in METRICS}
-    if not all(math.isfinite(value) for value in metrics.values()):
-        raise SystemExit("winner contains non-finite exact metrics")
+    # Pick the first candidate, in rank order, that clears every gate. The old
+    # behaviour aborted the whole publish on a duplicate winner (already in the
+    # archive or failing is_duplicate); now we degrade to the next-ranked
+    # candidate instead of losing the epoch.
+    chosen = None
+    chosen_sequence = None
+    observation_count = competitive_rate = observation_rate = 0
+    for candidate in candidates:
+        seq = str(candidate.get("sequence", "")).strip().upper()
+        try:
+            validator = (
+                validate_provisional_exact_evidence
+                if args.provisional
+                else validate_exact_robustness
+            )
+            observation_count, competitive_rate, observation_rate = validator(candidate)
+        except ValueError as error:
+            print(f"PUBLISH_SKIP {seq[:16]}: exact evidence: {error}", flush=True)
+            continue
+        if gates.check_sequence(seq, requirements):
+            print(f"PUBLISH_SKIP {seq[:16]}: Layer-1 sequence gates", flush=True)
+            continue
+        if seq not in _layer2_passes(args.layer2):
+            print(f"PUBLISH_SKIP {seq[:16]}: lacks a current Layer-2 pass", flush=True)
+            continue
+        if seq in archive_sequences:
+            print(f"PUBLISH_SKIP {seq[:16]}: already in the current archive", flush=True)
+            continue
+        # Validator duplicate gate (is_duplicate), re-run for each candidate.
+        with tempfile.TemporaryDirectory() as td:
+            inp = Path(td) / "novelty_input.json"
+            out = Path(td) / "novelty_output.json"
+            inp.write_text(json.dumps({"sequences": [seq]}))
+            subprocess.run(
+                [
+                    "/usr/local/bin/pixi", "run",
+                    "--manifest-path", "/root/pixi.toml",
+                    "--locked", "--environment", "metanano",
+                    "python", "-m", "nanobody_opt.check_validator_novelty",
+                    "--archive", str(args.archive),
+                    "--target", args.target,
+                    "--input", str(inp),
+                    "--output", str(out),
+                    "--summary-only",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            novel = json.loads(out.read_text())
+        if seq not in novel.get("sequences", []):
+            print(f"PUBLISH_SKIP {seq[:16]}: fails is_duplicate", flush=True)
+            continue
+        metrics = {name: float(candidate["metrics"][name]) for name in METRICS}
+        if not all(math.isfinite(value) for value in metrics.values()):
+            print(f"PUBLISH_SKIP {seq[:16]}: non-finite exact metrics", flush=True)
+            continue
+        chosen = candidate
+        chosen_sequence = seq
+        break
+
+    if chosen is None:
+        raise SystemExit("no candidate passed the publication gates")
+    winner = chosen
+    sequence = chosen_sequence
     selection_method, selection_score = selection_identity(
         winner, ranking, provisional=args.provisional
     )

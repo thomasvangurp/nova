@@ -127,3 +127,92 @@ def shrunk_metrics(
             result[key][metric] = shrink(
                 statistics.mean(values), len(values), mu, within, between)
     return result
+
+
+def _mean(values: list[float]) -> float:
+    """Arithmetic mean of a candidate's folds (sum/count).
+
+    ``shrunk_metrics`` feeds each candidate's fold values through
+    ``statistics.mean`` (a compensated sum).  The incremental aggregate (Fix 2)
+    stores (sum, sum_sq, count) instead of the folds themselves, so the mean is
+    ``sum / count``.  The two differ by at most a few ulps and never change the
+    shrinkage decision or the ranking order (which does not read the shrunk
+    means); SUM/SUM_SQ/COUNT is lossless for mean and variance in exact
+    arithmetic, which is the invariant the aggregate is built on.
+    """
+    return sum(values) / len(values)
+
+
+def _variance_components_from_stats(
+    groups: list[tuple[float, int, float]],
+) -> tuple[float, float, float]:
+    """``variance_components`` over (mean, count, sum_of_squared_deviations).
+
+    ``groups`` holds one ``(mean, count, ss)`` per candidate, where ``ss`` is
+    ``sum((x - mean)**2)`` computed as ``sum_sq - mean * sum`` from the
+    aggregate.  Mirrors :func:`variance_components` exactly: same usable /
+    replicated split, same minimum-replicated guard, same method-of-moments
+    between-variance recovery.
+    """
+    means = [group[0] for group in groups]
+    mu = sum(means) / len(means)
+
+    replicated = [group for group in groups if group[1] >= 2]
+    if len(replicated) < MINIMUM_REPLICATED:
+        # No usable estimate of fold noise: report zero within-variance, which
+        # makes the shrinkage factor 1 and leaves every estimate untouched.
+        if len(means) > 1:
+            observed = sum((value - mu) ** 2 for value in means) / len(means)
+        else:
+            observed = 0.0
+        return mu, 0.0, observed
+
+    ss = sum(group[2] for group in replicated)
+    df = sum(group[1] - 1 for group in replicated)
+    within = ss / df if df else 0.0
+
+    observed = sum((value - mu) ** 2 for value in means) / len(means)
+    harmonic_k = len(groups) / sum(1.0 / group[1] for group in groups)
+    between = observed - within / harmonic_k
+    return mu, within, max(between, 0.0)
+
+
+def shrunk_metrics_from_stats(
+    stats: dict[str, dict[str, tuple[float, float, int]]],
+    metrics: tuple[str, ...],
+) -> dict[str, dict[str, float]]:
+    """Shrink every metric of every candidate from the incremental aggregate.
+
+    ``stats`` maps a candidate key to ``{metric: (sum, sum_sq, count)}`` -- the
+    numeric aggregate maintained incrementally by the importer (Fix 2), read
+    instead of re-reading and ``json.loads``-ing every historical fold.  This
+    reproduces :func:`shrunk_metrics` from those aggregates: the per-candidate
+    mean, count, and the pooled within-variance are all functions of
+    (sum, sum_sq, count), so the estimator (mu, within, between, and the
+    per-key ``shrink`` blend) is unchanged; only the input representation
+    differs.  Values are identical up to floating-point summation order.
+    """
+    result: dict[str, dict[str, float]] = {key: {} for key in stats}
+    for metric in metrics:
+        groups: list[tuple[float, int, float]] = []
+        keys: list[str] = []
+        for key, metric_row in stats.items():
+            entry = metric_row.get(metric)
+            if entry is None:
+                continue
+            total, total_sq, count = entry
+            if count < 1:
+                continue
+            mean = total / count
+            # sum((x - mean)**2) = sum_sq - mean * sum, clamped at zero to
+            # absorb the tiny negative rounding that catastrophic cancellation
+            # can leave behind for near-constant folds.
+            ss = max(total_sq - mean * total, 0.0)
+            groups.append((mean, count, ss))
+            keys.append(key)
+        if len(groups) < 2:
+            continue
+        mu, within, between = _variance_components_from_stats(groups)
+        for key, (mean, count, _ss) in zip(keys, groups):
+            result[key][metric] = shrink(mean, count, mu, within, between)
+    return result

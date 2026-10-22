@@ -1,0 +1,49 @@
+name: SN68 release checks
+
+on:
+  pull_request:
+  push:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shipping:
+    name: Shipping regressions and release package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements/shipping-tests.txt
+      - name: Install CPU regression dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
+          python -m pip install -r requirements/shipping-tests.txt
+      - name: Test and package the committed shipping tree
+        run: python scripts/shipping_checks.py --output "$RUNNER_TEMP/sn68-release"
+      - name: Upload only a passing release
+        uses: actions/upload-artifact@v4
+        with:
+          name: sn68-tested-release
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/sn68-release/sn68-release.tar.gz
+            ${{ runner.temp }}/sn68-release/build_stamp.json
+            ${{ runner.temp }}/sn68-release/regressions.xml
+      - name: Preserve test failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sn68-failed-test-report
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/sn68-release/regressions.xml

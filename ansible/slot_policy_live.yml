@@ -31,11 +31,16 @@
     slot_manager_network: finney
     slot_manager_wallet: mining_ops
     slot_manager_hotkey_prefix: nova68-slot
-    slot_manager_minimum_hotkeys: 12
-    slot_manager_reserve_hotkeys: 1
+    # Value pricing: floor 5, cap 13, each slot between bought only while it is
+    # worth its price.  Keep these in step with slots.yml (a test compares them).
+    slot_manager_minimum_hotkeys: 5
+    slot_manager_maximum_hotkeys: 13
+    slot_manager_win_payout_alpha: 41.6
+    slot_manager_burst_max: 8
+    slot_manager_reserve_hotkeys: 0
     slot_manager_reserve_max_recycle_tao: 0.175
-    slot_manager_max_recycle_tao: 0.20
-    slot_manager_max_spend_tao_per_day: 3.4560
+    slot_manager_max_recycle_tao: 0.25
+    slot_manager_max_spend_tao_per_day: 4.5
     slot_manager_lookback_blocks: 180
     slot_manager_credential_source: auto
     slot_manager_exec: >-
@@ -57,6 +62,10 @@
       --convert-target-tao 1.0
       --convert-slippage 0.005
       --max-convert-alpha-per-day 250
+      --value-pricing
+      --maximum-hotkeys {{ slot_manager_maximum_hotkeys }}
+      --win-payout-alpha {{ slot_manager_win_payout_alpha }}
+      --burst-max {{ slot_manager_burst_max }}
       --interval 0 --execute-registrations
 
   tasks:
@@ -126,6 +135,8 @@
         slot_manager_help.rc != 0
         or '--reserve-hotkeys' not in slot_manager_help.stdout
         or '--reserve-max-recycle-tao' not in slot_manager_help.stdout
+        or '--value-pricing' not in slot_manager_help.stdout
+        or '--burst-max' not in slot_manager_help.stdout
 
     - name: Verify the chain stack in the locked Pixi environment
       ansible.builtin.command:
@@ -185,7 +196,8 @@
             keep = ('time','epoch','block','registered','target','reserve_slots',
             'maximum_registered','reserve_max_recycle_tao','recycle_tao',
             'executed','dry_run','reason','spent_tao_last_day',
-            'max_spend_tao_per_day');
+            'max_spend_tao_per_day','value_pricing','max_recycle_tao',
+            'slot_life_epochs','slot_value_cap_tao','win_value_tao');
             print(json.dumps({k:r.get(k) for k in keep}, sort_keys=True))
       register: slot_manager_last_decision
       changed_when: false
@@ -194,14 +206,15 @@
       ansible.builtin.assert:
         that:
           - (slot_manager_last_decision.stdout | from_json).dry_run == false
-          - (slot_manager_last_decision.stdout | from_json).target == 12
-          - (slot_manager_last_decision.stdout | from_json).reserve_slots == 1
-          - (slot_manager_last_decision.stdout | from_json).maximum_registered == 13
-          - (slot_manager_last_decision.stdout | from_json).reserve_max_recycle_tao == 0.175
-          - (slot_manager_last_decision.stdout | from_json).max_spend_tao_per_day == 3.456
+          - (slot_manager_last_decision.stdout | from_json).target == slot_manager_minimum_hotkeys | int
+          - (slot_manager_last_decision.stdout | from_json).maximum_registered == slot_manager_maximum_hotkeys | int
+          - (slot_manager_last_decision.stdout | from_json).value_pricing == true
+          - (slot_manager_last_decision.stdout | from_json).max_recycle_tao == slot_manager_max_recycle_tao | float
+          - (slot_manager_last_decision.stdout | from_json).reserve_max_recycle_tao == slot_manager_reserve_max_recycle_tao | float
+          - (slot_manager_last_decision.stdout | from_json).max_spend_tao_per_day == slot_manager_max_spend_tao_per_day | float
         fail_msg: >-
           The immediate unit run did not append a decision carrying the live
-          one-slot reserve policy; inspect the unit before allowing another tick.
+          value-pricing policy; inspect the unit before allowing another tick.
         success_msg: "{{ slot_manager_last_decision.stdout }}"
 
     - name: Confirm the timer is active, enabled, and scheduled

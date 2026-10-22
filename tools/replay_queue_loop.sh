@@ -9,6 +9,10 @@ LOG=/root/artifacts/replay_queue_loop.log
 PY=/root/.pixi/envs/bgen/bin/python
 echo "$(date -Is) replay_queue_loop starting" >> "$LOG"
 while true; do
+  if ! $PY /root/tools/live_submission_priority.py; then
+    sleep 20
+    continue
+  fi
   if ! $PY /root/tools/rival_coverage_pending.py >> "$LOG" 2>&1; then
     sleep 120
     continue

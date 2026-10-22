@@ -44,45 +44,10 @@ QUALITY_GATES: dict[str, str] = {
     "--maximum-p90-developability-rank-sum": "30",
 }
 
-# Evidence requirements.  The floor is ONE, and raising it is a trap.
-#
-# It looks like it should be higher.  Our screen's agreement with the validator
-# rises sharply with the number of observations a sequence has (measured
-# Spearman -0.184 at one, +0.230 at two to three, +0.240 at four or more), and
-# replaying past epochs with independent repeat screens says averaging them is
-# worth several rank points.  Both of those are real.  Neither licenses a floor
-# above one, because of what an "observation" actually is here.
-#
-# Measured on the live score bank: a sequence's observation count equals the
-# number of distinct epochs it appears in, exactly, at every depth -- 1115
-# sequences at depth 1 spanning a mean of 1.00 epochs, 202 at depth 5 spanning
-# 5.00, and so on.  The producer screens each candidate once per epoch and never
-# repeats one within an epoch, so depth is not replication.  It is age.
-#
-# A floor above one is therefore a survivorship filter, not an evidence filter.
-# Every one of the 200 candidates our generator produced in epoch 25134 had
-# depth 1; a floor of four would have excluded all of them and restricted
-# selection to molecules carried over from four or more previous epochs.  That
-# also explains the correlation above: depth is confounded with having survived,
-# so the rise in Spearman cannot be read as replication buying accuracy.
-#
-# Averaging whatever observations a sequence does have is still right, and
-# ranking already does it -- those are genuine repeat draws of a fixed sequence.
-# The change that would actually buy the replay's benefit is in the PRODUCER:
-# screen each candidate k times within one epoch.  Until that exists, this stays
-# at one.
-#
-# 2026-09-28: it exists and the floor is now eight.  The producer's confirmation
-# stage repeat-scores its 96 finalists up to 12 times within the epoch, and it
-# now finishes (--reserve-blocks 120) before the Pi commits, which the Pi holds
-# until just before its safe deadline.  A fresh candidate therefore reaches eight
-# observations in its first epoch, so the floor is an evidence filter again, not
-# a survivorship filter.  Measured on real validator outcomes, epochs
-# 25335-25394: our committed tickets with 1-5 observations made the top 10 at
-# 12.3% (399 tickets, 53% of the fleet) against ~20% at 6-40 observations.
-# Eight matches the producer's own --minimum-publishable-observations.
+# Publication requires twenty independent raw folds. The screen itself uses
+# a one-fold floor; only confirmed candidates may enter the submission pool.
 EVIDENCE_GATES: dict[str, str] = {
-    "--minimum-observations": "8",
+    "--minimum-observations": "20",
     "--minimum-structure-observations": "1",
 }
 

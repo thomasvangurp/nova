@@ -1,0 +1,22 @@
+---
+- name: Verify installed runtime bytes before service activation
+  ansible.builtin.command:
+    argv:
+      - python3
+      - /root/scripts/release_manifest.py
+      - verify
+      - --root
+      - /root
+      - --manifest
+      - "{{ sn68_release_root }}/build_stamp.json"
+      - --expected-sha
+      - "{{ sn68_tested_sha }}"
+      - --runtime-only
+  changed_when: false
+
+- name: Record the verified running-tree release manifest
+  ansible.builtin.copy:
+    src: "{{ sn68_release_root }}/build_stamp.json"
+    dest: /root/build_stamp.json
+    remote_src: true
+    mode: "0644"

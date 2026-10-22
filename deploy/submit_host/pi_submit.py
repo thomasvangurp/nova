@@ -39,6 +39,17 @@ sys.path.insert(0, str(HERE / "utils"))
 
 NULL = "~"
 
+#: A nanobody artifact more than this many epochs old is guaranteed to already
+#: be in the validator's HF submission archive; recommitting it just re-earns
+#: the "not unique for target" rejection. Bound the age so a producer outage
+#: cannot silently recommit the same pool forever.
+STALE_AGE_LIMIT = 3
+
+#: A writer stamps ``updated_at_unix`` when it writes the artifact. A missing,
+#: non-finite, or very old stamp is stale evidence regardless of the epoch
+#: override. Generous enough for two-host clock skew, far tighter than a day.
+MAX_ARTIFACT_AGE_SECONDS = 3600
+
 
 def producer_endpoints(instance: dict) -> list[tuple[str, str, int]]:
     """Direct SSH first, provider proxy second, with no written-down address."""
@@ -144,9 +155,31 @@ def sequences_by_uid(artifact: dict, epoch: int,
     one than nothing.
     """
     stale = int(artifact.get("epoch", -1)) != epoch
+    artifact_epoch = int(artifact.get("epoch", -1))
+    # Freshness (bug 4, format-robust): prefer the writer's updated_at_unix
+    # stamp, but a producer that does not stamp it must NOT hard-fail the
+    # commit. A missing/non-finite stamp falls back to the always-present
+    # epoch field, and only a genuinely stale epoch (age > STALE_AGE_LIMIT)
+    # is rejected. A VALID-but-out-of-window stamp is still rejected.
+    updated = artifact.get("updated_at_unix")
+    stamp_is_valid = (
+        isinstance(updated, (int, float))
+        and not isinstance(updated, bool)
+        and updated == updated
+    )
+    if stamp_is_valid and abs(time.time() - updated) > MAX_ARTIFACT_AGE_SECONDS:
+        raise ValueError("nanobody artifact updated_at_unix is stale")
     if stale and not allow_stale:
-        raise SystemExit(
+        raise ValueError(
             f"nanobody artifact is for epoch {artifact.get('epoch')}, not {epoch}")
+    if stale and artifact_epoch >= 0 and epoch - artifact_epoch > STALE_AGE_LIMIT:
+        # A producer outage must never silently recommit the same pool forever:
+        # an artifact this old is guaranteed to already be in the HF archive,
+        # so recommitting it just re-earns the "not unique" rejection.
+        raise ValueError(
+            f"nanobody artifact is {epoch - artifact_epoch} epochs stale "
+            f"(epoch {artifact_epoch}, limit {STALE_AGE_LIMIT}); refusing to "
+            "recommit a duplicate")
     if stale:
         print(json.dumps(dict(event="stale_nanobody", have=artifact.get("epoch"),
                               want=epoch)), flush=True)
@@ -159,12 +192,19 @@ def sequences_by_uid(artifact: dict, epoch: int,
     # producer's last chain snapshot.  Keep accepting the old per-uid shape so
     # a rolling deploy remains safe, but treat every distinct sequence in it as
     # a pool entry too.
-    for item in artifact.get("sequence_pool") or []:
-        sequence = str(
-            item.get("sequence") if isinstance(item, dict) else item
-        ).strip().upper()
+    sequence_pool = artifact.get("sequence_pool")
+    for item in sequence_pool or []:
+        raw = item.get("sequence") if isinstance(item, dict) else item
+        if raw is None:
+            continue
+        sequence = str(raw).strip().upper()
         if sequence and sequence not in pool:
             pool.append(sequence)
+    # Bug 10: an explicit-but-empty pool is no evidence the artifact can fill
+    # a freshly acquired uid. Legacy artifacts (no sequence_pool key) still
+    # fall back to their per-uid submissions below.
+    if sequence_pool is not None and not pool:
+        raise ValueError("nanobody artifact has no usable sequence pool")
     for entry in artifact.get("submissions") or []:
         sequence = str(entry.get("sequence") or "").strip().upper()
         if sequence:
@@ -220,6 +260,48 @@ def _identity(left: str, right: str) -> float:
     return sum(1 for a, b in zip(left, right) if a == b) / max(len(left), len(right))
 
 
+def commit_time_rules():
+    """(validator_rules module, thresholds), or None when the checker cannot run.
+
+    The last gate before an irreversible on-chain commit. One molecule that
+    breaks a validator rule voids the uid's whole portfolio (epoch 25695:
+    h-bond acceptors = 11, limit 10), and the fleet file may have been built
+    hours earlier by older code, so every uid's molecules are re-checked here
+    against the pinned upstream rules (tools/validator_rules.py). No network:
+    the live-config comparison already ran in bank_release. None means "ship NO
+    molecules" -- callers skip the compound half; the nanobody still commits.
+    """
+    try:
+        tools = str(HERE / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        import validator_rules
+        thresholds, _info = validator_rules.load_thresholds(live=False)
+        return validator_rules, thresholds
+    except Exception as error:
+        print(json.dumps(dict(event="molecule_rules_unavailable",
+                              err=f"{type(error).__name__}: {error}"[:200],
+                              action="no molecules committed")), flush=True)
+        return None
+
+
+def refuse_invalid_molecules(entry: dict, reaction, rules, label: str = "fleet") -> bool:
+    """True when every molecule of this uid's submission passes (False -> do not commit it)."""
+    if rules is None:
+        return False
+    module, thresholds = rules
+    try:
+        problems = module.check_submission(entry.get("molecules") or [], reaction, thresholds)
+    except Exception as error:     # a check that raises is a failed check
+        problems = [(None, "checker_error", f"{type(error).__name__}: {error}")]
+    if problems:
+        print(json.dumps(dict(event="molecules_refused", source=label, uid=int(entry["uid"]),
+                              reaction=reaction, problem_count=len(problems),
+                              first=[[n, r, str(d)[:90]] for n, r, d in problems[:3]])), flush=True)
+        return False
+    return True
+
+
 def molecules_by_uid(artifact, epoch: int, reaction: int) -> dict[int, str]:
     """The compound half, already bound to uids by the fleet allocator.
 
@@ -241,11 +323,53 @@ def molecules_by_uid(artifact, epoch: int, reaction: int) -> dict[int, str]:
                               have=artifact.get("reaction"), want=reaction)), flush=True)
         return {}
     out = {}
+    rules = None
     for entry in artifact.get("submissions") or []:
         names = [str(m["name"]) for m in entry.get("molecules") or []]
-        if names:
+        if not names:
+            continue
+        if rules is None:
+            rules = commit_time_rules() or False
+        # A uid whose molecules fail any validator rule gets none: committing an
+        # invalid set loses the whole portfolio anyway, and burns the molecules.
+        if refuse_invalid_molecules(entry, reaction, rules or None):
             out[int(entry["uid"])] = ",".join(names)
     return out
+
+
+def add_hedge(molecules: dict, hedge_path: Path, epoch: int, crew) -> dict:
+    """Optional second bet on a DIFFERENT reaction, carried by spare uids.
+
+    During the SANQI transition the validators' reaction rule (draw mod 5 vs mod 44) is decided by the code and
+    database they run when they score, which we cannot see in advance. ``release/hedge_fleet.json`` (same schema
+    as compound_fleet.json, built for the other rule's reaction) puts that bet on uids that carry no molecules.
+    A wrong-reaction uid just scores nothing on the compound track (like molecules:false); its nanobody is
+    unaffected. Never overrides a uid that already has molecules, only uids that are in the crew, only this epoch.
+    """
+    if not hedge_path.is_file():
+        return molecules
+    try:
+        artifact = _load(hedge_path)
+        if int(artifact.get("epoch", -1)) != epoch:
+            print(json.dumps(dict(event="hedge_ignored", why="epoch", have=artifact.get("epoch"), want=epoch)), flush=True)
+            return molecules
+        crew_uids = {int(u) for u, _ in crew}
+        added = []
+        rules = commit_time_rules() or None
+        for entry in artifact.get("submissions") or []:
+            uid = int(entry["uid"])
+            names = [str(m["name"]) for m in entry.get("molecules") or []]
+            if names and uid in crew_uids and uid not in molecules:
+                # The hedge is a deliberate bet on ANOTHER reaction, so its names are checked
+                # against the hedge's own declared reaction, and every property rule still applies.
+                if not refuse_invalid_molecules(entry, int(artifact.get("reaction", -1)), rules, "hedge"):
+                    continue
+                molecules[uid] = ",".join(names)
+                added.append(uid)
+        print(json.dumps(dict(event="hedge_added", reaction=artifact.get("reaction"), uids=added)), flush=True)
+    except Exception as error:                      # a bad hedge file must never cost the epoch
+        print(json.dumps(dict(event="hedge_error", err=f"{type(error).__name__}: {error}"[:160])), flush=True)
+    return molecules
 
 
 def commit_batch(rows, arguments, environment) -> tuple[int, int, list]:
@@ -280,14 +404,18 @@ def commit_batch(rows, arguments, environment) -> tuple[int, int, list]:
     # Resolve and verify BEFORE encrypting anything: uids are recycled, and
     # committing for a uid another operator now holds signs their slot.
     live = []
+    stale_uids = []
     for row in rows:
         name = addresses.get(row["hotkey"], row["hotkey"])
         if on_chain.get(int(row["uid"])) != row["hotkey"]:
             print(json.dumps(dict(event="stale", uid=row["uid"])), flush=True)
+            stale_uids.append(row["uid"])
             continue
         live.append(dict(row, name=name))
     if not live:
-        return 0, 0, []
+        # Zero verified commits from a nonempty intended fleet: report the
+        # stale uids so the caller can fail loudly rather than read success.
+        return 0, 0, stale_uids
 
     block = subtensor.get_current_block()
     timelock = QuicknetBittensorDrandTimelock()
@@ -440,7 +568,7 @@ def main(argv=None) -> int:
                         help="commit even if the producer has not refreshed for "
                              "this epoch. Only for the last safe block: prefer "
                              "fresh, but never commit nothing")
-    parser.add_argument("--reaction", type=int, required=True, choices=[1, 2, 3, 4, 5])
+    parser.add_argument("--reaction", type=int, required=True, choices=list(range(1, 45)))
     parser.add_argument("--crew", default=str(HERE / "crew.json"))
     parser.add_argument("--nanobody", default=str(HERE / "nanobody_result.json"))
     # The producer is resolved by LABEL at run time, never by a written-down
@@ -503,6 +631,7 @@ def main(argv=None) -> int:
     molecules = molecules_by_uid(
         _load(fleet_path) if fleet_path.is_file() else None,
         arguments.epoch, arguments.reaction)
+    molecules = add_hedge(molecules, fleet_path.parent / "hedge_fleet.json", arguments.epoch, crew)
 
     fleet_artifact = _load(fleet_path) if fleet_path.is_file() else None
     value = {}
@@ -565,7 +694,22 @@ def main(argv=None) -> int:
         print(json.dumps(dict(event="done", committed=committed, failed=failures,
                               dropped_to_blackout=len(dropped),
                               dropped_uids=dropped)), flush=True)
-        return 1 if failures else 0
+        if not failures or arguments.rehearse:
+            if not arguments.rehearse and committed == 0 and rows:
+                # Zero verified commits from a nonempty intended fleet must not
+                # read as success: "COMMIT_OK" has to mean something actually
+                # landed on-chain for the validator to read.
+                print(json.dumps(dict(event="zero_commits",
+                                      intended=len(rows), committed=0)), flush=True)
+                return 2
+            return 1 if failures else 0
+        # The parallel batch push failed (e.g. a racing push on the shared
+        # submissions repo). Fall back to the serial per-uid path below so the
+        # nanobody sequences still commit instead of the whole fleet scoring 0.
+        # The serial path re-runs every uid; the chain refuses re-commits of
+        # already-landed uids harmlessly.
+        print(json.dumps(dict(event="parallel_fallback", committed=committed,
+                              failed=failures)), flush=True)
 
     failures = 0
     dropped = []
@@ -619,9 +763,14 @@ def main(argv=None) -> int:
     # accepted. Reporting len(rows) here is how 25242 got recorded as ten
     # clean commits when most of the tail had already fallen past the cutoff.
     attempted = len(rows) - len(dropped)
-    print(json.dumps(dict(event="done", committed=attempted - failures,
+    committed = attempted - failures
+    print(json.dumps(dict(event="done", committed=committed,
                           failed=failures, dropped_to_blackout=len(dropped),
                           dropped_uids=dropped)), flush=True)
+    if committed == 0 and rows:
+        print(json.dumps(dict(event="zero_commits",
+                              intended=len(rows), committed=0)), flush=True)
+        return 2
     return 1 if failures else 0
 
 

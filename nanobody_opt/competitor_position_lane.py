@@ -80,11 +80,42 @@ def position_restricted_candidates(
     return candidates
 
 
+def _parent_cdr3_in_top50_basin(parent: str, top50_cdr3s: list[str] | None) -> bool:
+    """True when a parent's CDR3 clonotype sits at >= 0.85 positional identity
+    to an archived top-50 clonotype. Fail-closed: a missing index or an
+    unannotatable parent is treated as in-basin (excluded)."""
+    if top50_cdr3s is None:
+        # Gate not requested (pure-generation caller): do not exclude. The
+        # producer always supplies the index, and its upstream competitor_lane
+        # filter fails closed when the index is unavailable.
+        return False
+    if not top50_cdr3s:
+        # Index requested but empty/unparseable: fail-closed (treat as in-basin).
+        return True
+    from nanobody_opt.regions import find_regions
+    try:
+        regions = find_regions(parent)
+    except Exception:
+        return True
+    cdr3 = parent[regions.cdr3[0]:regions.cdr3[1]]
+    if not cdr3:
+        return True
+    length = len(cdr3)
+    for other in top50_cdr3s:
+        if not other:
+            continue
+        shared = sum(1 for a, b in zip(cdr3, other) if a == b)
+        if shared / max(length, len(other)) >= 0.85:
+            return True
+    return False
+
+
 def competitor_position_candidates(
     parents: list[str],
     *,
     allowed: list[list[str]],
     positions: list[int],
+    top50_cdr3s: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Apply ``position_restricted_candidates`` across every supplied parent.
 
@@ -92,9 +123,17 @@ def competitor_position_candidates(
     rank/basin-filtered elite bank -- see module docstring for why). Returns
     ``{candidate_sequence: {"parent": ..., "position": ...}}``, first-parent-wins
     on a collision so the result stays small and deterministic.
+
+    ``top50_cdr3s`` (optional) gates parents whose CDR3 clonotype matches an
+    archived top-50 clonotype: a framework single-edit preserves the parent CDR3,
+    so such a parent can only seed doomed children. ``None`` leaves the gate
+    inactive for pure-generation callers; the producer always supplies the real
+    index and fails closed upstream (competitor_lane) when it is unavailable.
     """
     results: dict[str, dict[str, Any]] = {}
     for parent in parents:
+        if _parent_cdr3_in_top50_basin(parent, top50_cdr3s):
+            continue
         for candidate, position in position_restricted_candidates(
             parent, allowed=allowed, positions=positions
         ).items():

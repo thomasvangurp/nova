@@ -13,6 +13,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import csv
 import hashlib
 import json
+import tempfile
+
+#: Bump when the TNP tool or CDR annotation changes; invalidates the
+#: developability cache so a stale profile can't bypass the hoisted gate.
+DEVELOPABILITY_CACHE_VERSION = "tnp-2026-07-redregion-v1"
 import multiprocessing as mp
 from pathlib import Path
 from typing import Any
@@ -124,6 +129,20 @@ def _cached_igblast(
 
 
 async def _developability(sequences: list[str], concurrency: int) -> list[dict[str, Any]]:
+    # Fast path: a persistent TNP daemon loads NanoBodyBuilder2 once and runs
+    # the same n_threads=1 TNP pipeline (ANARCI -> predict -> OpenMM refine ->
+    # compactness -> PSH/PPC/PNC -> six flags) over a parallel worker pool,
+    # instead of a subprocess per sequence (TNP -> NanoBodyBuilder2) that re-imports
+    # torch/ImmuneBuilder/openmm and re-reads 700 MB of weights off disk each time.
+    import nanobody_opt.tnp_daemon as tnp_daemon
+    if tnp_daemon.ENABLED:
+        try:
+            if tnp_daemon.available():
+                return await asyncio.to_thread(tnp_daemon.profile_batch, sequences)
+        except Exception as error:  # fall back to the subprocess path, as today
+            print("TNP_DAEMON_FALLBACK error=%s: %s"
+                  % (type(error).__name__, error), flush=True)
+
     from metanano.config import Config
     from metanano.services.async_manager import AsyncServiceManager
     from metanano.services.developability_service import DevelopabilityService
@@ -135,6 +154,14 @@ async def _developability(sequences: list[str], concurrency: int) -> list[dict[s
     # final one or two slow structures finish; a rolling queue starts their
     # replacements as soon as any slot becomes free.
     cfg.async_config.batch_size = max(1, len(sequences))
+    # Raise the default asyncio executor so asyncio.to_thread spawns up to
+    # `concurrency` TNP subprocesses instead of the 32-thread default cap
+    # (which is what collapsed --concurrency 200 to ~32, and GPU-memory
+    # contention with the scorer daemon collapsed it further to ~10).
+    import concurrent.futures
+    asyncio.get_running_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+    )
     manager = AsyncServiceManager(cfg.async_config)
     service = DevelopabilityService(cfg.developability, manager)
     try:
@@ -152,6 +179,17 @@ def _measured_developability(result: Any) -> bool:
     )
 
 
+def _developability_cache_digest(sequence: str) -> str:
+    """Sequence + tool/annotation version key, so a TNP change invalidates cache.
+
+    A sequence-only key would silently reuse a profile measured under an older
+    TNP tool or CDR annotation, defeating the hoisted developability gate.
+    """
+    return hashlib.sha256(
+        (DEVELOPABILITY_CACHE_VERSION + "\n" + sequence).encode("ascii")
+    ).hexdigest()
+
+
 def _cached_developability(
     rows: list[dict[str, Any]], cache_dir: Path, concurrency: int
 ) -> list[dict[str, Any]]:
@@ -160,7 +198,7 @@ def _cached_developability(
     results: list[dict[str, Any] | None] = [None] * len(rows)
     missing: list[int] = []
     for index, row in enumerate(rows):
-        digest = hashlib.sha256(row["sequence"].encode("ascii")).hexdigest()
+        digest = _developability_cache_digest(row["sequence"])
         path = cache_dir / f"{digest}.json"
         try:
             cached = json.loads(path.read_text())
@@ -181,12 +219,25 @@ def _cached_developability(
         wave = asyncio.run(_developability(
             [rows[index]["sequence"] for index in indices], concurrency
         ))
+        pending_writes: list[tuple[str, str]] = []
         for index, result in zip(indices, wave, strict=True):
             results[index] = result
-            digest = hashlib.sha256(rows[index]["sequence"].encode("ascii")).hexdigest()
             if _measured_developability(result):
+                digest = _developability_cache_digest(rows[index]["sequence"])
                 payload = {"sequence": rows[index]["sequence"], "developability": result}
-                (cache_dir / f"{digest}.json").write_text(json.dumps(payload) + "\n")
+                # Flush after this wave, outside the concurrent compute, so a
+                # restart does not discard every previously completed wave.
+                pending_writes.append((digest, json.dumps(payload) + "\n"))
+        for digest, blob in pending_writes:
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", dir=cache_dir, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(blob)
+                temporary.replace(cache_dir / f"{digest}.json")
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         print(f"TNP checkpoint: {min(start + len(indices), len(missing)):,}/"
               f"{len(missing):,} newly measured", flush=True)
 
@@ -305,7 +356,15 @@ def main() -> None:
             f"wrote {args.output}"
         )
         if not survivors:
-            raise SystemExit("no candidate passed IgBLAST")
+            # Degrade instead of aborting the epoch: write the (already empty)
+            # pool and exit cleanly so the producer's next stage sees a marked
+            # empty input rather than a killed subprocess.
+            print(
+                "LAYER2_EMPTY: no candidate passed IgBLAST; "
+                "writing marked-empty pool",
+                flush=True,
+            )
+            return
         return
 
     if survivors:
@@ -339,7 +398,14 @@ def main() -> None:
     args.output.write_text(json.dumps(output, indent=2) + "\n")
     print(f"TNP: {len(passed):,}/{len(survivors):,} pass; wrote {args.output}")
     if not passed:
-        raise SystemExit("no candidate passed Layer-2")
+        # Degrade instead of aborting the epoch: the (already written) pool is
+        # marked-empty, and the downstream race handles empty input gracefully.
+        print(
+            "LAYER2_EMPTY: no candidate passed Layer-2; "
+            "writing marked-empty pool",
+            flush=True,
+        )
+        return
 
 
 if __name__ == "__main__":

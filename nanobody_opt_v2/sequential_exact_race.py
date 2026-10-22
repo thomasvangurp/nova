@@ -22,6 +22,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+#: Must match run_live_producer.GENERATION_POLICY. Bump together on any
+#: generation/developability semantic change; the carry-over skips layer2 files
+#: stamped with an older policy.
+GENERATION_POLICY = "measured-parent-screen-2026-10-22-v2"
+
 from nanobody_opt.mutation_network import (
     ranking_observations,
     update_observation_store,
@@ -115,10 +120,28 @@ def _candidate_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _ordered_candidate_records(items: list) -> list[dict[str, Any]]:
+    def _screen_priority(item: dict[str, Any]):
+        # screen_priority survives the candidates.csv round-trip as a string
+        # (pandas writes ints mixed with NaN as float text, e.g. "1.0"), or ""
+        # for unattributed competitor single-edits; normalize with float so
+        # "1.0"/"1" both order, and a missing/empty/non-finite priority sorts
+        # LAST (NaN/Inf must not out-rank a real priority).
+        raw = item.get("screen_priority")
+        if raw is None or raw == "" or raw == " ":
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(value):
+            return None
+        return value
+
     if items and all(isinstance(item, dict) for item in items):
         items = sorted(items, key=lambda item: (
-            0 if item.get("screen_priority") is not None else 1,
-            int(item.get("screen_priority", 0)),
+            _parent_multipass_priority(item),
+            0 if _screen_priority(item) is not None else 1,
+            _screen_priority(item) if _screen_priority(item) is not None else 0,
             0
             if item.get("proposal_type") == "exhaustive_single_substitution"
             else 1
@@ -140,7 +163,31 @@ def _ordered_candidate_records(items: list) -> list[dict[str, Any]]:
     return records
 
 
-def _already_scored(database: Path | None, target: str) -> dict[str, int]:
+def _exact_history_rows(connection, target, *, sequences=None, metrics=False):
+    """Read only this pool's history using the node index, in bounded batches."""
+    from nanobody_opt import mutation_network
+    p = "?" if mutation_network._is_local(connection) else "%s"
+    wanted = sorted(set(sequences)) if sequences is not None else None
+    batches = [None] if wanted is None else [wanted[i:i + 500] for i in range(0, len(wanted), 500)]
+    rows = []
+    for batch in batches:
+        columns = "o.metrics_json" if metrics else "COUNT(o.observation_id)"
+        # CROSS JOIN keeps SQLite's indexed nodes lookup outside the history
+        # lookup instead of scanning millions of unrelated observation rows.
+        sql = (f"SELECT n.sequence, {columns} FROM nodes n CROSS JOIN observations o "
+               f"WHERE o.node_id = n.id AND n.target = {p} AND o.source IN "
+               "('live_exact_screen', 'local_exact_raw', 'live_exact_repeat') ")
+        params = [target]
+        if batch is not None:
+            sql += "AND n.sequence IN (" + ",".join([p] * len(batch)) + ") "
+            params.extend(batch)
+        sql += ("AND o.metrics_json IS NOT NULL AND o.metrics_json != ''"
+                if metrics else "GROUP BY n.sequence")
+        rows.extend(connection.execute(sql, tuple(params)).fetchall())
+    return rows
+
+
+def _already_scored(database: Path | None, target: str, *, sequences=None) -> dict[str, int]:
     """{sequence: exact observation count} across ALL epochs.
 
     The screen must not re-fold the bulk of already-scored candidates (the
@@ -157,15 +204,7 @@ def _already_scored(database: Path | None, target: str) -> dict[str, int]:
     except Exception:
         return {}
     try:
-        p = "?" if mutation_network._is_local(connection) else "%s"
-        rows = connection.execute(
-            "SELECT n.sequence, COUNT(o.observation_id) FROM observations o "
-            "JOIN nodes n ON n.id = o.node_id "
-            f"WHERE n.target = {p} AND o.source IN "
-            "('live_exact_screen', 'local_exact_raw', 'live_exact_repeat') "
-            "GROUP BY n.sequence",
-            (target,),
-        ).fetchall()
+        rows = _exact_history_rows(connection, target, sequences=sequences)
         return {str(r[0]): int(r[1]) for r in rows}
     except Exception:
         return {}
@@ -179,7 +218,7 @@ RESCORE_TOP = int(os.environ.get("NANOBODY_RESCORE_TOP", "1000"))
 
 
 def _multipass_rank_map(database: Path, target: str,
-                        before_epoch: int) -> dict[str, float]:
+                        before_epoch: int, *, sequences=None) -> dict[str, float]:
     """{sequence: mean-of-passes multipass rank} for every exact-scored seq.
 
     Same formula as rank_exact._mean_pass_rank: rank each stored fold against
@@ -199,15 +238,7 @@ def _multipass_rank_map(database: Path, target: str,
         from nanobody_opt import mutation_network
         connection = mutation_network._connect(Path(database))
         try:
-            p = "?" if mutation_network._is_local(connection) else "%s"
-            rows = connection.execute(
-                "SELECT n.sequence, o.metrics_json FROM observations o "
-                "JOIN nodes n ON n.id = o.node_id "
-                f"WHERE n.target = {p} AND o.source IN "
-                "('live_exact_screen', 'local_exact_raw', 'live_exact_repeat') "
-                "AND o.metrics_json IS NOT NULL AND o.metrics_json != ''",
-                (target,),
-            ).fetchall()
+            rows = _exact_history_rows(connection, target, sequences=sequences, metrics=True)
         finally:
             connection.close()
     except Exception:
@@ -221,19 +252,35 @@ def _multipass_rank_map(database: Path, target: str,
         if isinstance(metrics, dict) and set(METRICS).issubset(metrics):
             folds_by_seq.setdefault(seq, []).append(
                 {name: float(metrics[name]) for name in METRICS})
-    result: dict[str, float] = {}
+    # The shared formula ranks each fold independently against the field.
+    # Batch folds so the same field is not sorted ten times per historical
+    # sequence before any GPU work can start. Bound the temporary batch size.
+    ranked_by_seq: dict[str, list[float]] = {}
+    batch: dict[str, dict[str, float]] = {}
+    owners: dict[str, str] = {}
+
+    def flush():
+        for key, rank in rank_metrics_against_field(batch, field).items():
+            ranked_by_seq.setdefault(owners[key], []).append(rank)
+        batch.clear()
+        owners.clear()
+
     for seq, folds in folds_by_seq.items():
-        per_pass = {f"{seq}::{i}": fold for i, fold in enumerate(folds)}
-        ranks = rank_metrics_against_field(per_pass, field)
-        if ranks:
-            result[seq] = float(np.mean(list(ranks.values())))
-    return result
+        for fold in folds:
+            key = str(len(batch))
+            batch[key] = fold
+            owners[key] = seq
+            if len(batch) >= 4096:
+                flush()
+    if batch:
+        flush()
+    return {seq: float(np.mean(ranks)) for seq, ranks in ranked_by_seq.items()}
 
 
 def _carry_pending_records(local: list[dict], pooled_root: Path | None,
                           output_dir: Path, target: str,
                           database: Path | None = None,
-                          epoch: int | None = None) -> list[dict]:
+                          epoch: int | None = None, *, rescore_top: int | None = None) -> list[dict]:
     """Keep unscored proposals, plus a top slice of already-scored to deepen.
 
     Only a complete exact vector consumes a case, so the bulk of already-scored
@@ -244,19 +291,31 @@ def _carry_pending_records(local: list[dict], pooled_root: Path | None,
     """
     if pooled_root is None:
         return local
+    if rescore_top is None:
+        rescore_top = RESCORE_TOP
     from nanobody_opt.rank_exact import _observations
     records = list(local)
     for path in sorted(pooled_root.glob("iteration_[0-9][0-9]/layer2.json")):
+        # GAP 6: skip a prior iteration's layer2 file whose generation-policy
+        # sidecar predates this code (stamped by run_live_producer at write time),
+        # so a same-epoch restart after a code change cannot re-deepen a stale pool.
+        try:
+            marker = Path(str(path) + ".policy")
+            if marker.read_text().strip() != GENERATION_POLICY:
+                continue
+        except (OSError, FileNotFoundError):
+            continue
         records.extend(_candidate_records(path))
     records = _ordered_candidate_records(records)
     scored = set(_observations(_pooled_exact_paths([], pooled_root, output_dir), target))
-    scored |= set(_already_scored(database, target))
+    scored |= set(_already_scored(database, target, sequences=[r["sequence"] for r in records]))
     fresh = [r for r in records if r["sequence"] not in scored]
     already = [r for r in records if r["sequence"] in scored]
-    if database is not None and epoch is not None and already:
-        rank_map = _multipass_rank_map(database, target, epoch)
+    if rescore_top and database is not None and epoch is not None and already:
+        rank_map = _multipass_rank_map(database, target, epoch,
+                                       sequences=[r["sequence"] for r in already])
         already.sort(key=lambda r: rank_map.get(r["sequence"], float("inf")))
-    deepen = already[:RESCORE_TOP]
+    deepen = already[:rescore_top]
     return fresh + deepen
 
 
@@ -281,22 +340,55 @@ def _tranche_source_key(metadata: dict[str, dict[str, Any]], sequence: str) -> s
     return str(metadata.get(sequence, {}).get("parent_source") or "__unattributed__")
 
 
-#: Target screening SHARE per lane, not an equal split. historical_basin_member
-#: is where every actual win has come from so far; exact_shortlist's children
-#: score best on MEDIAN but that is not the same as win rate -- wins can come
-#: from rare strong outliers a median doesn't capture, so handing it an equal
-#: 50% (cutting the winning lane's share from its organic ~70-80% to 50%)
-#: risks trading real wins for a paper metric. The bug being fixed here was
-#: extreme starvation (measured 4-8% of tranche slots for exact_shortlist,
-#: due to per-parent dilution -- see the docstring below), not a departure
-#: from 50/50; the target below restores the lane weighting that existed
-#: before the bug, it does not invent a new one.  Weight, not a normalized
-#: share: a source counts as "behind" at screened_source_counts[s] / weight[s],
-#: so the source furthest below its weighted target is picked next.  Unlisted
-#: sources (including __unattributed__) get the default weight.
-_SOURCE_TARGET_WEIGHT: dict[str, float] = {
-    "historical_basin_member": 3.0,
+#: Screening TIER per generation source. The winner-family lane
+#: (exact_shortlist: frontier elite children, incl. 5GhR's and the winner's
+#: own single-edits) is screened FIRST, ahead of any source-deficit balancing.
+#: historical_basin_member is the unmeasured low-multipass pool being cut, so
+#: it is screened LAST. __unattributed__ (competitor single-edits and any row
+#: whose parent_source was stripped) sits in between.
+_SOURCE_SCREEN_TIER: dict[str, int] = {
+    "exact_shortlist": 0,
+    "__unattributed__": 1,
+    "historical_basin_member": 2,
+    "historical_nonduplicate_reservoir": 2,
 }
+_DEFAULT_SOURCE_TIER = 1
+
+
+def _parent_multipass_priority(record: dict[str, Any]) -> float:
+    """Measured parent quality is a screening proxy, never child evidence."""
+    try:
+        score = float(record.get("parent_multipass_mean"))
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return score if math.isfinite(score) and score >= 0 else float("inf")
+
+
+def _source_screen_tier(source: str) -> int:
+    return _SOURCE_SCREEN_TIER.get(source, _DEFAULT_SOURCE_TIER)
+
+
+def _basin_rank_value(metadata: dict[str, dict[str, Any]], sequence: str) -> int:
+    """parent_basin_rank, normalized across the CSV round-trip.
+
+    The candidates.csv writer emits numeric fields as text, and an empty cell
+    round-trips as ""; int("") would raise inside the tranche sort key and kill
+    the whole screen. Return a large sentinel for a missing/unparseable rank.
+    """
+    raw = metadata.get(sequence, {}).get("parent_basin_rank", 10**9)
+    if raw is None or raw == "" or raw == " ":
+        return 10**9
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return 10**9
+
+
+#: Target screening SHARE per lane (weighted, not normalized). Neutralized:
+#: the former historical_basin_member 3.0 weight amplified exactly the
+#: low-multipass pool the re-anchor fix cuts. Ordering is now governed by
+#: _source_screen_tier above, not by these weights.
+_SOURCE_TARGET_WEIGHT: dict[str, float] = {}
 _DEFAULT_SOURCE_TARGET_WEIGHT = 1.0
 
 
@@ -358,15 +450,15 @@ def _balanced_screen_tranche(
         choice = min(
             range(len(available)),
             key=lambda index: (
+                _parent_multipass_priority(metadata.get(available[index][1], {})),
+                _source_screen_tier(
+                    _tranche_source_key(metadata, available[index][1])
+                ),
                 _source_priority(
                     source_counts, _tranche_source_key(metadata, available[index][1])
                 ),
                 counts[allocation_key(available[index][1])],
-                int(
-                    metadata.get(available[index][1], {}).get(
-                        "parent_basin_rank", 10**9
-                    )
-                ),
+                _basin_rank_value(metadata, available[index][1]),
                 available[index][0],
             ),
         )
@@ -530,7 +622,11 @@ def _pooled_exact_paths(
         return paths
     seen = {path.resolve() for path in paths}
     own = output_dir.resolve()
-    for path in sorted(pooled_root.glob("iteration_*/race/**/exact_all.json")):
+    roots = [pooled_root]
+    carry = pooled_root / "pooled_roots.json"
+    if carry.is_file():
+        roots.extend(Path(p) for p in json.loads(carry.read_text())["roots"])
+    for path in sorted({p for root in roots for p in root.glob("iteration_*/race/**/exact_all.json")}):
         resolved = path.resolve()
         if resolved in seen or own in resolved.parents:
             continue
@@ -979,6 +1075,7 @@ def _rank_command(
     only_sequences: Path | None = None,
 ) -> list[str]:
     command = [sys.executable, "-m", "nanobody_opt.rank_exact",
+               "--current-exact-candidates-only",
                "--selection-metric-policy", selection_metric_policy,
                "--consensus-ranking-policy", consensus_ranking_policy]
     # NOVA_FULL_ARCHIVE_FIELD switches BOTH the ranking field and the strict
@@ -1038,8 +1135,11 @@ def _rank_command(
         # not p90 -- 25793 published the best-p90 candidate and it ranked
         # horribly on multipass.
         command.extend(["--selection-order", "multipass", "--before-epoch", str(epoch)])
-        if minimum_selection_observations is not None:
-            command.extend(["--minimum-observations", str(minimum_selection_observations)])
+        # Screening chooses what needs confirmation. Applying the publication
+        # floor here discards fresh one-pass children before they can earn it.
+        command.extend(["--minimum-observations", str(
+            1 if minimum_selection_observations is None else minimum_selection_observations
+        )])
     if only_sequences is not None:
         # A prune reorders the alive finalists only. They already passed the
         # pool-level construction constraints, which would otherwise re-cut
@@ -1640,6 +1740,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
     parser.add_argument("--carry-pending-candidates", action="store_true")
+    parser.add_argument("--screen-all-candidates", action="store_true",
+                        help="screen every eligible proposal, with no admission cap or repeat screening")
     parser.add_argument("--maximum-screen-tranches", type=int, default=0,
                         help="zero keeps the legacy limit; one lets the producer regenerate after each observation wave")
     parser.add_argument("--adaptive-finish-guard", action="store_true")
@@ -1682,6 +1784,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--candidate-limit", type=int, default=4800)
     parser.add_argument(
+        "--screen-top-n",
+        type=int,
+        default=int(os.environ.get("NANOBODY_SCREEN_TOP_N", "0")),
+        help=(
+            "screen only this many candidates (0 = the full candidate-limit). "
+            "The list is already ordered winner-family-first (source tier) and, "
+            "within a tier, by parent selection order (parent_multipass_mean at "
+            "the bank), so a small top-N is a cheap-rank screen: it folds the "
+            "best parents' children and skips the long tail that breaks no "
+            "settled position. Off by default; NANOBODY_SCREEN_TOP_N enables it."
+        ),
+    )
+    parser.add_argument(
         "--screen-tranche-size",
         type=int,
         default=700,
@@ -1701,7 +1816,7 @@ def _parser() -> argparse.ArgumentParser:
             "repeat a challenger after qualification only when its multipass "
             "field-rank is within this margin of the incumbent. Re-derived for "
             "the multipass scale (thin field ~200-900, rich ~800-2400): 150 is "
-            "~20% of the thin-field spread, mirroring the old p90 margin of 20 "
+            "~20%% of the thin-field spread, mirroring the old p90 margin of 20 "
             "on a ~78-106 p90 range. Env NANOBODY_CHALLENGER_MARGIN overrides."
         ),
     )
@@ -1912,16 +2027,8 @@ def main() -> None:
     # budget has been confirmed to support it; an explicit higher producer
     # value still wins.
     args.candidate_limit = max(args.candidate_limit, 4800)
-    # The producer also caps each iteration at --maximum-screen-tranches 2
-    # (~1400 candidates at 700/tranche), which re-limits the screen below the
-    # 4800 candidate-limit. Raise a positive tranche cap to cover the full
-    # pool (ceil(candidate_limit / screen_tranche_size)); 0 (unlimited) is
-    # preserved untouched.
-    if args.maximum_screen_tranches:
-        args.maximum_screen_tranches = max(
-            args.maximum_screen_tranches,
-            -(-args.candidate_limit // args.screen_tranche_size),
-        )
+    # A positive tranche cap is an explicit budget, including recovery passes.
+    # Preserve it; candidate_limit bounds the pool, not the number of tranches.
     if not 1 <= args.finalists <= args.candidate_limit:
         parser.error("require 1 <= --finalists <= --candidate-limit")
     if not 1 <= args.screen_tranche_size <= args.candidate_limit:
@@ -1944,6 +2051,8 @@ def main() -> None:
         parser.error("--replication-rounds cannot be negative")
     if args.maximum_screen_tranches < 0 or args.replication_finish_guard_seconds < 0 or args.maximum_current_epoch_observations < 0:
         parser.error("screen tranche limit and finish guard cannot be negative")
+    if args.screen_all_candidates and (args.screen_top_n or args.maximum_screen_tranches):
+        parser.error("--screen-all-candidates cannot be combined with a top-N or tranche cap")
     if args.replication_reserve_blocks < 0:
         parser.error("--replication-reserve-blocks cannot be negative")
     if args.replication_rounds_per_stage < 0:
@@ -1974,11 +2083,32 @@ def main() -> None:
     if args.carry_pending_candidates:
         candidate_records = _carry_pending_records(candidate_records, args.pooled_exact_root,
                                                   args.output_dir, args.target,
-                                                  args.mutation_database, args.epoch)
+                                                  args.mutation_database, args.epoch,
+                                                  rescore_top=0 if args.screen_all_candidates else RESCORE_TOP)
     # Confirmation can use the complete scored pool even when no pending case remains.
     if not candidate_records and args.replication_rounds:
         candidate_records = _candidate_records(args.layer2)
-    candidate_records = candidate_records[: args.candidate_limit]
+    # Source-tier-aware admission (before the limit cut): order winner-family
+    # first and historical last so the candidate-limit truncation never drops
+    # the winner tier. The stable sort preserves screen_priority order within
+    # each tier.
+    candidate_records.sort(
+        key=lambda record: (
+            _parent_multipass_priority(record),
+            _source_screen_tier(str(record.get("parent_source") or "__unattributed__")),
+        )
+    )
+    pre_limit = len(candidate_records)
+    if not args.screen_all_candidates:
+        candidate_records = candidate_records[: (
+            args.screen_top_n or args.candidate_limit
+        )]
+    if args.screen_top_n:
+        print(
+            f"EXACT_SCREEN_TOP_N truncated {pre_limit} candidates to "
+            f"top-N={args.screen_top_n} (cheap-rank screen)",
+            flush=True,
+        )
     sequences = [str(record["sequence"]) for record in candidate_records]
     candidate_metadata = {
         str(record["sequence"]): record for record in candidate_records
@@ -1987,14 +2117,60 @@ def main() -> None:
         candidate_metadata, args.pooled_exact_root
     )
     if not sequences:
-        raise SystemExit("Layer-2 input has no passing candidates")
+        # Degrade instead of aborting: a Layer-2 gate that passes nothing must
+        # not kill the producer's iteration. Write a marked-empty completion so
+        # the publisher can fall back to prior iterations' qualified pools.
+        print(
+            "EXACT_RACE_EMPTY_POOL: Layer-2 input has no passing candidates",
+            flush=True,
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_json(
+            args.output_dir / "complete.json",
+            {
+                "epoch": args.epoch,
+                "empty_pool": True,
+                "replication_rounds": args.replication_rounds,
+                "replication_rounds_completed": 0,
+                "screened": 0,
+                "candidate_limit": 0,
+                "qualified_rankings": [],
+                "exact_files": [],
+            },
+        )
+        print("EXACT_RACE_COMPLETE empty_pool=True qualified=0", flush=True)
+        return
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _atomic_json(
         args.output_dir / "screen_candidates.json",
         {"target": args.target, "sequences": sequences},
     )
     if not _chain_allows_work(args.chain_state, args.epoch, args.reserve_blocks):
-        raise SystemExit("current chain epoch is inside the scoring reserve window")
+        # Degrade instead of aborting: the producer already validated the
+        # reserve before spawning us. If the shared chain-state file has since
+        # advanced into the reserve (a mid-epoch start), skip GPU work and let
+        # the publisher fall back to the pooled prior iterations instead of
+        # losing the epoch.
+        print(
+            "EXACT_RACE_RESERVE_SKIPPED: inside the scoring reserve window; "
+            "skipping GPU work and publishing what prior iterations produced",
+            flush=True,
+        )
+        _atomic_json(
+            args.output_dir / "complete.json",
+            {
+                "epoch": args.epoch,
+                "reserve_skipped": True,
+                "replication_rounds": args.replication_rounds,
+                "replication_rounds_completed": 0,
+                "screened": 0,
+                "candidate_limit": len(sequences),
+                "qualified_rankings": [],
+                "exact_files": [],
+            },
+        )
+        print("EXACT_RACE_COMPLETE reserve_skipped=True qualified=0", flush=True)
+        return
 
     screen_ranking = args.output_dir / "screen_ranking.json"
     screen_exact_paths: list[Path] = []
@@ -2144,7 +2320,18 @@ def main() -> None:
             in_flight = _dispatch_next_tranche()
         bookkeeping_started = time.monotonic()
         screen_exact_paths.append(job.completed)
-        screened += len(job.tranche)
+        if args.screen_all_candidates:
+            from nanobody_opt.rank_exact import _observations
+            screened += len(set(job.tranche) & set(_observations([job.completed], args.target)))
+        else:
+            screened += len(job.tranche)
+        _atomic_json(args.output_dir / "screen_coverage.json", {
+            "epoch": args.epoch, "target": args.target,
+            "admitted": len(sequences), "screened": screened,
+            "pending": len(sequences) - screened,
+            "complete": screened == len(sequences),
+            "screen_all_candidates": args.screen_all_candidates,
+        })
         subprocess.run(
             _rank_command(
                 exact=_pooled_exact_paths(

@@ -1,0 +1,14 @@
+name: SN68 shipping guardrails
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Preserve this check name while using the same complete gate as deployment.
+jobs:
+  guardrails:
+    uses: ./.github/workflows/ci.yml

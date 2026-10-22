@@ -1,0 +1,55 @@
+---
+- name: Require a passing release package and exact tested revision
+  ansible.builtin.assert:
+    that:
+      - sn68_release_archive is defined
+      - sn68_release_manifest is defined
+      - sn68_tested_sha is defined
+      - sn68_tested_sha is match('^[0-9a-f]{40}$')
+    fail_msg: Run scripts/shipping_checks.py and deploy its passing release package.
+
+- name: Verify controller source against the tested release
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ repo }}/scripts/release_manifest.py"
+      - verify
+      - --root
+      - "{{ repo }}"
+      - --manifest
+      - "{{ sn68_release_manifest }}"
+      - --expected-sha
+      - "{{ sn68_tested_sha }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+  changed_when: false
+
+- name: Set the immutable release staging directory
+  ansible.builtin.set_fact:
+    sn68_release_root: "/root/releases/{{ sn68_tested_sha }}"
+
+- name: Create the release staging directory
+  ansible.builtin.file:
+    path: "{{ sn68_release_root }}"
+    state: directory
+    mode: "0755"
+
+- name: Stage the exact package that passed CI
+  ansible.builtin.unarchive:
+    src: "{{ sn68_release_archive }}"
+    dest: "{{ sn68_release_root }}"
+
+- name: Verify all staged code and test evidence before installing it
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ sn68_release_root }}/scripts/release_manifest.py"
+      - verify
+      - --root
+      - "{{ sn68_release_root }}"
+      - --manifest
+      - "{{ sn68_release_root }}/build_stamp.json"
+      - --expected-sha
+      - "{{ sn68_tested_sha }}"
+  changed_when: false

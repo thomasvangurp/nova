@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,10 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
 
 # 1-indexed hot positions, from the measured edit-position distribution (see
 # analysis/nanobody-gap/parent-selection-20260929/reconstruct_results.json).
-HOT_POSITIONS = [1, 3, 114, 122, 121, 124, 116, 123, 31, 100, 126, 111, 73, 127]
+# Codex-corrected 2026-10-21: framework/C-tail only -- N-term 1/3 and the
+# C-tail 113-126 band. CDR3-adjacent positions 114/116 and the interior
+# 31/73/100/111/127 are removed (they land in or too near the CDR3).
+HOT_POSITIONS = [1, 3, 113, 115, 120, 121, 122, 123, 124, 125, 126]
 
 # 1-indexed position -> residues in descending measured quality, from the
 # exhaustive 8x single-edit sweep (scoring_backfill/exhaustive_ranking.json).
@@ -81,18 +85,11 @@ HOT_POSITIONS = [1, 3, 114, 122, 121, 124, 116, 123, 31, 100, 126, 111, 73, 127]
 POSITION_RESIDUE_ORDER = {
     1: ["A", "D"],
     3: ["A", "M"],
-    73: ["A", "T"],
-    111: ["E", "D"],
-    114: ["H", "M"],
-    116: ["A", "S"],
     121: ["A", "T"],
     122: ["A", "P"],
     123: ["V", "A"],
     124: ["A", "S"],
     126: ["G", "A"],
-    127: ["A", "P"],
-    31: ["R"],
-    100: ["A", "G"],
 }
 
 
@@ -136,7 +133,7 @@ def multipass_scores(
 
     from nanobody_opt import db
     from nanobody_opt.rank_exact import (
-        fetch_recent_fields_from_db, pool_recent_fields, rank_metrics_against_field,
+        METRICS, fetch_recent_fields_from_db, pool_recent_fields, rank_metrics_against_field,
     )
 
     if not sequences or epoch is None:
@@ -155,10 +152,12 @@ def multipass_scores(
         FROM observations o JOIN nodes n ON n.id = o.node_id
         WHERE n.target = ? AND n.sequence IN ({placeholders})
           AND o.source = ? AND o.score_kind = ?
+          AND o.observation_count = 1
           AND o.metrics_json IS NOT NULL AND o.metrics_json != ''
         """,
         (TARGET, *sequences, "public_multipass_rivals", MULTIPASS_SCORE_KIND),
     ).fetchall()
+    conn.close()
     metrics_by_pass: dict[str, dict[str, float]] = {}
     seq_of_pass: dict[str, str] = {}
     for seq, observation_id, blob in rows:
@@ -167,6 +166,11 @@ def multipass_scores(
         except (TypeError, ValueError):
             continue
         if not isinstance(metrics, dict):
+            continue
+        try:
+            if not all(math.isfinite(float(metrics[name])) for name in METRICS):
+                continue
+        except (KeyError, TypeError, ValueError):
             continue
         key = f"{seq}::{observation_id}"
         metrics_by_pass[key] = metrics
@@ -212,19 +216,17 @@ def fetch_elite_history_parents(
     history.py's tier 2 already treats as "our multipass", and the same
     dense-sum-of-10 rank-sum definition as everywhere else, against the
     exact same pooled recent-field (rank_exact.fetch_recent_fields_from_db
-    + pool_recent_fields) -- this never introduces a second scoring scale.
-    Ranks each candidate against the field alone (see the comment at the
-    ranking loop below for why rank_metrics_against_field itself is not
-    reused here). Requires >= min_passes raw observations per sequence, the
+    + pool_recent_fields). Ranks every fold against the field alone, then
+    averages its ranks. Requires >= min_passes raw observations per sequence, the
     same robustness bar multipass gating applies elsewhere: a single noisy
     pass does not get an exemption just because it is old.
     """
     import json as _json
 
-    import numpy as np
-
     from nanobody_opt import db
-    from nanobody_opt.rank_exact import METRICS, fetch_recent_fields_from_db, pool_recent_fields
+    from nanobody_opt.rank_exact import (
+        METRICS, fetch_recent_fields_from_db, pool_recent_fields, rank_metrics_against_field,
+    )
 
     connection = db.connect_local(db_path)
     pooled_field = pool_recent_fields(
@@ -240,13 +242,15 @@ def fetch_elite_history_parents(
         SELECT n.sequence, o.observation_id, o.metrics_json
         FROM observations o JOIN nodes n ON n.id = o.node_id
         WHERE n.target = {p} AND o.epoch < {p} AND o.source IN ({placeholders})
+          AND o.observation_count = 1
           AND o.metrics_json IS NOT NULL AND o.metrics_json NOT IN ('', '{{}}')
         """,
         (target, before_epoch, *OUR_RAW_SOURCES),
     ).fetchall()
 
-    passes_by_seq: dict[str, list[dict[str, float]]] = {}
-    for seq, _observation_id, blob in rows:
+    connection.close()
+    raw = {}
+    for seq, observation_id, blob in rows:
         try:
             metrics = _json.loads(blob)
         except (TypeError, ValueError):
@@ -257,101 +261,40 @@ def fetch_elite_history_parents(
             values = {name: float(metrics[name]) for name in METRICS}
         except (TypeError, ValueError):
             continue
-        passes_by_seq.setdefault(seq.upper(), []).append(values)
-
-    qualifying = {seq: passes for seq, passes in passes_by_seq.items()
-                  if len(passes) >= min_passes}
-    if not qualifying:
-        return {}
-    # Mean metrics per sequence (same "mean of several real measurements"
-    # principle used throughout this session), ranked once against the
-    # current field -- never the stale score a pass carried when written.
-    seqs = list(qualifying)
-    mean_metrics = {
-        seq: {name: sum(pass_[name] for pass_ in qualifying[seq]) / len(qualifying[seq])
-              for name in METRICS}
-        for seq in seqs
-    }
-    # Deliberately NOT rank_metrics_against_field: that batches every
-    # candidate into the same combined frame and dense-ranks them together,
-    # so a candidate's score depends on how many OTHER candidates were
-    # passed in the same call -- harmless for its usual callers (a handful
-    # of passes or one epoch's ~50 submissions) but silently inflates the
-    # scale by up to 10x here, with tens of thousands of candidates at once
-    # (confirmed 2026-10-11: scores up to 45,972 against a field whose true
-    # ceiling is ~5,230, the exact shape of the pool-inflation bug already
-    # fixed once in rescale_multipass_history.py). Instead, rank each
-    # candidate against the field ALONE, vectorized: a value's dense rank if
-    # inserted one at a time equals (count of strictly "worse" field values)
-    # + 1, computed via searchsorted on the field's sorted unique values --
-    # identical result to concatenating field+1 candidate, for every
-    # candidate at once.
-    total = np.zeros(len(seqs), dtype=np.float64)
-    for metric, direction in METRICS.items():
-        field_sorted = np.sort(pooled_field[metric].to_numpy(dtype=np.float64))
-        unique_sorted = np.unique(field_sorted)
-        values = np.array([mean_metrics[seq][metric] for seq in seqs], dtype=np.float64)
-        if direction == "min":
-            # rank 1 = smallest value = best; rank(v) = #(unique field < v) + 1
-            total += np.searchsorted(unique_sorted, values, side="left") + 1
-        else:
-            # rank 1 = largest value = best; rank(v) = #(unique field > v) + 1
-            total += (len(unique_sorted)
-                       - np.searchsorted(unique_sorted, values, side="right")) + 1
-    ranks = dict(zip(seqs, total.tolist()))
+        if all(math.isfinite(value) for value in values.values()):
+            raw[f"{seq.upper()}::{observation_id}"] = values
+    # Rank each independent fold, then average, exactly as for public replay
+    # parents. Ranking averaged metrics can reverse the order of two parents.
+    passes_by_seq = {}
+    for key, score in rank_metrics_against_field(raw, pooled_field).items():
+        passes_by_seq.setdefault(key.rsplit("::", 1)[0], []).append(score)
+    ranks = {seq: sum(scores) / len(scores) for seq, scores in passes_by_seq.items()
+             if len(scores) >= min_passes}
     return dict(sorted(ranks.items(), key=lambda kv: kv[1])[:limit])
 
 
 def _load_pool(archive: Path) -> list[str]:
-    """Every public sequence in the archive, ranked by the validator's
-    Algorithm-2 minmax (best first), deduped.
+    """Every public sequence in the archive, deduped, RANK-BLIND.
 
-    This is the GLOBAL parent source: the whole archive sorted by the proxy
-    (binding/confidence), never our own lineage privileged. The archive's
-    metric columns give the Algorithm-2 rank for free, so no re-scoring.
+    Codex-corrected 2026-10-21: no metric eligibility (no liability filter) and
+    no quality-first ordering -- the edge is parent-pool BREADTH, so keep every
+    distinct public sequence in archive order. Validity is enforced downstream
+    at the child level, never by a parent metric.
     """
     import pandas as pd
 
     frame = pd.read_csv(archive)
     frame["sequence"] = frame["sequence"].astype(str).str.strip().str.upper()
     frame = frame.drop_duplicates("sequence", keep="last")
-
-    work = frame[frame.get("liability_num_violations", 0) <= 50].copy()
-    weights = {
-        "design_iiptm": 1.0, "design_ptm": 2.0, "min_design_to_target_pae": 1.0,
-        "plip_hbonds_refolded": 2.0, "plip_saltbridge_refolded": 2.0,
-        "delta_sasa_refolded": 2.0,
-    }
-    metric_dirs = {
-        "design_iiptm": "max", "design_ptm": "max", "min_design_to_target_pae": "min",
-        "plip_hbonds_refolded": "max", "plip_saltbridge_refolded": "max",
-        "delta_sasa_refolded": "max",
-    }
-    rank_cols = {}
-    for metric, weight in weights.items():
-        if metric not in work.columns:
-            continue
-        ascending = metric_dirs[metric] == "min"
-        rank_cols[metric] = work[metric].rank(ascending=ascending, method="average") / weight
-    work = work.assign(algo2_score=pd.DataFrame(rank_cols, index=work.index).max(axis=1))
-    work = work.sort_values("algo2_score", ascending=True)
-
-    pool: list[str] = [str(s).strip().upper() for s in work["sequence"].tolist()]
+    pool: list[str] = [str(s).strip().upper() for s in frame["sequence"].tolist()]
     if not pool:
-        raise SystemExit("archive contains no sequences")
+        raise ValueError("archive contains no sequences")
     return pool
 
 
 def _merge_priority(priority: list[str], scores: dict[str, float]) -> list[str]:
-    """Keep EVERY priority (top-50) parent in its own list order (Oct 8 rule).
-
-    The 2026-10-10 gate dropped top-50 parents without 10 stored replay
-    passes and re-sorted the rest by multipass score. With a 2,000-candidate
-    --limit, list order decides which ~8 parents get edited at all, so the
-    Oct 8 behaviour is the plain top-50 order. ``scores`` is accepted for the
-    call site but deliberately not used for ordering.
-    """
-    return list(priority)
+    """Apply the measured-multipass requirement to priority parents too."""
+    return sorted((s for s in priority if s in scores), key=lambda s: scores[s])
 
 
 def _eligible_parents(pool: list[str], top50: list[str], min_distance: int) -> list[str]:
@@ -373,8 +316,56 @@ def _eligible_parents(pool: list[str], top50: list[str], min_distance: int) -> l
     return eligible
 
 
+def _cdr3_in_top50_basin(parent: str, top50_cdr3s: list[str] | None) -> bool:
+    """True when a parent's CDR3 clonotype sits at >= 0.85 positional identity
+    to an archived top-50 clonotype (the validator's is_duplicate CDR3 rule).
+
+    A framework single-edit preserves the parent CDR3, so a top-50-basin parent
+    can only seed doomed children. Fail-closed: a missing clonotype index or an
+    unannotatable parent is treated as in-basin (excluded), so a read failure
+    never reopens the lane.
+    """
+    if not top50_cdr3s:
+        return True
+    from nanobody_opt.regions import find_regions
+    try:
+        regions = find_regions(parent)
+    except Exception:
+        return True
+    cdr3 = parent[regions.cdr3[0]:regions.cdr3[1]]
+    if not cdr3:
+        return True
+    length = len(cdr3)
+    for other in top50_cdr3s:
+        if not other:
+            continue
+        shared = sum(1 for a, b in zip(cdr3, other) if a == b)
+        if shared / max(length, len(other)) >= 0.85:
+            return True
+    return False
+
+
+def _interleave_parent_edits(items, *, priority, scores):
+    """Give each selected parent's best edit a turn before its second edit.
+
+    The priority set is the freshly gated parent bank. Its parents stay ordered
+    by measured merit; an optional model orders edits within each parent.
+    """
+    groups = {}
+    for item in items:
+        groups.setdefault(item["parent"], []).append(item)
+    ordered = sorted(groups, key=lambda parent: (scores.get(parent, float("inf")), parent))
+    preferred = set(priority)
+    result = []
+    for parents in ([p for p in ordered if p in preferred], [p for p in ordered if p not in preferred]):
+        for index in range(max((len(groups[p]) for p in parents), default=0)):
+            result.extend(groups[p][index] for p in parents if index < len(groups[p]))
+    return result
+
+
 def generate(archive: Path, positions: list[int], limit: int | None,
              pool_limit: int = 2000, top50: list[str] | None = None,
+             top50_cdr3s: list[str] | None = None,
              min_parent_distance: int = 6,
              priority: list[str] | None = None,
              double_edit_pairs: int = 0,
@@ -383,17 +374,17 @@ def generate(archive: Path, positions: list[int], limit: int | None,
              mutation_database: Path | None = None,
              min_passes: int = 10,
              epoch: int | None = None,
-             elite_history_scores: dict[str, float] | None = None) -> dict[str, Any]:
-    # Parent source: the rival's proven-good sequences when supplied, else the
-    # global archive ranked by the validator's Algorithm-2 proxy.
-    if rival_sequences:
-        pool = [s.upper() for s in rival_sequences]
-    else:
-        pool = _load_pool(archive)
+             elite_history_scores: dict[str, float] | None = None,
+             priority_scores: dict[str, float] | None = None) -> dict[str, Any]:
+    # Parent source: the BROAD public archive (any miner, any rank, any score),
+    # rank-blind. Codex-corrected: no rival restriction and no top-50 parent
+    # exclusion -- validity is enforced at the CHILD level by
+    # check_validator_novelty, never by a parent metric or a parent clonotype.
+    pool = _load_pool(archive)
     # Our own historically-strong, since-abandoned sequences (see
-    # fetch_elite_history_parents) are a parent source the rival-only broad
-    # pool above has no way to surface -- added here, not as a replacement,
-    # so this never narrows what --rival-coldkey already finds.
+    # fetch_elite_history_parents) are a parent source the broad pool above has
+    # no way to surface -- added here, not as a replacement, so this never
+    # narrows what the broad pool already finds.
     if elite_history_scores:
         existing = set(pool)
         pool = pool + [s for s in elite_history_scores if s not in existing]
@@ -404,12 +395,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
 
     modal_length = Counter(len(s) for s in pool).most_common(1)[0][0]
     pool = [s for s in pool if len(s) == modal_length]
-    if top50:
-        pool = _eligible_parents(pool, top50, min_parent_distance)
 
-    # The live top-50 are the strongest parents: their single/double edits are
-    # closest to the current winners AND still clear the dedup (the validator's
-    # reference is the full-history HF top-50, ~30 edits from the live field).
+    # The freshly gated parent bank gets first access to the proposal budget.
     priority_pool: list[str] = []
     if priority:
         priority_pool = [s.upper() for s in priority if len(s) == modal_length]
@@ -417,6 +404,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         pool = [s for s in pool if s not in priority_set]
 
     multipass_ranked = 0
+    scores: dict[str, float] = {}
     if mutation_database is not None:
         # User directive, 2026-10-10: "demand multipass scoring, only use
         # those" -- drop every parent (priority and broad pool alike) without
@@ -437,6 +425,10 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         if elite_history_scores:
             scores = {**scores, **{s: v for s, v in elite_history_scores.items()
                                     if s not in scores}}
+        # Keep the freshly selected bank's common-field evidence intact, even
+        # when a parent has both our folds and public replay observations.
+        if priority_scores:
+            scores.update({s: value for s, value in priority_scores.items() if s in priority_pool})
         multipass_ranked = len(scores)
         priority_pool = _merge_priority(priority_pool, scores)
         pool = sorted((s for s in pool if s in scores), key=lambda s: scores[s])
@@ -465,12 +457,12 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     def _items(source: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {"sequence": seq, "parent": meta["parent"], "position": meta["position"],
-             "source": "competitor_position_lane"}
+             "source": "competitor_position_lane",
+             "parent_multipass_mean": scores.get(meta["parent"])}
             for seq, meta in source.items()
         ]
 
-    # Single-edit candidates kept separate so the priority top-50 can be ranked
-    # independently (per-parent) while the broad pool stays shuffled for diversity.
+    # Keep bank proposals separate from the broad fallback pool.
     priority_candidates = competitor_position_candidates(
         priority_pool, allowed=allowed, positions=positions)
     if double_edit_pairs:
@@ -494,8 +486,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
 
     # When a trained parent-relative ranker is supplied, order every parent's
     # single-edits by predicted improvement (best edit per parent first) so
-    # --limit keeps the strongest edit of each parent -- the top-50 priority
-    # first, then the rival's submissions as the supplement.
+    # --limit keeps the strongest edit of each parent, in parent-merit order.
     items = priority_items + broad_items
     ranker_applied = False
     if ranker_model is not None:
@@ -509,6 +500,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         )
         ranker_applied = True
 
+    items = _interleave_parent_edits(items, priority=priority_pool, scores=scores)
     if limit:
         items = items[:limit]
     return {
@@ -540,7 +532,7 @@ def main() -> None:
     parser.add_argument("--min-parent-distance", type=int, default=6,
                         help="minimum Hamming distance from the top-50 a parent must have (default 6)")
     parser.add_argument("--priority-parents", type=Path, default=None,
-                        help="top50_index.json; its `live_sequences` (final_score top-50) are edited first and always kept")
+                        help="freshly gated parent bank; measured parents receive proposals in merit order")
     parser.add_argument("--double-edit-pairs", type=int, default=0,
                         help="generate 2-substitution candidates of the priority parents, using this many position pairs (0 = off)")
     parser.add_argument("--ranker-model", type=Path, default=None,
@@ -554,18 +546,29 @@ def main() -> None:
     parser.add_argument("--elite-history-limit", type=int, default=500,
                         help="max of our own historically-strong, since-abandoned sequences to add to the broad pool (0 = off, default 500)")
     parser.add_argument("--elite-history-min-passes", type=int, default=3,
-                        help="raw OUR_RAW_SOURCES observations required per elite-history sequence (default 3)")
+                        help="raw observations required per elite-history sequence; effective minimum is also bounded by --min-passes")
     args = parser.parse_args()
     positions = [int(p) for p in args.positions.split(",") if p.strip()]
     top50 = None
+    top50_cdr3s = None
     if args.top50 is not None:
-        top50 = [str(s).strip().upper() for s in
-                 (json.loads(args.top50.read_text()).get("sequences") or [])]
+        blob = json.loads(args.top50.read_text())
+        top50 = [str(s).strip().upper() for s in (blob.get("sequences") or [])]
+        top50_cdr3s = [str(s).strip().upper() for s in (blob.get("cdr3s") or [])
+                       if str(s).strip()]
     priority = None
+    priority_scores = {}
     if args.priority_parents is not None:
         blob = json.loads(args.priority_parents.read_text())
         priority = [str(s).strip().upper() for s in
                     (blob.get("live_sequences") or blob.get("sequences") or [])]
+        priority_scores = {
+            c["sequence"]: float(c["parent_multipass_mean"])
+            for c in blob.get("candidates", [])
+            if c.get("selection_score_kind") == "current_multipass_mean"
+            and c.get("parent_multipass_observations", 0) >= args.min_passes
+            and math.isfinite(float(c.get("parent_multipass_mean", math.inf)))
+        }
     ranker_model = None
     if args.ranker_model is not None:
         from nanobody_opt.parent_relative_ranker_inference import load_model
@@ -594,17 +597,19 @@ def main() -> None:
     if args.mutation_database is not None and args.elite_history_limit:
         elite_history_scores = fetch_elite_history_parents(
             args.mutation_database, before_epoch=epoch,
-            min_passes=args.elite_history_min_passes,
+            min_passes=max(args.elite_history_min_passes, args.min_passes),
             limit=args.elite_history_limit)
     payload = generate(args.archive, positions, args.limit, pool_limit=args.pool_limit,
-                       top50=top50, min_parent_distance=args.min_parent_distance,
+                       top50=top50, top50_cdr3s=top50_cdr3s,
+                       min_parent_distance=args.min_parent_distance,
                        priority=priority, double_edit_pairs=args.double_edit_pairs,
                        ranker_model=ranker_model,
                        rival_sequences=rival_sequences,
                        mutation_database=args.mutation_database,
                        min_passes=args.min_passes,
                        epoch=epoch,
-                       elite_history_scores=elite_history_scores)
+                       elite_history_scores=elite_history_scores,
+                       priority_scores=priority_scores)
     if args.mutation_database is not None and payload["pool_size"] == 0:
         raise SystemExit(
             f"--mutation-database given but zero parents have >= "

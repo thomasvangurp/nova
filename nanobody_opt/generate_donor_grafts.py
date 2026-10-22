@@ -326,12 +326,53 @@ def main() -> None:
     if not 1 <= args.teacher_rank <= len(teachers):
         parser.error(f"--teacher-rank must be between 1 and {len(teachers)}")
     teacher_sequence = str(teachers[args.teacher_rank - 1]["sequence"])
-    archive = pd.read_csv(args.archive)
     config = yaml.safe_load(args.config.read_text())
     requirements = config["nanobody_requirements"]
     target = str(config["protein_selection"]["nanobody"]["target"])
     if target != str(teacher_payload.get("target")):
         raise SystemExit("teacher target does not match live configuration")
+    # GAP 5: the graft preserves the teacher's CDRs (graft_cdrs_onto /
+    # progressive_grafts both protect CDR positions), so an out-of-range teacher
+    # CDR3 would be copied unchanged into every graft. Profile the teacher once
+    # (cached) and skip grafting when its CDR-only red region is out of range.
+    try:
+        from nanobody_opt.filter_layer2 import _cached_developability
+        teacher_profile = _cached_developability(
+            [{"sequence": teacher_sequence}], Path("/root/layer2_cache"), 1,
+        )[0]
+        teacher_cdr_in_range = (
+            isinstance(teacher_profile, dict)
+            and 20.0 <= float(teacher_profile.get("total_cdr_length", 0)) <= 39.0
+            and 5.0 <= float(teacher_profile.get("cdr3_length", 0)) <= 23.0
+            and 0.56 <= float(teacher_profile.get("cdr3_compactness", 0)) <= 1.61
+        )
+    except Exception:
+        # GAP 5: FAIL CLOSED -- an unmeasurable teacher must not emit grafts
+        # that preserve an unknown (possibly out-of-range) CDR3.
+        teacher_cdr_in_range = False
+    if not teacher_cdr_in_range:
+        print(
+            "DONOR_GRAFTS_SKIPPED: teacher CDR red-region out of range or "
+            "unmeasurable; writing empty graft pool",
+            flush=True,
+        )
+        _atomic_json(args.output, {
+            "purpose": "R&D IMGT paratope graft onto validator-proven frameworks",
+            "target": target,
+            "teacher_sequence": teacher_sequence,
+            "teacher_rank": args.teacher_rank,
+            "mode": args.mode,
+            "swap_counts": [],
+            "max_donor_liability": args.max_donor_liability,
+            "donor_count": 0,
+            "preserved_contact_positions": [],
+            "vernier_backmutation": True,
+            "rejection_counts": {"teacher_cdr_out_of_range": 1},
+            "cases": [],
+        })
+        print(f"DONOR_GRAFTS_READY target={target} donors=0 eligible=0 output={args.output}")
+        return 0
+    archive = pd.read_csv(args.archive)
 
     preserved: set[int] = set()
     for report in args.contacts:

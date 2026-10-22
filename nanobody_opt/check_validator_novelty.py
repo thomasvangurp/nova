@@ -228,14 +228,38 @@ def main() -> None:
 
     candidates = _load_candidates(args.input)
     if not candidates:
-        raise SystemExit("no candidate sequences found")
+        # A valid-but-empty candidate set is a successful empty gate, not a
+        # failure: the historical fallback downstream must be allowed to run
+        # when a generation produces zero Layer-2 survivors. Malformed input
+        # still raises inside _load_candidates (json.loads / csv parse).
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps({
+            "target": args.target,
+            "archive": str(args.archive),
+            "archive_count": 0,
+            "algorithm2_top_count": 0,
+            "input_count": 0,
+            "pass_count": 0,
+            "sequences": [],
+            "candidates": [],
+            "all_results": [],
+        }, indent=2) + "\n")
+        return
     archive = pd.read_csv(args.archive)
     historical = set(archive.sequence.dropna().astype(str).str.strip().str.upper())
     # No pre-filter of our own: rank_binders applies the liability filter
     # itself, exactly as index_top_sequences hands it the raw frame.
     top = _rank_binders(archive, args.top, args.max_liability_violations)
     if len(top) != args.top:
-        raise SystemExit(f"expected {args.top} top sequences, got {len(top)}")
+        # Degrade instead of aborting: a thin archive must not kill the gate.
+        # A partial/empty top index simply yields fewer duplicate matches (an
+        # empty index passes everything as novel, matching the validator's own
+        # behaviour when it has nothing to index).
+        print(
+            f"VALIDATOR_NOVELTY_DEGRADED: expected {args.top} top sequences, "
+            f"got {len(top)}; indexing the available {len(top)}",
+            flush=True,
+        )
 
     # Exactly the call neurons/validator/nanobody_validity.py makes: it passes
     # coarse_min_shared=None, coarse_jaccard=None, which the SearchEngine

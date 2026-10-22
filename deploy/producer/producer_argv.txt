@@ -1,12 +1,6 @@
-/usr/local/bin/pixi
-run
---manifest-path
-/root/pixi.toml
---locked
---environment
-bgen
-live-producer
---
+/root/.pixi/envs/bgen/bin/python
+-m
+nanobody_opt_v2.run_live_producer
 --poll-interval
 30
 --mutation-database
@@ -14,7 +8,7 @@ live-producer
 --parent-epochs
 0
 --parent-limit
-400
+64
 --neighbor-parent-limit
 128
 --recent-parent-epoch-window
@@ -48,7 +42,7 @@ repair-only
 --basin-exploration-residues-per-position
 5
 --candidate-limit
-2800
+4800
 --screen-tranche-size
 700
 --maximum-initial-screen-p90
@@ -56,7 +50,7 @@ repair-only
 --weak-initial-fallback-after
 1400
 --finalists
-300
+64
 --exact-scorer
 /root/nanobody_opt/score_boltzgen_fast_adapter.py
 --basin-shrinkage-strength
@@ -104,3 +98,11 @@ repair-only
 adaptive
 --prescreen-next-epoch
 --overlap-next-prep
+--epoch-cycle-start
+25872
+--epoch-proposal-budget
+8000
+--epoch-candidate-budget
+4800
+--epoch-confirmation-finalists
+64

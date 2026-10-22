@@ -1,54 +1,58 @@
-name: Deploy nanobody box
+name: Deploy tested nanobody release
 
-# Separate from the miner deploy: boltzgen pins torch==2.7.1 while the miner's
-# bz2 env is pinned to 2.6.0 for boltz. They must never share a machine env.
 on:
   workflow_dispatch:
     inputs:
       host:
-        description: "SSH host or IP of the target box"
+        description: SSH host of the target producer
         required: true
+        type: string
       port:
-        description: "SSH port"
+        description: SSH port
         required: true
-        default: "22"
+        default: '22'
+        type: string
+      activate:
+        description: Activate the producer after release verification
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sn68-deploy-${{ inputs.host }}-${{ inputs.port }}
+  cancel-in-progress: false
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
   deploy:
+    needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           submodules: recursive
-
-      - name: Install ansible
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: sn68-tested-release
+          path: ${{ runner.temp }}/sn68-tested-release
+      - name: Install Ansible
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "ansible-core>=2.16,<2.22" "ansible-lint>=24"
+          python -m pip install 'ansible-core>=2.16,<2.22'
           ansible-galaxy collection install -r ansible/requirements.yml
-
-      - name: Lint the deployment
-        env:
-          ANSIBLE_CONFIG: ansible/ansible.cfg
-        run: ansible-lint ansible/
-
-      - name: Load SSH key
+      - name: Deploy the tested release
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "${{ inputs.port }}" -H "${{ inputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Provision
-        run: |
-          ansible-playbook -i '${{ inputs.host }},' ansible/nanobody.yml \
-            -e ansible_port=${{ inputs.port }} \
-            --private-key ~/.ssh/id_deploy \
-            --ssh-common-args '-o StrictHostKeyChecking=accept-new'
-        env:
+          SN68_DEPLOY_HOST: ${{ inputs.host }}
+          SN68_DEPLOY_PORT: ${{ inputs.port }}
+          SN68_DEPLOY_ACTIVATE: ${{ inputs.activate }}
+          SN68_TESTED_SHA: ${{ github.sha }}
+          SN68_RELEASE_DIR: ${{ runner.temp }}/sn68-tested-release
           ANSIBLE_CONFIG: ansible/ansible.cfg
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-          ANSIBLE_FORCE_COLOR: "1"
+        run: python scripts/deploy_tested_release.py

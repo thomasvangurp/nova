@@ -53,7 +53,14 @@ PRODUCER=${NOVA_PRODUCER:-true}
 [ -x "$INVENTORY" ] || { echo "inventory not executable: $INVENTORY" >&2; exit 2; }
 [ -r "$TOKEN_FILE" ] || { echo "github token file not readable: $TOKEN_FILE" >&2; exit 2; }
 
-exec ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+: "${SN68_RELEASE_DIR:?Set SN68_RELEASE_DIR to the downloaded passing CI artifact}"
+: "${SN68_TESTED_SHA:?Set SN68_TESTED_SHA to the successful CI commit}"
+python3 ../scripts/release_manifest.py verify --root .. \
+  --manifest "$SN68_RELEASE_DIR/build_stamp.json" --expected-sha "$SN68_TESTED_SHA"
+ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+  -e "sn68_release_archive=$SN68_RELEASE_DIR/sn68-release.tar.gz" \
+  -e "sn68_release_manifest=$SN68_RELEASE_DIR/build_stamp.json" \
+  -e "sn68_tested_sha=$SN68_TESTED_SHA" \
   -e "@$PROFILE" \
   -e "nanobody_coldkey_ss58=$COLDKEY" \
   -e "nanobody_github_token_file=$TOKEN_FILE" \

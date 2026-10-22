@@ -22,44 +22,34 @@
 #
 # Requires: repo
 
-- name: Sync nanobody optimization, chain and support packages
-  ansible.posix.synchronize:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    checksum: true
-    owner: false
-    group: false
-    perms: false
-    rsync_opts: "{{ ['--omit-dir-times', '--exclude=__pycache__', '--exclude=*.pyc', '--no-perms'] + (item.excludes | default([])) }}"
-    use_ssh_args: true
+- name: Verify and stage the tested release
+  ansible.builtin.include_tasks: prepare_tested_release.yml
+
+- name: Install the verified runtime packages including the shipping v2 tree
+  ansible.builtin.command:
+    argv: "{{ ['rsync', '-a', '--checksum', '--exclude=__pycache__', '--exclude=*.pyc'] + (item.excludes | default([])) + [sn68_release_root ~ '/' ~ item.name ~ '/', '/root/' ~ item.name ~ '/'] }}"
   loop:
-    # The design/scoring producer.
-    - src: "{{ repo }}/nanobody_opt/"
-      dest: /root/nanobody_opt/
-    # The chain-side publisher and its helpers.
-    - src: "{{ repo }}/tools/"
-      dest: /root/tools/
-    - src: "{{ repo }}/neurons/"
-      dest: /root/neurons/
-    - src: "{{ repo }}/compound_miner/"
-      dest: /root/compound_miner/
-    # miner.py extends sys.path with BASE_DIR/utils, so these are imported as
-    # top-level modules (``from files import ...``, ``from btdr import ...``).
-    - src: "{{ repo }}/utils/"
-      dest: /root/utils/
-    # config_loader.py only; the live validator YAML is downloaded, never copied.
-    - src: "{{ repo }}/config/"
-      dest: /root/config/
-      excludes:
-        - "--exclude=config.yaml"
-        - "--exclude=boltzgen_config.yaml"
-    # The focused publisher/consumer tests run on the box against the deployed
-    # tree, so a deploy proves the code it just installed rather than the code
-    # the controller happens to hold.
-    - src: "{{ repo }}/tests/"
-      dest: /root/tests/
+    - {name: nanobody_opt}
+    - {name: nanobody_opt_v2}
+    - {name: tools}
+    - {name: neurons}
+    - {name: compound_miner}
+    - {name: utils}
+    - name: config
+      excludes: ['--exclude=config.yaml', '--exclude=boltzgen_config.yaml']
+    - {name: tests}
+    - {name: scripts}
+    - {name: deploy}
   loop_control:
-    label: "{{ item.dest }}"
+    label: "{{ item.name }}"
+  changed_when: true
+
+- name: Install the verified deployment gate
+  ansible.builtin.copy:
+    src: "{{ sn68_release_root }}/deploy_gate.sh"
+    dest: /root/deploy_gate.sh
+    remote_src: true
+    mode: "0755"
 
 - name: Make combinatorial_db importable without shipping the molecule database
   ansible.builtin.file:

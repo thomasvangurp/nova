@@ -101,7 +101,19 @@ def main() -> None:
         if len(str(row.get("sequence", "")).strip()) == args.sequence_length
     ]
     if not usable:
-        raise SystemExit(f"no usable proposals in {args.input}")
+        # Degrade instead of aborting the epoch: write an empty (header-only)
+        # output so the downstream race sees a marked-empty pool.
+        print(
+            f"PUBLIC_NEIGHBOURHOOD_EMPTY: no usable proposals in {args.input}; "
+            "writing empty output",
+            flush=True,
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            if fieldnames:
+                writer.writerow(fieldnames)
+        return 0
 
     archive = archive_sequences(args.archive, args.sequence_length)
     distances = minimum_distances(

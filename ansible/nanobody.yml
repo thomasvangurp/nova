@@ -1121,119 +1121,10 @@
     # taking the miner down: that is how an adapter ModuleNotFoundError was
     # caught without costing an epoch, and it is why nothing below reorders.
 
-    - name: Name the producer's launcher and arguments once
+    - name: Read the tested producer launch configuration
       ansible.builtin.set_fact:
-        # Declared as data so the same list is both what the gate verifies and
-        # what tmux starts. Typing them twice is how a verified flag and a
-        # passed flag drift apart.
-        nanobody_producer_launcher:
-          - /usr/local/bin/pixi
-          - run
-          - --manifest-path
-          - /root/pixi.toml
-          - --locked
-          - --environment
-          - bgen
-          - live-producer
-          - --
-        nanobody_producer_arguments:
-          - --poll-interval
-          - "30"
-          - --mutation-database
-          - "{{ nanobody_mutation_database }}"
-          - --parent-epochs
-          - "{{ nanobody_parent_epochs }}"
-          - --parent-limit
-          - "{{ nanobody_parent_limit }}"
-          - --neighbor-parent-limit
-          - "{{ nanobody_neighbor_parent_limit }}"
-          - --recent-parent-epoch-window
-          - "{{ nanobody_recent_parent_epoch_window }}"
-          - --recent-anchor-parent-limit
-          - "{{ nanobody_recent_anchor_parent_limit }}"
-          - --recent-neighbor-parent-limit
-          - "{{ nanobody_recent_neighbor_parent_limit }}"
-          - --basin-core-limit
-          - "{{ nanobody_basin_core_limit }}"
-          - --basin-parent-limit
-          - "{{ nanobody_basin_parent_limit }}"
-          - --neighbor-seed-count
-          - "{{ nanobody_neighbor_seed_count }}"
-          - --per-seed
-          - "{{ nanobody_proposals_per_seed }}"
-          - --settled-deviation-policy
-          - "{{ nanobody_settled_deviation_policy }}"
-          - --proposal-limit
-          - "{{ nanobody_proposal_limit }}"
-          - --basin-fraction
-          - "{{ nanobody_basin_fraction }}"
-          - --basin-routes-per-core
-          - "{{ nanobody_basin_routes_per_core }}"
-          - --basin-evidence-fraction
-          - "{{ nanobody_basin_evidence_fraction }}"
-          - --basin-evidence-core-limit
-          - "{{ nanobody_basin_evidence_core_limit }}"
-          - --basin-top-core-weight
-          - "{{ nanobody_basin_top_core_weight }}"
-          - --basin-exploration-residues-per-position
-          - "{{ nanobody_basin_exploration_residues_per_position }}"
-          - --candidate-limit
-          - "{{ nanobody_candidate_limit }}"
-          - --screen-tranche-size
-          - "{{ nanobody_screen_tranche_size }}"
-          - --maximum-initial-screen-p90
-          - "{{ nanobody_maximum_initial_screen_p90 }}"
-          - --weak-initial-fallback-after
-          - "{{ nanobody_weak_initial_fallback_after }}"
-          - --finalists
-          - "{{ nanobody_finalists }}"
-          - --exact-scorer
-          - "{{ nanobody_exact_scorer }}"
-          - --basin-shrinkage-strength
-          - "{{ nanobody_basin_shrinkage_strength }}"
-          - --minimum-basin-samples
-          - "{{ nanobody_minimum_basin_samples }}"
-          - --qualification-observations
-          - "{{ nanobody_qualification_observations }}"
-          - --pipeline-depth
-          - "{{ nanobody_pipeline_depth }}"
-          - --minimum-publishable-observations
-          - "{{ nanobody_minimum_publishable_observations }}"
-          - --replication-rounds
-          - "{{ nanobody_replication_rounds }}"
-          - --replication-reserve-blocks
-          - "{{ nanobody_replication_reserve_blocks }}"
-          - --replication-rounds-per-stage
-          - "{{ nanobody_replication_rounds_per_stage }}"
-          - --replication-keep-fraction
-          - "{{ nanobody_replication_keep_fraction }}"
-          - --igblast-batch-size
-          - "{{ nanobody_igblast_batch_size }}"
-          # A replacement scorer needs its own calibrated qualification
-          # thresholds; an empty value keeps the production scorer's.
-          - --strict-gates
-          - "{{ nanobody_strict_gates }}"
-          - --layer2-igblast-only
-          - "{{ 1 if nanobody_layer2_igblast_only | bool else 0 }}"
-          # Scaffold diversity the neighbourhood search cannot reach on its
-          # own. Across epochs 25093-25095 every candidate in the pool sat
-          # within 0.93 identity of every other, we committed seven
-          # submissions and the validator scored three.
-          - --donor-grafts
-          - --graft-teacher-rank
-          - "{{ nanobody_graft_teacher_rank }}"
-          - --graft-limit
-          - "{{ nanobody_graft_limit }}"
-          - --public-neighbourhood-distance
-          - "{{ nanobody_public_neighbourhood_distance }}"
-          - --scout-iterations
-          - "{{ nanobody_scout_iterations }}"
-          - --exploit-basin-fraction
-          - "{{ nanobody_exploit_basin_fraction }}"
-          - --exploit-basin-core-limit
-          - "{{ nanobody_exploit_basin_core_limit }}"
-          - --screen-predict-batch-size
-          - "{{ nanobody_screen_predict_batch_size }}"
+        nanobody_producer_launcher: "{{ lookup('file', repo ~ '/deploy/producer/producer_argv.txt').splitlines() }}"
+        nanobody_producer_arguments: []
 
     - name: Check the configured live exact scorer before activation
       ansible.builtin.stat:
@@ -1284,6 +1175,22 @@
 
     - name: Verify the box reaches the central MySQL (Tailscale)
       ansible.builtin.include_tasks: tasks/verify_mysql_reachability.yml
+
+    - name: Verify the installed release before producer activation
+      ansible.builtin.include_tasks: tasks/verify_tested_runtime.yml
+
+    - name: Validate the tested launch settings against the installed parser
+      ansible.builtin.command:
+        argv: [/root/.pixi/envs/bgen/bin/python, /root/scripts/check_launch_contract.py]
+      changed_when: false
+
+    - name: Persist the tested producer arguments for watchdog recovery
+      ansible.builtin.copy:
+        src: /root/deploy/producer/producer_argv.txt
+        dest: /root/artifacts/producer_argv.txt
+        remote_src: true
+        mode: "0644"
+      when: nanobody_producer_activate | bool
 
     - name: Stop prior autonomous nanobody producer before activation
       ansible.builtin.command:
