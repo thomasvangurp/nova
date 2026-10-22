@@ -30,6 +30,7 @@ TEST_FILES = (
     'tests/test_deploy_stamp.py',
     'tests/test_release_pipeline.py',
     'tests/test_epoch_deadline.py',
+    'tests/test_dashboard_cohort.py',
     'tests/test_nanobody_rank_exact.py',
     'tests/test_topup_slave.py',
     'nanobody_opt_v2/tests/test_flags.py',

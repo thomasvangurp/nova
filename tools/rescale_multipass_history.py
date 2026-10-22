@@ -70,15 +70,26 @@ def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
         f"{API}/api/competitions/leaderboard/{epoch}/nanobodies",
         headers={"User-Agent": "nova-rescale-multipass/1"},
     )
+    data = None
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = json.load(resp)
+        data = payload.get("data") if isinstance(payload, dict) else None
     except Exception:
-        return None
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return None
-    seen: set[str] = set()
+        data = None
+    if not isinstance(data, list) or not data:
+        # The API has no rows (since 25693 the validator's upload is rejected): use the rebuilt-from-log board.
+        try:
+            from tools.leaderboard_fallback import load_rows
+        except ImportError:
+            from leaderboard_fallback import load_rows
+        data = load_rows(epoch)
+        if not isinstance(data, list):
+            return None
+    # Measurements belong to a sequence, but leaderboard membership belongs
+    # to its owner too. The same sequence can score for two owners in one
+    # epoch; globally deduplicating it silently removes the later owner's row.
+    seen: set[tuple[str, str]] = set()
     pairs: list[tuple[str, str]] = []
     for submission in data:
         coldkey = str(submission.get("coldkey") or "")
@@ -86,8 +97,8 @@ def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
             if nb.get("protein_name") != TARGET:
                 continue
             seq = str(nb.get("sequence") or "").strip().upper()
-            if seq and seq not in seen:
-                seen.add(seq)
+            if seq and (coldkey, seq) not in seen:
+                seen.add((coldkey, seq))
                 pairs.append((coldkey, seq))
     return pairs
 
@@ -111,20 +122,17 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
         if sequences is None:
             rows = conn.execute(base + " AND o.epoch = ?", (TARGET, epoch)).fetchall()
         else:
-            # Replay-queue passes (writer replay_queue_slave) are scored for
-            # parents / provisional children whatever epoch they are later
-            # submitted in; their `epoch` is only the chain epoch at scoring
-            # time. A fold belongs to (sequence, target), so count them for
-            # the sequence, bounded by the sequence set (never the whole
-            # epoch, see the pool-inflation bug).
+            # Every canonical raw fold belongs to (sequence, target). Reuse
+            # stored passes across epochs regardless of which replay writer
+            # produced them; bound by the real submitted sequence set.
             rows = []
             ordered = sorted(sequences)
             for i in range(0, len(ordered), 300):
                 chunk = ordered[i:i + 300]
                 rows += conn.execute(
                     base + f" AND n.sequence IN ({','.join('?' * len(chunk))}) "
-                    "AND (o.epoch = ? OR json_extract(o.provenance_json, '$.writer') = 'replay_queue_slave')",
-                    (TARGET, *chunk, epoch),
+                    "ORDER BY o.observation_id",
+                    (TARGET, *chunk),
                 ).fetchall()
     finally:
         conn.close()
@@ -258,22 +266,15 @@ def rescale_epoch(epoch: int) -> dict | None:
     if missing_our_seqs:
         pass_metrics.update(our_race_metrics(missing_our_seqs))
 
-    # User, 2026-10-11: "Allareretainedin db" / "Look harder" -- a rival has
-    # no multipass replay AND no race history of its own (we never fold a
-    # rival's sequence ourselves), but seed_mutation_database.py has been
-    # continuously ingesting the REAL validator's own per-submission raw
-    # metrics (source=public_validator_api) across effectively all of
-    # history -- confirmed 100% coverage of one otherwise-unrecoverable
-    # epoch's full rival fleet. One real draw per sequence instead of a
-    # multipass mean, but it is the validator's own real fold, not a
-    # simulation, so it is not a downgrade in kind -- only in replicate count.
-    still_missing = all_seqs - {
-        key.rsplit("::", 1)[0] for key in pass_metrics
-    }
-    if still_missing:
-        pass_metrics.update(validator_api_metrics(epoch, still_missing))
-    if not pass_metrics:
-        return None
+    # A single validator draw is not a multipass mean. Keep missing
+    # evidence explicit rather than silently changing measurement regimes.
+    depths: dict[str, int] = defaultdict(int)
+    for key in pass_metrics:
+        depths[key.rsplit("::", 1)[0]] += 1
+    qualified = {seq for seq, depth in depths.items()
+                 if depth >= PASSES_PER_SEQUENCE}
+    pass_metrics = {key: metrics for key, metrics in pass_metrics.items()
+                    if key.rsplit("::", 1)[0] in qualified}
 
     fields = fetch_recent_fields_from_db(
         LOCAL_DB, target=TARGET, before_epoch=epoch, count=FIELD_EPOCHS)
@@ -281,8 +282,6 @@ def rescale_epoch(epoch: int) -> dict | None:
         return None
     pooled = pool_recent_fields(fields)
     pass_ranks = rank_metrics_against_field(pass_metrics, pooled)
-    if not pass_ranks:
-        return None
 
     seq_of_key = {k: k.rsplit("::", 1)[0] for k in pass_ranks}
     by_seq: dict[str, list[float]] = defaultdict(list)
@@ -301,6 +300,8 @@ def rescale_epoch(epoch: int) -> dict | None:
             "formula": "sum10",
             "measurement": "local_fast_scorer_multipass_mean",
             "passes": None,
+            "minimum_passes": PASSES_PER_SEQUENCE,
+            "coverage_policy": "complete_fleet_minimum_10_passes",
             "field": "recent_validator_epochs",
             "field_rows": int(len(pooled)),
             "field_sha256": None,
@@ -311,13 +312,18 @@ def rescale_epoch(epoch: int) -> dict | None:
     }
     for coldkey, seqs in sorted(by_coldkey.items(), key=lambda kv: -len(kv[1])):
         scored = [seq_means[s] for s in seqs if s in seq_means]
-        if not scored:
-            continue
+        complete = len(scored) == len(seqs)
         entry = {
-            "mean": float(np.mean(scored)),
-            "stdev": float(np.std(scored)) if len(scored) > 1 else None,
+            "mean": float(np.mean(scored)) if complete and scored else None,
+            "stdev": float(np.std(scored)) if complete and len(scored) > 1 else None,
             "fleet_size": len(seqs),
-            "scores": [float(v) for v in sorted(scored)],
+            "scored_sequences": len(scored),
+            "missing_sequences": len(seqs) - len(scored),
+            "minimum_passes": PASSES_PER_SEQUENCE,
+            "coverage_complete": complete,
+            "passes_min": min((depths[s] for s in seqs if s in seq_means), default=0),
+            "passes_max": max((depths[s] for s in seqs if s in seq_means), default=0),
+            "scores": [float(v) for v in sorted(scored)] if complete else [],
         }
         if coldkey == OUR_COLDKEY:
             result["ours"] = entry
