@@ -147,6 +147,10 @@ PARITY_EXTRA = ("/root/fastscore/pinned-530f5dcbc54d/fast_score_batch.py",)
 #:   * scorer_daemon.py: the master adds worker-count shard widening (scorer_workers_per_gpu), the slave
 #:     adds the orphan-worker parent watch and the replicate plumbing.  Sharding changes how a round is
 #:     split across workers, not what a sequence scores.
+#:     2026-10-22: reviewed master's short-shard retry and detailed merge diagnostics. The retry
+#:     sends the same first sixteen scorer arguments, overwrites the incomplete shard, and merges it
+#:     once. The slave's extra replicate arguments remain disabled for this unique-sequence top-up.
+#:     Neither pinned scoring code nor measurement settings change. Unknown future hashes still block.
 #: The master's scorer files must keep matching ``scorer_sha256`` in its settings: the adapter refuses to
 #: run otherwise, and an edit that skipped the pin stopped the whole race from 2026-10-16 18:58 EDT.
 #: Only these exact pairs are accepted.  A change on either box produces a new pair, which blocks the
@@ -156,7 +160,7 @@ REVIEWED_DIVERGENCE = {
         "efe27a946e26f6f76f6292c2cd2fa6f8d4638a64b31281016f5d743036367197",
         "09844a09324b710393d59ed49d41a71a6470b2edd711d2e338fcedf544780c64"),
     "scorer_daemon.py": (
-        "1b959001e0c52320a96f402ae030da1be6edfdca2728c24478f83690832347b8",
+        "108ebb25cdd15bf4bf7cc0db4aa6073c595a21863bd76c8e14e0d719a7ca6696",
         "5a0ced01655abc8bc7f2029d568b281f83e850f1452e2403f46971cbd0be7971"),
     "fast_score_batch.py": (
         "530f5dcbc54d4a012571f4f9a7ddb6c016552291606652766d02c91643a7d531",
