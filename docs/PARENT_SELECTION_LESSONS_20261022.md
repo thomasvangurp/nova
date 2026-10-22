@@ -16,10 +16,16 @@ The correction bounds the strict pool even when thin, filters evidence depth bef
 
 The slave worker must see producer confirmation rankings without waiting for the publisher. New rival/replay batches yield during the critical submission window until confirmation and current publication exist. Already completed measurements remain reusable through the observation store.
 
+Recovery found twenty completed epoch-25871 repeat files missing their sealed import records. The normal importer recovered 720 independent observation records and sealed all twenty runs. Recovery must retain at most 64 confirmed, policy-current finalists from the immediately preceding epoch, import their completed repeat evidence, and rank them against the current field. Publication still runs the current novelty, Layer-2 and independent-observation gates. Do not rerun historical GPU work or scan old screening directories on the publisher path.
+
 ## Release contract
 
 Run `scripts/shipping_checks.py` from a clean committed tree. It stages committed source, compiles it, executes the explicit shipping regression suites, rejects missing/zero/skipped/failed tests, and packages those exact bytes with commit, lockfile hash, file hashes, and passing test evidence. CI runs this same command. Deployment depends on that CI job and downloads its package; it verifies staged and installed hashes before activation. Both producer trees must not be confused: production invokes `nanobody_opt_v2.run_live_producer` and ships `nanobody_opt_v2`.
 
-A local test pass is not a GitHub CI pass. Do not deploy changed code until CI succeeds for the exact revision. Preserve the passing receipt and verify each installed file against it. Do not copy an unrelated build stamp or infer production health from a running tmux session. Verify the artifact's epoch and age, the confirmation depth, and the submitter's actual commit results.
+A local test pass is not a GitHub CI pass. Normally deploy after GitHub CI succeeds for the exact revision. For this incident the user explicitly authorized the verified local shipping run; preserve that distinction and the passing receipt, and verify each installed file against it. Do not copy an unrelated build stamp or infer production health from a running tmux session. Verify the artifact's epoch and age, the confirmation depth, and the submitter's actual commit results.
+
+Commit `f29c07b772cd3c980c55ccaf97662afb14ef7dd7` passed all 371 shipping tests locally and in [GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/39804000282). Eleven incident runtime files were deployed from that verified artifact and checked by hash; producer, publisher and slave top-up restarted successfully. The receipt is `/root/artifacts/incident_release_20261022.json`. This was a scoped incident deployment, not a claim that every runtime file matches a full release.
+
+The HTTPS credential could not push workflow changes. Authenticated SSH successfully pushed the same commit, including workflows; the local `payout-pr` remote now uses `git@github.com:thomasvangurp/nova.git` as its persistent push URL. This fixes workflow pushes without copying credentials or granting a broader token scope.
 
 Regression coverage includes current-field parent merit, proposal/screen budgets, deferred TNP, value pricing, commit side effects, validator round trips, actual v2 imports, release tampering, and a real blocked-process rollover test that proves child termination and immediate next-epoch progress.

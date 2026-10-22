@@ -534,6 +534,55 @@ def _current_epoch_exact_inputs(
     return tuple(sorted(root.glob("**/exact_all.json")))
 
 
+def _previous_confirmed_pool(epoch_root: Path, target: str) -> tuple[set[str], tuple[Path, ...]]:
+    """Recover a bounded, completed shortlist across a publication outage.
+
+    Scores here only choose which saved evidence to recover. Current-field
+    ranking, independent-observation counting, novelty and Layer-2 still run.
+    Never walk historical screening pools or launch old GPU work.
+    """
+    from nanobody_opt_v2.run_live_producer import _artifact_policy_stale
+    prior = epoch_root.parent / f"epoch{int(epoch_root.name.removeprefix('epoch')) - 1}"
+    candidates = []
+    for iteration in sorted((prior / 'producer').glob('iteration_[0-9][0-9]')):
+        layer2 = iteration / 'layer2_dedup.json'
+        if _artifact_policy_stale(layer2):
+            continue
+        rounds = iteration / 'race/rounds'
+        try:
+            eligible = json.loads(layer2.read_text())
+            ranking = json.loads((rounds / 'stage_ranking.json').read_text())
+        except (OSError, ValueError):
+            continue
+        if eligible.get('target') != target or ranking.get('target') != target:
+            continue
+        allowed = set(eligible.get('sequences') or [])
+        for candidate in ranking.get('candidates') or []:
+            try:
+                sequence = str(candidate['sequence']).strip().upper()
+                score = float(candidate['selection_score'])
+                depth = int(candidate['observation_count'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sequence in allowed and depth >= 20 and math.isfinite(score):
+                candidates.append((score, sequence, rounds))
+    selected: dict[str, Path] = {}
+    for _, sequence, rounds in sorted(candidates):
+        selected.setdefault(sequence, rounds)
+        if len(selected) == 64:
+            break
+    # At most 64 completed repeat files from the immediately preceding epoch;
+    # current ingestion is always first, and the command deadline still applies.
+    files = sorted({path for rounds in selected.values()
+                    for path in rounds.glob('round_[0-9][0-9]/exact_all.json')})[:64]
+    return set(selected), tuple(files)
+
+
+def _publication_exact_inputs(score_bank_root: Path, epoch: int, target: str) -> tuple[Path, ...]:
+    _, carryover = _previous_confirmed_pool(score_bank_root / 'live' / f'epoch{epoch}', target)
+    return tuple(dict.fromkeys((*_current_epoch_exact_inputs(score_bank_root, epoch), *carryover)))
+
+
 def _exact_run_descriptor(path: Path, target: str) -> dict[str, Any]:
     """Describe exactly the rows the raw-screen importer must seal."""
     raw = path.read_bytes()
@@ -1079,6 +1128,8 @@ def _producer_candidate_scope(epoch_root: Path, target: str, previous=None) -> P
         return None
     epoch = int(epoch_root.name.removeprefix("epoch"))
     allowed.update(_live_sequences(previous, epoch))
+    confirmed, _ = _previous_confirmed_pool(epoch_root, target)
+    allowed.update(confirmed)
     output = epoch_root / "producer_candidate_scope.txt"
     output.write_text("".join(s + "\n" for s in sorted(allowed)))
     return output
@@ -2113,8 +2164,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             raise SystemExit("locked nanobody Pixi runtimes are not installed")
 
         # Normal operation uses SQLite as the sole historical query surface.
-        # Files are considered only inside this epoch's directory, ingested
-        # once, sealed, and then omitted from rank_exact entirely.  Explicit
+        # Current runs and a bounded completed shortlist from the prior epoch
+        # are ingested once, sealed, then omitted from rank_exact. Explicit
         # --exact remains a break-glass/testing path with the old semantics.
         explicit_exact = tuple(args.exact or ())
         missing_exact = [str(path) for path in explicit_exact if not path.is_file()]
@@ -2134,8 +2185,8 @@ def _publish_once(args: argparse.Namespace) -> None:
         else:
             exact_inputs = ()
             observation_history = args.observation_database
-            current_inputs = _current_epoch_exact_inputs(
-                args.score_bank_root, epoch
+            current_inputs = _publication_exact_inputs(
+                args.score_bank_root, epoch, target
             )
             descriptors = [
                 _exact_run_descriptor(path, target) for path in current_inputs

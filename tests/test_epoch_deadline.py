@@ -118,3 +118,55 @@ def test_background_replay_yields_until_confirmation_and_current_publication(tmp
     assert not critical(tmp_path)
     clock(state, epoch=73, offset=160)
     assert critical(tmp_path)
+
+
+def saved_finalists(root, epoch=71, target='TEST', depth=20, count=1):
+    from nanobody_opt_v2.run_live_producer import GENERATION_POLICY
+    iteration = root / f'live/epoch{epoch}/producer/iteration_02'
+    rounds = iteration / 'race/rounds'
+    rounds.mkdir(parents=True)
+    sequences = [f'CANDIDATE{i:03}' for i in range(count)]
+    layer2 = iteration / 'layer2_dedup.json'
+    layer2.write_text(json.dumps({'target': target, 'sequences': sequences}))
+    Path(str(layer2) + '.policy').write_text(GENERATION_POLICY)
+    (rounds / 'stage_ranking.json').write_text(json.dumps({
+        'target': target, 'candidates': [
+            {'sequence': sequence, 'observation_count': depth, 'selection_score': i + 1}
+            for i, sequence in enumerate(sequences)]}))
+    exact = rounds / 'round_20/exact_all.json'
+    exact.parent.mkdir(); exact.write_text('{}')
+    return layer2, exact
+
+
+def test_completed_unpublished_finalists_survive_rollover(monkeypatch, tmp_path):
+    publisher = import_shipping('tools.publish_current_nanobody', monkeypatch)
+    _, exact = saved_finalists(tmp_path)
+    saved_finalists(tmp_path, epoch=72, count=0)
+    epoch_root = tmp_path / 'live/epoch72'
+    scope = publisher._producer_candidate_scope(epoch_root, 'TEST')
+    assert scope.read_text().splitlines() == ['CANDIDATE000']
+    current = publisher._current_epoch_exact_inputs(tmp_path, 72)
+    assert publisher._publication_exact_inputs(tmp_path, 72, 'TEST') == (*current, exact)
+    assert publisher._previous_confirmed_pool(epoch_root, 'TEST')[0] == {'CANDIDATE000'}
+
+
+@pytest.mark.parametrize('invalid', ['shallow', 'target', 'policy', 'old'])
+def test_carryover_rejects_ineligible_or_unbounded_history(monkeypatch, tmp_path, invalid):
+    publisher = import_shipping('tools.publish_current_nanobody', monkeypatch)
+    layer2, _ = saved_finalists(tmp_path, epoch=70 if invalid == 'old' else 71,
+                               target='OTHER' if invalid == 'target' else 'TEST',
+                               depth=19 if invalid == 'shallow' else 20)
+    if invalid == 'policy':
+        Path(str(layer2) + '.policy').write_text('obsolete')
+    assert publisher._previous_confirmed_pool(tmp_path / 'live/epoch72', 'TEST') == (set(), ())
+
+
+def test_carryover_caps_finalists_and_never_reads_old_screen_pool(monkeypatch, tmp_path):
+    publisher = import_shipping('tools.publish_current_nanobody', monkeypatch)
+    _, exact = saved_finalists(tmp_path, count=100)
+    screen = exact.parents[2] / 'screen/exact_all.json'
+    screen.parent.mkdir(); screen.write_text('{}')
+    sequences, files = publisher._previous_confirmed_pool(tmp_path / 'live/epoch72', 'TEST')
+    assert len(sequences) == 64
+    assert 'CANDIDATE000' in sequences and 'CANDIDATE099' not in sequences
+    assert files == (exact,)
