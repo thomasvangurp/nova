@@ -45,3 +45,49 @@ Epoch 25872 subsequently had all eleven fleet entries scored. The dashboard snap
 The rebuilt and published dashboard shows epoch 25872 at **849.130303**, all eleven candidates covered, 10–30 stored replay passes per candidate, against 388 rows from the preceding ten epochs. This retrospective dashboard calculation uses its stored replay evidence; the earlier **785.207792** was the live prepublication estimate with 21 observations each and its then-available field. Keep these labelled rather than treating them as the same snapshot. The rendered Multipass trace and successful Vercel publication were verified.
 
 Regression coverage includes current-field parent merit, proposal/screen budgets, deferred TNP, value pricing, commit side effects, validator round trips, actual v2 imports, release tampering, and a real blocked-process rollover test that proves child termination and immediate next-epoch progress.
+
+
+## Pi dashboard ownership (2026-10-23)
+
+The Mac refresh and multipass LaunchAgents were still the data producers even
+though Vercel deployment ran on the Pi. Closing the Mac stopped both upstream
+steps. The master multipass exporter also stopped, leaving epoch 25872 as its
+last published file. Recent Mac logs contained DNS failures, transfer failures
+and timeouts. A successful deploy attempt was not proof of a successful deploy.
+
+The tested dashboard release is `d50957bb38fadc6fb45b251ad5ff6648970a7b36`.
+Both local shipping CI (438 tests, zero skips) and GitHub run
+https://github.com/thomasvangurp/nova/actions/runs/39911431328 passed. One initial
+local run failed the existing four-second epoch cancellation timing assertion;
+the focused rerun and complete shipping rerun passed without relaxing the test.
+
+Production dashboard jobs use `/opt/nova-dashboard` on the Pi. The template
+`deploy/dashboard/nova-dashboard@.service` runs each job with its own lock and
+health file. Refresh and publish timers run after 60 seconds idle; multipass
+after 300 seconds; compound after 600 seconds; money and proxy after 3600 seconds.
+A slow collector cannot hold the render/publish lock. Health preserves the last
+success separately from the latest attempt; CLI output and exception messages
+are never copied to logs.
+
+The Pi resolves the current master through its existing authenticated Vast CLI,
+requests a bounded recent-six-epoch export, and pulls the resulting comparison.
+The master exporter writes newest epochs first and saves after each epoch while
+retaining historical rows. A failed older epoch cannot erase newer progress.
+Exports are file-locked; remote and local timeouts bound work. Invalid or older
+comparison downloads cannot replace the last good file. An exported epoch and
+a completely measured fleet are reported separately on the dashboard.
+
+Dashboard source and these regression suites are now included in the release
+manifest and blocking shipping checks. Deploy only files whose hashes match a
+passing build stamp. Pi Python dependencies are pinned in
+`requirements/dashboard.txt`; Vercel CLI is pinned to 65.1.0 and uses the Pi's
+existing authentication. No credentials are copied from the Mac. Bootstrap
+history with a consistent SQLite backup; redeployment must preserve live data.
+
+Operational checks: `systemctl list-timers 'nova-dashboard-*'`,
+`systemctl status nova-dashboard@refresh nova-dashboard@multipass nova-dashboard@publish`,
+and the non-secret `data/dashboard_*_health.json` receipts. Verify the live
+`/version.json` marker and rendered multipass panel before retiring Mac writers.
+The Mac dashboard and multipass LaunchAgents must remain disabled after cutover.
+AWS/Taostats histories retain their last known values if Pi credentials are
+unavailable; chain balances and Vast collection use existing Pi access.
