@@ -1,5 +1,6 @@
 """Deferred TNP must cover preparation without weakening publication gates."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -297,3 +298,39 @@ def test_priority_parent_lane_cannot_bypass_measured_multipass_order(monkeypatch
     assert lane._merge_priority(["WEAK", "UNMEASURED", "STRONG"], {
         "WEAK": 1805, "STRONG": 684.15,
     }) == ["STRONG", "WEAK"]
+
+
+def test_publisher_compares_stored_candidates_without_adding_them_to_gpu_queue(monkeypatch, tmp_path):
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    root = tmp_path / "epoch100"
+    path = root / "producer/iteration_01/layer2_dedup.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"target": "TEST", "sequences": ["NEW"]}))
+    producer._stamp_artifact_policy(path)
+    scope = publisher._producer_candidate_scope(root, "TEST", include_stored_candidates=True)
+    assert scope is None  # compare complete stored bank, not just discovery
+    command = publisher._rank_command(
+        bgen_python=Path("python"), nanobody_opt_root=tmp_path, exact_inputs=[],
+        archive=tmp_path / "archive.csv", target="TEST", output=tmp_path / "ranking.json",
+        exclusion=tmp_path / "ledger", epoch=100, shortlist=100, config=None,
+        strict=False, observation_history=tmp_path / "history.sqlite", only_sequences=scope)
+    assert "--observation-history" in command
+    assert "--current-exact-candidates-only" not in command
+    assert "--only-sequences" not in command
+    assert int(command[command.index("--minimum-observations") + 1]) == 20
+    # Changing comparison never asks for a fresh screen of stored candidates.
+    assert "--scorer" not in command
+    assert "--gpus" not in command
+    from nanobody_opt_v2.screen_budget import pending
+    assert pending([{"sequence": "NEW"}], tmp_path, 100, 4800) == [{"sequence": "NEW"}]
+
+
+def test_scope_change_invalidates_old_publisher_noop_state(monkeypatch, tmp_path):
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    common = dict(epoch=100, target="TEST", exact_fingerprint="same",
+                  ledger_fingerprint="same", fleet_fingerprint="same")
+    assert not publisher._publisher_state_matches({"schema_version": 2, **common}, **common)
+    path = tmp_path / "state.json"
+    publisher._write_publisher_state(path, **common, strict_fingerprint="same")
+    assert publisher._publisher_state_matches(json.loads(path.read_text()), **common)

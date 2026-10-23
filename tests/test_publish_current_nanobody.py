@@ -92,7 +92,7 @@ SEQUENCE = _sequence(0)
 
 def _checkpoint(epoch=EPOCH, sequence=SEQUENCE, stage="qualified"):
     return {
-        "schema_version": 3,
+        "schema_version": 2,
         "status": stage,
         "publication_stage": stage,
         "target": TARGET,
@@ -447,7 +447,7 @@ def test_processed_state_is_bound_to_the_uid_set_as_well(tmp_path):
         "ledger_fingerprint": "ledger",
         "fleet_fingerprint": "[[1,\"5H\"]]",
     }
-    state = {"schema_version": 2, **common}
+    state = {"schema_version": 3, **common}
 
     assert _publisher_state_matches(state, **common)
     assert not _publisher_state_matches(state, **{**common, "exact_fingerprint": "new"})
@@ -461,7 +461,7 @@ def test_processed_state_is_bound_to_the_uid_set_as_well(tmp_path):
 
 def test_strict_cache_survives_an_unrelated_one_shot_but_not_a_new_uid():
     state = {
-        "schema_version": 2,
+        "schema_version": 3,
         "epoch": EPOCH,
         "target": TARGET,
         "exact_fingerprint": "old-exact",

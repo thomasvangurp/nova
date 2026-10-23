@@ -215,3 +215,28 @@ local rows, so existing data cannot provide an unbiased missed-winner rate.
 A same-field comparison of retained finalists' initial versus subsequent
 observations found roughly 39%, 24% and 40% worse repeat rank sums. This shows
 selection optimism, not the fraction of winners lost; do not conflate them.
+
+
+## Separate discovery from comparison (2026-10-23)
+
+Excluding 235,814 previously evaluated candidates from new GPU work must not
+exclude those candidates from comparison or publication. The publisher's
+producer-derived candidate scope accidentally coupled these two decisions.
+With a sealed observation database, publication now compares the stored bank
+and newly confirmed candidates together against the current ten-epoch field.
+It does not dispatch GPU evaluations of stored candidates. Explicit score-bank
+runs retain their existing scope. The twenty-observation publication floor,
+current novelty checks, Layer-2 gates and strict qualification remain required.
+
+Publisher state schema 3 invalidates the old scope's no-op cache. The aggregate
+ranking path applies the requested observation floor before loading raw fold
+vectors, retaining all aggregate statistics for unchanged shrinkage. This avoids
+loading shallow histories that cannot qualify. The existing command timeout,
+epoch cancellation and bounded strict finalist pool remain in force.
+
+A read-only live comparison for epoch 25894 ranked 9,542 candidates with enough
+stored observations and produced a top-100 comparison without GPU work.
+This is a comparison probe, not a claim that its leaders pass final novelty or
+submission gates. CI regressions verify that a stored candidate absent from
+current exact inputs can beat a new candidate in the same-field ranking,
+without another fold; discovery still rejects previously evaluated candidates.

@@ -137,7 +137,7 @@ SHORTLIST_PER_UID = 50
 
 CANONICAL_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 SUPPORTED_CHAIN_STATE_SCHEMAS = frozenset({1, 2})
-PUBLISHER_STATE_SCHEMA_VERSION = 2
+PUBLISHER_STATE_SCHEMA_VERSION = 3
 
 
 class ChainView(NamedTuple):
@@ -1111,8 +1111,17 @@ def _novel_layer2_rankings(rankings: Path, novelty: Path, output: Path) -> Path:
     return output
 
 
-def _producer_candidate_scope(epoch_root: Path, target: str, previous=None) -> Path | None:
-    """Keep historical folds as evidence without re-admitting rejected parents."""
+def _producer_candidate_scope(epoch_root: Path, target: str, previous=None, *,
+                              include_stored_candidates: bool = False) -> Path | None:
+    """Discovery admission must not constrain the publication comparison.
+
+    With a sealed observation database, compare stored candidates and newly
+    confirmed candidates together. The ranker's observation floor and public
+    exclusions, followed by current novelty and Layer-2 checks, still decide
+    eligibility. Explicit score-bank operation keeps its existing scope.
+    """
+    if include_stored_candidates:
+        return None
     from nanobody_opt_v2.run_live_producer import _artifact_policy_stale
     allowed = set()
     found = False
@@ -2325,7 +2334,10 @@ def _publish_once(args: argparse.Namespace) -> None:
                 f"need at least {len(crew)}, got {shortlist_floor}"
             )
         shortlist = max(shortlist_floor, len(crew) * SHORTLIST_PER_UID)
-        candidate_scope = _producer_candidate_scope(epoch_root, target, previous)
+        candidate_scope = _producer_candidate_scope(
+            epoch_root, target, previous,
+            include_stored_candidates=observation_history is not None,
+        )
         if current_qualified:
             # The provisional pass is the net that keeps an epoch from submitting
             # nothing. A qualified fleet is already live for this epoch, so the

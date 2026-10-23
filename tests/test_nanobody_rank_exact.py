@@ -812,3 +812,40 @@ def test_the_ranker_and_the_invariant_agree_on_a_randomised_corpus():
         ]
         rows.sort(key=lambda item: float(item["multipass_rank"]))
         fleet._assert_non_decreasing_multipass_rank(rows)
+
+
+def test_stored_candidate_can_beat_new_candidate_without_a_new_fold(tmp_path, monkeypatch):
+    exact = _exact_bank(tmp_path, {"NEW": 20})
+    history = tmp_path / "history.sqlite"
+    db.connect_local(history).close()
+    # The old candidate is absent from --exact. Its stored raw observations
+    # must still participate in the SAME current-field comparison.
+    best = {m: (-100.0 if direction == "min" else 100.0) for m,direction in METRICS.items()}
+    monkeypatch.setattr(rank_exact, "_read_aggregate_stats", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(rank_exact, "_historical_observations", lambda *a, **kw: ({"STORED": [best]*20}, 20))
+    field = pd.DataFrame([_metrics(i) for i in range(1, 50)])
+    monkeypatch.setattr(rank_exact, "fetch_recent_fields_from_db", lambda *a, **kw: [(99,field)])
+    result = _rank(tmp_path, monkeypatch, exact, **{
+        "--observation-history": history, "--minimum-observations": 20,
+        "--selection-order": "multipass", "--before-epoch": 100,
+        "--consensus-ranking-policy": "off", "--rank-workers": 1,
+    })
+    assert result["sequences"] == ["STORED", "NEW"]
+    assert result["candidates"][0]["observation_count"] == 20
+    assert result["candidates"][0]["multipass_rank"] < result["candidates"][1]["multipass_rank"]
+
+
+def test_stored_bank_reads_raw_folds_only_above_evidence_floor(tmp_path, monkeypatch):
+    exact = _exact_bank(tmp_path, {"NEW": 20})
+    history = tmp_path / "history.sqlite"
+    db.connect_local(history).close()
+    stats = rank_exact._folds_to_stats({"STORED": [_metrics(.2)]*20, "SHALLOW": [_metrics(.1)]*19})
+    monkeypatch.setattr(rank_exact, "_read_aggregate_stats", lambda *a, **kw: (stats, 1))
+    def folds(database, target, candidates, **kw):
+        assert candidates == {"NEW", "STORED"}
+        return {"STORED": [_metrics(.2)]*20}
+    monkeypatch.setattr(rank_exact, "_candidate_observation_folds", folds)
+    result = _rank(tmp_path, monkeypatch, exact, **{
+        "--observation-history": history, "--minimum-observations": 20, "--rank-workers": 1,
+    })
+    assert set(result["sequences"]) == {"NEW", "STORED"}

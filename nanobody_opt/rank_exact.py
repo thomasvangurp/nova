@@ -1543,8 +1543,13 @@ def main() -> None:
                 }
                 current_folds = sum(len(v) for v in observations_by_sequence.values())
                 added = sum(pool_depths.values()) - current_folds
+                # The full stored bank participates in comparison. Do not
+                # materialize hundreds of thousands of one-pass histories
+                # that cannot satisfy this invocation's evidence floor.
+                # Keep their aggregate statistics for unchanged shrinkage.
                 candidates = _candidate_set(
-                    pool_depths.keys(), only_sequences,
+                    (seq for seq, depth in pool_depths.items()
+                     if depth >= args.minimum_observations), only_sequences,
                     historical_sequences, excluded_sequences,
                 )
                 candidate_folds = _candidate_observation_folds(
