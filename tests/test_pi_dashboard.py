@@ -188,6 +188,8 @@ def test_aws_cli_uses_service_credential_locator_and_drops_ambient_keys(monkeypa
     monkeypatch.setenv("AWS_PROFILE", "unrelated")
     def run(command, **kwargs):
         assert command[-2:] == ["--profile", "nova-dashboard"]
+        assert "--no-cli-pager" not in command
+        assert kwargs["env"]["AWS_PAGER"] == ""
         assert kwargs["env"]["AWS_SHARED_CREDENTIALS_FILE"] == "/run/credentials/money/aws-dashboard"
         assert "AWS_PROFILE" not in kwargs["env"]
         assert kwargs["stderr"] == subprocess.DEVNULL

@@ -84,15 +84,17 @@ def _aws_json(arguments: list[str], profile: str | None = None,
     if not binary:
         raise InfraError("AWS CLI is unavailable")
     command = [binary, *arguments, "--region", AWS_BILLING_REGION,
-               "--output", "json", "--no-cli-pager"]
-    environment = None
+               "--output", "json"]
+    # AWS_PAGER works with v2 and is harmless to the pinned v1 client.
+    # --no-cli-pager is v2-only and makes v1 reject even STS identity reads.
+    environment = os.environ.copy()
+    environment["AWS_PAGER"] = ""
     if profile:
         command.extend(["--profile", profile])
         # A stale temporary shell session otherwise takes precedence over the
         # explicitly selected long-lived profile.  Remove only credential
         # variables from this child's private environment; never inspect or
         # log their values.
-        environment = os.environ.copy()
         for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
                      "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN",
                      "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
