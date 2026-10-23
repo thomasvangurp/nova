@@ -159,16 +159,16 @@ Verification receipts are retained on the Pi at
 `data/ohio_destroyed_20261023.json` and `data/dashboard_aws_access_20261023.json`.
 
 
-## Fresh evaluation budget and money history (2026-10-23)
+## Previously unevaluated candidate budget and money history (2026-10-23)
 
-The 4,800 epoch budget means new first-stage GPU evaluations in that epoch.
+The 4,800 epoch budget means first-ever exact evaluations of previously unevaluated candidates.
 Cached history remains ranking evidence and contributes zero budget credit.
 Epochs 25889/25890/25891 actually screened 799/623/581 new candidates while
 all-history coverage claimed 4,785/4,788/4,787. Never describe that coverage as
 new work. Keep up to 8,000 proposals through cheap eligibility before admitting
 4,800; early cheap rejection consumes no GPU budget.
 
-New epoch manifests use `fresh-evaluations-v1`. A locked, durable per-epoch
+New epoch manifests use `unseen-candidates-v2`. A locked, durable per-epoch
 ledger reserves dispatches before launch; restart, cached results, and repeat
 confirmation cannot reset or inflate this budget. Report successful screens,
 reserved dispatches, incomplete dispatches, and budget shortfall separately.
@@ -196,3 +196,22 @@ logs. Portfolio history uses the latest observation of each position per day;
 missing observations remain unknown rather than creating zero-value crashes.
 CI covers stale income, missing portfolio observations, duplicate snapshots,
 component accounting, and failed reward queries.
+
+
+The user clarified that a fresh stochastic draw of an old candidate is NOT new
+work for this budget. The initial `fresh-evaluations-v1` interpretation was
+withdrawn before epoch 25892 began screening. The producer was stopped at
+25891 offset 358 while its completed result and independent publisher remained
+available. Previously evaluated sequences now feed the generator's exclusion
+file and the fallback's seen set. Admission rechecks local exact, public
+validator and rival replay history before selecting 4,800; dispatch checks
+again. The history read fails closed instead of treating an outage as an empty
+cache. Parent measurements remain usable for ranking. Confirmation and any
+future experiment on first-pass noise are separate from this discovery budget.
+
+Epochs 25889–25891 discarded 748/799, 574/623 and 528/581 candidates before
+confirmation. Only 9, 7 and 8 of those discarded candidates have multiple raw
+local rows, so existing data cannot provide an unbiased missed-winner rate.
+A same-field comparison of retained finalists' initial versus subsequent
+observations found roughly 39%, 24% and 40% worse repeat rank sums. This shows
+selection optimism, not the fraction of winners lost; do not conflate them.

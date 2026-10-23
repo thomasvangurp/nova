@@ -212,6 +212,41 @@ def _already_scored(database: Path | None, target: str, *, sequences=None) -> di
         connection.close()
 
 
+def _prior_evaluation_sequences(database: Path, target: str, *, sequences=None) -> set[str]:
+    """Prior exact work excludes a candidate from the NEW-candidate budget.
+
+    Fail closed: a database outage must never turn cache hits into new work.
+    Public validator/replay measurements count too, not only our own folds.
+    """
+    from nanobody_opt import mutation_network
+    connection = None
+    try:
+        if database is None:
+            raise ValueError("missing observation database")
+        connection = mutation_network._connect(Path(database))
+        placeholder = "?" if mutation_network._is_local(connection) else "%s"
+        wanted = sorted(set(sequences)) if sequences is not None else None
+        batches = [None] if wanted is None else [wanted[i:i+500] for i in range(0, len(wanted), 500)]
+        found = set()
+        for batch in batches:
+            sql = ("SELECT DISTINCT n.sequence FROM nodes n CROSS JOIN observations o "
+                   f"WHERE o.node_id=n.id AND n.target={placeholder} AND o.source IN "
+                   "('live_exact_screen','local_exact_raw','live_exact_repeat',"
+                   "'public_multipass_rivals','public_validator_api') ")
+            params = [target]
+            if batch is not None:
+                sql += "AND n.sequence IN (" + ",".join([placeholder]*len(batch)) + ")"
+                params.extend(batch)
+            found.update(str(row[0]) for row in connection.execute(sql, tuple(params)).fetchall())
+        return found
+    except Exception:
+        # Do not expose database connection diagnostics or silently rescore.
+        raise RuntimeError("prior exact-evaluation lookup unavailable") from None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 #: Soft dedup: re-deepen the top this many already-scored candidates per screen
 #: (best multipass rank first, regardless of their current pass count).
 RESCORE_TOP = int(os.environ.get("NANOBODY_RESCORE_TOP", "1000"))
@@ -1740,7 +1775,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
     parser.add_argument("--fresh-screen-budget", type=int, default=0,
-                        help="per-epoch new screening dispatch cap; cached history consumes none")
+                        help="per-epoch never-evaluated candidate cap; exclude every prior exact result")
     parser.add_argument("--carry-pending-candidates", action="store_true")
     parser.add_argument("--screen-all-candidates", action="store_true",
                         help="screen every eligible proposal, with no admission cap or repeat screening")
@@ -2086,6 +2121,9 @@ def main() -> None:
         if args.fresh_screen_budget < 1 or args.pooled_exact_root is None:
             parser.error("fresh screening requires a positive budget and an epoch root")
         from nanobody_opt_v2.screen_budget import pending as fresh_pending
+        evaluated = _prior_evaluation_sequences(args.mutation_database, args.target,
+            sequences=[r["sequence"] for r in candidate_records])
+        candidate_records = [r for r in candidate_records if r["sequence"] not in evaluated]
         candidate_records = fresh_pending(candidate_records, args.pooled_exact_root,
                                           args.epoch, args.fresh_screen_budget)
     elif args.carry_pending_candidates:

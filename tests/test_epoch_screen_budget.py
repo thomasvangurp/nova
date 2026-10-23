@@ -28,6 +28,7 @@ def test_prepare_once_preserves_oversupply_for_fresh_epoch_gate(tmp_path, monkey
         assert kw["prepare_only"]
         assert kw["args"].generation_proposal_budget == 8000
         assert kw["args"].child_floor == 8000
+        assert kw["args"].only_unseen_candidates
         assert sum(producer._generation_quotas(kw["args"], 8000).values()) == 8000
         producer._atomic_json(kw["iteration_root_override"] / "layer2_dedup.json", {
             "candidates": [{"sequence": f"SEQ{i}"} for i in range(6500)],
@@ -39,7 +40,7 @@ def test_prepare_once_preserves_oversupply_for_fresh_epoch_gate(tmp_path, monkey
     pool = json.loads(first.read_text())
     assert len(pool["candidates"]) == 6500
     assert pool["exact_admission_limit"] == 4800
-    assert pool["screen_budget_policy"] == "fresh-evaluations-v1"
+    assert pool["screen_budget_policy"] == "unseen-candidates-v2"
     assert pool["prepared_during_epoch"] == 71
     assert pool["origin_epoch"] == 72
 
@@ -132,7 +133,7 @@ def test_fallback_cannot_overshoot_screen_floor_and_retries_rejections(tmp_path,
 def test_fresh_budget_ignores_cache_and_survives_restart(tmp_path, monkeypatch):
     from nanobody_opt_v2 import screen_budget
     race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
-    monkeypatch.setattr(race, "_already_scored", lambda *a, **kw: {"OLD": 50})
+    monkeypatch.setattr(race, "_prior_evaluation_sequences", lambda *a, **kw: {"OLD"})
     parser = race._parser()
     args = parser.parse_args([
         "--layer2", "pool.json", "--archive", "archive.csv", "--config", "config.yaml",
@@ -146,7 +147,7 @@ def test_fresh_budget_ignores_cache_and_survives_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(race, "_candidate_records", lambda p: records)
     monkeypatch.setattr(race, "_chain_allows_work", lambda *a: False)
     race.main()
-    assert json.loads((tmp_path / "race/screen_candidates.json").read_text())["sequences"] == ["OLD", "NEW", "THIRD"]
+    assert json.loads((tmp_path / "race/screen_candidates.json").read_text())["sequences"] == ["NEW", "THIRD", "EXTRA"]
     # Charge before launch, so even a failed/interrupted GPU dispatch cannot
     # be silently retried outside the cap. Cheap rejected records never enter it.
     assert screen_budget.reserve(["OLD", "NEW"], tmp_path, 101, 3) == ["OLD", "NEW"]
@@ -183,3 +184,47 @@ def test_fresh_coverage_counts_only_this_epoch_screen_not_history_or_repeats(tmp
         database=tmp_path / "db", target="TEST", epoch=101, until_epoch=101)
     assert report["budget_exhausted"] and report["complete"]
     assert report["screened"] == 1  # never claim failed dispatches succeeded
+
+
+def test_unseen_admission_replaces_old_candidates_before_budget_cut(tmp_path, monkeypatch):
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.complete_screen_until_epoch = 72
+    args.complete_screen_pool = tmp_path / "pool.json"
+    producer._atomic_json(args.complete_screen_pool, {
+        "target": "TEST", "origin_epoch": 72, "exact_admission_limit": 3,
+        "screen_budget_policy": "unseen-candidates-v2",
+        "candidates": [{"sequence": s, "parent_multipass_mean": i}
+                       for i,s in enumerate(["OLD1","OLD2","NEW1","NEW2","NEW3","NEW4"])],
+    })
+    monkeypatch.setattr(producer, "_prepare_epoch", lambda **kw: (tmp_path / "cfg", tmp_path / "archive", "TEST"))
+    monkeypatch.setattr(producer, "_validator_novel_sequences", lambda **kw: {"OLD1","OLD2","NEW1","NEW2","NEW3","NEW4"})
+    monkeypatch.setattr(race, "_prior_evaluation_sequences", lambda *a, **kw: {"OLD1","OLD2"})
+    monkeypatch.setattr(producer, "_complete_pool_coverage", lambda **kw: {"complete": False})
+    calls=[]
+    monkeypatch.setattr(producer, "_run_race", lambda **kw: calls.append(kw))
+    producer._run_complete_screen_pool(args, state(72))
+    pool=json.loads(calls[0]["layer2"].read_text())
+    assert pool["sequences"] == ["NEW1","NEW2","NEW3"]
+    assert pool["previously_evaluated_excluded"] == 2
+    assert pool["deferred"] == 1
+    assert calls[0]["args"].fresh_screen_budget == 3
+
+
+def test_prior_evaluation_query_includes_public_measurements_and_fails_closed(tmp_path, monkeypatch):
+    import sqlite3
+    from nanobody_opt import mutation_network
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    path=tmp_path / "db"
+    c=sqlite3.connect(path)
+    c.executescript("CREATE TABLE nodes (id INTEGER,sequence TEXT,target TEXT); CREATE TABLE observations (node_id INTEGER, source TEXT);")
+    c.executemany("INSERT INTO nodes VALUES (?,?,?)", [(1,"A","TEST"),(2,"B","TEST"),(3,"C","TEST"),(4,"D","OTHER")])
+    c.executemany("INSERT INTO observations VALUES (?,?)", [(1,"local_exact_raw"),(2,"public_multipass_rivals"),(3,"proxy"),(4,"local_exact_raw")])
+    c.commit();c.close()
+    monkeypatch.setattr(mutation_network, "_connect", lambda p: sqlite3.connect(p))
+    monkeypatch.setattr(mutation_network, "_is_local", lambda c: True)
+    assert race._prior_evaluation_sequences(path,"TEST",sequences=["A","B","C","D"]) == {"A","B"}
+    assert race._prior_evaluation_sequences(path,"TEST") == {"A","B"}
+    with pytest.raises(RuntimeError, match="lookup unavailable"):
+        race._prior_evaluation_sequences(tmp_path / "missing","TEST")

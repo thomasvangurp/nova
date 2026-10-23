@@ -708,6 +708,9 @@ def _run_iteration(
     quotas = _generation_quotas(args, generation_budget) if generation_budget else None
     epoch = int(state["epoch"])
     target = str(state["nanobody_target"])
+    if getattr(args, "only_unseen_candidates", False):
+        from nanobody_opt_v2.sequential_exact_race import _prior_evaluation_sequences
+        args.prior_evaluated_sequences = _prior_evaluation_sequences(args.mutation_database, target)
     config, archive, target = _prepare_epoch(
         root=args.runtime_root,
         epoch=epoch,
@@ -1064,6 +1067,13 @@ def _run_iteration(
                 "--settled-deviation-policy", str(args.settled_deviation_policy),
                 "--random-seed", str(epoch * 100 + iteration),
             ]
+            if getattr(args, "only_unseen_candidates", False):
+                excluded = iteration_root / "previous_exact_evaluations.csv"
+                with excluded.open("w", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["sequence"])
+                    writer.writerows((seq,) for seq in sorted(args.prior_evaluated_sequences))
+                command.extend(["--exclude", str(excluded)])
             for previous in sorted(producer_root.glob("iteration_*/children_candidates.csv")):
                 if previous != children_candidates:
                     command.extend(["--exclude", str(previous)])
@@ -1230,6 +1240,11 @@ def _run_iteration(
     if generation_budget:
         child_floor = min(child_floor, generation_budget)
     current = json.loads(layer2_dedup.read_text())
+    if getattr(args, "only_unseen_candidates", False):
+        current["candidates"] = [c for c in current.get("candidates", [])
+                                 if c["sequence"] not in args.prior_evaluated_sequences]
+        current["sequences"] = [c["sequence"] for c in current["candidates"]]
+        _atomic_json(layer2_dedup, current)
     if generation_budget and len(current.get("candidates", [])) > generation_budget:
         raise ValueError("eligible pool exceeds the epoch candidate budget")
     shortage_path = iteration_root / "children_candidates.csv.shortage.json"
@@ -1487,7 +1502,7 @@ def _historical_child_fallback(*, args, target, config, hf_archive,
     # stopped rotating. Now each rotation proposes a bounded batch, the gates
     # run, and the loop keeps rotating until `floor` children are actually
     # accepted or the reservoir genuinely produces no new proposals.
-    seen = set(kept)
+    seen = set(kept) | set(getattr(args, "prior_evaluated_sequences", ()))
     batch_size = max(2000, floor * 2)
     attempt = 0
     exhausted = False
@@ -2209,6 +2224,7 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
     synthetic = {**state, "epoch": epoch, "block": epoch * int(state["epoch_length"])}
     bounded = argparse.Namespace(**{**vars(args), "generation_proposal_budget": args.epoch_proposal_budget,
                                    "candidate_limit": args.epoch_proposal_budget, "child_floor": args.epoch_proposal_budget,
+                                   "only_unseen_candidates": True,
                                    "finalists": args.epoch_confirmation_finalists,
                                    "complete_screen_pool": None,
                                    "complete_screen_until_epoch": None})
@@ -2241,7 +2257,7 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
         "prepared_during_epoch": int(state["epoch"]), "candidate_budget": budget,
         "proposal_budget": args.epoch_proposal_budget,
         "exact_admission_limit": budget,
-        "screen_budget_policy": "fresh-evaluations-v1",
+        "screen_budget_policy": "unseen-candidates-v2",
         "admission_policy": "measured_parent_priority_after_cheap_eligibility",
         "lane_quotas": _generation_quotas(bounded, args.epoch_proposal_budget),
         "target_multipass_score": 900,
@@ -2284,7 +2300,7 @@ def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
     from nanobody_opt.rank_exact import _observations
     from nanobody_opt_v2.sequential_exact_race import _already_scored, _pooled_exact_paths
     sequences = {c["sequence"] for c in pool["candidates"]}
-    if pool.get("screen_budget_policy") == "fresh-evaluations-v1":
+    if pool.get("screen_budget_policy") == "unseen-candidates-v2":
         from nanobody_opt_v2.screen_budget import snapshot
         budget = int(pool["exact_admission_limit"])
         attempted = len(snapshot(producer_root, epoch, budget)["reserved"])
@@ -2293,7 +2309,7 @@ def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
         paths = sorted(producer_root.glob("iteration_*/race/screen/tranche_*/exact_all.json"))
         screened = len(sequences & set(_observations(paths, target)))
         report = {"epoch": epoch, "target_epoch": until_epoch, "target": target,
-                  "budget_policy": "fresh-evaluations-v1", "budget": budget,
+                  "budget_policy": "unseen-candidates-v2", "budget": budget,
                   "eligible": len(sequences), "attempted": attempted, "screened": screened,
                   "pending": max(len(sequences) - attempted, 0),
                   "uncompleted_dispatches": max(attempted - screened, 0),
@@ -2342,13 +2358,22 @@ def _run_complete_screen_pool(args, state) -> str:
             target=target, input_path=args.complete_screen_pool)
         candidates = [c for c in source["candidates"] if c["sequence"] in novel]
         eligible_count = len(candidates)
+        previously_evaluated = 0
+        if source.get("screen_budget_policy") == "unseen-candidates-v2":
+            from nanobody_opt_v2.sequential_exact_race import _prior_evaluation_sequences
+            evaluated = _prior_evaluation_sequences(args.mutation_database, target,
+                sequences=[c["sequence"] for c in candidates])
+            candidates = [c for c in candidates if c["sequence"] not in evaluated]
+            previously_evaluated = eligible_count - len(candidates)
+        unseen_count = len(candidates)
         if source.get("exact_admission_limit") is not None:
             from nanobody_opt_v2.sequential_exact_race import _ordered_candidate_records
             candidates = _ordered_candidate_records(candidates)[:int(source["exact_admission_limit"])]
         _atomic_json(validated, {**source, "candidates": candidates,
                                 "sequences": [c["sequence"] for c in candidates],
                                 "eligible_before_admission": eligible_count,
-                                "admitted": len(candidates), "deferred": eligible_count - len(candidates),
+                                "admitted": len(candidates), "deferred": unseen_count - len(candidates),
+                                "previously_evaluated_excluded": previously_evaluated,
                                 "novelty_rejected": len(source["candidates"]) - eligible_count})
         _stamp_artifact_policy(validated)
     pool = json.loads(validated.read_text())
@@ -2374,7 +2399,7 @@ def _run_complete_screen_pool(args, state) -> str:
     full = argparse.Namespace(**{**vars(args), "budget_mode": "adaptive",
                                 "screen_all_candidates": True, "screen_top_n": 0,
                                 "fresh_screen_budget": (int(pool["exact_admission_limit"])
-                                    if pool.get("screen_budget_policy") == "fresh-evaluations-v1" else 0),
+                                    if pool.get("screen_budget_policy") == "unseen-candidates-v2" else 0),
                                 "maximum_screen_tranches_override": 0,
                                 "finalists": args.complete_screen_finalists})
     _run_race(args=full, state=state, iteration=iteration, config=config,

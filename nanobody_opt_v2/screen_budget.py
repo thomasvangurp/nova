@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-POLICY = "fresh-evaluations-v1"
+POLICY = "unseen-candidates-v2"
 
 
 def identity(sequence: str) -> str:
