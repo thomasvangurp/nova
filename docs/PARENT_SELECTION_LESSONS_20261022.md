@@ -100,3 +100,47 @@ HTML's actual US box-plot trace contains epoch 25883 with 12 candidates and mean
 1127.0666666666666. Epochs 25873–25878 were backfilled on a bounded Pi-triggered
 job; the public distribution has no missing epochs from 25873 through 25883.
 The cutover receipt is `/opt/nova-dashboard/data/dashboard_cutover_20261023.json`.
+
+
+## Ohio destruction and Pi billing access (2026-10-23)
+
+The user explicitly requested destruction of Ohio, including clarification
+"destroy, not just shut down". In account `668100850015`, region `us-east-2`,
+instance `i-0c26ae9fcae0edfd3` was terminated, its 2048 GiB root volume was deleted,
+AMI `ami-019b75f505b72f62e` deregistered, and snapshot `snap-0ccf9c833173ee3fe`
+(1600 GiB source volume) deleted. Both Elastic IP allocations were released.
+The three subnets, two custom security groups, internet gateway, regional SSH
+key-pair registration, and the now-empty VPC were deleted. Verification found
+zero nonterminated instances, volumes, snapshots, AMIs, Elastic IPs, VPCs,
+subnets, interfaces, security groups, gateways, key pairs or launch templates.
+Inventories also found no Auto Scaling groups, spot fleets/requests, EventBridge
+rules/schedules, Lambda functions, CloudFormation stacks, Ohio S3 buckets,
+Lightsail resources/snapshots, RDS databases/snapshots, ECS/EKS clusters, load
+balancers, EFS/FSx filesystems, OpenSearch domains, DynamoDB tables, ECR
+repositories, CloudWatch logs/alarms, MemoryDB/ElastiCache/Redshift clusters or
+backup recovery points. Cost Explorer's prior three-day Ohio charges involved
+only EC2 compute, EC2 Other (storage), and VPC (IPv4). Historical charges remain
+in billing records after resource destruction.
+
+The earlier request to give the Pi AWS access uses a dedicated IAM user,
+`nova-dashboard-pi`, in that same account. Its sole inline policy is the
+versioned `deploy/dashboard/aws-cost-reader-policy.json`: only
+`ce:GetCostAndUsage` and `ce:GetCostForecast`. Simulation confirmed both reads
+allowed and EC2 launch/termination, IAM user creation and S3 object access
+implicitly denied. No managed policies or group memberships were added.
+
+The new credential was transferred in memory through SSH stdin directly into
+the Pi's established systemd encrypted store. No root-profile credentials were
+copied. `/etc/nova/dashboard-aws.cred` is host-encrypted and mode 0600 inside the
+existing mode-0700 credential directory. Only the money service receives it,
+via the versioned `nova-dashboard-money-aws.conf` instance drop-in. The AWS CLI
+reads a service-lifetime credential file through the normal named-profile
+provider; systemd removes plaintext service credentials on exit. Neither a key
+nor its value appears in a unit, source file, command argument or audit log.
+
+Release `36b9e8b0a536f899e8da697ddfbf66c90e1cdd91` passed all 442 shipping tests
+with zero skips, plus GitHub CI:
+https://github.com/thomasvangurp/nova/actions/runs/39913578935
+before the tested files were deployed. AWS CLI is pinned to 1.44.74. An operator
+can revoke this Pi identity independently through IAM without affecting the
+Mac's administrative profile or any other miner.
