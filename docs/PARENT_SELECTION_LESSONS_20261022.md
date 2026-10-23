@@ -144,3 +144,16 @@ https://github.com/thomasvangurp/nova/actions/runs/39913578935
 before the tested files were deployed. AWS CLI is pinned to 1.44.74. An operator
 can revoke this Pi identity independently through IAM without affecting the
 Mac's administrative profile or any other miner.
+
+
+Live verification exposed a CLI compatibility defect: the pinned AWS CLI v1
+rejects v2's `--no-cli-pager` argument. Revision
+`eb1794d7760170e5836e4907f80ff368eda6fd17` uses `AWS_PAGER` in the child environment
+instead, with a regression assertion and another complete 442-test passing
+shipping run before deployment. A Pi service using the encrypted credential
+successfully identified itself as `nova-dashboard-pi` and fetched 422 live AWS
+cost rows. The normal money unit's profile and service credential locator were
+also verified. The account's historical accrued bill remains present after
+Ohio destruction; deleting resources does not erase charges already incurred.
+Verification receipts are retained on the Pi at
+`data/ohio_destroyed_20261023.json` and `data/dashboard_aws_access_20261023.json`.
