@@ -91,3 +91,12 @@ and the non-secret `data/dashboard_*_health.json` receipts. Verify the live
 The Mac dashboard and multipass LaunchAgents must remain disabled after cutover.
 AWS/Taostats histories retain their last known values if Pi credentials are
 unavailable; chain balances and Vast collection use existing Pi access.
+
+
+Cutover verified on 2026-10-23: both Mac LaunchAgents were disabled and unloaded;
+all six Pi timers were enabled and active. After cutover, an automatic Pi publish
+advanced the public build from `20261023T063203Z` to `20261023T063427Z`. The public
+HTML's actual US box-plot trace contains epoch 25883 with 12 candidates and mean
+1127.0666666666666. Epochs 25873–25878 were backfilled on a bounded Pi-triggered
+job; the public distribution has no missing epochs from 25873 through 25883.
+The cutover receipt is `/opt/nova-dashboard/data/dashboard_cutover_20261023.json`.
