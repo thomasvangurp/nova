@@ -92,7 +92,7 @@ SEQUENCE = _sequence(0)
 
 def _checkpoint(epoch=EPOCH, sequence=SEQUENCE, stage="qualified"):
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": stage,
         "publication_stage": stage,
         "target": TARGET,
