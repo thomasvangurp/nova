@@ -27,7 +27,7 @@ def test_prepare_once_preserves_oversupply_for_fresh_epoch_gate(tmp_path, monkey
         calls.append(kw)
         assert kw["prepare_only"]
         assert kw["args"].generation_proposal_budget == 8000
-        assert kw["args"].child_floor == 4800
+        assert kw["args"].child_floor == 8000
         assert sum(producer._generation_quotas(kw["args"], 8000).values()) == 8000
         producer._atomic_json(kw["iteration_root_override"] / "layer2_dedup.json", {
             "candidates": [{"sequence": f"SEQ{i}"} for i in range(6500)],
@@ -39,6 +39,7 @@ def test_prepare_once_preserves_oversupply_for_fresh_epoch_gate(tmp_path, monkey
     pool = json.loads(first.read_text())
     assert len(pool["candidates"]) == 6500
     assert pool["exact_admission_limit"] == 4800
+    assert pool["screen_budget_policy"] == "fresh-evaluations-v1"
     assert pool["prepared_during_epoch"] == 71
     assert pool["origin_epoch"] == 72
 
@@ -126,3 +127,59 @@ def test_fallback_cannot_overshoot_screen_floor_and_retries_rejections(tmp_path,
                                        destination=destination, floor=2)
     assert attempts == [["CA", "DA"], ["EA", "FA"]]
     assert len(json.loads(destination.read_text())["candidates"]) == 2
+
+
+def test_fresh_budget_ignores_cache_and_survives_restart(tmp_path, monkeypatch):
+    from nanobody_opt_v2 import screen_budget
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    monkeypatch.setattr(race, "_already_scored", lambda *a, **kw: {"OLD": 50})
+    parser = race._parser()
+    args = parser.parse_args([
+        "--layer2", "pool.json", "--archive", "archive.csv", "--config", "config.yaml",
+        "--target", "TEST", "--epoch", "101", "--output-dir", str(tmp_path / "race"),
+        "--pooled-exact-root", str(tmp_path), "--gpus", "0", "--carry-pending-candidates",
+        "--screen-all-candidates", "--fresh-screen-budget", "3",
+    ])
+    monkeypatch.setattr(parser, "parse_args", lambda: args)
+    monkeypatch.setattr(race, "_parser", lambda: parser)
+    records = [{"sequence": s} for s in ["OLD", "NEW", "THIRD", "EXTRA"]]
+    monkeypatch.setattr(race, "_candidate_records", lambda p: records)
+    monkeypatch.setattr(race, "_chain_allows_work", lambda *a: False)
+    race.main()
+    assert json.loads((tmp_path / "race/screen_candidates.json").read_text())["sequences"] == ["OLD", "NEW", "THIRD"]
+    # Charge before launch, so even a failed/interrupted GPU dispatch cannot
+    # be silently retried outside the cap. Cheap rejected records never enter it.
+    assert screen_budget.reserve(["OLD", "NEW"], tmp_path, 101, 3) == ["OLD", "NEW"]
+    assert screen_budget.pending(records, tmp_path, 101, 3) == [{"sequence": "THIRD"}]
+    assert screen_budget.reserve(["NEW", "THIRD", "EXTRA"], tmp_path, 101, 3) == ["THIRD"]
+    assert screen_budget.reserve(["EXTRA"], tmp_path, 101, 3) == []
+    assert len(screen_budget.snapshot(tmp_path, 101, 3)["reserved"]) == 3
+    with pytest.raises(ValueError):
+        screen_budget.snapshot(tmp_path, 102, 3)
+
+
+def test_fresh_coverage_counts_only_this_epoch_screen_not_history_or_repeats(tmp_path, monkeypatch):
+    from nanobody_opt_v2 import screen_budget
+    rank = import_shipping("nanobody_opt.rank_exact", monkeypatch)
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    monkeypatch.setattr(race, "_already_scored", lambda *a, **kw: pytest.fail("cache is not budget"))
+    current = tmp_path / "iteration_01/race/screen/tranche_01/exact_all.json"
+    current.parent.mkdir(parents=True)
+    current.write_text("{}")
+    def observations(paths, target):
+        assert paths == [current]
+        return {"A": [{}]}
+    monkeypatch.setattr(rank, "_observations", observations)
+    screen_budget.reserve(["A", "B"], tmp_path, 101, 3)
+    pool = {"candidates": [{"sequence": s} for s in ["A", "B", "C"]],
+            "screen_budget_policy": screen_budget.POLICY, "exact_admission_limit": 3}
+    report = producer._complete_pool_coverage(pool=pool, producer_root=tmp_path,
+        database=tmp_path / "db", target="TEST", epoch=101, until_epoch=101)
+    assert (report["screened"], report["attempted"], report["pending"]) == (1, 2, 1)
+    assert report["uncompleted_dispatches"] == 1
+    assert not report["complete"]
+    screen_budget.reserve(["C"], tmp_path, 101, 3)
+    report = producer._complete_pool_coverage(pool=pool, producer_root=tmp_path,
+        database=tmp_path / "db", target="TEST", epoch=101, until_epoch=101)
+    assert report["budget_exhausted"] and report["complete"]
+    assert report["screened"] == 1  # never claim failed dispatches succeeded

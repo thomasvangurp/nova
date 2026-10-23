@@ -187,16 +187,31 @@ def daily_money_history(connection: sqlite3.Connection, tao_usd: float) -> list[
         infra_by_day[key] = infra_by_day.get(key, 0.0) + float(usd or 0.0)
         infra_items_by_day.setdefault(key, {})[str(item)] = float(usd or 0.0)
 
-    # Total holdings (free + staked) per day, for the portfolio-TAO overlay.
-    portfolio_by_day: dict[str, dict[str, float]] = {}
+    # API silence is not zero income. A successful complete query is the
+    # coverage watermark; an event timestamp alone does not prove a full day.
+    try:
+        sync = connection.execute(
+            "SELECT through_at,ok FROM economics_sync WHERE source='delegations'").fetchone()
+    except sqlite3.OperationalError:
+        sync = None
+    if sync and sync[0]:
+        through_day = dt.datetime.fromtimestamp(sync[0], dt.timezone.utc).date().isoformat()
+    else:
+        latest = connection.execute("SELECT MAX(timestamp) FROM delegations").fetchone()[0]
+        through_day = str(latest or "")[:10]
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+    # Keep the last sample of each position, not the sum of intraday snapshots.
+    # A missing portfolio observation remains unknown instead of becoming zero.
+    portfolio_by_day: dict[str, dict] = {}
     for block, netuid, alpha, price, free in connection.execute(
         "SELECT block, netuid, alpha, alpha_price_tao, free_tao FROM balances "
         "ORDER BY block"
     ):
         day = clock(block).date().isoformat()
-        p = portfolio_by_day.setdefault(day, {"free": 0.0, "staked": 0.0})
+        p = portfolio_by_day.setdefault(day, {"free": 0.0, "positions": {}})
         p["free"] = float(free or 0.0)
-        p["staked"] += float(alpha or 0.0) * float(price or 0.0)
+        p["positions"][netuid] = float(alpha or 0.0) * float(price or 0.0)
 
     days = sorted(set(income_by_day) | set(reg_by_day)
                   | set(infra_by_day) | set(portfolio_by_day))
@@ -205,8 +220,10 @@ def daily_money_history(connection: sqlite3.Connection, tao_usd: float) -> list[
         income = income_by_day.get(day, 0.0)
         reg = reg_by_day.get(day, 0.0)
         infra_usd = infra_by_day.get(day, 0.0)
-        net_tao = income - reg - (infra_usd / tao_usd)
-        p = portfolio_by_day.get(day, {"free": 0.0, "staked": 0.0})
+        covered = bool(through_day and day < through_day and day < today)
+        net_tao = income - reg - (infra_usd / tao_usd) if covered else None
+        p = portfolio_by_day.get(day)
+        staked = sum(p["positions"].values()) if p is not None else None
         out.append({
             "day": day,
             "gross_tao": income,
@@ -214,11 +231,14 @@ def daily_money_history(connection: sqlite3.Connection, tao_usd: float) -> list[
             "net_tao": net_tao,
             "gross_usd": income * tao_usd,
             "infra_usd": infra_usd,
-            "net_usd": net_tao * tao_usd,
+            "net_usd": net_tao * tao_usd if net_tao is not None else None,
+            "income_status": "recorded" if covered else "incomplete",
+            "rewards_through": through_day or None,
+            "registration_usd": reg * tao_usd,
             "infrastructure": infra_items_by_day.get(day, {}),
-            "holding_tao": p["staked"],
-            "free_tao": p["free"],
-            "portfolio_tao": p["free"] + p["staked"],
+            "holding_tao": staked,
+            "free_tao": p["free"] if p is not None else None,
+            "portfolio_tao": p["free"] + staked if p is not None else None,
         })
     return out
 

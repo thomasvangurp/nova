@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import subprocess
 import time
 import urllib.error
@@ -38,6 +39,14 @@ def _api_key(service: str = KEYCHAIN_SERVICE) -> str:
     key = os.environ.get("TAOSTATS_API_KEY")
     if key:
         return key
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    if directory:
+        try:
+            key = (Path(directory) / "taostats").read_text().strip()
+        except OSError:
+            key = ""
+        if key:
+            return key
     try:
         done = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-w"],

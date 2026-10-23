@@ -1739,6 +1739,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
+    parser.add_argument("--fresh-screen-budget", type=int, default=0,
+                        help="per-epoch new screening dispatch cap; cached history consumes none")
     parser.add_argument("--carry-pending-candidates", action="store_true")
     parser.add_argument("--screen-all-candidates", action="store_true",
                         help="screen every eligible proposal, with no admission cap or repeat screening")
@@ -2080,7 +2082,13 @@ def main() -> None:
             flush=True,
         )
     candidate_records = _candidate_records(args.layer2)
-    if args.carry_pending_candidates:
+    if args.fresh_screen_budget:
+        if args.fresh_screen_budget < 1 or args.pooled_exact_root is None:
+            parser.error("fresh screening requires a positive budget and an epoch root")
+        from nanobody_opt_v2.screen_budget import pending as fresh_pending
+        candidate_records = fresh_pending(candidate_records, args.pooled_exact_root,
+                                          args.epoch, args.fresh_screen_budget)
+    elif args.carry_pending_candidates:
         candidate_records = _carry_pending_records(candidate_records, args.pooled_exact_root,
                                                   args.output_dir, args.target,
                                                   args.mutation_database, args.epoch,
@@ -2260,6 +2268,11 @@ def main() -> None:
             completed=completed,
             screened_source_counts=screened_source_counts,
         )
+        if args.fresh_screen_budget:
+            from nanobody_opt_v2.screen_budget import reserve
+            tranche = reserve(tranche, args.pooled_exact_root, args.epoch, args.fresh_screen_budget)
+            if not tranche:
+                return None
         if not completed.is_file():
             _atomic_json(source, {"target": args.target, "sequences": tranche})
         for sequence in tranche:

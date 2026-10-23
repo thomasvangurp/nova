@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+import pytest
 import subprocess
 
 import plotly.graph_objects as go
@@ -216,7 +217,7 @@ def test_daily_money_history_does_not_treat_holdings_change_as_income():
     daily = money.daily_money_history(connection, tao_usd=10.0)
     assert len(daily) == 2
     assert all(row["gross_tao"] == 0.0 for row in daily)
-    assert all(row["net_usd"] == 0.0 for row in daily)
+    assert all(row["net_usd"] is None for row in daily)
     assert [row["portfolio_tao"] for row in daily] == [6.0, 7.0]
 
 
@@ -615,3 +616,39 @@ def test_rolling_rates_leave_a_gap_when_the_window_drains():
     assert tens[29] == 100.0          # 30 entries in the window: a real rate
     assert tens[45] is None           # 15 old entries left: a gap, not 100%
     assert tens[-1] is None
+
+
+def test_money_latest_snapshot_missing_day_and_stale_income():
+    connection = _money_connection()
+    connection.executemany("INSERT INTO balances VALUES (?,?,?,?,?,?)", [
+        (100, 68, 10, .5, 1, 1), (200, 68, 12, .5, 1, 2),
+        (200, 2, 4, .5, 1, 2)])
+    connection.execute("INSERT INTO costs VALUES ('1970-01-02','test',5,'estimated')")
+    rows = money.daily_money_history(connection, 10)
+    assert rows[0]["portfolio_tao"] == 9  # latest SN68 + SN2 + free once
+    assert rows[1]["portfolio_tao"] is None
+    assert rows[1]["net_usd"] is None
+    assert rows[1]["income_status"] == "incomplete"
+
+
+def test_money_components_never_double_count_infrastructure():
+    from nanobody_dash import panels
+    row = dict(day="2026-10-23", gross_usd=100, registration_usd=20,
+               infra_usd=30, net_usd=50, portfolio_tao=4,
+               infrastructure={"test": 30}, income_status="recorded")
+    fig = panels.fig_money_history([row])
+    bars = [trace for trace in fig.data if trace.type == "bar"]
+    assert sum(trace.y[0] for trace in bars) == 50
+    assert all("net" not in trace.name for trace in bars)
+    pending = panels.fig_money_history([{**row, "net_usd": None, "income_status": "incomplete"}])
+    assert any("net pending" in annotation.text for annotation in pending.layout.annotations)
+
+
+def test_delegation_failure_is_not_a_successful_empty_refresh(monkeypatch):
+    connection = _money_connection()
+    monkeypatch.setattr(economics, "_api_key", lambda: "test-placeholder")
+    def unavailable(*a, **kw):
+        raise economics.TaostatsError("unavailable")
+    monkeypatch.setattr(economics, "get", unavailable)
+    with pytest.raises(economics.TaostatsError):
+        economics.collect_delegations(connection, "public-test-address")

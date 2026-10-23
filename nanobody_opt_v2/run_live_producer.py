@@ -1407,6 +1407,8 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     ]
     if getattr(args, "dry_run", False):
         race_command.append("--dry-run")
+    if getattr(args, "fresh_screen_budget", 0):
+        race_command.extend(["--fresh-screen-budget", str(args.fresh_screen_budget)])
     if getattr(args, "screen_all_candidates", False):
         race_command.append("--screen-all-candidates")
     if getattr(args, "minimum_selection_observations", None) is not None:
@@ -2206,7 +2208,7 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
         return manifest
     synthetic = {**state, "epoch": epoch, "block": epoch * int(state["epoch_length"])}
     bounded = argparse.Namespace(**{**vars(args), "generation_proposal_budget": args.epoch_proposal_budget,
-                                   "candidate_limit": budget, "child_floor": budget,
+                                   "candidate_limit": args.epoch_proposal_budget, "child_floor": args.epoch_proposal_budget,
                                    "finalists": args.epoch_confirmation_finalists,
                                    "complete_screen_pool": None,
                                    "complete_screen_until_epoch": None})
@@ -2239,6 +2241,7 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
         "prepared_during_epoch": int(state["epoch"]), "candidate_budget": budget,
         "proposal_budget": args.epoch_proposal_budget,
         "exact_admission_limit": budget,
+        "screen_budget_policy": "fresh-evaluations-v1",
         "admission_policy": "measured_parent_priority_after_cheap_eligibility",
         "lane_quotas": _generation_quotas(bounded, args.epoch_proposal_budget),
         "target_multipass_score": 900,
@@ -2281,6 +2284,24 @@ def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
     from nanobody_opt.rank_exact import _observations
     from nanobody_opt_v2.sequential_exact_race import _already_scored, _pooled_exact_paths
     sequences = {c["sequence"] for c in pool["candidates"]}
+    if pool.get("screen_budget_policy") == "fresh-evaluations-v1":
+        from nanobody_opt_v2.screen_budget import snapshot
+        budget = int(pool["exact_admission_limit"])
+        attempted = len(snapshot(producer_root, epoch, budget)["reserved"])
+        # Only current-epoch first-screen artifacts count. Prior results and
+        # confirmation rounds remain ranking evidence, never budget credit.
+        paths = sorted(producer_root.glob("iteration_*/race/screen/tranche_*/exact_all.json"))
+        screened = len(sequences & set(_observations(paths, target)))
+        report = {"epoch": epoch, "target_epoch": until_epoch, "target": target,
+                  "budget_policy": "fresh-evaluations-v1", "budget": budget,
+                  "eligible": len(sequences), "attempted": attempted, "screened": screened,
+                  "pending": max(len(sequences) - attempted, 0),
+                  "uncompleted_dispatches": max(attempted - screened, 0),
+                  "budget_shortfall": max(budget - attempted, 0),
+                  "budget_exhausted": attempted >= budget,
+                  "complete": attempted >= min(budget, len(sequences))}
+        _atomic_json(producer_root / "full_scan_coverage.json", report)
+        return report
     observed = set(_already_scored(database, target, sequences=sequences))
     observed.update(_observations(
         _pooled_exact_paths([], producer_root, producer_root / "coverage_probe"), target))
@@ -2352,6 +2373,8 @@ def _run_complete_screen_pool(args, state) -> str:
     _stamp_artifact_policy(iteration_root / "layer2_dedup.json")
     full = argparse.Namespace(**{**vars(args), "budget_mode": "adaptive",
                                 "screen_all_candidates": True, "screen_top_n": 0,
+                                "fresh_screen_budget": (int(pool["exact_admission_limit"])
+                                    if pool.get("screen_budget_policy") == "fresh-evaluations-v1" else 0),
                                 "maximum_screen_tranches_override": 0,
                                 "finalists": args.complete_screen_finalists})
     _run_race(args=full, state=state, iteration=iteration, config=config,

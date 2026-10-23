@@ -270,32 +270,41 @@ def fig_proxy_accuracy(rows) -> go.Figure:
 
 
 def fig_money_history(rows) -> go.Figure:
-    """Daily portfolio (free + staked) change, the headline net income."""
+    """Recorded reward receipts and costs, with portfolio on a separate axis."""
     if not rows:
         return _empty("No daily money history recorded yet")
     days = [row["day"] for row in rows]
     figure = go.Figure()
+    # Component bars sum to recorded net. Never stack a cost beneath a net
+    # value that already deducted it. Today's income/cost periods are partial.
     figure.add_trace(go.Bar(
-        x=days, y=[row["net_usd"] for row in rows],
-        name="net TAO/day", marker_color=WIN,
-        hovertemplate="%{x}<br>net $%{y:,.2f}<extra></extra>",
+        x=days, y=[row["gross_usd"] for row in rows],
+        name="recorded rewards (USD)", marker_color=WIN,
+        hovertemplate="%{x}<br>recorded rewards $%{y:,.2f}<extra></extra>",
     ))
-    # Infrastructure is shown for context; it is already netted into the
-    # portfolio via the free-TAO transfers that fund it, so it is not
-    # subtracted a second time here.
-    infrastructure = [sum(
-        float(value or 0)
-        for value in (row.get("infrastructure") or {}).values()
-    ) for row in rows]
-    if any(abs(value) >= 1e-9 for value in infrastructure):
-        figure.add_trace(go.Bar(
-            x=days, y=[-value for value in infrastructure],
-            name="infrastructure", marker_color="#b392f0",
-            hovertemplate=(
-                "%{x}<br>infrastructure $%{customdata:,.2f}<extra></extra>"
-            ),
-            customdata=infrastructure,
-        ))
+    figure.add_trace(go.Bar(
+        x=days, y=[-row.get("registration_usd", 0) for row in rows],
+        name="registration cost", marker_color="#e6a66b",
+        hovertemplate="%{x}<br>registration $%{y:,.2f}<extra></extra>",
+    ))
+    infrastructure = [row.get("infra_usd", sum(
+        float(value or 0) for value in (row.get("infrastructure") or {}).values()
+    )) for row in rows]
+    figure.add_trace(go.Bar(
+        x=days, y=[-value for value in infrastructure],
+        name="infrastructure (daily estimate)", marker_color="#b392f0",
+        hovertemplate="%{x}<br>infrastructure $%{customdata:,.2f}<extra></extra>",
+        customdata=infrastructure,
+    ))
+    figure.add_trace(go.Scatter(
+        x=days, y=[row["net_usd"] for row in rows], name="recorded net (USD)",
+        mode="lines+markers", connectgaps=False, line=dict(color="#ffffff", width=1.5),
+        hovertemplate="%{x}<br>recorded net $%{y:,.2f}<extra></extra>",
+    ))
+    if rows[-1].get("income_status") == "incomplete":
+        figure.add_annotation(text="Latest day incomplete — net pending; reward receipts may lag wins",
+                              x=0, y=1.12, xref="paper", yref="paper", showarrow=False,
+                              font=dict(color=MUTED, size=12), xanchor="left")
     figure.add_trace(go.Scatter(
         x=days, y=[row["portfolio_tao"] for row in rows],
         name="portfolio TAO", yaxis="y2", mode="lines+markers",

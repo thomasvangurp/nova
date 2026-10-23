@@ -157,3 +157,42 @@ also verified. The account's historical accrued bill remains present after
 Ohio destruction; deleting resources does not erase charges already incurred.
 Verification receipts are retained on the Pi at
 `data/ohio_destroyed_20261023.json` and `data/dashboard_aws_access_20261023.json`.
+
+
+## Fresh evaluation budget and money history (2026-10-23)
+
+The 4,800 epoch budget means new first-stage GPU evaluations in that epoch.
+Cached history remains ranking evidence and contributes zero budget credit.
+Epochs 25889/25890/25891 actually screened 799/623/581 new candidates while
+all-history coverage claimed 4,785/4,788/4,787. Never describe that coverage as
+new work. Keep up to 8,000 proposals through cheap eligibility before admitting
+4,800; early cheap rejection consumes no GPU budget.
+
+New epoch manifests use `fresh-evaluations-v1`. A locked, durable per-epoch
+ledger reserves dispatches before launch; restart, cached results, and repeat
+confirmation cannot reset or inflate this budget. Report successful screens,
+reserved dispatches, incomplete dispatches, and budget shortfall separately.
+An interrupted expensive dispatch remains charged conservatively, preventing
+silent overspend. Deadline/handoff reserves still apply: an unfinished budget
+must be reported, never allowed to block the next epoch. Existing immutable
+old-policy epochs remain intact; archive only unused future preparation during
+cutover. CI exercises historical-cache exclusion, restart/cap behavior, and
+current-epoch coverage independently of ranking history.
+
+The screenshot's Money history is our Vercel dashboard. The linked Metanova
+page does not contain that chart. Reward collection on the Pi lacked Taostats
+access and retained data only through October 22; absence became zero income.
+The bars also stacked infrastructure beneath net after it was already deducted.
+Today's Vast number is a full-day estimate, not spend accrued so far. The fix
+shows reward receipts, registration and infrastructure as components, with net
+as a separate line; current/incompletely covered days have net pending. Winning
+an epoch is not a posted reward transfer or proof of positive net cash flow.
+
+Reward refresh success now has a persistent coverage watermark. API errors
+must fail the money job visibly rather than masquerade as an empty successful
+refresh. Pi Taostats access uses an encrypted systemd credential scoped to the
+money service; the HTTP client consumes it in memory, without CLI arguments or
+logs. Portfolio history uses the latest observation of each position per day;
+missing observations remain unknown rather than creating zero-value crashes.
+CI covers stale income, missing portfolio observations, duplicate snapshots,
+component accounting, and failed reward queries.

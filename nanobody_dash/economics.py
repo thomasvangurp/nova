@@ -33,6 +33,10 @@ from .taostats import TaostatsError, _api_key, get
 RAO = 1e9
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS economics_sync (
+    source TEXT PRIMARY KEY, attempted_at REAL NOT NULL,
+    through_at REAL, ok INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS delegations (
     id TEXT PRIMARY KEY, timestamp TEXT, block INTEGER, netuid INTEGER,
     action TEXT, alpha REAL, tao REAL, alpha_price_tao REAL,
@@ -189,7 +193,7 @@ def collect_delegations(connection, coldkey: str, pages: int = 12,
             body = get("delegation/v1", dict(nominator=coldkey, limit=per_page,
                                              page=page), key=key)
         except TaostatsError:
-            break                                   # rate limit or end of data
+            raise
         rows = body.get("data") or []
         if not rows:
             break
@@ -219,7 +223,7 @@ def collect_transfers(connection, coldkey: str, pages: int = 4,
             body = get("transfer/v1", dict(address=coldkey, limit=per_page,
                                            page=page), key=key)
         except TaostatsError:
-            break
+            raise
         rows = body.get("data") or []
         if not rows:
             break
@@ -444,17 +448,28 @@ def main() -> int:
     arguments = parser.parse_args()
     connection = connect(arguments.database)
     report = dict(balances=collect_current_balances_chain(connection))
+    all_current = bool(report["balances"])
     for name, collector in (("delegations", collect_delegations), ("transfers", collect_transfers)):
+        started = time.time()
+        ok = False
         try:
             report[name] = collector(connection, arguments.coldkey)
+            ok = True
         except TaostatsError:
             report[name] = "unavailable; retained history"
+            all_current = False
+        connection.execute(
+            "INSERT INTO economics_sync (source,attempted_at,through_at,ok) VALUES (?,?,?,?) "
+            "ON CONFLICT(source) DO UPDATE SET attempted_at=excluded.attempted_at, "
+            "through_at=COALESCE(excluded.through_at,economics_sync.through_at),ok=excluded.ok",
+            (name, started, started if ok else None, int(ok)))
+        connection.commit()
     for label, query in (("netuids", "SELECT DISTINCT netuid FROM delegations"),
                          ("rows", "SELECT COUNT(*) FROM delegations")):
         report[label] = [r[0] for r in connection.execute(query)] if label == "netuids" \
             else connection.execute(query).fetchone()[0]
     print(json.dumps(report))
-    return 0
+    return 0 if all_current else 1
 
 
 if __name__ == "__main__":
