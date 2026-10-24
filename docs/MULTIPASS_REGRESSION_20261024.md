@@ -466,11 +466,11 @@ Numeric evidence: `docs/evidence/epoch_25914_handoff_audit_20261024.json`.
 
 ### Timing correction implementation
 
-The shipping producer and publisher now opt into `pi-handoff-v1`, defined in
+The shipping producer and publisher now opt into `pi-handoff-v2`, defined in
 `nanobody_opt/submission_timing.py`. The Pi imports the same commitment reserve
 and late-pull margin. With thirteen crew members the final-pull reserve is
-91 blocks. Publication must finish at end-96, leaving sixty seconds for
-transfer. Scoring must finish at end-126, leaving six minutes for publisher
+41 blocks. Publication must finish at end-46, leaving sixty seconds for
+transfer. Scoring must finish at end-76, leaving six minutes for publisher
 polling, ranking and gates. That allowance covers the observed approximately
 246-second final-confirmation-to-gate delay plus the 45-second polling interval
 with margin. It is an operational allowance, not proof every workload fits.
@@ -496,3 +496,24 @@ actual launch profiles, adaptive budgeting, fleet growth, confirm/publish/pull
 timing, the publisher's live deadline guard, stale receipts, and preparation
 across rollover. The old 36-block reserve fails the same handoff invariant.
 Activation and live delivery verification are recorded separately below.
+
+
+The user explicitly requested a less conservative Pi reserve before deployment.
+Thirty recent log records (25888–25917) show 12–13-entry commit processes taking
+78–98 seconds, with no recorded repairs, failures or blackout drops. The
+parallel reserve is now sixteen blackout blocks plus twenty commit/repair
+blocks (four minutes) for up to twenty UIDs. Larger fleets receive additional
+batch allowance. The final-pull margin is sixty seconds, instead of 120. For
+thirteen UIDs this moves the intended final pull from end-91 to end-41, about
+ten minutes later, while leaving five minutes from pull to blackout. A full
+serial fleet repair is no longer reserved on every ordinary parallel epoch;
+existing best-first repairs can use the remaining bounded window.
+
+CPU preparation still opens at end-136. Its elapsed time is now charged to an
+epoch-end clock anchored before preparation, rather than accidentally extending
+the chain deadline. The Pi's subprocess stream uses a timed queue and an owned
+process group: a silent RPC cannot block its stdout iterator indefinitely.
+The submission process is stopped before the blackout (with one extra block
+for cleanup), and cannot occupy the next epoch. CI exercises this with a real
+silent process and descendant, and verifies the next invocation can run.
+Numeric timing evidence: `docs/evidence/pi_commit_timing_20261024.json`.

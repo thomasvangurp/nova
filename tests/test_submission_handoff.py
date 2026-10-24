@@ -4,6 +4,9 @@ import json
 import shlex
 import time
 import tomllib
+import subprocess
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -46,13 +49,13 @@ def test_shipping_profiles_finish_before_the_actual_pi_pull(tmp_path):
     assert '--pi-handoff' in shlex.split(commands[0])
     p = timing.configured_plan(args)
     # The real Pi's commit reserve + final-pull margin, not the master's old 36.
-    pi_pull = 361 - pi.commit_reserve(13) - 120 / 12
+    pi_pull = 361 - pi.commit_reserve(13) - 60 / 12
     scoring_end = 361 - producer._handoff_reserve(args)
     publication_end = scoring_end + timing.PUBLICATION_SECONDS / 12
     transferred = publication_end + timing.TRANSFER_SECONDS / 12
     assert transferred <= pi_pull
-    assert p['publication_reserve_blocks'] == 96
-    assert producer._handoff_reserve(args) == 126
+    assert p['publication_reserve_blocks'] == 46
+    assert producer._handoff_reserve(args) == 76
     # This is the incident's old contract and must fail the same invariant.
     assert 361 - 36 + timing.PUBLICATION_SECONDS / 12 > pi_pull
 
@@ -65,7 +68,7 @@ def test_live_fleet_growth_moves_producer_deadline_before_pi_cutoff(tmp_path, cr
     path.parent.mkdir()
     path.write_text(json.dumps({**p, 'epoch': 100}))
     reserve = producer._handoff_reserve(args)
-    assert reserve >= pi.commit_reserve(crew) + 10 + 5 + 30
+    assert reserve >= pi.commit_reserve(crew) + 5 + 5 + 30
     assert timing.configured_plan(args)['crew_size'] == max(13, crew)
 
 
@@ -74,17 +77,17 @@ def test_real_adaptive_budget_reserves_the_whole_handoff(tmp_path):
     root = tmp_path / 'live/epoch100/producer'
     state = {'epoch': 100, 'epoch_length': 361, 'block': 36100}
     plan = producer._budget_plan(args, state, root)
-    assert plan['screen_cutoff_block'] + plan['replication_reserve_blocks'] <= 361 - 126
+    assert plan['screen_cutoff_block'] + plan['replication_reserve_blocks'] <= 361 - 76
     receipt = json.loads((root / 'budget.json').read_text())
-    assert receipt['effective_handoff_reserve_blocks'] == 126
-    assert receipt['submission_handoff']['pi_pull_reserve_blocks'] == 91
+    assert receipt['effective_handoff_reserve_blocks'] == 76
+    assert receipt['submission_handoff']['pi_pull_reserve_blocks'] == 41
 
 
 def test_confirm_publish_pull_flow_and_rollover(tmp_path, monkeypatch):
     args = shipping_args(tmp_path)
     args.chain_state = tmp_path / 'clock.json'
     epoch = 25914
-    write_clock(args.chain_state, epoch, 234)
+    write_clock(args.chain_state, epoch, 284)
     # Confirmation finishes just before its actual shipping deadline.
     assert EpochDeadline(args.chain_state, epoch, producer._handoff_reserve(args)).remaining() > 0
     completed = tmp_path / f'live/epoch{epoch}/producer/full_scan_confirmation.json'
@@ -94,16 +97,16 @@ def test_confirm_publish_pull_flow_and_rollover(tmp_path, monkeypatch):
     p = timing.configured_plan(args)
     # Spend the entire allowed publication window, using the publisher's
     # real pre-publication guard, then transfer before the Pi's snapshot.
-    write_clock(args.chain_state, epoch, 264)
+    write_clock(args.chain_state, epoch, 314)
     monkeypatch.setattr(publisher, '_COMMAND_DEADLINE',
                         EpochDeadline(args.chain_state, epoch, p['publication_reserve_blocks']))
     monkeypatch.setattr(publisher, '_chain_view', lambda *a: type('Chain', (), {'epoch': epoch})())
     publisher._assert_same_epoch(args, epoch, 'test handoff')
     artifact = {'epoch': epoch, 'submission_handoff': timing.publication_receipt(
-        epoch=epoch, timing=p, confirmation=confirmation, block=epoch*361+264, epoch_length=361)}
+        epoch=epoch, timing=p, confirmation=confirmation, block=epoch*361+314, epoch_length=361)}
     source, pulled = tmp_path/'master.json', tmp_path/'pi.json'
     publisher._atomic_json(source, artifact)
-    write_clock(args.chain_state, epoch, 269)
+    write_clock(args.chain_state, epoch, 319)
     pulled.write_bytes(source.read_bytes())
     receipt = pi.submission_timing.artifact_receipt(pulled, epoch)
     assert receipt['confirmation_complete_at_start']
@@ -111,7 +114,7 @@ def test_confirm_publish_pull_flow_and_rollover(tmp_path, monkeypatch):
     assert receipt['artifact_sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
     # A late publisher must leave that committed input intact, and the next
     # epoch cannot mistake it for its own completed confirmation.
-    write_clock(args.chain_state, epoch, 270)
+    write_clock(args.chain_state, epoch, 320)
     with pytest.raises(EpochDeadlineExceeded):
         publisher._assert_same_epoch(args, epoch, 'late publication')
     write_clock(args.chain_state, epoch+1, 1)
@@ -119,7 +122,7 @@ def test_confirm_publish_pull_flow_and_rollover(tmp_path, monkeypatch):
         publisher._COMMAND_DEADLINE.remaining()
     assert not pi.submission_timing.artifact_receipt(pulled, epoch+1)['confirmation_complete_at_start']
     assert timing.confirmation_digest(tmp_path, epoch+1) is None
-    assert EpochDeadline(args.chain_state, epoch+1, 126).remaining() > 0
+    assert EpochDeadline(args.chain_state, epoch+1, 76).remaining() > 0
 
 
 def test_fallback_cannot_claim_confirmation_that_finished_later(tmp_path):
@@ -135,7 +138,7 @@ def test_fallback_cannot_claim_confirmation_that_finished_later(tmp_path):
     assert receipt['confirmation_sha256'] is None
 
 
-@pytest.mark.parametrize('future, expected_reserve', [(False, 126), (True, 0)])
+@pytest.mark.parametrize('future, expected_reserve', [(False, 76), (True, 0)])
 def test_pool_preparation_keeps_the_real_epoch_clock(tmp_path, monkeypatch, future, expected_reserve):
     args = shipping_args(tmp_path)
     state = {'epoch': 100, 'block': 100*361+240, 'epoch_length': 361,
@@ -150,3 +153,57 @@ def test_pool_preparation_keeps_the_real_epoch_clock(tmp_path, monkeypatch, futu
     monkeypatch.setattr(producer, '_run_iteration', prepare)
     with pytest.raises(ObservedDeadline):
         producer._prepare_epoch_pool(args, state, 101 if future else 100)
+
+
+def test_parallel_reserve_has_retry_room_without_charging_every_uid():
+    assert pi.commit_reserve(13) == 36
+    assert timing.commit_reserve(13, serial=True) == 81
+    assert pi.commit_reserve(20) == pi.commit_reserve(13)
+    assert pi.commit_reserve(21) > pi.commit_reserve(20)
+    # 98s was the slowest measured process in thirty retained epochs.
+    assert (pi.commit_reserve(13) - timing.BLACKOUT_BLOCKS) * 12 >= 2 * 98
+    assert timing.LATE_COMMIT_MARGIN_SECONDS == 60
+
+
+def test_pi_preparation_does_not_extend_the_chain_deadline(tmp_path, monkeypatch):
+    now = [10000.0]
+    monkeypatch.setattr(pi, 'ROOT', tmp_path)
+    monkeypatch.setattr(pi.time, 'time', lambda: now[0])
+    monkeypatch.setattr(pi.time, 'sleep', lambda seconds: now.__setitem__(0, now[0]+seconds))
+    monkeypatch.setattr(pi, 'say', lambda **kwargs: None)
+    # Model five minutes spent preparing crew/artifacts before waiting.
+    monkeypatch.setattr(pi, 'publish', lambda *a: now.__setitem__(0, now[0]+300))
+    monkeypatch.setattr(pi, 'producer_epoch_here', lambda *a: 100)
+    monkeypatch.setattr(pi, 'artifact_confirmation', lambda *a: (13, 13))
+    monkeypatch.setattr(pi, 'check_producer_identity', lambda *a: False)
+    monkeypatch.setattr(pi, 'refresh_crew_for_commit', lambda a,v,*rest: v)
+    pulls = []
+    def pull(*a, **k):
+        pulls.append(now[0])
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(pi, 'run', pull)
+    args = SimpleNamespace(on_submit_host=True, late_commit=True,
+        late_commit_margin_seconds=60, confirmation_min_observations=20, dry_run=True)
+    pi.handle_epoch(args, {'crew': list(range(13)), 'reaction': 1},
+        100, 100*361+225, 101*361, set(), {'producer_stopped': False})
+    expected = 10000 + (361-225-36)*12 - 60
+    assert pulls == [expected]
+
+
+def test_silent_commit_process_cannot_block_the_next_epoch(tmp_path):
+    child = tmp_path / 'child.pid'
+    marker = tmp_path / 'escaped'
+    child_code = f'import time; from pathlib import Path; time.sleep(5); Path({str(marker)!r}).touch()'
+    code = ('import subprocess,sys,time; from pathlib import Path; '
+            f'p=subprocess.Popen([sys.executable,"-c",{child_code!r}]); '
+            f'Path({str(child)!r}).write_text(str(p.pid)); time.sleep(30)')
+    # A real silent subprocess exercises the old blocking stdout iterator.
+    command = shlex.join([sys.executable, '-c', code])
+    started = time.monotonic()
+    rc, _ = pi.stream(pi.LOCAL, command, timeout=.5)
+    assert rc == 124 and time.monotonic()-started < 3
+    assert child.exists()
+    probe = subprocess.run(['ps', '-o', 'stat=', '-p', child.read_text()], capture_output=True, text=True)
+    assert not probe.stdout.strip() or probe.stdout.strip().startswith('Z')
+    assert not marker.exists()
+    assert pi.stream(pi.LOCAL, shlex.join([sys.executable, '-c', 'pass']), timeout=3)[0] == 0

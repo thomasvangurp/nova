@@ -253,20 +253,19 @@ def test_a_missing_or_corrupt_ledger_is_not_fatal(tmp_path):
         assert isinstance(handled, set)
 
 
-def test_the_reserve_grows_with_the_fleet():
-    # A fixed reserve is wrong in both directions: too small and the tail
-    # commits into the blackout, too large and we abandon a producer we still
-    # had time to wait for.
-    assert loop.commit_reserve(10) == 16 + 50
-    assert loop.commit_reserve(12) > loop.commit_reserve(10)
+def test_the_reserve_prices_parallel_batches():
+    assert loop.commit_reserve(10) == 36
+    assert loop.commit_reserve(12) == loop.commit_reserve(10)
+    assert loop.commit_reserve(21) > loop.commit_reserve(20)
     assert loop.commit_reserve(0) == loop.commit_reserve(1)
 
 
 def test_the_reserve_matches_what_25248_actually_did():
     # Verified on-chain: ten uids, first at 69 blocks left, last at 26, and the
     # validator's cutoff is 16. The reserve must cover that run.
-    assert loop.commit_reserve(10) <= 69
-    assert loop.commit_reserve(10) >= 26
+    serial = loop.submission_timing.commit_reserve(10, serial=True)
+    assert serial <= 69
+    assert serial >= 26
 
 
 def test_remembering_an_epoch_terminates(tmp_path):

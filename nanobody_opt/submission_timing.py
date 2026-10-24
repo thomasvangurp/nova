@@ -12,11 +12,13 @@ import math
 import time
 from pathlib import Path
 
-POLICY = "pi-handoff-v1"
+POLICY = "pi-handoff-v2"
 BLOCK_SECONDS = 12
 BLACKOUT_BLOCKS = 16
 BLOCKS_PER_UID = 5
-LATE_COMMIT_MARGIN_SECONDS = 120
+LATE_COMMIT_MARGIN_SECONDS = 60
+PARALLEL_COMMIT_BLOCKS = 20
+PARALLEL_BATCH_UIDS = 20
 TRANSFER_SECONDS = 60
 # Epoch 25914 took ~246 seconds from completed confirmation to final gates.
 # Allow another publisher polling interval and margin; do not fit to one run.
@@ -24,8 +26,13 @@ PUBLICATION_SECONDS = 360
 FLEET_SIZE = 13
 
 
-def commit_reserve(uids: int) -> int:
-    return BLACKOUT_BLOCKS + BLOCKS_PER_UID * max(1, uids)
+def commit_reserve(uids: int, *, serial: bool = False) -> int:
+    if serial:
+        return BLACKOUT_BLOCKS + BLOCKS_PER_UID * max(1, uids)
+    # Recent 12–13-ticket batches took 78–98 seconds (no repairs). Four
+    # minutes leaves room for retries without paying a serial cost per UID.
+    batches = math.ceil(max(1, uids) / PARALLEL_BATCH_UIDS)
+    return BLACKOUT_BLOCKS + PARALLEL_COMMIT_BLOCKS * batches
 
 
 def plan(crew_size: int = FLEET_SIZE, *, late_margin_seconds: float = LATE_COMMIT_MARGIN_SECONDS,

@@ -7,8 +7,9 @@ be known in advance and a one-shot driver aimed at a named epoch cannot catch
 it -- the first cutover attempt missed for exactly that reason. This reads the
 reaction itself, each epoch, and acts inside the only safe window:
 
-    epoch_end - 75   producer refreshes its artifact
-    epoch_end - 55   producer starts committing        <- must be ours by here
+    epoch_end - 136  prepare crew and molecule inputs
+    epoch_end - 41   final producer pull (parallel batches up to 20 UIDs)
+    epoch_end - 36   commit/repair budget
     epoch_end - 16   validator blackout
 
 Ordering is the safety argument. Pull and verify BEFORE stopping the producer;
@@ -23,6 +24,7 @@ import hashlib
 import json
 import statistics
 import shutil
+import queue
 import subprocess
 import sys
 import threading
@@ -38,8 +40,8 @@ PROD = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
 EPOCH_LENGTH = 361
 # The validator stops reading at end-16.
 BLACKOUT_BLOCKS = submission_timing.BLACKOUT_BLOCKS
-# Measured on-chain at 25248: ten uids committed 5 blocks apart, 69 blocks left
-# down to 26. Almost all of it is set_commitment waiting for the extrinsic.
+# Serial reference retained for opening the CPU-preparation window. The
+# actual submission reserve now prices concurrent commitments and repairs.
 BLOCKS_PER_UID = submission_timing.BLOCKS_PER_UID
 
 # The window-open margin below (WINDOW_OPEN_BLOCKS) has to leave real slack
@@ -191,12 +193,7 @@ def check_producer_identity(a, epoch: int, nanobody: Path) -> bool:
 
 
 def commit_reserve(uids: int) -> int:
-    """How many blocks the commit run itself needs, plus the blackout.
-
-    A fixed reserve was wrong in both directions: too small and the tail
-    commits into the blackout, too large and we stop waiting for a producer we
-    still had time for. It depends on how many uids there are, so compute it.
-    """
+    """Parallel commit/repair allowance plus the validator blackout."""
     return submission_timing.commit_reserve(uids)
 
 
@@ -214,21 +211,46 @@ def stream(where, command, timeout=900):
     it was over -- no way to tell a slow epoch from a wedged one while it still
     mattered. The commits are the one step worth watching live.
     """
+    if timeout <= 0:
+        say(event="command_timeout", timeout_seconds=timeout)
+        return 124, []
     argv = where + ([command] if where is LOCAL else ["-n", command])
     child = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+                             stderr=subprocess.STDOUT, text=True, bufsize=1,
+                             start_new_session=True)
     lines = []
+    pending = queue.Queue()
+    def read_lines():
+        try:
+            for line in child.stdout:
+                pending.put(line)
+        finally:
+            pending.put(None)
+    threading.Thread(target=read_lines, daemon=True).start()
+    deadline = time.monotonic() + timeout
     try:
-        for line in child.stdout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                say(event="command_timeout", timeout_seconds=timeout)
+                return 124, lines
+            try:
+                line = pending.get(timeout=min(1.0, remaining))
+            except queue.Empty:
+                continue
+            if line is None:
+                child.wait(timeout=max(.01, deadline - time.monotonic()))
+                return child.returncode, lines
             line = line.rstrip()
             if line:
                 lines.append(line)
                 print(line, flush=True)
-        child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        child.kill()
-        raise
-    return child.returncode, lines
+        say(event="command_timeout", timeout_seconds=timeout)
+        return 124, lines
+    finally:
+        from nanobody_opt.epoch_deadline import _stop_group
+        _stop_group(child)
 
 
 def run(where, command, timeout=240):
@@ -439,7 +461,9 @@ def main() -> int:
         epoch, block, end = tick["epoch"], tick["block"], tick["end"]
         if epoch in handled:
             time.sleep(30); continue
-        refresh_at = end - commit_reserve(ASSUMED_MAX_CREW) - MIN_PRODUCER_WAIT_BLOCKS
+        # Keep CPU preparation early; reducing the parallel commit reserve
+        # must not move molecule/crew preparation into the last few minutes.
+        refresh_at = end - submission_timing.commit_reserve(ASSUMED_MAX_CREW, serial=True) - MIN_PRODUCER_WAIT_BLOCKS
         if block < refresh_at:
             wait = max(20, min(300, (refresh_at - block) * 12 * 0.6))
             say(event="waiting", epoch=epoch, block=block,
@@ -784,6 +808,9 @@ def dynamic_floor(reaction: int, epoch: int, static: float) -> tuple[float, dict
 
 
 def handle_epoch(a, view, epoch, block, end, covered, state):
+    # Anchor before any bank preparation. Adding the original block budget
+    # to a later wall clock would silently extend the real chain deadline.
+    epoch_end_at = time.time() + max(0, end - block) * submission_timing.BLOCK_SECONDS
     if True:
         producer_stopped = state["producer_stopped"]
         crew_path = ROOT / ("release" if a.on_submit_host else "data/release") / "crew.json"
@@ -850,7 +877,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
             # as long as the epoch's own deadline safely allows.
             def _recheck(reaction=view["reaction"], floor=floor):
                 reserve = commit_reserve(len(view["crew"]))
-                recheck_deadline = time.time() + max(0, end - reserve - block) * 12
+                recheck_deadline = epoch_end_at - reserve * submission_timing.BLOCK_SECONDS
                 safety_margin = 90  # stop attempting this long before commit
                 attempt = 0
                 # Every attempt must FINISH before the commit step collects this
@@ -859,7 +886,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 # collection and every result was discarded (25490-25500 all
                 # logged release_recheck_still_running; 25497/25500 missed
                 # their floors by 0.007).
-                collect_at = recheck_deadline - getattr(a, "late_commit_margin_seconds", 120) - 30
+                collect_at = recheck_deadline - getattr(a, "late_commit_margin_seconds", submission_timing.LATE_COMMIT_MARGIN_SECONDS) - 30
                 last_duration = 330.0
                 time.sleep(150)  # first look: give one bank-pull cycle a head start
                 while time.time() + last_duration * 1.15 < min(collect_at, recheck_deadline - safety_margin):
@@ -901,9 +928,9 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
         # instead, and if the producer still has not moved, commit what we have
         # rather than nothing.
         reserve = commit_reserve(len(view["crew"]))
-        deadline = time.time() + max(0, end - reserve - block) * 12
+        deadline = epoch_end_at - reserve * submission_timing.BLOCK_SECONDS
         say(event="wait_budget", uids=len(view["crew"]), reserve=reserve,
-            blocks_to_wait=max(0, end - reserve - block))
+            blocks_to_wait=max(0, int((deadline - time.time()) / 12)))
         stale_ok = False
         while time.time() < deadline:
             seen = (producer_epoch_here(a, epoch, view["reaction"])
@@ -1034,9 +1061,12 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                         attempts=recheck_result["attempts"])
                 shutil.rmtree(recheck_out, ignore_errors=True)
 
+        # Bound the whole local process group, including a silent RPC hang,
+        # before the blackout. It can never occupy the following epoch.
+        commit_seconds = max(0, epoch_end_at - (BLACKOUT_BLOCKS + 1) * 12 - time.time())
         code, _ = stream(PI, "cd /opt/nova-submit && ./.pixi/envs/default/bin/python pi_submit.py "
                              f"--epoch {epoch} --reaction {view['reaction']}"
-                             + (" --allow-stale-nanobody" if stale_ok else ""), timeout=900)
+                             + (" --allow-stale-nanobody" if stale_ok else ""), timeout=commit_seconds)
         commit = type("R", (), {"returncode": code})()
         say(event="committed", epoch=epoch, rc=code, molecules=have_molecules)
         # nanobody_result.json (per-uid ex-ante score_p90), crew.json and
