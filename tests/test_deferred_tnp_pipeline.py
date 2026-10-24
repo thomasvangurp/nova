@@ -300,37 +300,179 @@ def test_priority_parent_lane_cannot_bypass_measured_multipass_order(monkeypatch
     }) == ["STRONG", "WEAK"]
 
 
-def test_publisher_compares_stored_candidates_without_adding_them_to_gpu_queue(monkeypatch, tmp_path):
+def _comparison_fixture(monkeypatch, tmp_path):
+    from types import SimpleNamespace
     publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
-    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
     root = tmp_path / "epoch100"
-    path = root / "producer/iteration_01/layer2_dedup.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"target": "TEST", "sequences": ["NEW"]}))
-    producer._stamp_artifact_policy(path)
-    scope = publisher._producer_candidate_scope(root, "TEST", include_stored_candidates=True)
-    assert scope is None  # compare complete stored bank, not just discovery
+    root.mkdir()
+    archive = root / "archive.csv"
+    archive.write_text("sequence\nHISTORICAL\n")
+    config = root / "config.yaml"
+    config.write_text("current rules")
+    exclusion = root / "excluded.txt"
+    exclusion.write_text("RETIRED\n")
+    for name in ("check_validator_novelty.py", "filter_layer2.py"):
+        (tmp_path / name).write_text("current implementation")
+    pool = {"STORED", "NEW", "INVALID_NOVELTY", "INVALID_LAYER2", "HISTORICAL", "RETIRED"}
+    monkeypatch.setattr(publisher, "_stored_comparison_sequences", lambda *a: set(pool))
+    commands = []
+    def run(command):
+        commands.append(command)
+        data = json.loads(Path(command[command.index("--input") + 1]).read_text())
+        seqs = set(data["sequences"])
+        output = Path(command[command.index("--output") + 1])
+        if "check-validator-novelty" in command:
+            passed = seqs - {"INVALID_NOVELTY"}
+            publisher._atomic_json(output, {"input_count": len(seqs), "sequences": sorted(passed)})
+        else:
+            assert "filter-layer2" in command
+            assert "--igblast-only" not in command
+            publisher._atomic_json(output, {"input_count": len(seqs), "candidates": [
+                {"sequence": s, "layer2_passed": True} for s in sorted(seqs - {"INVALID_LAYER2"})]})
+    monkeypatch.setattr(publisher, "_run", run)
+    kwargs = dict(args=SimpleNamespace(nanobody_opt_root=tmp_path, pixi=Path("pixi"),
+                     layer2_concurrency=8, layer2_cache_dir=tmp_path / "cache"),
+                  epoch_root=root, target="TEST", database=tmp_path / "history.sqlite",
+                  archive=archive, config=config, exclusion=exclusion,
+                  pixi_manifest=tmp_path / "pixi.toml")
+    return publisher, kwargs, pool, commands
+
+
+def test_publisher_prechecks_stored_and_new_before_merit_cutoff(monkeypatch, tmp_path):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    scope = publisher._prechecked_comparison_scope(**kwargs)
+    assert set(scope.read_text().splitlines()) == {"STORED", "NEW"}
+    assert len(commands) == 2
+    # Both origins pass the exact same full current gates; neither invalid
+    # high-merit cached entry can consume a shortlist position.
+    precheck_input = json.loads((kwargs["epoch_root"] / "comparison_precheck_input.json").read_text())
+    assert set(precheck_input["sequences"]) == pool - {"HISTORICAL", "RETIRED"}
+    assert "--summary-only" in commands[0]
     command = publisher._rank_command(
         bgen_python=Path("python"), nanobody_opt_root=tmp_path, exact_inputs=[],
-        archive=tmp_path / "archive.csv", target="TEST", output=tmp_path / "ranking.json",
-        exclusion=tmp_path / "ledger", epoch=100, shortlist=100, config=None,
-        strict=False, observation_history=tmp_path / "history.sqlite", only_sequences=scope)
+        archive=kwargs["archive"], target="TEST", output=tmp_path / "ranking.json",
+        exclusion=kwargs["exclusion"], epoch=100, shortlist=1, config=kwargs["config"],
+        strict=False, observation_history=kwargs["database"], only_sequences=scope)
+    assert command[command.index("--only-sequences") + 1] == str(scope)
     assert "--observation-history" in command
     assert "--current-exact-candidates-only" not in command
-    assert "--only-sequences" not in command
     assert int(command[command.index("--minimum-observations") + 1]) == 20
-    # Changing comparison never asks for a fresh screen of stored candidates.
-    assert "--scorer" not in command
-    assert "--gpus" not in command
+    for cmd in [*commands, command]:
+        assert "--scorer" not in cmd and "--gpus" not in cmd
     from nanobody_opt_v2.screen_budget import pending
     assert pending([{"sequence": "NEW"}], tmp_path, 100, 4800) == [{"sequence": "NEW"}]
+
+
+def test_comparison_precheck_reuses_proofs_and_checks_new_arrivals(monkeypatch, tmp_path):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    publisher._prechecked_comparison_scope(**kwargs)
+    commands.clear()
+    publisher._prechecked_comparison_scope(**kwargs)
+    assert not commands
+    pool.add("LATER_CONFIRMED")
+    scope = publisher._prechecked_comparison_scope(**kwargs)
+    assert len(commands) == 2
+    inputs = json.loads((kwargs["epoch_root"] / "comparison_precheck_input.json").read_text())
+    assert inputs["sequences"] == ["LATER_CONFIRMED"]
+    assert set(scope.read_text().splitlines()) == {"STORED", "NEW", "LATER_CONFIRMED"}
+    kwargs["exclusion"].write_text("RETIRED\nSTORED\n")
+    scope = publisher._prechecked_comparison_scope(**kwargs)
+    assert "STORED" not in scope.read_text().splitlines()
+
+
+@pytest.mark.parametrize("change", ["archive", "config", "implementation", "epoch", "target"])
+def test_comparison_proof_invalidates_when_current_rules_change(monkeypatch, tmp_path, change):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    publisher._prechecked_comparison_scope(**kwargs)
+    commands.clear()
+    if change in ("archive", "config"):
+        with kwargs[change].open("a") as handle:
+            handle.write("CHANGED\n")
+    elif change == "implementation":
+        (tmp_path / "check_validator_novelty.py").write_text("changed implementation")
+    elif change == "epoch":
+        old = kwargs["epoch_root"]
+        new = tmp_path / "epoch101"
+        new.mkdir()
+        (new / "comparison_precheck.json").write_bytes((old / "comparison_precheck.json").read_bytes())
+        kwargs["epoch_root"] = new
+    else:
+        kwargs["target"] = "OTHER"
+    publisher._prechecked_comparison_scope(**kwargs)
+    assert len(commands) == 2
+    inputs = json.loads((kwargs["epoch_root"] / "comparison_precheck_input.json").read_text())
+    assert len(inputs["sequences"]) == 4
+
+
+def test_empty_comparison_precheck_cannot_reuse_stale_scope(monkeypatch, tmp_path):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    scope = publisher._prechecked_comparison_scope(**kwargs)
+    pool.clear()
+    pool.add("INVALID_NOVELTY")
+    with pytest.raises(RuntimeError, match="no comparison candidate"):
+        publisher._prechecked_comparison_scope(**kwargs)
+    assert scope.read_text() == ""
+
+
+def test_failed_comparison_precheck_does_not_cache_success(monkeypatch, tmp_path):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    def fail(command):
+        raise RuntimeError("gate interrupted")
+    monkeypatch.setattr(publisher, "_run", fail)
+    with pytest.raises(RuntimeError, match="gate interrupted"):
+        publisher._prechecked_comparison_scope(**kwargs)
+    assert not (kwargs["epoch_root"] / "comparison_precheck.json").exists()
+
+
+@pytest.mark.parametrize("aggregate", ["absent", "stale", "current"])
+def test_stored_comparison_uses_only_sealed_own_evidence(monkeypatch, tmp_path, aggregate):
+    import sqlite3
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    network = import_shipping("nanobody_opt.mutation_network", monkeypatch)
+    database = tmp_path / "history.sqlite"
+    c = sqlite3.connect(database)
+    c.executescript("""
+        CREATE TABLE nodes (id INTEGER PRIMARY KEY, target TEXT, sequence TEXT);
+        CREATE TABLE observations (node_id INTEGER, observation_id TEXT, source TEXT, metrics_json TEXT);
+        CREATE TABLE exact_run_observations (observation_id TEXT, target TEXT, run_id TEXT);
+        CREATE TABLE exact_runs (target TEXT, run_id TEXT, complete INTEGER);
+    """)
+    for i, (seq, target, count, source, complete) in enumerate([
+        ("READY", "TEST", 20, "local_exact_raw", 1),
+        ("SHALLOW", "TEST", 19, "local_exact_raw", 1),
+        ("RIVAL", "TEST", 20, "public_validator_api", 1),
+        ("UNSEALED", "TEST", 20, "local_exact_raw", 0),
+        ("OTHER", "OTHER", 20, "local_exact_raw", 1),
+    ]):
+        c.execute("INSERT INTO nodes VALUES (?, ?, ?)", (i, target, seq))
+        c.execute("INSERT INTO exact_runs VALUES (?, ?, ?)", (target, str(i), complete))
+        for j in range(count):
+            oid = f"{i}-{j}"
+            c.execute("INSERT INTO observations VALUES (?, ?, ?, '{}')", (i, oid, source))
+            c.execute("INSERT INTO exact_run_observations VALUES (?, ?, ?)", (oid, target, str(i)))
+    if aggregate != "absent":
+        c.executescript("""
+            CREATE TABLE exact_observation_aggregate (target TEXT, sequence TEXT, count_value INTEGER);
+            CREATE TABLE exact_observation_meta (key TEXT, value INTEGER);
+            INSERT INTO exact_observation_meta VALUES ('valid', 1);
+        """)
+        watermark = c.execute("SELECT MAX(rowid) FROM exact_run_observations").fetchone()[0]
+        c.execute("INSERT INTO exact_observation_meta VALUES ('source_max_rowid', ?)",
+                  (watermark if aggregate == "current" else watermark - 1,))
+        c.execute("INSERT INTO exact_observation_aggregate VALUES ('TEST', ?, 20)",
+                  ("READY" if aggregate == "current" else "WRONG",))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(network, "_connect", lambda *a: sqlite3.connect(database))
+    monkeypatch.setattr(network, "_is_local", lambda *a: True)
+    assert publisher._stored_comparison_sequences(database, "TEST", 20) == {"READY"}
 
 
 def test_scope_change_invalidates_old_publisher_noop_state(monkeypatch, tmp_path):
     publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
     common = dict(epoch=100, target="TEST", exact_fingerprint="same",
                   ledger_fingerprint="same", fleet_fingerprint="same")
-    assert not publisher._publisher_state_matches({"schema_version": 2, **common}, **common)
+    assert not publisher._publisher_state_matches({"schema_version": 3, **common}, **common)
     path = tmp_path / "state.json"
     publisher._write_publisher_state(path, **common, strict_fingerprint="same")
     assert publisher._publisher_state_matches(json.loads(path.read_text()), **common)

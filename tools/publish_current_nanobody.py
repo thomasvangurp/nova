@@ -137,7 +137,7 @@ SHORTLIST_PER_UID = 50
 
 CANONICAL_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 SUPPORTED_CHAIN_STATE_SCHEMAS = frozenset({1, 2})
-PUBLISHER_STATE_SCHEMA_VERSION = 3
+PUBLISHER_STATE_SCHEMA_VERSION = 4
 
 
 class ChainView(NamedTuple):
@@ -1111,17 +1111,8 @@ def _novel_layer2_rankings(rankings: Path, novelty: Path, output: Path) -> Path:
     return output
 
 
-def _producer_candidate_scope(epoch_root: Path, target: str, previous=None, *,
-                              include_stored_candidates: bool = False) -> Path | None:
-    """Discovery admission must not constrain the publication comparison.
-
-    With a sealed observation database, compare stored candidates and newly
-    confirmed candidates together. The ranker's observation floor and public
-    exclusions, followed by current novelty and Layer-2 checks, still decide
-    eligibility. Explicit score-bank operation keeps its existing scope.
-    """
-    if include_stored_candidates:
-        return None
+def _producer_candidate_scope(epoch_root: Path, target: str, previous=None) -> Path | None:
+    """Legacy explicit-file scope; sealed history uses the prechecked bank."""
     from nanobody_opt_v2.run_live_producer import _artifact_policy_stale
     allowed = set()
     found = False
@@ -1141,6 +1132,122 @@ def _producer_candidate_scope(epoch_root: Path, target: str, previous=None, *,
     allowed.update(confirmed)
     output = epoch_root / "producer_candidate_scope.txt"
     output.write_text("".join(s + "\n" for s in sorted(allowed)))
+    return output
+
+
+def _stored_comparison_sequences(database: Path, target: str, minimum: int) -> set[str]:
+    """Read an evidence-eligible superset, never a merit-limited shortlist.
+
+    The ranker still validates complete finite metric vectors. Counting sealed
+    own observations here can over-admit malformed evidence, but cannot promote
+    it through that final evidence check. Public rival scores are not own folds.
+    """
+    from nanobody_opt import mutation_network
+    connection = mutation_network._connect(database)
+    try:
+        p = "?" if mutation_network._is_local(connection) else "%s"
+        # The maintained aggregate avoids scanning millions of raw rows each
+        # publication cycle. A stale/missing aggregate must not hide candidates.
+        ready = False
+        if mutation_network._is_local(connection) and mutation_network._aggregate_ready(connection):
+            watermark = connection.execute(
+                "SELECT value FROM exact_observation_meta WHERE key='source_max_rowid'"
+            ).fetchone()
+            live = connection.execute("SELECT MAX(rowid) FROM exact_run_observations").fetchone()
+            ready = bool(watermark and int(watermark[0]) == int(live[0] or 0))
+        if ready:
+            rows = connection.execute(
+                f"SELECT DISTINCT sequence FROM exact_observation_aggregate "
+                f"WHERE target={p} AND count_value>={p}", (target, minimum),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT n.sequence FROM observations o "
+                "JOIN nodes n ON n.id=o.node_id "
+                "JOIN exact_run_observations x "
+                "ON x.observation_id=o.observation_id AND x.target=n.target "
+                "JOIN exact_runs r ON r.target=x.target AND r.run_id=x.run_id "
+                f"WHERE n.target={p} AND r.complete=1 "
+                "AND o.source='local_exact_raw' AND o.metrics_json IS NOT NULL "
+                f"GROUP BY n.sequence HAVING COUNT(*)>={p}", (target, minimum),
+            ).fetchall()
+        return {str(row[0]).strip().upper() for row in rows if row[0]}
+    finally:
+        connection.close()
+
+
+def _prechecked_comparison_scope(
+    *, args: argparse.Namespace, epoch_root: Path, target: str,
+    database: Path, archive: Path, config: Path, exclusion: Path,
+    pixi_manifest: Path,
+) -> Path:
+    """Apply current gates to stored AND newly confirmed candidates before ranking.
+
+    Reuse sequence measurements, not old eligibility. Incremental proof is
+    valid only for this epoch, target, archive, config and gate implementation.
+    No exact scorer is invoked and no discovery-budget reservation is made.
+    """
+    minimum = int(publication_gates.gate_defaults()["--minimum-observations"])
+    candidates = _stored_comparison_sequences(database, target, minimum)
+    with archive.open(newline="") as handle:
+        historical = {str(row.get("sequence") or "").strip().upper()
+                      for row in csv.DictReader(handle)}
+    excluded = {s.strip().upper() for s in exclusion.read_text().splitlines() if s.strip()}
+    candidates -= historical | excluded
+    proof_key = {
+        "schema_version": PUBLISHER_STATE_SCHEMA_VERSION,
+        "epoch": int(epoch_root.name.removeprefix("epoch")), "target": target,
+        "archive": _file_digest(archive), "config": _file_digest(config),
+        "gates": {name: _file_digest(args.nanobody_opt_root / name) for name in (
+            "check_validator_novelty.py", "filter_layer2.py",
+        )},
+    }
+    proof_path = epoch_root / "comparison_precheck.json"
+    proof = _read_json(proof_path) or {}
+    if proof.get("key") != proof_key:
+        proof = {}
+    checked = set(proof.get("checked_sequences", []))
+    allowed = set(proof.get("eligible_sequences", [])) & checked
+    pending = candidates - checked
+    if pending:
+        inputs = epoch_root / "comparison_precheck_input.json"
+        novelty = epoch_root / "comparison_precheck_novelty.json"
+        layer2 = epoch_root / "comparison_precheck_layer2.json"
+        _atomic_json(inputs, {"target": target, "sequences": sorted(pending)})
+        # Delete old output before dispatch: a failed/empty gate cannot reuse it.
+        novelty.unlink(missing_ok=True)
+        layer2.unlink(missing_ok=True)
+        _run(_novelty_command(
+            pixi_manifest=pixi_manifest, rankings=inputs, archive=archive,
+            target=target, output=novelty, pixi=args.pixi,
+        ) + ["--summary-only"])
+        novel = _validator_novel_sequences(novelty)
+        novelty_result = json.loads(novelty.read_text())
+        if novelty_result.get("input_count") != len(pending) or not novel <= pending:
+            raise RuntimeError("comparison novelty proof does not cover its input")
+        passed = set()
+        if novel:
+            _run(_layer2_command(
+                pixi_manifest=pixi_manifest, rankings=novelty, config=config,
+                output=layer2, concurrency=args.layer2_concurrency,
+                cache_dir=args.layer2_cache_dir, pixi=args.pixi,
+            ))
+            passed = _current_layer2_passes(layer2)
+            if json.loads(layer2.read_text()).get("input_count") != len(novel) or not passed <= novel:
+                raise RuntimeError("comparison Layer-2 proof does not cover its input")
+        checked.update(pending)
+        allowed.update(passed)
+        _atomic_json(proof_path, {"key": proof_key,
+            "checked_sequences": sorted(checked), "eligible_sequences": sorted(allowed),
+            "checked_count": len(checked), "eligible_count": len(allowed),
+        })
+    eligible = candidates & allowed
+    output = epoch_root / "comparison_candidate_scope.txt"
+    output.write_text("".join(s + "\n" for s in sorted(eligible)))
+    print(f"COMPARISON_PRECHECK candidates={len(candidates)} new_checks={len(pending)} "
+          f"eligible={len(eligible)}", flush=True)
+    if not eligible:
+        raise RuntimeError("no comparison candidate passes current pre-checks")
     return output
 
 
@@ -2273,23 +2380,6 @@ def _publish_once(args: argparse.Namespace) -> None:
             for assignment in fleet_module.assignments_from_artifact(previous)
         }
         uncommitted = prior_uids - committed_uids
-        if (
-            current_qualified
-            and _publisher_state_matches(
-                publisher_state,
-                epoch=epoch,
-                target=target,
-                exact_fingerprint=exact_fingerprint,
-                ledger_fingerprint=ledger_fingerprint,
-                fleet_fingerprint=fleet_fingerprint,
-            )
-            and not uncommitted
-        ):
-            print(
-                f"qualified epoch {epoch} fleet, score bank and uid set are "
-                "unchanged; no-op"
-            )
-            return
         if uncommitted:
             print(
                 f"qualified epoch {epoch} fleet unchanged but {len(uncommitted)} "
@@ -2304,6 +2394,10 @@ def _publish_once(args: argparse.Namespace) -> None:
         )
         if not archive_ready:
             _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
+        # A bank/crew match alone cannot reuse eligibility under changed rules.
+        gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path)]
+        exact_fingerprint = _sha256_bytes(json.dumps([exact_fingerprint, gate_fingerprint]).encode())
+        strict_fingerprint = _sha256_bytes(json.dumps([strict_fingerprint, gate_fingerprint]).encode())
 
         historical_layer2 = tuple(
             args.historical_layer2 or map(Path, DEFAULT_LAYER2_INPUTS)
@@ -2334,10 +2428,36 @@ def _publish_once(args: argparse.Namespace) -> None:
                 f"need at least {len(crew)}, got {shortlist_floor}"
             )
         shortlist = max(shortlist_floor, len(crew) * SHORTLIST_PER_UID)
-        candidate_scope = _producer_candidate_scope(
-            epoch_root, target, previous,
-            include_stored_candidates=observation_history is not None,
+        if observation_history is not None:
+            candidate_scope = _prechecked_comparison_scope(
+                args=args, epoch_root=epoch_root, target=target,
+                database=observation_history, archive=archive_path, config=config_path,
+                exclusion=exclusion_path, pixi_manifest=pixi_manifest,
+            )
+        else:
+            candidate_scope = _producer_candidate_scope(epoch_root, target, previous)
+        previous_prechecked = (
+            observation_history is None
+            or _live_sequences(previous, epoch) <= set(candidate_scope.read_text().splitlines())
         )
+        current_qualified = current_qualified and previous_prechecked
+        if (
+            current_qualified
+            and _publisher_state_matches(
+                publisher_state,
+                epoch=epoch,
+                target=target,
+                exact_fingerprint=exact_fingerprint,
+                ledger_fingerprint=ledger_fingerprint,
+                fleet_fingerprint=fleet_fingerprint,
+            )
+            and not uncommitted
+        ):
+            print(
+                f"qualified epoch {epoch} fleet, score bank and uid set are "
+                "unchanged; no-op"
+            )
+            return
         if current_qualified:
             # The provisional pass is the net that keeps an epoch from submitting
             # nothing. A qualified fleet is already live for this epoch, so the
@@ -2429,7 +2549,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 target=target,
                 epoch=epoch,
             )
-            if len(previous_assignments) > len(assignments):
+            if previous_prechecked and len(previous_assignments) > len(assignments):
                 print(
                     "NANOBODY_FLEET_RETAINED broader same-epoch artifact: "
                     f"previous={len(previous_assignments)} "

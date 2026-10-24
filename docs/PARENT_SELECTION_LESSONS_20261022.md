@@ -240,3 +240,35 @@ This is a comparison probe, not a claim that its leaders pass final novelty or
 submission gates. CI regressions verify that a stored candidate absent from
 current exact inputs can beat a new candidate in the same-field ranking,
 without another fold; discovery still rejects previously evaluated candidates.
+
+
+## Pre-check the bank before the merit cutoff (2026-10-23)
+
+The first comparison repair ranked the full bank before novelty checking its
+best 1,000 entries. In epoch 25894, all 1,011 shortlisted entries (including the
+diversity reserve) failed novelty. Invalid high-ranking cached entries therefore
+crowded out valid candidates. Ranking success was not publication success.
+
+The publisher now enumerates all sealed own candidates with enough evidence,
+removes exact historical/retired sequences, and applies current novelty plus
+full Layer-2 checks BEFORE either provisional or strict shortlist selection.
+Stored and newly confirmed candidates take the same path, reusing GPU evidence.
+These checks do not consume the 4,800 never-before-evaluated discovery budget.
+Incremental eligibility proof is bound to epoch, target, archive, config and gate
+implementation; newly confirmed arrivals are checked without repeating the full
+bank. Failed checks cannot write success, and empty results cannot reuse a stale
+scope. Publisher schema 4 invalidates old no-op state. Changed archive/config
+also invalidate qualification fingerprints, and an older broader artifact may
+only be retained when its sequences still belong to the current checked scope.
+
+Epoch 25893 had 12 live Pi slots but only six sequences at its commit deadline.
+The Pi refreshed until 17:13 UTC and committed all six successfully; all six
+were scored. The master's 11-entry artifact used gates completed at 17:18 UTC,
+after the Pi committed. Master history is therefore not proof of what the Pi
+actually submitted: compare the Pi archive, commit results and public scores.
+
+Shipping CI covers identical pre-checks for new/stored candidates, current-rule
+cache invalidation, incremental arrivals, interrupted/empty gates, stale aggregate
+fallback, sealed-own evidence, and a 1,001-invalid-entry shortlist regression.
+Release verification must include a current artifact reaching the Pi, not merely
+a successful ranking command or passing unit tests.

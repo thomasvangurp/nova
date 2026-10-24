@@ -849,3 +849,26 @@ def test_stored_bank_reads_raw_folds_only_above_evidence_floor(tmp_path, monkeyp
         "--observation-history": history, "--minimum-observations": 20, "--rank-workers": 1,
     })
     assert set(result["sequences"]) == {"NEW", "STORED"}
+
+
+def test_prechecked_bank_scope_applies_before_shortlist_limit(tmp_path, monkeypatch):
+    exact = _exact_bank(tmp_path, {"NEW": 20})
+    history = tmp_path / "history.sqlite"
+    db.connect_local(history).close()
+    best = {m: (-100.0 if direction == "min" else 100.0) for m, direction in METRICS.items()}
+    stored = {"STORED": [best] * 20}
+    stored.update({f"INVALID_{i}": [best] * 20 for i in range(1001)})
+    monkeypatch.setattr(rank_exact, "_read_aggregate_stats", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(rank_exact, "_historical_observations", lambda *a, **kw: (stored, 20040))
+    field = pd.DataFrame([_metrics(i) for i in range(1, 50)])
+    monkeypatch.setattr(rank_exact, "fetch_recent_fields_from_db", lambda *a, **kw: [(99, field)])
+    scope = tmp_path / "prechecked.txt"
+    scope.write_text("STORED\nNEW\n")
+    result = _rank(tmp_path, monkeypatch, exact, **{
+        "--observation-history": history, "--minimum-observations": 20,
+        "--selection-order": "multipass", "--before-epoch": 100,
+        "--consensus-ranking-policy": "off", "--rank-workers": 1,
+        "--only-sequences": scope, "--limit": 1,
+    })
+    assert result["sequences"] == ["STORED"]
+    assert result["candidates"][0]["observation_count"] == 20
