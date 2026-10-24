@@ -79,6 +79,8 @@ broad
 0
 --igblast-batch-size
 8
+--tnp-concurrency
+16
 --layer2-igblast-only
 1
 --donor-grafts

@@ -130,7 +130,9 @@ def test_prepare_gates_before_gpu_and_freezes_plan_on_restart(tmp_path, monkeypa
     selected, stages, _ = race._prepare_broad_confirmation(args=args, ranking=ranking,
         exclude={"c1"}, metadata={}, gpus=list("01234567"), timings=tmp_path / "timings")
     assert "c0" not in selected and "c1" not in selected
-    assert len(selected) == stages[0][0] == 103
+    assert len(selected) == stages[0][0] == 104
+    receipt = json.loads((tmp_path / "confirmation_plan.json").read_text())
+    assert receipt["eligibility"]["refilled_candidates"] >= 1
     ranking.write_text(json.dumps({"sequences": ["different"]}))
     again, again_stages, _ = race._prepare_broad_confirmation(args=args, ranking=ranking,
         exclude=set(), metadata={}, gpus=list("01234567"), timings=tmp_path / "timings")

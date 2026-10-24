@@ -166,3 +166,59 @@ rounds. The sealed DB contains 4,807 distinct candidates for that epoch,
 of which exactly 4,800 have their first own raw evidence in 25912 (the other
 seven are cached confirmations). Its best locally confirmed score was 882.33.
 That is one candidate's local estimate, not an independent fleet replay mean.
+
+## Follow-up: eligibility attrition defeated the broader race
+
+The subsequent screenshot is the validator's per-epoch score distribution,
+not the multipass chart. Both show continuing weakness. Independent replay
+means from the Pi were 1835.67 vs 1084.65 for us/5Gh in 25912, then 1077.03 vs
+1045.93 in 25913. Our 25914 mean was 1825.28 at ten stored passes; the rival's
+25914 replay was not complete at the time of this audit. Do not compare it
+against a missing rival mean or call one good epoch a recovery.
+
+The prior repair was incomplete. It budgeted 147 **proposals** before full
+Layer 2, then accepted the survivors without refilling. In epochs 25913–25915,
+only 21, 24, and 26 of 147 passed. Deadline fitting narrowed 25913 further to
+17 at the first stage. The resulting confirmation pools contained only 16 and
+17 qualified entries in 25913 and 25914. Meanwhile the comparison rankings
+contained 908, 781, and 658 candidates with current-version cached passing TNP
+profiles. A profile alone does not establish current novelty or all Layer-2
+eligibility, but these candidates warranted consideration through the gate.
+
+Of the rejected inputs, 118/126, 113/123, and 109/121 had **no measured TNP
+profile**, rather than measured red flags. Sampling twelve such inputs from
+25914 found seven failing the structure builder's existing numbered-domain
+requirement and five passing that prerequisite. An isolated uncached retry
+of one of the latter completed in 23.87 seconds with all six flags green.
+Thus unavailable results include both deterministic input failures and
+recoverable execution failures. The evidence does not establish the exact
+fraction attributable to each or prove an OOM for every failed job.
+
+The producer requested 200 concurrent TNP processes; its GPU shim distributed
+them without limiting occupancy. With approximately 3.8–6.3 GB free per GPU
+alongside resident scorers, this was an unsafe scheduling assumption. The
+repair separates TNP concurrency (16) from IgBLAST concurrency (200), and
+uses host-wide OS locks to allow at most two TNP processes on each GPU. The
+same upstream executable, arguments, model and eligibility thresholds remain.
+
+Confirmation now targets **passing** seats. It skips measured cached failures,
+checks the reserved second-chance sample early, and refills rejected places in
+rank order. Uncached work gets bounded batches and a separate time allowance;
+before that expires, measured cached passes can refill the pool through the
+full current gate. The complete repeat schedule and finish guard are reserved
+first. A late start narrows the schedule before gating rather than returning
+an empty race because the original widest schedule no longer fits. The 4,800
+NEW discovery cap and 755-repeat control cap are unchanged.
+
+Each gate runs in an owned process group with a timeout. Timeout kills its
+descendants, and a stale output file cannot become a successful result. Per-
+batch receipts distinguish `developability_unavailable` from measured
+`developability` rejection. Unmeasured failures never pass and are not cached
+as biological decisions. Final plans remain frozen across restart.
+
+Shipping CI now requires the previously omitted Layer-2 cache suite, plus
+eligibility attrition/refill, deadline/descendant cleanup and GPU-slot exec/
+release tests. The rank-only replay benchmark alone could not detect this
+runtime attrition bug. A passing CI run validates these failure paths; the
+first live gated width, completed depth and subsequent independent replay
+must still be checked before claiming competitive recovery.

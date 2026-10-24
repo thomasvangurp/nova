@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Spread independent TNP processes across the visible GPUs. ImmuneBuilder uses
-# logical cuda:0, so presenting one physical GPU per process prevents every
-# concurrent structure prediction from piling onto physical GPU 0.
+# Bound GPU occupancy across all callers, including concurrent publishers.
 set -eu
-gpu_count=${NOVA_TNP_GPU_COUNT:-0}
-if [ "$gpu_count" -le 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_count=$(nvidia-smi -L | wc -l)
-fi
-if [ "$gpu_count" -gt 0 ]; then
-  # Hash the immutable invocation rather than the process ID. PID modulo can
-  # cluster a whole launch wave on a few GPUs when worker PIDs share a stride.
-  gpu_slot=$(printf '%s\n' "$*" | cksum | awk -v count="$gpu_count" '{ print $1 % count }')
-  export CUDA_VISIBLE_DEVICES="$gpu_slot"
-fi
-exec /root/.pixi/envs/metanano/bin/TNP "$@"
+exec /root/.pixi/envs/metanano/bin/python /root/nanobody_opt/tnp_slots.py "$@"

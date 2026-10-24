@@ -24,7 +24,7 @@ def check(root: Path) -> None:
     expected = {'epoch_cycle_start': 25872, 'epoch_proposal_budget': 8000,
                 'epoch_candidate_budget': 4800, 'epoch_confirmation_finalists': 64,
                 'minimum_publishable_observations': 20, 'layer2_igblast_only': 1,
-                'confirmation_policy': 'broad'}
+                'confirmation_policy': 'broad', 'tnp_concurrency': 16}
     for name, value in expected.items():
         if getattr(args, name) != value:
             raise ValueError(f'launch setting disagrees with the release contract: {name}')

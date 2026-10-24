@@ -14,6 +14,7 @@ import math
 import csv
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -705,6 +706,7 @@ def _layer2_gate(
     command: list[str],
     root: Path,
     target: str,
+    timeout_seconds: float | None = None,
 ) -> list[str]:
     """Run full Layer-2 on the shortlist and keep only what actually passes.
 
@@ -727,10 +729,33 @@ def _layer2_gate(
     resolved = [
         item.format(input=str(source), output=str(output)) for item in command
     ]
+    # Never read an older successful file after a failed retry.
+    output.unlink(missing_ok=True)
     try:
-        subprocess.run(resolved, check=True)
+        if timeout_seconds is None:
+            subprocess.run(resolved, check=True)
+        else:
+            if timeout_seconds <= 0:
+                return []
+            with subprocess.Popen(resolved, start_new_session=True) as process:
+                try:
+                    code = process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    # pixi -> Python -> TNP -> structure builder are one owned
+                    # group. Killing just pixi leaves old-epoch GPU work alive.
+                    for sig in (signal.SIGTERM, signal.SIGKILL):
+                        try:
+                            os.killpg(process.pid, sig)
+                        except ProcessLookupError:
+                            pass
+                        if sig == signal.SIGTERM:
+                            time.sleep(.1)
+                    process.wait()
+                    raise
+                if code:
+                    raise subprocess.CalledProcessError(code, resolved)
         payload = json.loads(output.read_text())
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as error:
         # Failing open would publish on IgBLAST evidence alone, which the
         # publisher is right to refuse; failing closed costs this epoch's
         # replication instead.
@@ -769,12 +794,15 @@ def _replication_shortlist(
 def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timings):
     """Freeze a fully gated, budgeted tournament so restarts cannot change it."""
     from nanobody_opt_v2 import confirmation_policy as policy
+    from nanobody_opt_v2 import confirmation_eligibility as eligibility
     from nanobody_opt_v2.compute_budget import TimingModel
+    from nanobody_opt.filter_layer2 import cached_developability_result
 
     receipt_path = args.output_dir / "confirmation_plan.json"
     model = TimingModel(args.replication_load_seconds,
                         args.replication_seconds_per_observation, 0)
     proof = {"target": args.target,
+             "eligibility_policy": eligibility.VERSION,
              "config_sha256": hashlib.sha256(args.config.read_bytes()).hexdigest(),
              "archive_sha256": hashlib.sha256(args.archive.read_bytes()).hexdigest()}
     if receipt_path.is_file():
@@ -790,24 +818,80 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
         rounds_per_stage=args.replication_rounds_per_stage,
         keep_fraction=args.replication_keep_fraction,
         minimum_keep=args.replication_minimum_keep, gpus=len(gpus), model=model)
+    usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
+    # When closing started late, reserve a short cached-gate window first and
+    # narrow breadth up front. Otherwise demanding the full original schedule
+    # would leave zero gate time and incorrectly return an empty race.
+    gate_schedule = policy.fit(planned["schedule"], available=planned["schedule"][0][0],
+        usable_seconds=max(usable - args.replication_finish_guard_seconds - 30, 0),
+        model=model, gpus=len(gpus)) if args.layer2_gate_command else planned["schedule"]
+    gate_width = gate_schedule[0][0] if gate_schedule else 0
     payload = json.loads(ranking.read_text()) if ranking.is_file() else {}
     ordered = [s for s in payload.get("sequences", []) if s not in exclude]
+    command = shlex.split(args.layer2_gate_command) if args.layer2_gate_command else []
+    cache_dir = (Path(command[command.index("--cache-dir") + 1])
+                 if "--cache-dir" in command else None)
+
+    def cached(sequence):
+        result = cached_developability_result(sequence, cache_dir) if cache_dir else None
+        return result["passed"] if result is not None else None
+
+    known_failed = {s for s in ordered if cached(s) is False}
     observations = {r["sequence"]: int(r.get("observation_count", 1))
                     for r in payload.get("candidates", []) if r.get("sequence")}
     selected, reasons = policy.shortlist(
-        ordered, width=planned["schedule"][0][0], metadata=metadata,
+        [s for s in ordered if s not in known_failed],
+        width=gate_width, metadata=metadata,
         observations=observations, epoch=args.epoch, broadened=planned["broadened"])
     proposed = len(selected)
+    gate_receipt = {}
     if selected and args.layer2_gate_command:
         started = time.monotonic()
-        selected = _layer2_gate(selected, command=shlex.split(args.layer2_gate_command),
-                                root=args.output_dir, target=args.target)
+        repeat_seconds = policy.seconds(gate_schedule, model, len(gpus))
+        def clock_allowance():
+            if args.chain_state is not None and not _chain_allows_work(
+                    args.chain_state, args.epoch, args.reserve_blocks):
+                return 0.0
+            return max(0.0, (_remaining_blocks(args.chain_state, args.epoch)
+                             - args.reserve_blocks) * 12.0 - repeat_seconds
+                       - args.replication_finish_guard_seconds)
+        # Monotonic time also advances when the chain-state writer stalls.
+        deadline = started + clock_allowance()
+        def seconds_left():
+            return max(0.0, min(deadline - time.monotonic(), clock_allowance()))
+        def gate(batch, timeout, index, mode):
+            root = args.output_dir / "confirmation_eligibility" / f"batch_{index:04d}"
+            passed = _layer2_gate(batch, command=command, root=root,
+                                 target=args.target, timeout_seconds=min(timeout, 300.0))
+            # Counts distinguish measured rejection from missing computation.
+            try:
+                result = json.loads((root / "layer2_gate/layer2.json").read_text())
+                counts = result.get("rejection_counts", {})
+            except (OSError, ValueError):
+                counts = {"gate_unavailable": len(batch)}
+            _atomic_json(root / "receipt.json", {"mode": mode, "input_count": len(batch),
+                "pass_count": len(passed), "rejection_counts": counts})
+            return passed
+        # Check the small reserved audit sample early enough to reach TNP;
+        # a deadline must not silently discard every second-chance seat.
+        initial_order = list(selected)
+        gate_order = ([s for s in selected if reasons[s] != "score"]
+                      + [s for s in selected if reasons[s] == "score"])
+        selected, gate_receipt = eligibility.fill(
+            ordered=ordered, initial=gate_order, width=gate_width,
+            cached=cached, gate=gate, seconds_left=seconds_left)
+        positions = {s: i for i, s in enumerate(dict.fromkeys([*initial_order, *ordered]))}
+        selected.sort(key=positions.__getitem__)
+        _atomic_json(args.output_dir / "confirmation_eligibility.json", gate_receipt)
+        for sequence in selected:
+            reasons.setdefault(sequence, "eligible_refill")
+        proposed = gate_receipt["proposed_candidates"]
         _append_timing(timings, {"phase": "layer2_gate", "seconds": time.monotonic() - started})
     gated_count = len(selected)
     # A single noisy metric must not undo the second-chance sample. Full
     # biological eligibility still runs above; publication's gates remain.
     usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
-    schedule = policy.fit(planned["schedule"], available=len(selected),
+    schedule = policy.fit(gate_schedule, available=len(selected),
                           usable_seconds=max(usable - args.replication_finish_guard_seconds, 0),
                           model=model, gpus=len(gpus))
     selected = selected[:schedule[0][0]] if schedule else []
@@ -816,6 +900,7 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
                "eligible_comparison_candidates": len(ordered),
                "proposed_candidates": proposed, "gated_candidates": gated_count,
                "selected_candidates": len(selected),
+               "eligibility": gate_receipt,
                "selection_reasons": {s: reasons[s] for s in selected},
                "planned_evaluations": policy.evaluation_count(schedule),
                "planned_seconds": policy.seconds(schedule, model, len(gpus)),

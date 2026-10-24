@@ -190,6 +190,25 @@ def _developability_cache_digest(sequence: str) -> str:
     ).hexdigest()
 
 
+def cached_developability_result(sequence: str, cache_dir: Path) -> dict | None:
+    """Read only a measured result for this exact input and tool version."""
+    path = cache_dir / f"{_developability_cache_digest(sequence)}.json"
+    try:
+        cached = json.loads(path.read_text())
+        if (cached.get("sequence") == sequence
+                and _measured_developability(cached.get("developability"))):
+            return cached["developability"]
+    except (OSError, KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def developability_rejection(result: Any) -> str:
+    if not _measured_developability(result):
+        return "developability_unavailable"
+    return "" if result["passed"] else "developability"
+
+
 def _cached_developability(
     rows: list[dict[str, Any]], cache_dir: Path, concurrency: int
 ) -> list[dict[str, Any]]:
@@ -198,18 +217,10 @@ def _cached_developability(
     results: list[dict[str, Any] | None] = [None] * len(rows)
     missing: list[int] = []
     for index, row in enumerate(rows):
-        digest = _developability_cache_digest(row["sequence"])
-        path = cache_dir / f"{digest}.json"
-        try:
-            cached = json.loads(path.read_text())
-            if (
-                cached.get("sequence") == row["sequence"]
-                and _measured_developability(cached.get("developability"))
-            ):
-                results[index] = cached["developability"]
-                continue
-        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            pass
+        cached = cached_developability_result(row["sequence"], cache_dir)
+        if cached is not None:
+            results[index] = cached
+            continue
         missing.append(index)
 
     print(f"TNP cache: {len(rows) - len(missing):,} hit; {len(missing):,} missing")
@@ -372,12 +383,11 @@ def main() -> None:
         dev_results = _cached_developability(survivors, args.cache_dir, concurrency)
         for row, result in zip(survivors, dev_results, strict=True):
             row["developability"] = result
-            if result.get("passed"):
-                row["layer2_passed"] = True
-            else:
-                row["layer2_passed"] = False
-                row["layer2_rejection"] = "developability"
-                rejected["developability"] = rejected.get("developability", 0) + 1
+            reason = developability_rejection(result)
+            row["layer2_passed"] = not reason
+            if reason:
+                row["layer2_rejection"] = reason
+                rejected[reason] = rejected.get(reason, 0) + 1
 
     passed = [row for row in survivors if row.get("layer2_passed")]
     failed_survivors = [row for row in survivors if not row.get("layer2_passed")]

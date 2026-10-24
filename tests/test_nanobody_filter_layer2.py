@@ -28,7 +28,7 @@ def test_load_candidates_accepts_exact_scorer_cases(tmp_path):
 
 def test_execution_failure_is_retried_instead_of_cached(tmp_path, monkeypatch):
     sequence = "QVQLVESGG"
-    digest = hashlib.sha256(sequence.encode("ascii")).hexdigest()
+    digest = filter_layer2._developability_cache_digest(sequence)
     (tmp_path / f"{digest}.json").write_text(
         json.dumps(
             {
@@ -51,3 +51,22 @@ def test_execution_failure_is_retried_instead_of_cached(tmp_path, monkeypatch):
     ) == [measured]
     cached = json.loads((tmp_path / f"{digest}.json").read_text())
     assert cached["developability"] == measured
+
+
+def test_unmeasured_results_never_count_as_passes_or_biological_rejections():
+    assert filter_layer2.developability_rejection({"passed": False, "reason": "failed"}) == "developability_unavailable"
+    assert filter_layer2.developability_rejection({"passed": True}) == "developability_unavailable"
+    assert filter_layer2.developability_rejection({"passed": False, "flags": {"C": "red"}}) == "developability"
+    assert filter_layer2.developability_rejection({"passed": True, "flags": {"C": "green"}}) == ""
+
+
+def test_cache_requires_current_version_and_matching_input(tmp_path):
+    seq = "TEST"
+    payload = {"sequence": seq, "developability": {"passed": True, "flags": {"C": "green"}}}
+    (tmp_path / (hashlib.sha256(seq.encode()).hexdigest() + ".json")).write_text(json.dumps(payload))
+    assert filter_layer2.cached_developability_result(seq, tmp_path) is None
+    path = tmp_path / (filter_layer2._developability_cache_digest(seq) + ".json")
+    path.write_text(json.dumps({**payload, "sequence": "different"}))
+    assert filter_layer2.cached_developability_result(seq, tmp_path) is None
+    path.write_text(json.dumps(payload))
+    assert filter_layer2.cached_developability_result(seq, tmp_path)["passed"] is True
