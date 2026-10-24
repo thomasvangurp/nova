@@ -766,6 +766,92 @@ def _replication_shortlist(
     return sequences[:limit]
 
 
+def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timings):
+    """Freeze a fully gated, budgeted tournament so restarts cannot change it."""
+    from nanobody_opt_v2 import confirmation_policy as policy
+    from nanobody_opt_v2.compute_budget import TimingModel
+
+    receipt_path = args.output_dir / "confirmation_plan.json"
+    model = TimingModel(args.replication_load_seconds,
+                        args.replication_seconds_per_observation, 0)
+    proof = {"target": args.target,
+             "config_sha256": hashlib.sha256(args.config.read_bytes()).hexdigest(),
+             "archive_sha256": hashlib.sha256(args.archive.read_bytes()).hexdigest()}
+    if receipt_path.is_file():
+        receipt = json.loads(receipt_path.read_text())
+        if (receipt.get("epoch") != args.epoch or receipt.get("policy") != policy.POLICY
+                or receipt.get("rounds") != args.replication_rounds
+                or receipt.get("proof") != proof):
+            raise ValueError("confirmation resume plan mismatch")
+        return receipt["shortlist"], [tuple(s) for s in receipt["schedule"]], model
+
+    planned = policy.plan(
+        candidates=args.finalists, rounds=args.replication_rounds,
+        rounds_per_stage=args.replication_rounds_per_stage,
+        keep_fraction=args.replication_keep_fraction,
+        minimum_keep=args.replication_minimum_keep, gpus=len(gpus), model=model)
+    payload = json.loads(ranking.read_text()) if ranking.is_file() else {}
+    ordered = [s for s in payload.get("sequences", []) if s not in exclude]
+    observations = {r["sequence"]: int(r.get("observation_count", 1))
+                    for r in payload.get("candidates", []) if r.get("sequence")}
+    selected, reasons = policy.shortlist(
+        ordered, width=planned["schedule"][0][0], metadata=metadata,
+        observations=observations, epoch=args.epoch, broadened=planned["broadened"])
+    proposed = len(selected)
+    if selected and args.layer2_gate_command:
+        started = time.monotonic()
+        selected = _layer2_gate(selected, command=shlex.split(args.layer2_gate_command),
+                                root=args.output_dir, target=args.target)
+        _append_timing(timings, {"phase": "layer2_gate", "seconds": time.monotonic() - started})
+    gated_count = len(selected)
+    # A single noisy metric must not undo the second-chance sample. Full
+    # biological eligibility still runs above; publication's gates remain.
+    usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
+    schedule = policy.fit(planned["schedule"], available=len(selected),
+                          usable_seconds=max(usable - args.replication_finish_guard_seconds, 0),
+                          model=model, gpus=len(gpus))
+    selected = selected[:schedule[0][0]] if schedule else []
+    receipt = {**planned, "epoch": args.epoch, "rounds": args.replication_rounds, "proof": proof,
+               "schedule": schedule, "shortlist": selected,
+               "eligible_comparison_candidates": len(ordered),
+               "proposed_candidates": proposed, "gated_candidates": gated_count,
+               "selected_candidates": len(selected),
+               "selection_reasons": {s: reasons[s] for s in selected},
+               "planned_evaluations": policy.evaluation_count(schedule),
+               "planned_seconds": policy.seconds(schedule, model, len(gpus)),
+               "status": "ready" if selected else "insufficient_time_or_eligible_candidates"}
+    _atomic_json(receipt_path, receipt)
+    print(f"EXACT_CONFIRMATION_PLAN policy={policy.POLICY} candidates={len(selected)} "
+          f"repeat_evaluations={receipt['planned_evaluations']}/{planned['evaluation_cap']} "
+          f"status={receipt['status']}", flush=True)
+    return selected, schedule, model
+
+
+def _confirmation_health(*, root, epoch, required, rounds_completed, shortlist_count,
+                         minimum_keep, qualified_paths, fresh_sequences):
+    """Successful rounds are not proof of a qualified or newly improved pool."""
+    qualified = set()
+    for path in qualified_paths:
+        try:
+            rows = json.loads(path.read_text()).get("candidates", [])
+        except (OSError, ValueError):
+            continue
+        qualified.update(r["sequence"] for r in rows
+                         if r.get("sequence") and int(r.get("observation_count", 0)) >= required)
+    fresh = qualified & fresh_sequences
+    status = ("healthy" if len(qualified) >= minimum_keep and fresh
+              else "degraded_no_new_confirmed_candidates" if not fresh
+              else "degraded_short_confirmed_pool")
+    result = {"epoch": epoch, "status": status, "required_observations": required,
+              "rounds_completed": rounds_completed, "shortlist_candidates": shortlist_count,
+              "qualified_candidates": len(qualified), "fresh_confirmed_candidates": len(fresh),
+              "minimum_confirmed_pool": minimum_keep}
+    _atomic_json(root / "confirmation_health.json", result)
+    print(f"EXACT_CONFIRMATION_HEALTH status={status} qualified={len(qualified)} "
+          f"fresh_confirmed={len(fresh)}", flush=True)
+    return result
+
+
 def _drop_metric_outliers(
     shortlist: list[str],
     *,
@@ -968,6 +1054,7 @@ def _run_replication_rounds(
     rerank: Any = None,
     finish_model: Any = None,
     finish_guard_seconds: float = 0.0,
+    stage_schedule: list[tuple[int, int]] | None = None,
 ) -> int:
     """Re-observe one shortlist as whole rounds of independent observations.
 
@@ -979,6 +1066,11 @@ def _run_replication_rounds(
     """
     if not shortlist or rounds < 1:
         return 0
+    if stage_schedule is not None and (
+            sum(r for _, r in stage_schedule) != rounds
+            or not stage_schedule or stage_schedule[0][0] != len(shortlist)
+            or any(w < 1 or r < 1 for w, r in stage_schedule)):
+        raise ValueError("invalid explicit confirmation schedule")
     # Successive elimination.  A flat allocation spends the same depth on
     # candidates that were hopeless after four observations as on the eventual
     # pick; re-ranking between stages and dropping the trailing fraction reached
@@ -999,15 +1091,20 @@ def _run_replication_rounds(
                 str(item)
                 for item in json.loads(source.read_text()).get("sequences", [])
             ] or alive
-        stage_rounds = min(rounds_per_stage or rounds, rounds - completed)
+        if stage_schedule is not None and len(alive) != stage_schedule[stage - 1][0]:
+            raise ValueError("confirmation stage manifest disagrees with frozen budget")
+        stage_rounds = (stage_schedule[stage - 1][1] if stage_schedule is not None
+                        else min(rounds_per_stage or rounds, rounds - completed))
         # A round costs a model load whether it scores sixty candidates or
         # two, and a shortlist smaller than the shard count leaves shards
         # idle. When the shortlist cannot fill the box, run several rounds at
         # once on disjoint GPU groups: rounds are independent, and each keeps
         # its own invocation and predict composition, so the metric is
         # untouched. See round_parallelism for the measurements.
-        groups = _round_parallelism.plan(
-            alive=len(alive), gpus=gpus, rounds_left=stage_rounds)
+        # Explicit schedules are priced as serial rounds. In particular a
+        # concurrent partial stage must not advance to the next pruning depth.
+        groups = ([] if stage_schedule is not None else _round_parallelism.plan(
+            alive=len(alive), gpus=gpus, rounds_left=stage_rounds))
         if len(groups) > 1:
             done = _run_rounds_concurrently(
                 groups=groups, source=source, config=config, target=target,
@@ -1074,9 +1171,18 @@ def _run_replication_rounds(
                 f"stage={stage} alive={len(alive)} seconds={seconds:.0f}",
                 flush=True,
             )
-        if keep_fraction < 1.0 and len(alive) > 1 and rerank is not None:
-            keep = prune_width(len(alive), keep_fraction, minimum_keep)
+        should_prune = (stage < len(stage_schedule) if stage_schedule is not None
+                        else keep_fraction < 1.0)
+        if should_prune and len(alive) > 1 and rerank is not None:
+            keep = (min(len(alive), stage_schedule[stage][0]) if stage_schedule is not None
+                    else prune_width(len(alive), keep_fraction, minimum_keep))
             pruned = rerank(alive, keep)
+            if stage_schedule is not None:
+                # A failed re-rank cannot silently exceed the reserved budget.
+                pruned = list(dict.fromkeys(s for s in (pruned or alive) if s in alive))[:keep]
+                if len(pruned) < keep:
+                    pruned.extend(s for s in alive if s not in pruned)
+                    pruned = pruned[:keep]
             if pruned:
                 print(
                     f"EXACT_REPLICATION_PRUNED stage={stage} "
@@ -1808,6 +1914,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--consensus-ranking-policy", choices=("tier", "off"), default="tier")
     parser.add_argument("--minimum-selection-observations", type=int)
+    parser.add_argument("--confirmation-policy", choices=("legacy", "broad"), default="legacy")
     parser.add_argument("--fresh-screen-budget", type=int, default=0,
                         help="per-epoch never-evaluated candidate cap; exclude every prior exact result")
     parser.add_argument("--carry-pending-candidates", action="store_true")
@@ -2675,59 +2782,66 @@ def main() -> None:
             ranked = json.loads(screen_ranking.read_text()).get("candidates", [])
             already_confirmed.update(r["sequence"] for r in ranked
                                      if r.get("observation_count", 0) >= args.minimum_publishable_observations)
-        replication_shortlist = _replication_shortlist(
-            screen_ranking, exclude=set(repeated_finalists) | already_confirmed, limit=args.finalists
-        )
-        replication_shortlist = _drop_metric_outliers(
-            replication_shortlist,
-            ranking=screen_ranking,
-            archive=args.archive,
-            maximum_percentile=args.maximum_metric_percentile,
-        )
-        replication_shortlist = _affordable_shortlist(
-            replication_shortlist,
-            rounds=args.replication_rounds,
-            minimum_observations=args.minimum_publishable_observations,
-            remaining_blocks=max(
-                _remaining_blocks(args.chain_state, args.epoch)
-                - args.reserve_blocks,
-                0.0,
-            ),
-            load_seconds=args.replication_load_seconds,
-            seconds_per_observation=args.replication_seconds_per_observation,
-            gpu_count=len(gpus),
-        )
-        if args.layer2_gate_command:
-            gate_started = time.monotonic()
-            replication_shortlist = _layer2_gate(
-                replication_shortlist,
-                command=shlex.split(args.layer2_gate_command),
-                root=args.output_dir,
-                target=args.target,
+        stage_schedule = None
+        if args.confirmation_policy == "broad":
+            replication_shortlist, stage_schedule, finish_model = _prepare_broad_confirmation(
+                args=args, ranking=screen_ranking,
+                exclude=set(repeated_finalists) | already_confirmed,
+                metadata=candidate_metadata, gpus=gpus, timings=timings_path)
+        else:
+            replication_shortlist = _replication_shortlist(
+                screen_ranking, exclude=set(repeated_finalists) | already_confirmed, limit=args.finalists
             )
-            _append_timing(timings_path, {"phase": "layer2_gate", "seconds": round(time.monotonic() - gate_started, 1)})
-        finish_model = None
-        if args.adaptive_finish_guard:
-            from nanobody_opt_v2.compute_budget import TimingModel
-            finish_model = TimingModel(args.replication_load_seconds, args.replication_seconds_per_observation, 0)
-            # TNP consumes time after initial sizing: use the clock again before folding.
-            usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
-            # Price the run the loop actually executes (it prunes between
-            # stages), as confirmation_plan does. The flat rounds*width form
-            # cut 96 finalists to ~51 at 20 rounds on 8 GPUs. The per-round
-            # guard inside _run_replication_rounds still stops on overrun.
-            while replication_shortlist and (
-                finish_model.staged_seconds(
-                    rounds=args.replication_rounds,
-                    candidates=len(replication_shortlist),
-                    gpus=len(gpus),
-                    rounds_per_stage=args.replication_rounds_per_stage,
-                    keep_fraction=args.replication_keep_fraction,
-                    minimum_keep=args.replication_minimum_keep,
+            replication_shortlist = _drop_metric_outliers(
+                replication_shortlist,
+                ranking=screen_ranking,
+                archive=args.archive,
+                maximum_percentile=args.maximum_metric_percentile,
+            )
+            replication_shortlist = _affordable_shortlist(
+                replication_shortlist,
+                rounds=args.replication_rounds,
+                minimum_observations=args.minimum_publishable_observations,
+                remaining_blocks=max(
+                    _remaining_blocks(args.chain_state, args.epoch)
+                    - args.reserve_blocks,
+                    0.0,
+                ),
+                load_seconds=args.replication_load_seconds,
+                seconds_per_observation=args.replication_seconds_per_observation,
+                gpu_count=len(gpus),
+            )
+            if args.layer2_gate_command:
+                gate_started = time.monotonic()
+                replication_shortlist = _layer2_gate(
+                    replication_shortlist,
+                    command=shlex.split(args.layer2_gate_command),
+                    root=args.output_dir,
+                    target=args.target,
                 )
-                + args.replication_finish_guard_seconds > usable
-            ):
-                replication_shortlist.pop()
+                _append_timing(timings_path, {"phase": "layer2_gate", "seconds": round(time.monotonic() - gate_started, 1)})
+            finish_model = None
+            if args.adaptive_finish_guard:
+                from nanobody_opt_v2.compute_budget import TimingModel
+                finish_model = TimingModel(args.replication_load_seconds, args.replication_seconds_per_observation, 0)
+                # TNP consumes time after initial sizing: use the clock again before folding.
+                usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
+                # Price the run the loop actually executes (it prunes between
+                # stages), as confirmation_plan does. The flat rounds*width form
+                # cut 96 finalists to ~51 at 20 rounds on 8 GPUs. The per-round
+                # guard inside _run_replication_rounds still stops on overrun.
+                while replication_shortlist and (
+                    finish_model.staged_seconds(
+                        rounds=args.replication_rounds,
+                        candidates=len(replication_shortlist),
+                        gpus=len(gpus),
+                        rounds_per_stage=args.replication_rounds_per_stage,
+                        keep_fraction=args.replication_keep_fraction,
+                        minimum_keep=args.replication_minimum_keep,
+                    )
+                    + args.replication_finish_guard_seconds > usable
+                ):
+                    replication_shortlist.pop()
         def _prune(alive: list[str], keep: int) -> list[str]:
             """Keep the best of the alive set on all pooled observations."""
             ranking = args.output_dir / "rounds" / "stage_ranking.json"
@@ -2787,6 +2901,7 @@ def main() -> None:
             rerank=_prune,
             finish_model=finish_model,
             finish_guard_seconds=args.replication_finish_guard_seconds,
+            stage_schedule=stage_schedule,
         )
         observations = replication_rounds_completed + 1
         if observations < args.minimum_publishable_observations:
@@ -2831,6 +2946,23 @@ def main() -> None:
             else:
                 print("EXACT_REPLICATION_REJECTED", flush=True)
 
+    confirmation_health = None
+    if args.replication_rounds:
+        from nanobody_opt.rank_exact import _observations
+        # Only this epoch's discovery screens count as new confirmations.
+        from nanobody_opt.exact_checkpoints import exact_paths
+        discovery = []
+        for base in {args.output_dir, args.pooled_exact_root} - {None}:
+            discovery.extend(exact_paths(base, "**/screen/tranche_*"))
+        fresh_sequences = set(_observations(discovery, args.target))
+        confirmation_health = _confirmation_health(
+            root=args.output_dir, epoch=args.epoch,
+            required=args.minimum_publishable_observations,
+            rounds_completed=replication_rounds_completed,
+            shortlist_count=len(replication_shortlist),
+            minimum_keep=args.replication_minimum_keep,
+            qualified_paths=qualified_outputs, fresh_sequences=fresh_sequences)
+
     if args.dry_run:
         _print_dry_run_summary(
             output_dir=args.output_dir,
@@ -2845,6 +2977,7 @@ def main() -> None:
             "epoch": args.epoch,
             "replication_rounds": args.replication_rounds,
             "replication_rounds_completed": replication_rounds_completed,
+            "confirmation_health": confirmation_health,
             "replication_shortlist": len(replication_shortlist),
             "target": args.target,
             "screened": screened,

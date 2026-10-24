@@ -23,7 +23,8 @@ def check(root: Path) -> None:
     args = _parser().parse_args(flags)
     expected = {'epoch_cycle_start': 25872, 'epoch_proposal_budget': 8000,
                 'epoch_candidate_budget': 4800, 'epoch_confirmation_finalists': 64,
-                'minimum_publishable_observations': 20, 'layer2_igblast_only': 1}
+                'minimum_publishable_observations': 20, 'layer2_igblast_only': 1,
+                'confirmation_policy': 'broad'}
     for name, value in expected.items():
         if getattr(args, name) != value:
             raise ValueError(f'launch setting disagrees with the release contract: {name}')

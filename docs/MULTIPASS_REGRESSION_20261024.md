@@ -101,3 +101,52 @@ untouched. The unstarted 25911 proposal manifest was preserved under a backup
 name and rebuilt; its discovery ledger had no reservations. Epoch 25911 is the
 first epoch scheduled to use the corrected generation and comparison paths.
 Its resulting fleet multipass score must be measured after submission.
+
+## Fixed-field audit and broader confirmation
+
+The follow-up audit ranked all retained replay folds against the same 470-row
+reference field (epochs 25898–25907). Paired fleet means were 1262 vs 1259 for
+us and 5Gh in 25873–25882, 1190 vs 1074 in 25883–25894, and 1631 vs 1148 in
+25900–25908. The early gap was slower improvement; the recent decline remains
+after controlling for the changing reference field. Even our recent best two
+were 14% worse than 5DZX's smaller fleet. Do not explain this as fleet size alone.
+
+One-pass rankings are uncertain: among 1,525 replayed public candidates,
+retaining the first-pass best 20% captured 40% of the held-out best decile;
+five-pass screening captured 56%. These selected submissions cannot estimate
+the production-wide false-negative rate among rejected proposals.
+
+`broad-confirmation-v1` reallocates the existing repeat budget. The actual
+shipping control is 64/41/26/20 candidates, five repeat rounds at each width
+(65% survival), costing 755 repeats. The new 8-GPU schedule is 147 candidates
+for two repeats, 40 for five, and 20 for thirteen: 3, 8, and 21 total passes
+for candidates starting with one. It costs 754 repeats and no more modeled
+wall time. The 4,800 NEW-only discovery ledger remains independent. Other
+widths/GPU counts are priced against their own control schedule; narrowing
+preserves depth and refuses a window that cannot finish even one candidate.
+
+One sixteenth of a broadened shortlist gets second-chance allocation, split
+between measured-parent merit and an epoch-deterministic random audit. All
+entries must already belong to the eligible comparison pool and pass full
+Layer 2 before repeats. A parent score grants only a repeat opportunity.
+The one-pass metric-outlier heuristic does not cancel those opportunities;
+strict publication eligibility remains in force. The gated schedule and
+input hashes are frozen before GPU work so resume cannot widen its budget.
+
+The committed numerical fixtures contain no sequences or candidate IDs.
+On 1,000 separate-fold replay splits, the new policy's held-out top-13 mean
+was 1027.40 vs 1027.60 on 346 public candidates with 30 folds, and 1033.89 vs
+1036.03 on 367 candidates with 40 own/public folds. These gains are small;
+this is a conditional rank-only regression check, not evidence of recovering
+the full competitive gap or achieving 900. Eligibility and family selection
+are tested separately. Parent metadata is absent from the numerical benchmark,
+so all second-chance slots there use the random audit fallback.
+
+CI now requires this replay check, verifies the benchmark's control against
+the actual deployment argv, and exercises stage depth, budgets, full gates,
+restart identity, and incomplete qualification. Run
+`python -m tools.benchmark_confirmation_policy` to reproduce the numerical
+check. A round-complete marker is insufficient: `confirmation_health.json`
+reports qualified and newly confirmed counts, and propagates degradation to
+the epoch's coverage and confirmation receipts. No fresh confirmed candidates
+or a pool below the configured minimum is explicitly degraded.

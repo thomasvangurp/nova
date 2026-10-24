@@ -302,6 +302,18 @@ def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> 
                              rounds_per_stage=args.replication_rounds_per_stage,
                              keep_fraction=args.replication_keep_fraction,
                              minimum_keep=args.replication_minimum_keep)
+    if getattr(args, "confirmation_policy", "legacy") == "broad":
+        from nanobody_opt_v2.confirmation_policy import plan as broad_plan
+        comparison = broad_plan(
+            candidates=plan["confirmation_candidates"], rounds=args.replication_rounds,
+            rounds_per_stage=args.replication_rounds_per_stage,
+            keep_fraction=args.replication_keep_fraction,
+            minimum_keep=args.replication_minimum_keep,
+            gpus=len(args.gpus.split(",")), model=model)
+        plan.update(confirmation_policy=comparison["policy"],
+                    confirmation_schedule=comparison["schedule"],
+                    confirmation_repeat_evaluation_cap=comparison["evaluation_cap"],
+                    confirmation_first_stage_candidates=comparison["schedule"][0][0])
     if getattr(args, "complete_screen_until_epoch", None) is not None and epoch < args.complete_screen_until_epoch:
         # The current fleet is already qualified. Use the rest of this epoch
         # to screen the frozen pool for the explicitly requested next epoch.
@@ -1445,6 +1457,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         "--replication-rounds-per-stage", str(args.replication_rounds_per_stage),
         "--replication-keep-fraction", str(args.replication_keep_fraction),
         "--replication-minimum-keep", str(args.replication_minimum_keep),
+        "--confirmation-policy", getattr(args, "confirmation_policy", "legacy"),
         "--strict-gates", str(args.strict_gates or ""),
         "--selection-metric-policy", getattr(args, "selection_metric_policy", "plain"),
         "--consensus-ranking-policy", getattr(args, "consensus_ranking_policy", "tier"),
@@ -1725,6 +1738,8 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confirmation-policy", choices=("legacy", "broad"), default="broad",
+                        help="budget-preserving broader repeats before elimination")
     parser.add_argument(
         "--selection-metric-policy",
         choices=("plain",),
@@ -2487,6 +2502,11 @@ def _run_complete_screen_pool(args, state) -> str:
     completion = iteration_root / "race/complete.json"
     if completion.is_file():
         result = json.loads(completion.read_text())
+        health = result.get("confirmation_health")
+        if health:
+            _atomic_json(root / "confirmation_health.json", health)
+            coverage.update(confirmation_health=health)
+            _atomic_json(root / "full_scan_coverage.json", coverage)
         if result.get("replication_rounds_completed", 0) >= args.minimum_publishable_observations - 1:
             best = result.get("incumbent_rank")
             score_target = float(source.get("target_multipass_score", 900))

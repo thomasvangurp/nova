@@ -17,6 +17,7 @@ TEST_FILES = (
     'tests/test_parent_merit.py',
     'tests/test_epoch_screen_budget.py',
     'tests/test_cached_confirmation.py',
+    'tests/test_confirmation_policy.py',
     'tests/test_complete_screen_pool.py',
     'tests/test_deferred_tnp_pipeline.py',
     'tests/test_nanobody_waves.py',

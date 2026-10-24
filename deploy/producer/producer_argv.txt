@@ -65,6 +65,8 @@ repair-only
 20
 --replication-rounds
 20
+--confirmation-policy
+broad
 --replication-reserve-blocks
 152
 --replication-rounds-per-stage
