@@ -26,6 +26,8 @@ def test_prepare_once_preserves_oversupply_for_fresh_epoch_gate(tmp_path, monkey
     def prepare(**kw):
         calls.append(kw)
         assert kw["prepare_only"]
+        assert producer._STAGED.deadline.epoch == 71
+        assert producer._STAGED.nice is True
         assert kw["args"].generation_proposal_budget == 8000
         assert kw["args"].child_floor == 8000
         assert kw["args"].only_unseen_candidates
@@ -85,6 +87,70 @@ def test_next_pool_waits_for_current_confirmation(tmp_path, monkeypatch, confirm
     monkeypatch.setattr(producer, "_prepare_epoch_pool", lambda a, s, e: calls.append(e))
     producer._prepare_following_epoch_pool(args, state(epoch))
     assert calls == expected
+
+
+def test_next_pool_overlaps_confirmation_without_blocking_or_duplicate_preparation(tmp_path, monkeypatch):
+    import threading
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.epoch_cycle_start = 72
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def prepare(a, current, following):
+        calls.append((current["epoch"], following))
+        entered.set()
+        assert release.wait(2)
+    monkeypatch.setattr(producer, "_prepare_epoch_pool", prepare)
+    producer._start_following_epoch_pool(args, state(72))
+    assert entered.wait(1)
+    try:
+        producer._start_following_epoch_pool(args, state(72))
+        producer._atomic_json(tmp_path / "live/epoch72/producer/full_scan_confirmation.json", {})
+        producer._prepare_following_epoch_pool(args, state(72))
+        assert calls == [(72, 73)]
+    finally:
+        release.set()
+        producer._EPOCH_POOL_PREP[(str(tmp_path.resolve()), 73)]["thread"].join(2)
+    assert producer._EPOCH_POOL_PREP[(str(tmp_path.resolve()), 73)]["complete"]
+
+
+def test_failed_speculative_preparation_is_recoverable(tmp_path, monkeypatch):
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.epoch_cycle_start = 72
+    def fail(*a):
+        raise RuntimeError("interrupted preparation")
+    monkeypatch.setattr(producer, "_prepare_epoch_pool", fail)
+    producer._start_following_epoch_pool(args, state(72))
+    record = producer._EPOCH_POOL_PREP[(str(tmp_path.resolve()), 73)]
+    record["thread"].join(2)
+    assert record["error_type"] == "RuntimeError" and not record["complete"]
+    monkeypatch.setattr(producer, "_prepare_epoch_pool", lambda *a: None)
+    producer._start_following_epoch_pool(args, state(72))
+    record = producer._EPOCH_POOL_PREP[(str(tmp_path.resolve()), 73)]
+    record["thread"].join(2)
+    assert record["complete"]
+
+
+@pytest.mark.parametrize("offset,expected", [(0, []), (220, [73])])
+def test_race_starts_next_pool_during_confirmation_only(tmp_path, monkeypatch, offset, expected):
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.epoch_cycle_start = 72
+    current = {**state(72), "block": 72 * 361 + offset}
+    monkeypatch.setattr(producer, "_chain_state", lambda *a: current)
+    monkeypatch.setattr(producer, "_budget_plan", lambda *a: {
+        "replication_reserve_blocks": 127, "confirmation_candidates": 64,
+        "gpu_seconds_per_candidate": 4.8, "load_seconds": 45,
+    })
+    monkeypatch.setattr(producer, "_screen_budget", lambda *a: (700, 4.8))
+    starts = []
+    monkeypatch.setattr(producer, "_start_following_epoch_pool", lambda a, s: starts.append(s["epoch"] + 1))
+    monkeypatch.setattr(producer, "_run", lambda command: None)
+    producer._run_race(args=args, state=current, iteration=1, config=tmp_path / "config.yaml",
+        archive=tmp_path / "archive.csv", target="TEST", producer_root=tmp_path,
+        iteration_root=tmp_path / "iteration_01", layer2=tmp_path / "layer2.json")
+    assert starts == expected
 
 
 @pytest.mark.parametrize("epoch,route", [(71, "full"), (72, "cycle"), (73, "cycle")])

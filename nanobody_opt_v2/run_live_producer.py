@@ -1459,6 +1459,8 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         race_command.extend(
             ["--layer2-gate-command", " ".join(shlex.quote(item) for item in gate)]
         )
+    if closing:
+        _start_following_epoch_pool(args, state)
     _run(race_command)
 
 
@@ -2267,11 +2269,51 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
     return manifest
 
 
+_EPOCH_POOL_PREP: dict[tuple[str, int], dict[str, Any]] = {}
+
+
+def _start_following_epoch_pool(args, state) -> None:
+    """Overlap CPU-only preparation with confirmation, without awaiting it.
+
+    _prepare_epoch_pool retains the current epoch's real cancellation deadline
+    and lowers its subprocess priority. It never performs next-epoch GPU work.
+    """
+    start = getattr(args, "epoch_cycle_start", None)
+    following = int(state["epoch"]) + 1
+    if start is None or following < start:
+        return
+    key = (str(args.runtime_root.resolve()), following)
+    record = _EPOCH_POOL_PREP.get(key)
+    if record and (record.get("complete") or record["thread"].is_alive()):
+        return
+    record = {"complete": False}
+    prepared_args = argparse.Namespace(**vars(args))
+    prepared_state = dict(state)
+
+    def work():
+        try:
+            _prepare_epoch_pool(prepared_args, prepared_state, following)
+            record["complete"] = True
+        except BaseException as error:
+            # Failed speculative preparation must never abort confirmation.
+            record["error_type"] = type(error).__name__
+            print(f"PRODUCER_NEXT_POOL_RETRY epoch={following} error={type(error).__name__}", flush=True)
+
+    thread = threading.Thread(target=work, name=f"epoch-pool-{following}", daemon=True)
+    record["thread"] = thread
+    _EPOCH_POOL_PREP[key] = record
+    thread.start()
+    print(f"PRODUCER_NEXT_POOL_STARTED epoch={following}", flush=True)
+
+
 def _prepare_following_epoch_pool(args, state) -> None:
     start = getattr(args, "epoch_cycle_start", None)
     epoch = int(state["epoch"])
     if start is None or epoch + 1 < start:
         return
+    record = _EPOCH_POOL_PREP.get((str(args.runtime_root.resolve()), epoch + 1))
+    if record and record["thread"].is_alive():
+        return  # The independent preparation must never block the producer.
     root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
     # Finish the current confirmation before spending spare CPU time on the next pool.
     if not (root / "full_scan_confirmation.json").is_file():

@@ -382,3 +382,14 @@ existing launcher environment. Otherwise an incident replay launched directly
 can silently take the colder subprocess route even when the daemon is healthy.
 Both routes must remain correct; their throughput and verification evidence
 must be distinguished.
+
+The immutable epoch-cycle path had also deferred the next pool's CPU preparation
+until confirmation was completely finished. Its preparation took much longer
+than the remaining handoff window, so the next epoch started by waiting for
+generation. Start that CPU-only preparation in a daemon thread when confirmation
+begins instead. Keep the existing low subprocess priority and the CURRENT
+epoch's cancellation deadline; refresh admission gates in the real next epoch.
+Never join speculative preparation from the scoring loop or start a duplicate
+preparation after confirmation. A failed preparation remains retryable and
+cannot abort the current race. CI covers overlap, retry, duplicate prevention,
+confirmation-only dispatch, priority and current-epoch deadline ownership.
