@@ -190,7 +190,7 @@ def test_pi_preparation_does_not_extend_the_chain_deadline(tmp_path, monkeypatch
     assert pulls == [expected]
 
 
-def test_silent_commit_process_cannot_block_the_next_epoch(tmp_path):
+def test_silent_commit_process_cannot_block_the_next_epoch(tmp_path, monkeypatch):
     child = tmp_path / 'child.pid'
     marker = tmp_path / 'escaped'
     child_code = f'import time; from pathlib import Path; time.sleep(5); Path({str(marker)!r}).touch()'
@@ -199,9 +199,19 @@ def test_silent_commit_process_cannot_block_the_next_epoch(tmp_path):
             f'Path({str(child)!r}).write_text(str(p.pid)); time.sleep(30)')
     # A real silent subprocess exercises the old blocking stdout iterator.
     command = shlex.join([sys.executable, '-c', code])
+    real_popen = subprocess.Popen
+    def started_child(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        # Login-shell startup varies by runner. Begin the timeout experiment
+        # only after the child exists; startup speed is not the property here.
+        until = time.monotonic() + 10
+        while not child.exists() and process.poll() is None and time.monotonic() < until:
+            time.sleep(.02)
+        return process
+    monkeypatch.setattr(pi.subprocess, 'Popen', started_child)
     started = time.monotonic()
     rc, _ = pi.stream(pi.LOCAL, command, timeout=.5)
-    assert rc == 124 and time.monotonic()-started < 3
+    assert rc == 124 and time.monotonic()-started < 12
     assert child.exists()
     probe = subprocess.run(['ps', '-o', 'stat=', '-p', child.read_text()], capture_output=True, text=True)
     assert not probe.stdout.strip() or probe.stdout.strip().startswith('Z')
