@@ -1,0 +1,518 @@
+{
+  "baseline_revision": "5c470d838076b3b28e9f4dc23e53874f64efc039",
+  "current_runtime_revision": "e649cebe1bead936d228042649fba614dd96c794",
+  "live_configuration_changed": false,
+  "submission_history": {
+    "periods": {
+      "strong_early": {
+        "submitted": 123,
+        "with_raw_evidence": 123,
+        "prior_epoch_evidence": 20,
+        "prior_epoch_20plus": 20,
+        "prior_epoch_1to19": 0,
+        "epochs": 10
+      },
+      "strong_later": {
+        "submitted": 101,
+        "with_raw_evidence": 101,
+        "prior_epoch_evidence": 5,
+        "prior_epoch_20plus": 5,
+        "prior_epoch_1to19": 0,
+        "epochs": 8
+      },
+      "transition": {
+        "submitted": 39,
+        "with_raw_evidence": 39,
+        "prior_epoch_evidence": 31,
+        "prior_epoch_20plus": 31,
+        "prior_epoch_1to19": 0,
+        "epochs": 4
+      },
+      "regressed": {
+        "submitted": 115,
+        "with_raw_evidence": 115,
+        "prior_epoch_evidence": 98,
+        "prior_epoch_20plus": 88,
+        "prior_epoch_1to19": 10,
+        "epochs": 9
+      }
+    },
+    "epochs": [
+      {
+        "epoch": 25873,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 6,
+        "prior_epoch_20plus": 6,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 24.5,
+        "median_age_epochs": 0.5
+      },
+      {
+        "epoch": 25874,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 8,
+        "prior_epoch_20plus": 8,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27,
+        "median_age_epochs": 1
+      },
+      {
+        "epoch": 25875,
+        "submitted": 11,
+        "with_raw_evidence": 11,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 28,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25876,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 4,
+        "prior_epoch_20plus": 4,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25877,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25878,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 1,
+        "prior_epoch_20plus": 1,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25879,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 25,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25880,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 30.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25881,
+        "submitted": 11,
+        "with_raw_evidence": 11,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 26,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25882,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 1,
+        "prior_epoch_20plus": 1,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 29,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25883,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25884,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 1,
+        "prior_epoch_20plus": 1,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 28.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25885,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 2,
+        "prior_epoch_20plus": 2,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 23,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25886,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 2,
+        "prior_epoch_20plus": 2,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 29,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25887,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 25,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25888,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 26,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25889,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 25.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25890,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 28,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25891,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 4,
+        "prior_epoch_20plus": 4,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 28.0,
+        "median_age_epochs": 0.0
+      },
+      {
+        "epoch": 25892,
+        "submitted": 10,
+        "with_raw_evidence": 10,
+        "prior_epoch_evidence": 10,
+        "prior_epoch_20plus": 10,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 28.0,
+        "median_age_epochs": 1.0
+      },
+      {
+        "epoch": 25893,
+        "submitted": 6,
+        "with_raw_evidence": 6,
+        "prior_epoch_evidence": 6,
+        "prior_epoch_20plus": 6,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 21.0,
+        "median_age_epochs": 1.0
+      },
+      {
+        "epoch": 25894,
+        "submitted": 11,
+        "with_raw_evidence": 11,
+        "prior_epoch_evidence": 11,
+        "prior_epoch_20plus": 11,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 32,
+        "median_age_epochs": 1
+      },
+      {
+        "epoch": 25900,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 12,
+        "prior_epoch_20plus": 12,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 21.0,
+        "median_age_epochs": 30.0
+      },
+      {
+        "epoch": 25901,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 0,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 31,
+        "median_age_epochs": 0
+      },
+      {
+        "epoch": 25902,
+        "submitted": 12,
+        "with_raw_evidence": 12,
+        "prior_epoch_evidence": 12,
+        "prior_epoch_20plus": 12,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 31.0,
+        "median_age_epochs": 1.0
+      },
+      {
+        "epoch": 25903,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 13,
+        "prior_epoch_20plus": 13,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 25,
+        "median_age_epochs": 34
+      },
+      {
+        "epoch": 25904,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 13,
+        "prior_epoch_20plus": 13,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 49,
+        "median_age_epochs": 751
+      },
+      {
+        "epoch": 25905,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 9,
+        "prior_epoch_20plus": 0,
+        "prior_epoch_1to19": 9,
+        "median_own_raw_depth": 31,
+        "median_age_epochs": 1
+      },
+      {
+        "epoch": 25906,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 13,
+        "prior_epoch_20plus": 12,
+        "prior_epoch_1to19": 1,
+        "median_own_raw_depth": 32,
+        "median_age_epochs": 3
+      },
+      {
+        "epoch": 25907,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 13,
+        "prior_epoch_20plus": 13,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 27,
+        "median_age_epochs": 1
+      },
+      {
+        "epoch": 25908,
+        "submitted": 13,
+        "with_raw_evidence": 13,
+        "prior_epoch_evidence": 13,
+        "prior_epoch_20plus": 13,
+        "prior_epoch_1to19": 0,
+        "median_own_raw_depth": 25,
+        "median_age_epochs": 1
+      }
+    ],
+    "missing_boards": []
+  },
+  "raw_evaluation_counts": {
+    "epochs": [
+      {
+        "epoch": 25889,
+        "observations": {
+          "screen": 799,
+          "rounds": 625,
+          "other": 233
+        },
+        "distinct_candidates": {
+          "screen": 799,
+          "rounds": 51,
+          "other": 58
+        }
+      },
+      {
+        "epoch": 25890,
+        "observations": {
+          "screen": 623,
+          "rounds": 600,
+          "other": 307
+        },
+        "distinct_candidates": {
+          "screen": 623,
+          "rounds": 49,
+          "other": 54
+        }
+      },
+      {
+        "epoch": 25901,
+        "observations": {
+          "screen": 4523,
+          "other": 512,
+          "rounds": 530
+        },
+        "distinct_candidates": {
+          "screen": 4523,
+          "other": 57,
+          "rounds": 40
+        }
+      },
+      {
+        "epoch": 25914,
+        "observations": {
+          "screen": 4800,
+          "rounds": 428,
+          "other": 36
+        },
+        "distinct_candidates": {
+          "screen": 4800,
+          "rounds": 24,
+          "other": 3
+        }
+      },
+      {
+        "epoch": 25915,
+        "observations": {
+          "screen": 4800,
+          "rounds": 442
+        },
+        "distinct_candidates": {
+          "screen": 4800,
+          "rounds": 26
+        }
+      }
+    ]
+  },
+  "allocation_replay": {
+    "30folds": {
+      "candidates": 346,
+      "training_folds": 21,
+      "heldout_folds": 9,
+      "trials": 3000,
+      "variants": {
+        "old_allocation": {
+          "heldout_mean": 1027.2737663817663,
+          "paired_delta_vs_old": 0.0,
+          "monte_carlo_se": 0.0,
+          "conditional_mc_interval_95": [
+            0.0,
+            0.0
+          ],
+          "better_trial_fraction": 0.0,
+          "repeat_evaluations": 755
+        },
+        "current_allocation": {
+          "heldout_mean": 1027.2930455840456,
+          "paired_delta_vs_old": 0.019279202279201324,
+          "monte_carlo_se": 0.6715883841290915,
+          "conditional_mc_interval_95": [
+            -1.2970340306138182,
+            1.3355924351722206
+          ],
+          "better_trial_fraction": 0.503,
+          "repeat_evaluations": 754
+        },
+        "broad_without_random_sample": {
+          "heldout_mean": 1026.6137065527066,
+          "paired_delta_vs_old": -0.6600598290598283,
+          "monte_carlo_se": 0.6803703687619469,
+          "conditional_mc_interval_95": [
+            -1.9935857518332443,
+            0.6734660937135877
+          ],
+          "better_trial_fraction": 0.513,
+          "repeat_evaluations": 754
+        }
+      }
+    },
+    "40folds": {
+      "candidates": 367,
+      "training_folds": 21,
+      "heldout_folds": 19,
+      "trials": 3000,
+      "variants": {
+        "old_allocation": {
+          "heldout_mean": 1036.896148448043,
+          "paired_delta_vs_old": 0.0,
+          "monte_carlo_se": 0.0,
+          "conditional_mc_interval_95": [
+            0.0,
+            0.0
+          ],
+          "better_trial_fraction": 0.0,
+          "repeat_evaluations": 755
+        },
+        "current_allocation": {
+          "heldout_mean": 1033.5305775978406,
+          "paired_delta_vs_old": -3.3655708502024306,
+          "monte_carlo_se": 0.58254841462503,
+          "conditional_mc_interval_95": [
+            -4.507365742867489,
+            -2.223775957537372
+          ],
+          "better_trial_fraction": 0.5443333333333333,
+          "repeat_evaluations": 754
+        },
+        "broad_without_random_sample": {
+          "heldout_mean": 1033.5863171390013,
+          "paired_delta_vs_old": -3.3098313090418348,
+          "monte_carlo_se": 0.5836321220218572,
+          "conditional_mc_interval_95": [
+            -4.453750268204675,
+            -2.1659123498789947
+          ],
+          "better_trial_fraction": 0.5443333333333333,
+          "repeat_evaluations": 754
+        }
+      }
+    }
+  },
+  "allocation_replay_seeds": [
+    701289,
+    901233,
+    503711
+  ],
+  "limitations": [
+    "First local raw epoch describes our recorded own evidence, not all possible public evaluations.",
+    "The rollback replay tests allocation only on selected deeply measured cohorts, not the original full proposal pools.",
+    "Training and evaluation folds are disjoint within each trial; Monte Carlo intervals describe split uncertainty conditional on these cohorts.",
+    "Live historical deployments were scoped; the baseline is a verified release plus recorded launch configuration, not a complete machine snapshot.",
+    "An optional submitted-source metadata query timed out and was cancelled; it supplies no conclusions.",
+    "No historical or current candidate was GPU rescored for this evaluation."
+  ]
+}

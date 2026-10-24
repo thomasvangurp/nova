@@ -228,8 +228,11 @@ must still be checked before claiming competitive recovery.
 The dated cutover record in `PARENT_SELECTION_LESSONS_20261022.md` places
 `unseen-candidates-v2` at 25892. Before that, 25889 and 25890 evaluated only
 799 and 623 genuinely new candidates while reporting 4,785 and 4,788 covered.
-The system could still benefit from reused candidates and their existing
-evidence. The user's NEW-only budget requirement was correct; the implementation
+Those coverage counts do not show the source of the submitted winners. The
+submission-level audit below finds that 96 of 101 submissions in 25883–25890
+were first locally evaluated in that same epoch, correcting the earlier
+inference that the better fleet mainly relied on older candidates.
+The user's NEW-only budget requirement was correct; the implementation
 incorrectly coupled discovery exclusions to comparison, and left candidates
 with 1–19 stored folds outside both confirmation and publication. After the
 new exclusion was enabled, filtering evaluated proposals after generation caps
@@ -261,3 +264,110 @@ explicitly sets TNP concurrency to sixteen. Until then the shared GPU-slot
 wrapper already bounds newly launched TNP jobs. No Mac process owns this
 handoff. Receipt: `/root/artifacts/eligibility_refill_release_20261024.json`.
 Live gated width, completed depth and independent replay remain pending.
+
+## Evaluation of reverting the earlier configuration
+
+The user requested evaluation, explicitly not a live reversion. No runtime
+configuration or release was changed during this evaluation. The reference
+is the verified `5c470d8` incident release and recorded launch contract used
+from 25872, compared with runtime `e649ceb`. Historical releases installed
+scoped files; this is not a claim to possess a complete 25890 machine image.
+
+### What actually changed
+
+The versioned producer launch configuration differs by only two added options:
+`--confirmation-policy broad` and `--tnp-concurrency 16`. AST comparison of the
+producer, race, publisher and ranker's argument defaults found no other changed
+defaults beyond the new discovery-budget argument. Parent limits, parent-merit
+selection, the core local-neighborhood generator, basin settings, score formula,
+twenty-observation publication floor and the 65% control pruning fraction did
+not receive a parameter retune. Candidate admission and evidence flow changed
+substantially inside the implementation, despite largely unchanged CLI settings.
+
+| Change | Verified boundary | Reversion assessment |
+| --- | --- | --- |
+| NEW-only discovery, separate durable reservations | 25892, `d4f7974`; the interim `2309bbe` receipt also names 25892 as its first fresh epoch | Preserve honest accounting and the requested NEW-only cap. Reverting the whole implementation restores cached coverage being treated as completed discovery and the old mixed screening/deepening path. |
+| Stored-bank comparison and prechecks | 25894 `6c23044`, 25899 `9b49663`, sparse-bank confirmation restored in 25911 | Preserve eligibility-before-cutoff and access to stored evidence. The first partial repairs had real omissions, not a reason to remove comparison. |
+| Generation exclusions before caps, complete assembly markers, repeat-chunk inputs and partial-wave recovery | 25911, `730f410` | Keep the corrections. A whole-tree rollback restores reproducible work-loss and fallback-generation failure paths. |
+| Broader confirmation, deterministic second-chance sample | 25913, `93e2f7b` | A legitimate policy to challenge. Evaluate the old schedule within the corrected gating/deadline implementation; merely switching to the legacy branch reintroduces unfilled eligibility seats. |
+| Passing-seat refill, bounded gate processes and host-wide TNP slots | 25916, `e649ceb` | Keep resource limits and complete eligibility. These do not establish that the broader allocation improves quality. |
+
+### Fresh finalists disappeared while confirmation became relatively scarce
+
+The audit matched actual validator-scored US submissions against retained,
+independent `local_exact_raw` observations up to each submission epoch. All
+submitted candidates in these periods had retained own raw evidence. “Same
+epoch” means first **locally** evaluated then, not a claim about every possible
+public measurement or every proposed candidate.
+
+| Period | Submitted candidates | First locally evaluated that epoch | Had earlier-epoch local evidence |
+| --- | ---: | ---: | ---: |
+| 25873–25882 | 123 | 103 (83.7%) | 20 |
+| 25883–25890 | 101 | 96 (95.0%) | 5 |
+| 25891–25894 | 39 | 8 (20.5%) | 31 |
+| 25900–25908 | 115 | 17 (14.8%) | 98 |
+
+In particular, every scored US submission in 25889 and 25890 was first locally
+evaluated in its submission epoch. The earlier implication that those better
+fleets predominantly came from reused inventory was unsupported. The confirmed
+sparse-bank omission remains a defect, but this audit does not establish its
+individual contribution to the fleet decline. The strongest observed change
+is the failure to deliver competitive newly evaluated finalists.
+
+The raw work ledger exposes a separate allocation issue:
+
+| Epoch | Screen observations | Candidates in main confirmation | Main confirmation repeat observations |
+| --- | ---: | ---: | ---: |
+| 25889 | 799 | 51 | 625 |
+| 25890 | 623 | 49 | 600 |
+| 25901 | 4,523 | 40 | 530 |
+| 25914 | 4,800 | 24 | 428 |
+| 25915 | 4,800 | 26 | 442 |
+
+These columns classify raw paths as screening or race rounds. Other recorded
+raw work exists and is retained separately in the numeric audit; do not call
+this table the total GPU bill. The old 64-proposal confirmation capacity was
+approximately 8–10% of 623–799 new evaluations. Even a fully filled new 147-seat
+pool is at most 3.1% of 4,800, and cached candidates can also occupy those seats.
+Thus increasing discovery without similarly increasing confirmation changes
+the selection problem, independently of the implementation defects. This is
+an allocation trade-off to test, not proof that 4,800 NEW evaluations are bad.
+
+### Controlled allocation replay
+
+The offline comparison used the same candidates, first observations, disjoint
+held-out folds and near-identical repeat budgets for both schedules. It ran
+3,000 splits per cohort using three new random seeds, without GPU scoring.
+Parent metadata, original proposal pools, full live gates and family selection
+are not available in these fixtures, so this compares allocation only.
+
+| Measured cohort | Old 64→41→26→20 | Current 147→40→20 | Current minus old |
+| --- | ---: | ---: | ---: |
+| 346 candidates, 30 folds | 1027.27 | 1027.29 | +0.02 |
+| 367 candidates, 40 folds | 1036.90 | 1033.53 | −3.37 |
+
+Lower is better. The old schedule costs 755 repeats, the new one 754. Training
+uses 21 folds and evaluation uses the remaining 9 or 19 within each split.
+Conditional Monte Carlo 95% intervals for the differences are −1.30 to +1.34
+and −4.51 to −2.22. These intervals quantify random split variation for these
+selected cohorts; they do not establish generalization to the live 4,800 pool.
+Removing the random second-chance sample gives deltas −0.66 and −3.31, also
+too small here to explain the several-hundred-point production regression.
+
+The newer allocation has not demonstrated a material production advantage.
+Its small original rank-only benchmark gain and passing implementation tests
+were insufficient to establish that. Restoring the old confirmation schedule
+inside the corrected orchestration is a reasonable controlled comparison;
+there is no evidence here to justify a whole-repository rollback or to promise
+that old settings will reproduce old scores against today's eligible pool.
+
+For the next policy decision, compare old and current allocation on the same
+current eligible candidate pool, preserve independent evaluation passes, hold
+repeat/time budgets fixed, and record the number of NEW candidates reaching
+confirmation and publication. Separately evaluate discovery/confirmation balance
+without silently changing the user's 4,800-NEW requirement. Keep deadline,
+eligibility, evidence-preservation and budget-accounting fixes in both variants.
+
+Numeric evidence: `docs/evidence/config_revert_evaluation_20261024.json`.
+Reproduce the allocation comparison with:
+`python tools/evaluate_confirmation_rollback.py --output /tmp/rollback-replay.json`.
