@@ -393,3 +393,32 @@ Never join speculative preparation from the scoring loop or start a duplicate
 preparation after confirmation. A failed preparation remains retryable and
 cannot abort the current race. CI covers overlap, retry, duplicate prevention,
 confirmation-only dispatch, priority and current-epoch deadline ownership.
+
+Production recovery in epoch 25900 completed both previously reserved tranches:
+700/700 mixed-length entries in 559 seconds and 700/700 length-125 entries in
+488 seconds, retaining all 1,400 structures under validator-dual-sample-v1.
+These were fresh discovery inputs, unlike the earlier diagnostic. The first
+tranche exercised the cold subprocess route; the second used the configured
+daemon. Neither reservation was charged twice. The standard coverage report
+now records attempted=1,400, screened=1,400, uncompleted_dispatches=0 and
+budget_shortfall=3,400. This is recovery evidence, not completion of the full
+4,800 budget or evidence of a particular multipass score.
+
+Runtime release a0b8c0fbbddd141f65562b55dbcf917d1fc9a976 passed 514 mandatory
+checks locally and in GitHub Actions and was installed on both scorer hosts.
+The dead-worker, disconnected-client and replica-protocol checks also passed
+inside both configured production Python runtimes. Producer release
+90b66ced5c5df2a7c2b8220b60d5a6c3ff610400 passed 518 mandatory checks locally
+and in GitHub Actions before installation; its deployed file hash matches the
+tested staged package. The Pi's independent submission service has a current
+12-entry artifact for its 12 held slots, with no unassigned UID. Preparation
+remains distinct from on-chain commitment and validator scoring.
+
+After the reserved-tranche recovery, the supervised producer resumed iteration
+3 of epoch 25900 in confirmation mode and emitted
+`PRODUCER_NEXT_POOL_STARTED epoch=25901`; that preparation directory appeared
+while current confirmation was still active. The producer, scorer daemon,
+publisher and watchdog sessions were present. Pi submission stayed active;
+its refresh, publication and multipass systemd jobs completed with status 0.
+These checks verify the autonomous handoff has resumed, without relying on a
+Mac process or waiting for confirmation before beginning next-epoch CPU work.
