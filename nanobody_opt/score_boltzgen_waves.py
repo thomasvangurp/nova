@@ -122,6 +122,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _length_waves(sequences: list[str], wave_size: int) -> list[list[str]]:
+    """Keep every admitted candidate while satisfying the fast scorer's shape.
+
+    Preserve first-seen length order and candidate order within each length.
+    Homogeneous inputs keep their existing wave boundaries and resume identity.
+    """
+    by_length: dict[int, list[str]] = {}
+    for sequence in sequences:
+        by_length.setdefault(len(sequence), []).append(sequence)
+    return [bucket[start:start + wave_size]
+            for bucket in by_length.values()
+            for start in range(0, len(bucket), wave_size)]
+
+
 def _wave_command(
     *,
     scorer: Path,
@@ -228,8 +242,8 @@ def main() -> None:
     all_components: dict[str, dict] = {}
     all_structures: dict[str, dict] = {}
 
-    for wave_index, start in enumerate(range(0, len(sequences), args.wave_size)):
-        wave = sequences[start : start + args.wave_size]
+    start = 0
+    for wave_index, wave in enumerate(_length_waves(sequences, args.wave_size)):
         stem = f"wave_{wave_index:03d}"
         wave_input = args.output_dir / f"{stem}_input.json"
         wave_output = args.output_dir / f"{stem}_exact.json"
@@ -294,6 +308,7 @@ def main() -> None:
                 "wave": wave_index,
                 "start": start,
                 "count": len(wave),
+                "sequence_length": len(wave[0]),
                 "input": str(wave_input),
                 "output": str(wave_output),
                 "sha256": _sha256(wave_output),
@@ -308,6 +323,7 @@ def main() -> None:
                 "source_sha256": _sha256(args.sequences),
                 "candidate_count": len(sequences),
                 "wave_size": args.wave_size,
+                "wave_partition": "first-seen-length",
                 "completed_count": sum(item["count"] for item in completed),
                 "completed_waves": completed,
             },
@@ -316,6 +332,7 @@ def main() -> None:
             f"WAVE_{action} {wave_index}: {len(wave)} candidates -> {wave_output}",
             flush=True,
         )
+        start += len(wave)
 
     if len(all_components) != len(sequences):
         raise SystemExit(

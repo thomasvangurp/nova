@@ -325,3 +325,18 @@ budget. Verify fresh production progress separately. The original daemon worker
 failure trigger remains unproven; the independently reproduced fallback-exit
 deadlock is repaired. Do not equate a successful diagnostic with a completed
 discovery budget or promise a particular future multipass score.
+
+The first fresh production tranche in epoch 25900 exposed a separate contract
+failure that the homogeneous diagnostic did not cover: its 700 entries included
+487 of one length and 213 of another. The fast adapter explicitly refuses a
+mixed-length call before GPU dispatch. Reservation therefore advanced while
+completed fresh evaluations stayed at zero. Recovery must reuse those reserved
+inputs rather than charge another batch or mistake reservation for completion.
+
+The wave runner now partitions admitted inputs by length, preserving first-seen
+length order, order within each length, the admission limit, and all retained
+structures. Homogeneous waves retain their existing boundaries. Mandatory CI
+now includes the actual wave runner and its validation suites, plus mixed-length
+execution and interruption/resume regressions that invoke the adapter's real
+shape check. End-to-end verification must exercise production input shapes;
+a small homogeneous diagnostic is insufficient evidence of production recovery.
