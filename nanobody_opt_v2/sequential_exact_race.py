@@ -111,6 +111,34 @@ def _atomic_json(path: Path, payload: Any) -> None:
         raise
 
 
+def _refresh_full_scan_coverage(args: argparse.Namespace) -> None:
+    """Keep epoch progress current while the producer waits for this race.
+
+    Reservations and completed fresh observations remain separate. Reporting
+    failures must not interrupt an otherwise healthy scoring job.
+    """
+    if not getattr(args, "fresh_screen_budget", 0) or args.pooled_exact_root is None:
+        return
+    path = args.pooled_exact_root / "full_scan_pool.json"
+    if not path.is_file():
+        return
+    try:
+        pool = json.loads(path.read_text())
+        if (pool.get("screen_budget_policy") != "unseen-candidates-v2"
+                or pool.get("target") != args.target
+                or pool.get("origin_epoch") != args.epoch):
+            raise ValueError("coverage pool identity mismatch")
+        from nanobody_opt_v2.run_live_producer import _complete_pool_coverage
+        _complete_pool_coverage(
+            pool=pool, producer_root=args.pooled_exact_root,
+            database=args.mutation_database, target=args.target,
+            epoch=args.epoch, until_epoch=args.epoch,
+        )
+    except Exception as error:
+        print(f"EXACT_COVERAGE_REFRESH_FAILED epoch={args.epoch} "
+              f"error={type(error).__name__}", flush=True)
+
+
 def _candidate_records(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text())
     items = payload if isinstance(payload, list) else (
@@ -2311,6 +2339,7 @@ def main() -> None:
             tranche = reserve(tranche, args.pooled_exact_root, args.epoch, args.fresh_screen_budget)
             if not tranche:
                 return None
+            _refresh_full_scan_coverage(args)
         if not completed.is_file():
             _atomic_json(source, {"target": args.target, "sequences": tranche})
         for sequence in tranche:
@@ -2383,6 +2412,7 @@ def main() -> None:
             "complete": screened == len(sequences),
             "screen_all_candidates": args.screen_all_candidates,
         })
+        _refresh_full_scan_coverage(args)
         subprocess.run(
             _rank_command(
                 exact=_pooled_exact_paths(

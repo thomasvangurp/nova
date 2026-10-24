@@ -252,6 +252,74 @@ def test_fresh_coverage_counts_only_this_epoch_screen_not_history_or_repeats(tmp
     assert report["screened"] == 1  # never claim failed dispatches succeeded
 
 
+def test_live_race_updates_epoch_coverage_before_returning(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from nanobody_opt_v2 import screen_budget
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    rank = import_shipping("nanobody_opt.rank_exact", monkeypatch)
+    pool = tmp_path / "full_scan_pool.json"
+    producer._atomic_json(pool, {
+        "target": "TEST", "origin_epoch": 101,
+        "screen_budget_policy": screen_budget.POLICY, "exact_admission_limit": 3,
+        "candidates": [{"sequence": s} for s in ["A", "B", "C"]],
+    })
+    parser = race._parser()
+    args = parser.parse_args([
+        "--layer2", str(pool), "--archive", "archive.csv", "--config", "config.yaml",
+        "--target", "TEST", "--epoch", "101", "--gpus", "0",
+        "--output-dir", str(tmp_path / "iteration_01/race"),
+        "--pooled-exact-root", str(tmp_path), "--fresh-screen-budget", "3",
+        "--screen-all-candidates", "--screen-tranche-size", "2", "--pipeline-depth", "0",
+    ])
+    monkeypatch.setattr(parser, "parse_args", lambda: args)
+    monkeypatch.setattr(race, "_parser", lambda: parser)
+    monkeypatch.setattr(race, "_prior_evaluation_sequences", lambda *a, **kw: set())
+    monkeypatch.setattr(race, "_chain_allows_work", lambda *a: True)
+    monkeypatch.setattr(race, "_remaining_blocks", lambda *a: 300)
+    monkeypatch.setattr(rank, "_observations", lambda paths, target: {"A": [{}]} if paths else {})
+    snapshots = []
+    def start(**kw):
+        snapshots.append(json.loads((tmp_path / "full_scan_coverage.json").read_text()))
+        completed = kw["output_dir"] / "exact_all.json"
+        def wait():
+            producer._atomic_json(completed, {})
+        return SimpleNamespace(wait=wait, completed=completed, tranche=kw["tranche"])
+    monkeypatch.setattr(race, "_start_screen", start)
+    class StopAfterCoverage(Exception):
+        pass
+    def rank_after_coverage(*a, **kw):
+        snapshots.append(json.loads((tmp_path / "full_scan_coverage.json").read_text()))
+        raise StopAfterCoverage
+    monkeypatch.setattr(race.subprocess, "run", rank_after_coverage)
+    with pytest.raises(StopAfterCoverage):
+        race.main()
+    assert [(r["attempted"], r["screened"], r["uncompleted_dispatches"])
+            for r in snapshots] == [(2, 0, 2), (2, 1, 1)]
+    assert all(r["pending"] == 1 and not r["complete"] for r in snapshots)
+
+
+@pytest.mark.parametrize("failure", ["wrong_epoch", "wrong_target", "write_failed"])
+def test_coverage_refresh_failure_does_not_abort_scoring(tmp_path, monkeypatch, capsys, failure):
+    from types import SimpleNamespace
+    race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
+    producer._atomic_json(tmp_path / "full_scan_pool.json", {
+        "target": "OTHER" if failure == "wrong_target" else "TEST",
+        "origin_epoch": 100 if failure == "wrong_epoch" else 101,
+        "screen_budget_policy": "unseen-candidates-v2",
+    })
+    called = []
+    def write(**kw):
+        called.append(kw)
+        raise OSError("simulated unavailable report destination")
+    monkeypatch.setattr(producer, "_complete_pool_coverage", write)
+    race._refresh_full_scan_coverage(SimpleNamespace(
+        fresh_screen_budget=3, pooled_exact_root=tmp_path, epoch=101,
+        target="TEST", mutation_database=tmp_path / "db"))
+    assert bool(called) == (failure == "write_failed")
+    assert "EXACT_COVERAGE_REFRESH_FAILED epoch=101" in capsys.readouterr().out
+    assert not (tmp_path / "full_scan_coverage.json").exists()
+
+
 def test_unseen_admission_replaces_old_candidates_before_budget_cut(tmp_path, monkeypatch):
     race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
     args = producer._parser().parse_args([])

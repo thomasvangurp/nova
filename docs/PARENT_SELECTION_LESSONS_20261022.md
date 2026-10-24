@@ -422,3 +422,14 @@ publisher and watchdog sessions were present. Pi submission stayed active;
 its refresh, publication and multipass systemd jobs completed with status 0.
 These checks verify the autonomous handoff has resumed, without relying on a
 Mac process or waiting for confirmation before beginning next-epoch CPU work.
+
+The follow-up check in epoch 25901 verified 4,182 completed fresh evaluations
+and a current 12-entry master artifact. Pi reported 12 successful commitments
+and zero failures for epoch 25900. It also exposed a reporting defect: the
+top-level coverage file still showed zero because its parent process only
+refreshed it before and after the entire race. Refresh that same authoritative
+coverage calculation after each reservation and each completed tranche. Keep
+reserved and completed counts distinct, validate epoch/target identity, and
+report monitoring-write failures without aborting healthy scoring. Mandatory CI
+exercises the live race through reservation and completion before it returns,
+including partial completion and invalid-scope/write-failure cases.
