@@ -424,6 +424,48 @@ def test_failed_comparison_precheck_does_not_cache_success(monkeypatch, tmp_path
     assert not (kwargs["epoch_root"] / "comparison_precheck.json").exists()
 
 
+def test_cold_prechecks_do_not_block_cached_fleet_or_truncate_bank(monkeypatch, tmp_path):
+    from nanobody_opt.filter_layer2 import _developability_cache_digest
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    pool.update(f"COLD_{i}" for i in range(90))
+    cache = kwargs["args"].layer2_cache_dir
+    cache.mkdir()
+    (cache / (_developability_cache_digest("STORED") + ".json")).write_text(json.dumps({
+        "sequence": "STORED", "developability": {"passed": True, "flags": {}},
+    }))
+    scope = publisher._prechecked_comparison_scope(**kwargs)
+    assert scope.read_text().splitlines() == ["STORED"]
+    first = json.loads((kwargs["epoch_root"] / "comparison_precheck.json").read_text())
+    assert first["pending_count"] > 32
+    for _ in range(4):
+        commands.clear()
+        scope = publisher._prechecked_comparison_scope(**kwargs)
+        assert len(commands) <= 1  # same-archive novelty proof is reused
+    assert set(scope.read_text().splitlines()) == pool - {
+        "HISTORICAL", "RETIRED", "INVALID_NOVELTY", "INVALID_LAYER2",
+    }
+    assert json.loads((kwargs["epoch_root"] / "comparison_precheck.json").read_text())["pending_count"] == 0
+
+
+def test_interrupted_layer2_keeps_novelty_proof_but_not_eligibility(monkeypatch, tmp_path):
+    publisher, kwargs, pool, commands = _comparison_fixture(monkeypatch, tmp_path)
+    run = publisher._run
+    def interrupted(command):
+        if "filter-layer2" in command:
+            raise RuntimeError("interrupted Layer-2")
+        run(command)
+    monkeypatch.setattr(publisher, "_run", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        publisher._prechecked_comparison_scope(**kwargs)
+    proof = json.loads((kwargs["epoch_root"] / "comparison_precheck.json").read_text())
+    assert proof["eligible_sequences"] == []
+    assert "STORED" not in proof["checked_sequences"]
+    monkeypatch.setattr(publisher, "_run", run)
+    commands.clear()
+    assert set(publisher._prechecked_comparison_scope(**kwargs).read_text().splitlines()) == {"STORED", "NEW"}
+    assert len(commands) == 1 and "filter-layer2" in commands[0]
+
+
 @pytest.mark.parametrize("aggregate", ["absent", "stale", "current"])
 def test_stored_comparison_uses_only_sealed_own_evidence(monkeypatch, tmp_path, aggregate):
     import sqlite3

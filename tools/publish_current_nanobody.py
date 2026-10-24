@@ -1196,6 +1196,7 @@ def _prechecked_comparison_scope(
     candidates -= historical | excluded
     proof_key = {
         "schema_version": PUBLISHER_STATE_SCHEMA_VERSION,
+        "policy": "incremental-layer2-v1",
         "epoch": int(epoch_root.name.removeprefix("epoch")), "target": target,
         "archive": _file_digest(archive), "config": _file_digest(config),
         "gates": {name: _file_digest(args.nanobody_opt_root / name) for name in (
@@ -1208,44 +1209,71 @@ def _prechecked_comparison_scope(
         proof = {}
     checked = set(proof.get("checked_sequences", []))
     allowed = set(proof.get("eligible_sequences", [])) & checked
-    pending = candidates - checked
+    novelty_checked = set(proof.get("novelty_checked_sequences", []))
+    novel = set(proof.get("novel_sequences", [])) & novelty_checked
+    pending = candidates - novelty_checked
+
+    def checkpoint():
+        _atomic_json(proof_path, {"key": proof_key,
+            "novelty_checked_sequences": sorted(novelty_checked),
+            "novel_sequences": sorted(novel),
+            "checked_sequences": sorted(checked), "eligible_sequences": sorted(allowed),
+            "checked_count": len(candidates & checked),
+            "eligible_count": len(candidates & allowed),
+            "pending_count": len(candidates - checked),
+        })
+
     if pending:
         inputs = epoch_root / "comparison_precheck_input.json"
         novelty = epoch_root / "comparison_precheck_novelty.json"
-        layer2 = epoch_root / "comparison_precheck_layer2.json"
         _atomic_json(inputs, {"target": target, "sequences": sorted(pending)})
-        # Delete old output before dispatch: a failed/empty gate cannot reuse it.
         novelty.unlink(missing_ok=True)
-        layer2.unlink(missing_ok=True)
         _run(_novelty_command(
             pixi_manifest=pixi_manifest, rankings=inputs, archive=archive,
             target=target, output=novelty, pixi=args.pixi,
         ) + ["--summary-only"])
-        novel = _validator_novel_sequences(novelty)
+        passed_novelty = _validator_novel_sequences(novelty)
         novelty_result = json.loads(novelty.read_text())
-        if novelty_result.get("input_count") != len(pending) or not novel <= pending:
+        if novelty_result.get("input_count") != len(pending) or not passed_novelty <= pending:
             raise RuntimeError("comparison novelty proof does not cover its input")
-        passed = set()
-        if novel:
-            _run(_layer2_command(
-                pixi_manifest=pixi_manifest, rankings=novelty, config=config,
-                output=layer2, concurrency=args.layer2_concurrency,
-                cache_dir=args.layer2_cache_dir, pixi=args.pixi,
-            ))
-            passed = _current_layer2_passes(layer2)
-            if json.loads(layer2.read_text()).get("input_count") != len(novel) or not passed <= novel:
-                raise RuntimeError("comparison Layer-2 proof does not cover its input")
-        checked.update(pending)
+        novelty_checked.update(pending)
+        novel.update(passed_novelty)
+        checked.update(pending - passed_novelty)
+        checkpoint()
+
+    # Revalidate available measurements first so a cold historical TNP backlog
+    # cannot withhold an otherwise ready fleet. Advance every unchecked entry
+    # over subsequent cycles; this is a checkpoint size, never a pool cutoff.
+    from nanobody_opt.filter_layer2 import _developability_cache_digest, _measured_developability
+    waiting = (candidates & novel) - checked
+    cached = set()
+    for sequence in waiting:
+        measurement = _read_json(args.layer2_cache_dir / (_developability_cache_digest(sequence) + ".json"))
+        if (measurement and measurement.get("sequence") == sequence
+                and _measured_developability(measurement.get("developability"))):
+            cached.add(sequence)
+    batch = cached or set(sorted(waiting)[:32])
+    if batch:
+        layer2_input = epoch_root / "comparison_precheck_layer2_input.json"
+        layer2 = epoch_root / "comparison_precheck_layer2.json"
+        _atomic_json(layer2_input, {"target": target, "sequences": sorted(batch)})
+        layer2.unlink(missing_ok=True)
+        _run(_layer2_command(
+            pixi_manifest=pixi_manifest, rankings=layer2_input, config=config,
+            output=layer2, concurrency=args.layer2_concurrency,
+            cache_dir=args.layer2_cache_dir, pixi=args.pixi,
+        ))
+        passed = _current_layer2_passes(layer2)
+        if json.loads(layer2.read_text()).get("input_count") != len(batch) or not passed <= batch:
+            raise RuntimeError("comparison Layer-2 proof does not cover its input")
+        checked.update(batch)
         allowed.update(passed)
-        _atomic_json(proof_path, {"key": proof_key,
-            "checked_sequences": sorted(checked), "eligible_sequences": sorted(allowed),
-            "checked_count": len(checked), "eligible_count": len(allowed),
-        })
+        checkpoint()
     eligible = candidates & allowed
     output = epoch_root / "comparison_candidate_scope.txt"
     output.write_text("".join(s + "\n" for s in sorted(eligible)))
     print(f"COMPARISON_PRECHECK candidates={len(candidates)} new_checks={len(pending)} "
-          f"eligible={len(eligible)}", flush=True)
+          f"eligible={len(eligible)} pending_checks={len(candidates - checked)}", flush=True)
     if not eligible:
         raise RuntimeError("no comparison candidate passes current pre-checks")
     return output
@@ -2436,6 +2464,11 @@ def _publish_once(args: argparse.Namespace) -> None:
             )
         else:
             candidate_scope = _producer_candidate_scope(epoch_root, target, previous)
+        # Newly checked cached entries can improve the shortlist without a new
+        # GPU fold; that progress must invalidate the publication no-op too.
+        scope_fingerprint = _file_digest(candidate_scope) if candidate_scope else None
+        exact_fingerprint = _sha256_bytes(json.dumps([exact_fingerprint, scope_fingerprint]).encode())
+        strict_fingerprint = _sha256_bytes(json.dumps([strict_fingerprint, scope_fingerprint]).encode())
         previous_prechecked = (
             observation_history is None
             or _live_sequences(previous, epoch) <= set(candidate_scope.read_text().splitlines())

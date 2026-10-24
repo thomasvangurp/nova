@@ -290,3 +290,13 @@ cleanup and terminate an unresponsive analysis child. Keep reuse within a live
 worker. The real-spawn regression must wait for its analysis child to start;
 otherwise a semaphore startup failure can masquerade as successful cleanup.
 Both cases are now part of the mandatory epoch-deadline suite.
+
+
+The first live pre-check found 617 novel entries, of which 580 lacked cached
+TNP measurements. Waiting for this cold backlog before publishing again
+recreated a deadline bottleneck. Current-gate checks now validate available
+measurements first and checkpoint cold entries in batches of 32 across cycles.
+No unchecked entry enters ranking, and the batch size never truncates the bank:
+pending checks remain explicit and every cycle advances them. Novelty proof
+survives an interrupted Layer-2 batch; eligibility does not. Scope changes
+invalidate publication no-op state even without new GPU observations.
