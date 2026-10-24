@@ -150,3 +150,19 @@ check. A round-complete marker is insufficient: `confirmation_health.json`
 reports qualified and newly confirmed counts, and propagates degradation to
 the epoch's coverage and confirmation receipts. No fresh confirmed candidates
 or a pool below the configured minimum is explicitly degraded.
+
+Activation: runtime commit `93e2f7b2dae0cfc674af55b50df85fae4dc8b6e4`
+passed 580 local shipping checks with no skips, failures, or errors, and
+GitHub CI https://github.com/thomasvangurp/nova/actions/runs/40109977179 .
+The full 635-file package was verified on the master; both replay cohorts
+also passed under its runtime Python. Ten installed files matched the tested
+hashes, and the restarted producer carried the explicit broad-policy flag.
+The producer was restarted only after 25912 completed; 25913 is the first
+epoch using the policy. Receipt:
+`/root/artifacts/confirmation_policy_release_20261024.json`.
+
+Epoch 25912 finished 4,800 discovery evaluations and twenty confirmation
+rounds. The sealed DB contains 4,807 distinct candidates for that epoch,
+of which exactly 4,800 have their first own raw evidence in 25912 (the other
+seven are cached confirmations). Its best locally confirmed score was 882.33.
+That is one candidate's local estimate, not an independent fleet replay mean.
