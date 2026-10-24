@@ -528,3 +528,32 @@ repairs; the outer process budget now ends at end-17, leaving cleanup time and
 additional margin before the validator boundary. Shorter expected runtime does
 not extend that valid window. The shipping suite executes the validator's
 strict predicate on both boundaries and checks the actual Pi commit timeout.
+
+### Deployment verification
+
+Runtime release `f6184322fc288380a9fea80f90d7e187d3b88af2` passed all 608
+mandatory shipping checks and [GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/40141311873).
+All 642 staged package files were verified on the master. The Pi's existing
+SANQI and compound-window extensions were preserved using a targeted overlay;
+the resulting Pi variant passed the sixteen handoff tests separately. The
+previous hosted run exposed a test fixture startup race on Linux; the fixture
+now waits for child readiness before testing cancellation. Production runtime
+bytes did not change for that test correction.
+
+The Pi activated the new timing in epoch 25918. The master's one-time activation
+job runs on the master itself, so closing the Mac cannot prevent activation.
+It waits until current race work and the protected publication window have
+finished, verifies the installed runtime hashes, preserves the live launch
+arguments, and checks that both replacement processes loaded `--pi-handoff`.
+The 4,800 NEW-only cap remains in the live producer arguments. Both running
+master processes were verified with the new flag in epoch 25918;
+the first full affected epoch is 25919. The Pi reported thirteen committed,
+zero failed and zero dropped to blackout for its first changed epoch, 25918.
+That epoch still used the previous master scheduling policy. The final
+activation receipt and verification details are recorded in
+`docs/evidence/handoff_release_20261024.json`; the exact activation code is
+retained beside it as `handoff_activation_20261024.py`.
+
+Deployment verification does not establish a new multipass result. Quality
+must be checked against the actual committed fleet and subsequent independent
+replay, rather than a later master artifact or a successful process exit.

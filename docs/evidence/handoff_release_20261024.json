@@ -1,0 +1,98 @@
+{
+  "release": "f6184322fc288380a9fea80f90d7e187d3b88af2",
+  "ci_url": "https://github.com/thomasvangurp/nova/actions/runs/40141311873",
+  "shipping_tests": 608,
+  "pi_overlay_tests": 16,
+  "verified_master_package_files": 642,
+  "pi_activation_epoch": 25918,
+  "master_activation": "active",
+  "validator_no_submission_blocks_verified": 10,
+  "operational_guard_blocks": 16,
+  "parallel_commit_reserve_blocks": 36,
+  "pi_final_pull_reserve_blocks": 41,
+  "publication_reserve_blocks": 46,
+  "scoring_reserve_blocks": 76,
+  "activation_job_sha256": "43f87a2e9c7c0979e9e4173d841ca4b53defa7d76bd37d51f8f4bd264515b75d",
+  "master_activation_epoch": 25918,
+  "first_full_epoch": 25919,
+  "master_live_verification": {
+    "activation": {
+      "status": "active",
+      "epoch": 25918,
+      "first_full_epoch": 25919,
+      "release": "f6184322fc288380a9fea80f90d7e187d3b88af2",
+      "producer_pids": [
+        1456975
+      ],
+      "publisher_pids": [
+        1457082
+      ]
+    },
+    "receipt": {
+      "release": "f6184322fc288380a9fea80f90d7e187d3b88af2",
+      "activation": "active",
+      "activation_epoch": 25918,
+      "first_full_epoch": 25919
+    },
+    "chain": {
+      "block": 9356736,
+      "epoch": 25918,
+      "epoch_length": 361
+    },
+    "processes": [
+      {
+        "role": "producer",
+        "pid": 1456975,
+        "pi_handoff": true,
+        "candidate_budget": 4800
+      },
+      {
+        "role": "publisher",
+        "pid": 1457082,
+        "pi_handoff": true
+      }
+    ],
+    "runtime_hashes_verified": {
+      "nanobody_opt/submission_timing.py": true,
+      "nanobody_opt_v2/run_live_producer.py": true,
+      "tools/publish_current_nanobody.py": true
+    },
+    "producer_launch_handoff": true,
+    "publisher_task_handoff": true,
+    "capacity": {},
+    "activation_code_sha256": "43f87a2e9c7c0979e9e4173d841ca4b53defa7d76bd37d51f8f4bd264515b75d"
+  },
+  "pi_first_live_commit": {
+    "epoch": 25918,
+    "events": [
+      {
+        "event": "plan",
+        "epoch": 25918,
+        "crew": 13,
+        "with_sequence": 13,
+        "committing": 13
+      },
+      {
+        "event": "pushed",
+        "blobs": 13,
+        "block": 9356722
+      },
+      {
+        "event": "done",
+        "committed": 13,
+        "failed": 0,
+        "dropped_to_blackout": 0
+      },
+      {
+        "event": "committed",
+        "epoch": 25918,
+        "rc": 0
+      },
+      {
+        "event": "archived",
+        "epoch": 25918
+      }
+    ]
+  },
+  "quality_verification": "Await independent replay of the first full affected epoch; successful commits do not establish multipass quality."
+}
