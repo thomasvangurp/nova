@@ -183,6 +183,36 @@ def _client_disconnected(conn) -> bool:
         return True
 
 
+def _watch_parent(parent_pid: int, interval: float = 1.0) -> None:
+    """Watch the owning daemon, including workers started through a launcher.
+
+    The configured Python launcher may insert a process between daemon and
+    worker. Comparing getppid() with the daemon PID would kill healthy workers.
+    """
+    def owner_alive():
+        if parent_pid <= 1:
+            return False
+        try:
+            os.kill(parent_pid, 0)
+            # A zombie still answers kill(pid, 0); it cannot own a worker.
+            with open(f"/proc/{parent_pid}/stat") as handle:
+                return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return os.path.isdir("/proc") is False
+        except ProcessLookupError:
+            return False
+
+    def watch():
+        while True:
+            if not owner_alive():
+                import signal
+                if os.getpgrp() == os.getpid():
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
+                os._exit(0)
+            time.sleep(interval)
+    threading.Thread(target=watch, name="scorer-parent-watch", daemon=True).start()
+
+
 class ShardWorker:
     """One persistent process pinned to one GPU.
 
@@ -205,7 +235,7 @@ class ShardWorker:
         env["CUDA_VISIBLE_DEVICES"] = self.gpu   # pinned once, privately
         self.proc = subprocess.Popen(
             [python or __import__("sys").executable, os.path.abspath(__file__),
-             "--shard-worker", "--scorer", scorer_path],
+             "--shard-worker", "--parent-pid", str(os.getpid()), "--scorer", scorer_path],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             # To a FILE, never DEVNULL: a worker that dies takes its reason
             # with it and the parent sees only an empty read.
@@ -448,6 +478,7 @@ def job_from_command(command, *, observation_id=None) -> dict:
         # main(): observation_id = a.observation_id or uuid4().hex
         "observation_id": (observation_id or flags.get("--observation-id")
                            or _uuid.uuid4().hex),
+        "allow_replicates": "--allow-replicates" in bare,
         # the launcher the adapter chose, not whatever python holds the daemon
         "python": tokens[0] if tokens and not tokens[0].startswith("--") else None,
     }
@@ -685,7 +716,7 @@ class Daemon:
                         "scorer_protocol": SCORER_PROTOCOL,
                         "observation_id": job["observation_id"],
                         "diagnostic_seed": None,
-                        "predict_batch_size": job["batch_size"],
+                        "predict_batch_size": (1 if job.get("allow_replicates") else job["batch_size"]),
                         "per_nanobody_components": merged,
                         "structures": structures},
                        handle, indent=2, default=str)
@@ -697,13 +728,17 @@ class Daemon:
         Single source of truth for both the first dispatch and the retry, so
         the two can never hand the pinned worker different arguments.
         """
-        return [index, gpu, bucket, job["subnet_config"], out,
+        args = [index, gpu, bucket, job["subnet_config"], out,
                 job["batch_size"], job.get("keep_work_dir", False),
                 root, job.get("fold_matmul", "high"),
                 job.get("fold_steps", 50), job.get("fold_samples"),
                 job.get("design_steps", 100),
                 job.get("synth_reference"), job.get("synth_library"),
                 job.get("structure_dir"), job["observation_id"]]
+        if job.get("worker_argument_schema", "base-v1") == "replicates-v1":
+            args.extend([bool(job.get("allow_replicates")),
+                         list(range(index, len(job["sequences"]), job["_shard_count"]))])
+        return args
 
     def _rerun_short_shards(self, work, job, root, gpus, slots, cancelled=None) -> None:
         """Re-run once every shard that came back short.
@@ -772,15 +807,22 @@ class Daemon:
         import concurrent.futures
 
         gpus = [g for g in str(job["gpus"]).split(",") if g]
+        schema = job.get("worker_argument_schema", "base-v1")
+        if schema not in {"base-v1", "replicates-v1"}:
+            raise RuntimeError("unknown scorer worker argument schema")
+        if job.get("allow_replicates") and schema != "replicates-v1":
+            raise RuntimeError("replicate job requires the extended worker schema")
         requested_shards = int(job.get("shards_per_gpu", 1))
         sequences = job["sequences"]
-        shards_per_gpu = effective_shards_per_gpu(requested_shards, len(sequences), len(gpus))
+        shards_per_gpu = (requested_shards if schema == "replicates-v1" else
+                          effective_shards_per_gpu(requested_shards, len(sequences), len(gpus)))
         if shards_per_gpu != requested_shards:
             import sys as _sys
             print("WORKERS_PER_GPU_APPLIED shards_per_gpu=%d->%d sequences=%d gpus=%d"
                   % (requested_shards, shards_per_gpu, len(sequences), len(gpus)),
                   file=_sys.stderr, flush=True)
         buckets = self._shard(sequences, gpus, shards_per_gpu)
+        job["_shard_count"] = len(buckets)
         root = job["shard_root"]
         os.makedirs(root, exist_ok=True)
         # Start or replace any worker this round needs. A dead worker is
@@ -915,8 +957,10 @@ def main(argv=None) -> int:
     parser.add_argument("--socket", default=SOCKET_PATH)
     parser.add_argument("--shard-worker", action="store_true",
                         help="internal: run as a GPU-pinned shard worker")
+    parser.add_argument("--parent-pid", type=int, help="internal: owning daemon PID")
     args = parser.parse_args(argv)
     if args.shard_worker:
+        _watch_parent(args.parent_pid if args.parent_pid is not None else os.getppid())
         return shard_worker_main(args.scorer)
     daemon = Daemon(args.scorer, args.socket)
     daemon.warm()

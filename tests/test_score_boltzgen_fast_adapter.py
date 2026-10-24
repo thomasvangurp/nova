@@ -75,6 +75,13 @@ def test_reference_registry_selects_target_and_length(tmp_path):
     assert command[command.index("--synth-reference") + 1] == "/correct.cif"
 
 
+def test_replica_capability_is_explicit_and_preserved_for_slave(tmp_path):
+    args = _args(tmp_path, allow_replicates=True)
+    with pytest.raises(SystemExit, match="registered"):
+        adapter.build_command(args, {})
+    assert "--allow-replicates" in adapter.build_command(args, {"worker_argument_schema": "replicates-v1"})
+
+
 @pytest.mark.parametrize("settings", [
     {"synth_reference": "/unregistered.cif"},
     {"synth_reference": "/wrong-length.cif", "synth_reference_length": 127,

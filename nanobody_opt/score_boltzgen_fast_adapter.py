@@ -161,6 +161,10 @@ def build_command(
     ):
         if settings.get(key) is not None:
             command.extend([flag, str(settings[key])])
+    if getattr(args, "allow_replicates", False):
+        if settings.get("worker_argument_schema") != "replicates-v1":
+            raise SystemExit("replicate scoring requires the registered replicates-v1 worker")
+        command.append("--allow-replicates")
     return command
 
 
@@ -176,6 +180,7 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--structure-dir", type=Path)
     parser.add_argument("--require-structures", action="store_true")
+    parser.add_argument("--allow-replicates", action="store_true")
     parser.add_argument(
         "--settings",
         type=Path,
@@ -211,7 +216,9 @@ def main() -> None:
     if _scorer_daemon is not None and _scorer_daemon.ENABLED:
         try:
             if _scorer_daemon.available():
-                _scorer_daemon.score(_scorer_daemon.job_from_command(command))
+                job = _scorer_daemon.job_from_command(command)
+                job["worker_argument_schema"] = settings.get("worker_argument_schema", "base-v1")
+                _scorer_daemon.score(job)
                 raise SystemExit(0)
         except SystemExit:
             raise

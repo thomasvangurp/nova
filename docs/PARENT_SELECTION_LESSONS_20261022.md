@@ -360,3 +360,19 @@ work releases GPU locks when the epoch runner terminates its client. Real-proces
 CI covers a dead parent whose child holds the pipe open, a partial reply,
 disconnection and SystemExit. The previously deployed three-workers-per-GPU,
 parallel startup and short-shard retry changes are retained in source control.
+
+The new length-125 reference reuses all 1,282 target-chain atom coordinates
+from the existing validated length-127 reference, verified exactly by atom
+identity; only the candidate-chain length changes. Keep its separate reference
+library so registering a new length does not alter the old length's library.
+
+Master and slave pinned scorers have different worker argument formats. The
+slave also supports replica ordinals and watches its owning daemon. A deployment
+must preserve those capabilities instead of overwriting the slave with the
+master's older 16-argument worker contract. The shared daemon now selects the
+registered base or replica format explicitly, preserves global replica ordinals
+and the slave's existing shard count, and retains owner monitoring. Owner
+monitoring checks the daemon's lifetime rather than requiring it to be the
+worker's direct parent: the configured Python launcher may insert a process.
+CI exercises both argument formats, replica-flag forwarding and indirect-parent
+ownership using real processes.

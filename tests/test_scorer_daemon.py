@@ -179,3 +179,45 @@ def test_worker_reports_system_exit_and_remains_available(tmp_path):
     assert replies[0] == {"ready": True}
     assert len(replies) == 3
     assert all(not reply["ok"] and "SystemExit" in reply["error"] for reply in replies[1:])
+
+
+@pytest.mark.parametrize("schema,replicate", [("base-v1", False), ("replicates-v1", False), ("replicates-v1", True)])
+def test_master_and_slave_worker_arguments_preserve_their_protocol(schema, replicate):
+    job = {"worker_argument_schema": schema, "allow_replicates": replicate,
+           "sequences": ["A"] * 7, "_shard_count": 3, "subnet_config": {},
+           "batch_size": 2, "observation_id": "test"}
+    args = sd.Daemon._shard_args(1, "0", ["A", "A"], "out", job, "work")
+    assert len(args) == (16 if schema == "base-v1" else 18)
+    if schema == "replicates-v1":
+        assert args[-2:] == [replicate, [1, 4]]
+
+
+def test_replica_flag_reaches_daemon_job(tmp_path):
+    source = tmp_path / "seq.json"
+    source.write_text(json.dumps({"sequences": ["AAAA", "AAAA"]}))
+    job = sd.job_from_command(_command(source) + ["--allow-replicates"])
+    assert job["allow_replicates"] is True
+    assert job["sequences"] == ["AAAA", "AAAA"]
+
+
+def test_owner_watch_tolerates_launcher_and_stops_after_daemon_dies():
+    import subprocess
+    import sys
+    import time
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    worker = _real_worker(
+        "from nanobody_opt.scorer_daemon import _watch_parent; import time; "
+        f"_watch_parent({owner.pid}, 0.05); print('ready', flush=True); time.sleep(30)"
+    )
+    try:
+        assert worker._read_reply(5) == "ready"
+        time.sleep(0.15)
+        assert worker.proc.poll() is None  # owner is deliberately not getppid()
+        owner.terminate()
+        owner.wait(timeout=2)
+        worker.proc.wait(timeout=2)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=2)
+        worker.close()
