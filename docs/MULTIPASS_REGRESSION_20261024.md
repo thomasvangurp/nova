@@ -517,3 +517,14 @@ The submission process is stopped before the blackout (with one extra block
 for cleanup), and cannot occupy the next epoch. CI exercises this with a real
 silent process and descendant, and verifies the next invocation can run.
 Numeric timing evidence: `docs/evidence/pi_commit_timing_20261024.json`.
+
+The valid submission window remains the hard constraint. Verified against
+the published upstream `neurons/validator/commitments.py` and `config/config.yaml`
+on 2026-10-24: `epoch_start < inclusion_block < epoch_end - 10`. The last
+accepted block is therefore end-11. The sixteen-block value in our scheduler
+is an additional operational guard, not the current upstream exclusion value.
+The Pi's existing signer checks the live remaining blocks before its batch and
+repairs; the outer process budget now ends at end-17, leaving cleanup time and
+additional margin before the validator boundary. Shorter expected runtime does
+not extend that valid window. The shipping suite executes the validator's
+strict predicate on both boundaries and checks the actual Pi commit timeout.

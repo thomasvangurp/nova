@@ -1,5 +1,6 @@
 """Regress epoch25914: completion on the master must precede the Pi snapshot."""
 import hashlib
+import ast
 import json
 import shlex
 import time
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nanobody_opt import submission_timing as timing
 from nanobody_opt.epoch_deadline import EpochDeadline, EpochDeadlineExceeded
@@ -165,7 +167,8 @@ def test_parallel_reserve_has_retry_room_without_charging_every_uid():
     assert timing.LATE_COMMIT_MARGIN_SECONDS == 60
 
 
-def test_pi_preparation_does_not_extend_the_chain_deadline(tmp_path, monkeypatch):
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_pi_preparation_does_not_extend_the_chain_deadline(tmp_path, monkeypatch, dry_run):
     now = [10000.0]
     monkeypatch.setattr(pi, 'ROOT', tmp_path)
     monkeypatch.setattr(pi.time, 'time', lambda: now[0])
@@ -182,12 +185,48 @@ def test_pi_preparation_does_not_extend_the_chain_deadline(tmp_path, monkeypatch
         pulls.append(now[0])
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(pi, 'run', pull)
+    commits = []
+    def commit(*a, **kwargs):
+        commits.append((now[0], kwargs['timeout']))
+        return 0, []
+    monkeypatch.setattr(pi, 'stream', commit)
     args = SimpleNamespace(on_submit_host=True, late_commit=True,
-        late_commit_margin_seconds=60, confirmation_min_observations=20, dry_run=True)
+        late_commit_margin_seconds=60, confirmation_min_observations=20,
+        dry_run=dry_run, producer_commits=False)
     pi.handle_epoch(args, {'crew': list(range(13)), 'reaction': 1},
         100, 100*361+225, 101*361, set(), {'producer_stopped': False})
     expected = 10000 + (361-225-36)*12 - 60
     assert pulls == [expected]
+    if dry_run:
+        assert not commits
+    else:
+        assert commits == [(expected, (41-17)*12)]
+
+
+def test_submission_window_uses_the_validators_strict_block_boundaries():
+    # Execute only the actual validator's inclusion predicate, without its
+    # network/model imports. The published upstream predicate was verified
+    # on 2026-10-24; config competition.no_submission_blocks is currently 10.
+    tree = ast.parse((ROOT/'neurons/validator/commitments.py').read_text())
+    function = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'get_commitments')
+    condition = next(n for n in ast.walk(function) if isinstance(n, ast.Compare)
+                     and isinstance(n.left, ast.Name) and n.left.id == 'min_block')
+    oracle = compile(ast.Expression(condition), '<validator-window>', 'eval')
+    no_submission = yaml.safe_load((ROOT/'config/config.yaml').read_text())['competition']['no_submission_blocks']
+    start, end = 25914*361, 25915*361
+    def valid(block):
+        return eval(oracle, {'__builtins__': {}},
+                    {'min_block': start, 'max_block': end-no_submission, 'commit': {'block': block}})
+    assert not valid(start)
+    assert valid(start+1)
+    assert valid(end-no_submission-1)
+    assert not valid(end-no_submission)
+    assert not valid(end)
+    # Sixteen is OUR earlier operational guard, not the current validator's
+    # ten-block exclusion. Even the process cleanup limit remains inside it.
+    assert no_submission <= timing.BLACKOUT_BLOCKS
+    assert valid(end-timing.BLACKOUT_BLOCKS-1)
+    assert timing.plan()['pi_pull_reserve_blocks'] > timing.commit_reserve(13) > timing.BLACKOUT_BLOCKS
 
 
 def test_silent_commit_process_cannot_block_the_next_epoch(tmp_path, monkeypatch):
