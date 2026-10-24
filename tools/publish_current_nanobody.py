@@ -1184,7 +1184,7 @@ def _stored_comparison_sequences(database: Path, target: str, minimum: int) -> s
 def _prechecked_comparison_scope(
     *, args: argparse.Namespace, epoch_root: Path, target: str,
     database: Path, archive: Path, config: Path, exclusion: Path,
-    pixi_manifest: Path,
+    pixi_manifest: Path, ready_artifact: bool = True,
 ) -> Path:
     """Apply current gates to stored AND newly confirmed candidates before ranking.
 
@@ -1258,6 +1258,10 @@ def _prechecked_comparison_scope(
                 and _measured_developability(measurement.get("developability"))):
             cached.add(sequence)
     batch = cached or set(sorted(waiting)[:32])
+    if not ready_artifact and candidates & allowed:
+        # After a restart or interrupted publish, deliver the proven fleet
+        # before starting any further cold work. Resume the backlog next cycle.
+        batch = set()
     if batch:
         layer2_input = epoch_root / "comparison_precheck_layer2_input.json"
         layer2 = epoch_root / "comparison_precheck_layer2.json"
@@ -2466,6 +2470,7 @@ def _publish_once(args: argparse.Namespace) -> None:
                 args=args, epoch_root=epoch_root, target=target,
                 database=observation_history, archive=archive_path, config=config_path,
                 exclusion=exclusion_path, pixi_manifest=pixi_manifest,
+                ready_artifact=bool(_live_sequences(previous, epoch)),
             )
         else:
             candidate_scope = _producer_candidate_scope(epoch_root, target, previous)

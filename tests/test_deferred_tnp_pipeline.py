@@ -437,6 +437,11 @@ def test_cold_prechecks_do_not_block_cached_fleet_or_truncate_bank(monkeypatch, 
     assert scope.read_text().splitlines() == ["STORED"]
     first = json.loads((kwargs["epoch_root"] / "comparison_precheck.json").read_text())
     assert first["pending_count"] > 32
+    commands.clear()
+    # A retry after a failed publication must deliver the checked fleet before
+    # making it wait for cold measurements again.
+    assert publisher._prechecked_comparison_scope(**kwargs, ready_artifact=False) == scope
+    assert commands == []
     for _ in range(4):
         commands.clear()
         scope = publisher._prechecked_comparison_scope(**kwargs)
