@@ -300,3 +300,28 @@ No unchecked entry enters ranking, and the batch size never truncates the bank:
 pending checks remain explicit and every cycle advances them. Novelty proof
 survives an interrupted Layer-2 batch; eligibility does not. Scope changes
 invalidate publication no-op state even without new GPU observations.
+
+The first artifact-retention guard incorrectly treated `_live_sequences()` as
+a set; its actual return type is a list. This raised TypeError after successful
+pre-checks. The corrected guard converts the result explicitly. Mandatory CI
+now exercises the complete database-backed publication orchestrator, using its
+real artifact, scope, retry and retention helpers with simulated external gates.
+It proves that both ordinary startup and interruption after pre-checks deliver
+the checked fleet before taking another cold batch. Helper-only tests did not
+provide enough integration coverage for this incident.
+
+Release `128b79a846f19f3e36ef948e16ddd64fc1724f3d` passed all 473 mandatory
+shipping checks locally and in GitHub Actions before the publisher deployment.
+The scorer cleanup also passed both real-spawn shutdown cases in the configured
+master and slave runtimes. Epoch 25900 produced a current 12-entry artifact;
+the Pi independently pulled it and planned 12 entries for 12 held slots, with
+no missing UID. This verifies preparation, not on-chain acceptance.
+
+A separate live scorer check completed 32/32 previously measured candidates
+in 107 seconds through the warm daemon, retaining all 32 structures under the
+pinned validator-dual-sample-v1 protocol. These diagnostic evaluations were not
+ingested into rankings and are not new discovery work or part of the 4,800
+budget. Verify fresh production progress separately. The original daemon worker
+failure trigger remains unproven; the independently reproduced fallback-exit
+deadlock is repaired. Do not equate a successful diagnostic with a completed
+discovery budget or promise a particular future multipass score.

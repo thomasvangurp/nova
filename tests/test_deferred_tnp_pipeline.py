@@ -536,3 +536,92 @@ def test_current_artifact_retention_uses_real_sequence_list_contract(monkeypatch
     scope = tmp_path / "scope.txt"
     scope.write_text("READY\n")
     assert publisher._artifact_passes_scope(artifact, 100, scope) is expected
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_database_publication_delivers_checked_fleet_before_cold_backlog(
+    monkeypatch, tmp_path, interrupted,
+):
+    """Exercise the complete orchestrator with real artifact/helper contracts.
+
+    External gates/ranking are simulated, but scope, retry, fleet construction,
+    artifact retention, and state writes run together as they do on the host.
+    """
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    from test_publish_current_nanobody import _Host, EPOCH
+    from nanobody_opt.filter_layer2 import _developability_cache_digest
+
+    host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
+    args = host.args(strict_qualification=False)
+    args.exact = []
+    args.observation_database = tmp_path / "observations.sqlite"
+    cold = {f"COLD{i:03d}" for i in range(80)}
+    bank = set(host.candidate_sequences) | cold
+    rejected = host.candidate_sequences[0]
+    monkeypatch.setattr(publisher, "_publication_exact_inputs", lambda *a: ())
+    monkeypatch.setattr(publisher, "_database_exact_fingerprints", lambda *a: ("bank", "bank", 1))
+    monkeypatch.setattr(publisher, "_stored_comparison_sequences", lambda *a: set(bank))
+    args.layer2_cache_dir.mkdir()
+    for sequence in host.candidate_sequences:
+        (args.layer2_cache_dir / (_developability_cache_digest(sequence) + ".json")).write_text(
+            json.dumps({"sequence": sequence, "developability": {"passed": True, "flags": {}}})
+        )
+    comparison_batches = []
+    fail_rank_once = interrupted
+
+    def run(command):
+        nonlocal fail_rank_once
+        def value(flag):
+            return command[command.index(flag) + 1]
+
+        if "check-validator-novelty" in command or "filter-layer2" in command:
+            host.commands.append(list(command))
+            source = json.loads(Path(value("--input")).read_text())
+            sequences = set(source.get("sequences", [])) or {
+                row["sequence"] for row in source.get("candidates", [])
+            }
+            if "check-validator-novelty" in command:
+                result = {"input_count": len(sequences), "sequences": sorted(sequences - {rejected})}
+            else:
+                if Path(value("--input")).name == "comparison_precheck_layer2_input.json":
+                    comparison_batches.append(sequences)
+                result = {"input_count": len(sequences), "candidates": [
+                    {"sequence": sequence, "layer2_passed": True} for sequence in sorted(sequences)
+                ]}
+            publisher._atomic_json(Path(value("--output")), result)
+        elif any(str(part).endswith("rank_exact.py") for part in command):
+            if fail_rank_once:
+                fail_rank_once = False
+                raise RuntimeError("publication interrupted after precheck")
+            allowed = set(Path(value("--only-sequences")).read_text().splitlines())
+            assert rejected not in allowed
+            host.run(command)
+            output = Path(value("--output"))
+            result = json.loads(output.read_text())
+            result["candidates"] = [row for row in result["candidates"] if row["sequence"] in allowed]
+            publisher._atomic_json(output, result)
+        else:
+            host.run(command)
+
+    monkeypatch.setattr(publisher, "_run", run)
+    if interrupted:
+        with pytest.raises(RuntimeError, match="publication interrupted"):
+            publisher._publish_once(args)
+        assert not host.artifact.exists()
+    publisher._publish_once(args)
+    artifact = json.loads(host.artifact.read_text())
+    assert artifact["epoch"] == EPOCH
+    assert artifact["submission_count"] == 3
+    assert len(comparison_batches) == 1
+    assert not comparison_batches[0] & cold
+    assert rejected not in artifact["sequence_pool"]
+    assert set(artifact["sequence_pool"]) <= bank - cold
+
+    # The published fleet survives the real retention helper while the next
+    # cycle advances cold eligibility without requiring any new GPU evidence.
+    publisher._publish_once(args)
+    assert len(comparison_batches) == 2
+    assert len(comparison_batches[1]) == 32
+    assert comparison_batches[1] <= cold
+    assert json.loads(host.artifact.read_text())["submission_count"] == 3
+    assert not any("fast_score" in " ".join(command) for command in host.commands)
