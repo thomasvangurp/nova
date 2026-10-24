@@ -1,0 +1,930 @@
+{
+  "scope": "Read-only comparison of the archived submitted fleets, producer receipts and independent replay. No runtime configuration was changed by this audit.",
+  "latest_replay": {
+    "source_modified_utc": "2026-10-24T23:29:26.362655+00:00",
+    "read_utc": "2026-10-24T23:33:12.532457+00:00",
+    "epochs": [
+      {
+        "epoch": 25916,
+        "ours": {
+          "coverage_complete": true,
+          "fleet_size": 13,
+          "mean": 1036.6282051282053,
+          "missing_sequences": 0,
+          "passes_max": 30,
+          "passes_min": 30,
+          "scored_sequences": 13,
+          "stdev": 90.22341675511113
+        },
+        "rivals": {
+          "5DZXbYUs": {
+            "coverage_complete": true,
+            "fleet_size": 3,
+            "mean": 1085.6000000000001,
+            "missing_sequences": 0,
+            "passes_max": 20,
+            "passes_min": 20,
+            "scored_sequences": 3
+          },
+          "5GhREcsK": {
+            "coverage_complete": true,
+            "fleet_size": 7,
+            "mean": 1065.7142857142856,
+            "missing_sequences": 0,
+            "passes_max": 20,
+            "passes_min": 20,
+            "scored_sequences": 7
+          }
+        }
+      },
+      {
+        "epoch": 25917,
+        "ours": {
+          "coverage_complete": true,
+          "fleet_size": 13,
+          "mean": 1876.269230769231,
+          "missing_sequences": 0,
+          "passes_max": 10,
+          "passes_min": 10,
+          "scored_sequences": 13,
+          "stdev": 652.5620458382781
+        },
+        "rivals": {
+          "5DZXbYUs": {
+            "coverage_complete": false,
+            "fleet_size": 3,
+            "mean": null,
+            "missing_sequences": 3,
+            "passes_max": 0,
+            "passes_min": 0,
+            "scored_sequences": 0
+          },
+          "5GhREcsK": {
+            "coverage_complete": false,
+            "fleet_size": 7,
+            "mean": null,
+            "missing_sequences": 4,
+            "passes_max": 20,
+            "passes_min": 10,
+            "scored_sequences": 3
+          }
+        }
+      }
+    ]
+  },
+  "submitted_fleets": [
+    {
+      "epoch": 25916,
+      "ours": {
+        "coverage_complete": true,
+        "fleet_size": 13,
+        "mean": 1036.6282051282053,
+        "minimum_passes": 10,
+        "missing_sequences": 0,
+        "passes_max": 30,
+        "passes_min": 30,
+        "scored_sequences": 13,
+        "stdev": 90.22341675511113
+      },
+      "rivals": {
+        "5DZXbYUs": {
+          "coverage_complete": true,
+          "fleet_size": 3,
+          "mean": 1085.6000000000001,
+          "missing_sequences": 0,
+          "passes_max": 20,
+          "passes_min": 20,
+          "scored_sequences": 3
+        },
+        "5GhREcsK": {
+          "coverage_complete": true,
+          "fleet_size": 7,
+          "mean": 1065.7142857142856,
+          "missing_sequences": 0,
+          "passes_max": 20,
+          "passes_min": 20,
+          "scored_sequences": 7
+        }
+      },
+      "artifact_time_utc": "2026-10-24T20:57:39.521552+00:00",
+      "local_mean": 1035.2574983600011,
+      "rows": [
+        {
+          "id": "1dd5f2a6e05f95bf8d09adfff25ee676a1e1f57cb8aab43ff1993ec2b24a658c",
+          "uid": 16,
+          "local_score": 822.25,
+          "observations": 20,
+          "replay_score": 979.1666666666666,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "261fb3d4244f7acac89f1574706c777ca67b8ac481eae46c5bf3124af2bbe70a",
+          "uid": 22,
+          "local_score": 889.1,
+          "observations": 20,
+          "replay_score": 890.8666666666667,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "b7ca021279fa97c49367d8d7d2307f1f263d8b721fb2257db3d1b7d31e2b61ec",
+          "uid": 23,
+          "local_score": 990.4,
+          "observations": 20,
+          "replay_score": 1069.9,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "9dabba4dded93aac94b2e1fc12f29d82c43e3d3d42d82df37d6c3336dc90d6cf",
+          "uid": 30,
+          "local_score": 1041.15,
+          "observations": 20,
+          "replay_score": 946.4,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "f2d4850ae9bddf38e76896f9f9b121568970841f1dd711a93857fa1e21734f01",
+          "uid": 33,
+          "local_score": 1046.85,
+          "observations": 20,
+          "replay_score": 974.7333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "a7a2bfc2f445d05ea96bddb6ccbad22ee6f0b23d864af6bf3bcdcf34dd9aa0f0",
+          "uid": 34,
+          "local_score": 1058.9666666666667,
+          "observations": 30,
+          "replay_score": 1126.5,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "f7ada010c39c3cd3bfc09e0e1c72f94123a218e43444953325e1dd00cf62b1ef",
+          "uid": 43,
+          "local_score": 1072.25,
+          "observations": 20,
+          "replay_score": 1067.7333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "676352d2c450c9abc51918be035b6101d04a571f1d411764bda5c5ca4020ec9d",
+          "uid": 45,
+          "local_score": 1072.9032258064517,
+          "observations": 31,
+          "replay_score": 1131.2666666666667,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "f56d68e03dcefc8502f919c1b896ba2d38c44c5ad54f9e36d856fdfc1fcb56f9",
+          "uid": 47,
+          "local_score": 1076.55,
+          "observations": 20,
+          "replay_score": 938.9333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "1a1829f1f2cdedb3b1f75699f463a2e9e1ca9dc094736880667be975314417fd",
+          "uid": 48,
+          "local_score": 1079.8,
+          "observations": 20,
+          "replay_score": 1151.3333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "ed28dfc99bdbf733dff6422d4fd92a7ade3faaa6be513e56b5ae332714931b4c",
+          "uid": 53,
+          "local_score": 1094.5,
+          "observations": 20,
+          "replay_score": 1045.5333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "638565456916ebdea7e198f6f10eb9e473a17a95a510c9c270026f5c62b33946",
+          "uid": 54,
+          "local_score": 1094.8275862068965,
+          "observations": 29,
+          "replay_score": 1186.8333333333333,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        },
+        {
+          "id": "986674b40b5ddda13b6d7ef417ad6e25ffd7573c1bdd0b53aab8734f788b966f",
+          "uid": 60,
+          "local_score": 1118.8,
+          "observations": 20,
+          "replay_score": 966.9666666666667,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25916
+          }
+        }
+      ]
+    },
+    {
+      "epoch": 25917,
+      "ours": {
+        "coverage_complete": true,
+        "fleet_size": 13,
+        "mean": 1876.269230769231,
+        "minimum_passes": 10,
+        "missing_sequences": 0,
+        "passes_max": 10,
+        "passes_min": 10,
+        "scored_sequences": 13,
+        "stdev": 652.5620458382781
+      },
+      "rivals": {
+        "5DZXbYUs": {
+          "coverage_complete": false,
+          "fleet_size": 3,
+          "mean": null,
+          "missing_sequences": 3,
+          "passes_max": 0,
+          "passes_min": 0,
+          "scored_sequences": 0
+        },
+        "5GhREcsK": {
+          "coverage_complete": false,
+          "fleet_size": 7,
+          "mean": null,
+          "missing_sequences": 6,
+          "passes_max": 10,
+          "passes_min": 10,
+          "scored_sequences": 1
+        }
+      },
+      "artifact_time_utc": "2026-10-24T22:10:58.626708+00:00",
+      "local_mean": 1822.283337055837,
+      "rows": [
+        {
+          "id": "4f88b915d49b6442e7bb4c1e24645df7f5708013846d9a677b7291e7ddcc0c40",
+          "uid": 16,
+          "local_score": 1117.857142857143,
+          "observations": 21,
+          "replay_score": 1224.0,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "c28bba259d8cf7d6c33ac483b03188e147aecdf5f248a86ff56665d04be7830d",
+          "uid": 22,
+          "local_score": 1125.095238095238,
+          "observations": 21,
+          "replay_score": 1014.7,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "991953cde92f85cc7641117a15a622e0fa07a4ae2b51dfacaedf8d8ad5f9f8b1",
+          "uid": 23,
+          "local_score": 1138.0,
+          "observations": 21,
+          "replay_score": 1352.2,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "6fa92d55c5fe21b54ef546b708aa2b2b41696d63c98f1a0d399816a524215bee",
+          "uid": 30,
+          "local_score": 1138.3809523809523,
+          "observations": 21,
+          "replay_score": 1211.1,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "9c828179311eb5e3df069949e19842c25e74cedb46f62531a7e666345a6ffb97",
+          "uid": 33,
+          "local_score": 1169.2380952380952,
+          "observations": 21,
+          "replay_score": 1191.9,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "b972282a75a2da7076b48628f52ead45a3c4f8f98e0aed076256d6ad1c46db45",
+          "uid": 34,
+          "local_score": 1291.4761904761904,
+          "observations": 21,
+          "replay_score": 1519.5,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "89141e70192b5fb8d9938d8f9adbad979c13e68794c60014045715f95e2667e2",
+          "uid": 43,
+          "local_score": 1316.3,
+          "observations": 20,
+          "replay_score": 1462.5,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "3d19d6a4ae823d893e32650bd96b48a52c933a2f9f19a843abbf36b236fd4a8c",
+          "uid": 45,
+          "local_score": 2563.9137931034484,
+          "observations": 58,
+          "replay_score": 2564.3,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "f13436d3952588bc13d7d95af943c3e38a599d958cafaf776aa1cc8a65a452e8",
+          "uid": 47,
+          "local_score": 2564.909090909091,
+          "observations": 66,
+          "replay_score": 2578.9,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "081e4e5abb811c2e2861315ed4ba353d9a01312c775d7abb7b44224409a32c3b",
+          "uid": 48,
+          "local_score": 2565.4225352112676,
+          "observations": 71,
+          "replay_score": 2606.1,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "7d2f62523d632090be5752d9804115aa2cb4a1debc2728f5f787ea27b733d391",
+          "uid": 53,
+          "local_score": 2565.785714285714,
+          "observations": 56,
+          "replay_score": 2557.9,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "68ab709cd6bb925ba8a5d9902e179e0d5834614a9c615a1b194bda8031bca3a7",
+          "uid": 54,
+          "local_score": 2566.3658536585367,
+          "observations": 41,
+          "replay_score": 2572.2,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        },
+        {
+          "id": "1428cbc4a9b33d42173318b31d2edaa9d20c035d609f56bacbd6b9ca0fdafe11",
+          "uid": 60,
+          "local_score": 2566.938775510204,
+          "observations": 98,
+          "replay_score": 2536.2,
+          "checkpoint": {
+            "schema_version": 3,
+            "epoch": 25917
+          }
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "25916": {
+      "new_screened": 4800,
+      "new_attempted": 4800,
+      "confirmation_rounds": 20,
+      "qualified_candidates": 17,
+      "fresh_confirmed_candidates": 7
+    },
+    "25917": {
+      "new_screened": 4646,
+      "new_attempted": 4646,
+      "new_pending": 154,
+      "confirmation_rounds": 0,
+      "qualified_candidates": 0,
+      "fresh_confirmed_candidates": 0
+    }
+  },
+  "confirmation_plans": [
+    {
+      "epoch": 25916,
+      "iterations": [
+        {
+          "iteration": "iteration_01",
+          "race_json_names": [
+            "complete.json",
+            "screen_candidates.json",
+            "screen_coverage.json",
+            "screen_ranking.json"
+          ],
+          "files": []
+        },
+        {
+          "iteration": "iteration_02",
+          "race_json_names": [
+            "complete.json",
+            "confirmation_eligibility.json",
+            "confirmation_health.json",
+            "confirmation_plan.json",
+            "confirmation_scope.json",
+            "qualified_after_rounds.json",
+            "screen_candidates.json",
+            "screen_ranking.json"
+          ],
+          "files": [
+            {
+              "file": "iteration_02/race/confirmation_health.json",
+              "modified_utc": "2026-10-24T20:56:14.129428+00:00",
+              "data": {
+                "epoch": 25916,
+                "status": "degraded_short_confirmed_pool",
+                "required_observations": 20,
+                "rounds_completed": 20,
+                "shortlist_candidates": 147,
+                "qualified_candidates": 17,
+                "fresh_confirmed_candidates": 7,
+                "minimum_confirmed_pool": 20
+              }
+            },
+            {
+              "file": "iteration_02/race/confirmation_plan.json",
+              "modified_utc": "2026-10-24T20:44:49.761233+00:00",
+              "data": {
+                "policy": "broad-confirmation-v1",
+                "control_width": 64,
+                "control_schedule": [
+                  [
+                    64,
+                    5
+                  ],
+                  [
+                    41,
+                    5
+                  ],
+                  [
+                    26,
+                    5
+                  ],
+                  [
+                    20,
+                    5
+                  ]
+                ],
+                "schedule": [
+                  [
+                    147,
+                    2
+                  ],
+                  [
+                    40,
+                    5
+                  ],
+                  [
+                    20,
+                    13
+                  ]
+                ],
+                "evaluation_cap": 755,
+                "planned_evaluations": 754,
+                "seconds_cap": 872.8499999999999,
+                "planned_seconds": 854.22,
+                "broadened": true,
+                "epoch": 25916,
+                "rounds": 20,
+                "proof": {
+                  "target": "P20809",
+                  "eligibility_policy": "eligible-refill-v1",
+                  "config_sha256": "96705f33a00e2fa35f249af680303b0bc0ffa7337bf76bdd909430be79f38deb",
+                  "archive_sha256": "137703e06e40fea4cab894de2cd7b2f63f1d0680e37ebde10889f83f0a6cab7d"
+                },
+                "eligible_comparison_candidates": 10000,
+                "proposed_candidates": 155,
+                "gated_candidates": 147,
+                "selected_candidates": 147,
+                "eligibility": {
+                  "policy": "eligible-refill-v1",
+                  "target_candidates": 147,
+                  "proposed_candidates": 155,
+                  "unique_proposed_candidates": 155,
+                  "known_measured_failures_skipped": 29,
+                  "gated_candidates": 147,
+                  "refilled_candidates": 123,
+                  "cached_refill_candidates": 123,
+                  "deadline_limited": true,
+                  "batches": [
+                    {
+                      "mode": "ranked",
+                      "proposed": 32,
+                      "passed": 24,
+                      "seconds": 78.1884648334235,
+                      "timeout_seconds": 81.63643648009747
+                    },
+                    {
+                      "mode": "cached_refill",
+                      "proposed": 123,
+                      "passed": 123,
+                      "seconds": 0.4711157539859414,
+                      "timeout_seconds": 33.277423360385
+                    }
+                  ]
+                },
+                "status": "ready"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "epoch": 25917,
+      "iterations": [
+        {
+          "iteration": "iteration_01",
+          "race_json_names": [
+            "complete.json",
+            "screen_candidates.json",
+            "screen_coverage.json",
+            "screen_ranking.json"
+          ],
+          "files": []
+        },
+        {
+          "iteration": "iteration_02",
+          "race_json_names": [
+            "complete.json",
+            "confirmation_eligibility.json",
+            "confirmation_health.json",
+            "confirmation_plan.json",
+            "screen_candidates.json",
+            "screen_ranking.json"
+          ],
+          "files": [
+            {
+              "file": "iteration_02/race/confirmation_health.json",
+              "modified_utc": "2026-10-24T22:01:01.999728+00:00",
+              "data": {
+                "epoch": 25917,
+                "status": "degraded_no_new_confirmed_candidates",
+                "required_observations": 20,
+                "rounds_completed": 0,
+                "shortlist_candidates": 0,
+                "qualified_candidates": 0,
+                "fresh_confirmed_candidates": 0,
+                "minimum_confirmed_pool": 20
+              }
+            },
+            {
+              "file": "iteration_02/race/confirmation_plan.json",
+              "modified_utc": "2026-10-24T22:01:01.563725+00:00",
+              "data": {
+                "policy": "broad-confirmation-v1",
+                "control_width": 64,
+                "control_schedule": [
+                  [
+                    64,
+                    5
+                  ],
+                  [
+                    41,
+                    5
+                  ],
+                  [
+                    26,
+                    5
+                  ],
+                  [
+                    20,
+                    5
+                  ]
+                ],
+                "schedule": [],
+                "evaluation_cap": 755,
+                "planned_evaluations": 0,
+                "seconds_cap": 736.5749999999998,
+                "planned_seconds": 0,
+                "broadened": true,
+                "epoch": 25917,
+                "rounds": 20,
+                "proof": {
+                  "target": "P20809",
+                  "eligibility_policy": "eligible-refill-v1",
+                  "config_sha256": "96705f33a00e2fa35f249af680303b0bc0ffa7337bf76bdd909430be79f38deb",
+                  "archive_sha256": "c8139cde3e7f9265d73f8fd8a6f8c5d6e4b01bc0e3fe0b4a15a52833bda8ff9d"
+                },
+                "eligible_comparison_candidates": 4646,
+                "proposed_candidates": 0,
+                "gated_candidates": 0,
+                "selected_candidates": 0,
+                "eligibility": {
+                  "policy": "eligible-refill-v1",
+                  "target_candidates": 80,
+                  "proposed_candidates": 0,
+                  "unique_proposed_candidates": 0,
+                  "known_measured_failures_skipped": 0,
+                  "gated_candidates": 0,
+                  "refilled_candidates": 0,
+                  "cached_refill_candidates": 0,
+                  "deadline_limited": true,
+                  "batches": []
+                },
+                "status": "insufficient_time_or_eligible_candidates"
+              }
+            }
+          ]
+        },
+        {
+          "iteration": "iteration_03",
+          "race_json_names": [
+            "complete.json",
+            "confirmation_eligibility.json",
+            "confirmation_health.json",
+            "confirmation_plan.json",
+            "screen_candidates.json",
+            "screen_ranking.json"
+          ],
+          "files": [
+            {
+              "file": "iteration_03/race/confirmation_health.json",
+              "modified_utc": "2026-10-24T22:05:26.369719+00:00",
+              "data": {
+                "epoch": 25917,
+                "status": "degraded_no_new_confirmed_candidates",
+                "required_observations": 20,
+                "rounds_completed": 0,
+                "shortlist_candidates": 0,
+                "qualified_candidates": 0,
+                "fresh_confirmed_candidates": 0,
+                "minimum_confirmed_pool": 20
+              }
+            },
+            {
+              "file": "iteration_03/race/confirmation_plan.json",
+              "modified_utc": "2026-10-24T22:05:26.069717+00:00",
+              "data": {
+                "policy": "broad-confirmation-v1",
+                "control_width": 64,
+                "control_schedule": [
+                  [
+                    64,
+                    5
+                  ],
+                  [
+                    41,
+                    5
+                  ],
+                  [
+                    26,
+                    5
+                  ],
+                  [
+                    20,
+                    5
+                  ]
+                ],
+                "schedule": [],
+                "evaluation_cap": 755,
+                "planned_evaluations": 0,
+                "seconds_cap": 736.5749999999998,
+                "planned_seconds": 0,
+                "broadened": true,
+                "epoch": 25917,
+                "rounds": 20,
+                "proof": {
+                  "target": "P20809",
+                  "eligibility_policy": "eligible-refill-v1",
+                  "config_sha256": "96705f33a00e2fa35f249af680303b0bc0ffa7337bf76bdd909430be79f38deb",
+                  "archive_sha256": "c8139cde3e7f9265d73f8fd8a6f8c5d6e4b01bc0e3fe0b4a15a52833bda8ff9d"
+                },
+                "eligible_comparison_candidates": 4646,
+                "proposed_candidates": 0,
+                "gated_candidates": 0,
+                "selected_candidates": 0,
+                "eligibility": {
+                  "policy": "eligible-refill-v1",
+                  "target_candidates": 16,
+                  "proposed_candidates": 0,
+                  "unique_proposed_candidates": 0,
+                  "known_measured_failures_skipped": 0,
+                  "gated_candidates": 0,
+                  "refilled_candidates": 0,
+                  "cached_refill_candidates": 0,
+                  "deadline_limited": true,
+                  "batches": []
+                },
+                "status": "insufficient_time_or_eligible_candidates"
+              }
+            }
+          ]
+        },
+        {
+          "iteration": "iteration_04",
+          "race_json_names": [
+            "complete.json",
+            "confirmation_health.json",
+            "confirmation_plan.json",
+            "screen_candidates.json",
+            "screen_ranking.json"
+          ],
+          "files": [
+            {
+              "file": "iteration_04/race/confirmation_health.json",
+              "modified_utc": "2026-10-24T22:09:51.051496+00:00",
+              "data": {
+                "epoch": 25917,
+                "status": "degraded_no_new_confirmed_candidates",
+                "required_observations": 20,
+                "rounds_completed": 0,
+                "shortlist_candidates": 0,
+                "qualified_candidates": 0,
+                "fresh_confirmed_candidates": 0,
+                "minimum_confirmed_pool": 20
+              }
+            },
+            {
+              "file": "iteration_04/race/confirmation_plan.json",
+              "modified_utc": "2026-10-24T22:09:50.947495+00:00",
+              "data": {
+                "policy": "broad-confirmation-v1",
+                "control_width": 64,
+                "control_schedule": [
+                  [
+                    64,
+                    5
+                  ],
+                  [
+                    41,
+                    5
+                  ],
+                  [
+                    26,
+                    5
+                  ],
+                  [
+                    20,
+                    5
+                  ]
+                ],
+                "schedule": [],
+                "evaluation_cap": 755,
+                "planned_evaluations": 0,
+                "seconds_cap": 736.5749999999998,
+                "planned_seconds": 0,
+                "broadened": true,
+                "epoch": 25917,
+                "rounds": 20,
+                "proof": {
+                  "target": "P20809",
+                  "eligibility_policy": "eligible-refill-v1",
+                  "config_sha256": "96705f33a00e2fa35f249af680303b0bc0ffa7337bf76bdd909430be79f38deb",
+                  "archive_sha256": "c8139cde3e7f9265d73f8fd8a6f8c5d6e4b01bc0e3fe0b4a15a52833bda8ff9d"
+                },
+                "eligible_comparison_candidates": 4646,
+                "proposed_candidates": 0,
+                "gated_candidates": 0,
+                "selected_candidates": 0,
+                "eligibility": {},
+                "status": "insufficient_time_or_eligible_candidates"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cached_scope_evidence": {
+    "25917_initial_precheck_completed_eligible": 81462,
+    "25917_closing_scope_cached_counts": [
+      0,
+      0,
+      0
+    ],
+    "archive_rows_at_initial_novelty": 74574,
+    "archive_rows_at_closing_confirmation": 74622,
+    "archive_added_rows": 48,
+    "recheck_input_count": 219172,
+    "recheck_pending_at_deadline": 40342,
+    "recheck_eligible_at_deadline": 45055,
+    "source_log": "/root/live_producer.log",
+    "source_root": "/root/live/epoch25917/producer"
+  },
+  "gate_budget_reproduction": {
+    "scope": "Offline reproduction using the recorded 25917 timing model and observed fitted widths; synthetic chain positions, no GPU or network work.",
+    "model": {
+      "load_seconds": 4.83,
+      "gpu_seconds_per_candidate": 6.095,
+      "gpus": 8
+    },
+    "uncached_minimum_start_seconds": 90,
+    "cases": [
+      {
+        "remaining_blocks_synthetic": 70,
+        "initial_width": 16,
+        "schedule": [
+          [
+            16,
+            2
+          ],
+          [
+            16,
+            5
+          ],
+          [
+            16,
+            13
+          ]
+        ],
+        "gate_allowance_seconds": 37.6,
+        "gate_calls": 0,
+        "selected": 0,
+        "deadline_limited": true
+      },
+      {
+        "remaining_blocks_synthetic": 92,
+        "initial_width": 80,
+        "schedule": [
+          [
+            80,
+            2
+          ],
+          [
+            40,
+            5
+          ],
+          [
+            20,
+            13
+          ]
+        ],
+        "gate_allowance_seconds": 33.42,
+        "gate_calls": 0,
+        "selected": 0,
+        "deadline_limited": true
+      }
+    ]
+  },
+  "source_hashes": {
+    "nanobody_opt_v2/cached_confirmation.py": "8ebb5007c47f988b8ab54b913fd934b62e318883dc112d0c108d46874c6210e5",
+    "nanobody_opt_v2/confirmation_eligibility.py": "96d6e17c300bc7c5e6fe9d376ca7c2d760d9e3f2146aec31d6d722e35dc55c4d",
+    "nanobody_opt_v2/sequential_exact_race.py": "d52742310258b19cd9ec830ed513a544548a017cd524da3d55af0a4819dce604",
+    "tools/publish_current_nanobody.py": "37fdb0527f45ce58a43ae23edfcf736df7b7528c50ac995b403ffc47214e2b70"
+  },
+  "remaining_corrections": [
+    "Revalidate changed-archive candidates in bounded batches, prioritizing previously competitive measured candidates without accepting stale eligibility.",
+    "Budget actual cold-gate work before fitting repeat breadth; the short cached-only allowance cannot support an uncached batch.",
+    "Exercise the combined archive-update, unavailable-cache, late-confirmation and final committed-fleet path in CI."
+  ],
+  "limitations": [
+    "25917 currently has 10 replay passes per submission versus 30 for 25916.",
+    "25917 rival fleets remain incomplete; do not compare their partial means.",
+    "Offline timing reproduction uses synthetic remaining-block positions matching the observed fitted widths, not a reconstructed historical chain timestamp.",
+    "The active handoff fix begins its first full epoch at 25919 and does not itself repair the newly identified cache-invalidation/gate-budget interaction."
+  ]
+}

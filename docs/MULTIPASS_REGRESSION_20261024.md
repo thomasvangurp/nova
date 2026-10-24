@@ -557,3 +557,58 @@ retained beside it as `handoff_activation_20261024.py`.
 Deployment verification does not establish a new multipass result. Quality
 must be checked against the actual committed fleet and subsequent independent
 replay, rather than a later master artifact or a successful process exit.
+
+### Why 25916 was good and 25917 was poor
+
+Read-only audit at 2026-10-24 23:33 UTC; no runtime settings changed during this
+comparison. The archived Pi inputs and independent replay agree about the
+quality difference:
+
+| Epoch | New evaluations completed | Confirmation rounds | Submitted local mean | Replay mean | Replay passes per entry |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 25916 | 4,800 | 20 | 1,035.26 | 1,036.63 | 30 |
+| 25917 | 4,646 | 0 | 1,822.28 | 1,876.27 | 10 |
+
+Both fleets have thirteen entries. In 25917, seven entries had a local mean
+of 1,185.19 and replayed at 1,282.27. The other six were already locally
+2,563.91–2,566.94 after 41–98 observations and replayed at a mean of 2,569.27.
+Most deterioration was therefore visible before submission. This is not
+evidence that those six unexpectedly collapsed on independent replay.
+
+The 25917 stored-bank precheck first completed with 81,462 eligible candidates.
+The reference archive then changed from 74,574 to 74,622 rows. Eligibility is
+bound to the archive hash, so the previous proof could no longer be accepted.
+All three closing races logged `ready=False cached=0`; their comparison pools
+contained only the 4,646 fresh candidates. A full recheck of 219,172 stored
+candidates subsequently produced partial eligibility too late for those races
+and stopped at the deadline with 40,342 pending. The safe invalidation was
+correct; the failure was allowing revalidation to withhold the usable bank
+throughout confirmation.
+
+The repeat planner compounded that failure. It fits repeat breadth after
+reserving only thirty seconds for the eligibility gate. The uncached gate
+requires sixty seconds plus a thirty-second fallback reserve before starting.
+With no usable cached passes, the fitted plans could therefore allocate zero
+gate calls. The recorded first two closing attempts targeted eighty and
+sixteen seats, attempted zero candidates, and completed zero repeat rounds;
+the third could no longer fit a schedule at all. All reported
+`degraded_no_new_confirmed_candidates`.
+
+An offline reproduction using the recorded timing model and those fitted
+widths produces gate allowances of 33.42 and 37.60 seconds and zero gate calls,
+even when the synthetic gate would accept every input. These are synthetic
+remaining-block positions matching the observed widths, not recovered live
+chain timestamps. The reproduction uses no GPU work or biological inputs.
+
+The shared producer/publisher/Pi deadline fix does not itself repair this
+interaction. The next correction must revalidate changed-archive candidates
+in bounded batches, prioritize useful measured candidates without trusting
+stale eligibility, and reserve actual uncached-gate time before choosing
+repeat breadth. CI must combine archive updates, unavailable cached scope,
+late confirmation and the final submitted fleet. Standalone refill tests with
+an already available cache did not cover this path. The 4,800 NEW cap and the
+submission validity boundary must remain unchanged.
+
+At this snapshot the rival fleets for 25917 are incomplete, so no rival mean
+is used to explain the difference. Evidence and the numerical reproduction:
+`docs/evidence/epoch_25916_25917_confirmation_audit_20261024.json`.
