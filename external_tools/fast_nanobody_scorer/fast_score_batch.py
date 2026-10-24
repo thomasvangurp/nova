@@ -316,6 +316,11 @@ def _worker(args):
         w.subnet_config = subnet_config
         w.unique_sequences = w._deduplicate_nanobodies({0: {"sequences": chunk_seqs}})
 
+        # Every chunk has a newly emptied input directory. Cached model/config
+        # state cannot stand in for the current chunk's design inputs.
+        if synth is None and "cfg_dir" in cached:
+            w._write_yaml_files()
+
         # configure once per worker. The YAML it emits differs between chunks
         # only in paths, and run_batch overrides those at instantiate time. The
         # input YAMLs feed the design stage only, which synthesis replaces.

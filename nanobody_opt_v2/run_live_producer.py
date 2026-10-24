@@ -69,6 +69,20 @@ def _stamp_artifact_policy(path: Path) -> None:
     _artifact_policy_marker(path).write_text(GENERATION_POLICY + "\n")
 
 
+def _assembled_candidates(path: Path) -> bool:
+    try:
+        proof = json.loads(Path(str(path) + ".assembled.json").read_text())
+        return proof == {"policy": GENERATION_POLICY, "sha256": _sha256(path)}
+    except (OSError, ValueError):
+        return False
+
+
+def _finish_candidate_assembly(path: Path) -> None:
+    _stamp_artifact_policy(path)
+    _atomic_json(Path(str(path) + ".assembled.json"),
+                 {"policy": GENERATION_POLICY, "sha256": _sha256(path)})
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -853,7 +867,10 @@ def _run_iteration(
             "--output", str(children_parents),
         ])
     elite_parents = producer_root / "competitor_parents.json"
-    if not elite_parents.is_file() or _artifact_policy_stale(elite_parents):
+    unseen = getattr(args, "only_unseen_candidates", False)
+    stale_unseen = (unseen and elite_parents.is_file() and not
+                    json.loads(elite_parents.read_text()).get("unseen_before_limit"))
+    if not elite_parents.is_file() or _artifact_policy_stale(elite_parents) or stale_unseen:
         # Framework-only singles cannot repair a blocked parent clonotype.
         # Prioritize the measured, freshly gated parent bank rather than raw
         # Algorithm-2 top-50 parents whose children exhaust the cap then fail.
@@ -879,8 +896,17 @@ def _run_iteration(
         ]
         if args.ranker_model.is_file():
             lane_argv += ["--ranker-model", str(args.ranker_model)]
+        if unseen:
+            excluded = iteration_root / "previous_exact_evaluations.csv"
+            excluded.parent.mkdir(parents=True, exist_ok=True)
+            with excluded.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["sequence"])
+                writer.writerows((seq,) for seq in sorted(args.prior_evaluated_sequences))
+            lane_argv += ["--exclude", str(excluded)]
         _run(lane_argv)
         _stamp_artifact_policy(elite_parents)
+        (producer_root / "competitor_parents_layer2.json").unlink(missing_ok=True)
     # This lane contains thousands of proposed single-edit children. Honor
     # shortlist-deferred TNP here too; full TNP remains mandatory in the race
     # shortlist gate and the independent publisher.
@@ -987,7 +1013,11 @@ def _run_iteration(
         flush=True,
     )
     candidates = iteration_root / "candidates.csv"
-    if not candidates.is_file() or _artifact_policy_stale(candidates):
+    if not candidates.is_file() or _artifact_policy_stale(candidates) or not _assembled_candidates(candidates):
+        Path(str(candidates) + ".assembled.json").unlink(missing_ok=True)
+        # A previous interrupted assembly must not leave reusable downstream gates.
+        for name in ("layer2.json", "layer2_dedup.json"):
+            (iteration_root / name).unlink(missing_ok=True)
         # Two pools, each tagged with its source so the race's observations can
         # be attributed per pool: single-edits (competitor lane, exploitation)
         # and multi-edit children (elite parents + neighbourhood, breadth).
@@ -1018,8 +1048,6 @@ def _run_iteration(
                         "basin_core_id": "",
                         "proposal_lane": "",
                     })
-        _stamp_artifact_policy(candidates)
-
         children_candidates = iteration_root / "children_candidates.csv"
         if not children_candidates.is_file() or _artifact_policy_stale(children_candidates):
             command = [
@@ -1194,6 +1222,7 @@ def _run_iteration(
             grafts_novel = grafts.with_name(grafts.stem + ".novel.json")
             _atomic_json(grafts_novel, graft_payload)
             merge_graft_candidates(candidates, grafts_novel)
+        _finish_candidate_assembly(candidates)
     layer2 = iteration_root / "layer2.json"
     if not layer2.is_file() or _artifact_policy_stale(layer2):
         _run([
@@ -1441,7 +1470,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         ])
         if force_confirmation:
             race_command.append("--replication-only")
-    if args.layer2_igblast_only:
+    if args.layer2_igblast_only or getattr(args, "fresh_screen_budget", 0):
         # The pool was screened on IgBLAST alone, so the shortlist must earn
         # full Layer-2 evidence before anything can be published.
         gate = [
@@ -2348,7 +2377,8 @@ def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
         attempted = len(snapshot(producer_root, epoch, budget)["reserved"])
         # Only current-epoch first-screen artifacts count. Prior results and
         # confirmation rounds remain ranking evidence, never budget credit.
-        paths = sorted(producer_root.glob("iteration_*/race/screen/tranche_*/exact_all.json"))
+        from nanobody_opt.exact_checkpoints import exact_paths
+        paths = exact_paths(producer_root, "iteration_*/race/screen/tranche_*")
         screened = len(sequences & set(_observations(paths, target)))
         report = {"epoch": epoch, "target_epoch": until_epoch, "target": target,
                   "budget_policy": "unseen-candidates-v2", "budget": budget,
@@ -2393,6 +2423,9 @@ def _run_complete_screen_pool(args, state) -> str:
     config, archive, target = _prepare_epoch(
         root=args.runtime_root, epoch=epoch, expected_target=source["target"],
         live_subtree=_producer_subtree(args))
+    if source.get("screen_budget_policy") == "unseen-candidates-v2":
+        from nanobody_opt_v2.cached_confirmation import start
+        start(args=args, state=state, archive=archive, config=config, producer_root=root)
     validated = root / "full_scan_pool.json"
     if not validated.is_file():
         novel = _validator_novel_sequences(

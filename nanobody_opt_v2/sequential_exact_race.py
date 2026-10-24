@@ -689,7 +689,8 @@ def _pooled_exact_paths(
     carry = pooled_root / "pooled_roots.json"
     if carry.is_file():
         roots.extend(Path(p) for p in json.loads(carry.read_text())["roots"])
-    for path in sorted({p for root in roots for p in root.glob("iteration_*/race/**/exact_all.json")}):
+    from nanobody_opt.exact_checkpoints import exact_paths
+    for path in sorted({p for root in roots for p in exact_paths(root, "iteration_*/race/**")}):
         resolved = path.resolve()
         if resolved in seen or own in resolved.parents:
             continue
@@ -1117,7 +1118,8 @@ def _append_timing(path: Path, record: dict[str, Any]) -> None:
 
 
 def _exact_paths(root: Path) -> list[Path]:
-    return sorted(root.glob("**/exact_all.json"))
+    from nanobody_opt.exact_checkpoints import exact_paths
+    return exact_paths(root)
 
 
 def _rank_command(
@@ -1136,11 +1138,15 @@ def _rank_command(
     minimum_selection_observations: int | None = None,
     observation_history: Path | None = None,
     only_sequences: Path | None = None,
+    comparison_scope: Path | None = None,
 ) -> list[str]:
     command = [sys.executable, "-m", "nanobody_opt.rank_exact",
-               "--current-exact-candidates-only",
                "--selection-metric-policy", selection_metric_policy,
                "--consensus-ranking-policy", consensus_ranking_policy]
+    if comparison_scope is None:
+        command.append("--current-exact-candidates-only")
+    else:
+        command.extend(["--only-sequences", str(comparison_scope)])
     # NOVA_FULL_ARCHIVE_FIELD switches BOTH the ranking field and the strict
     # qualification gates together, atomically. The two must never be enabled
     # independently: the small-field gates (60/400/300/100/30) reject almost
@@ -2611,13 +2617,24 @@ def main() -> None:
             [], args.pooled_exact_root, args.output_dir
         )
         already_confirmed = set()
+        comparison_scope = None
+        if args.fresh_screen_budget and args.pooled_exact_root is not None:
+            from nanobody_opt.rank_exact import _observations
+            from nanobody_opt_v2.cached_confirmation import write_ranking_scope
+            comparison_scope = write_ranking_scope(
+                root=args.pooled_exact_root / "cached_confirmation", epoch=args.epoch,
+                target=args.target, archive=args.archive, config=args.config,
+                fresh_sequences=set(_observations(pooled_for_ranking, args.target)),
+                output=args.output_dir / "confirmation_scope.txt",
+            )
         if args.maximum_current_epoch_observations:
             from nanobody_opt.rank_exact import _observations
             already_confirmed = {
                 sequence for sequence, observations in _observations(pooled_for_ranking, args.target).items()
                 if len(observations) >= args.maximum_current_epoch_observations
             }
-        if not screen_ranking.is_file() and pooled_for_ranking:
+        if (not screen_ranking.is_file() or comparison_scope is not None) and (
+                pooled_for_ranking or comparison_scope is not None):
             # The closing iteration may screen nothing at all: it opens inside
             # the replication window on purpose.  Rank the epoch's pooled
             # observations so the shortlist is the best of every generation.
@@ -2635,6 +2652,7 @@ def main() -> None:
                     consensus_ranking_policy=args.consensus_ranking_policy,
                     minimum_selection_observations=args.minimum_selection_observations,
                     observation_history=args.mutation_database,
+                    comparison_scope=comparison_scope,
                 ),
                 check=True,
             )
@@ -2650,6 +2668,13 @@ def main() -> None:
                 prior_strength=args.basin_shrinkage_strength,
                 minimum_samples=args.minimum_basin_samples,
             )
+        if comparison_scope is not None:
+            # Complete cached evidence already competes in the publisher. It
+            # must not consume another confirmation tournament merely because
+            # its folds came from an earlier epoch.
+            ranked = json.loads(screen_ranking.read_text()).get("candidates", [])
+            already_confirmed.update(r["sequence"] for r in ranked
+                                     if r.get("observation_count", 0) >= args.minimum_publishable_observations)
         replication_shortlist = _replication_shortlist(
             screen_ranking, exclude=set(repeated_finalists) | already_confirmed, limit=args.finalists
         )

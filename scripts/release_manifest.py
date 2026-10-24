@@ -14,6 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SOURCE_PATHS = (
+    'external_tools/fast_nanobody_scorer/fast_score_batch.py',
+    'external_tools/fast_nanobody_scorer/resident.py',
+    'external_tools/fast_nanobody_scorer/synth_fullatom.py',
     'nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons', 'compound_miner',
     'utils', 'config', 'combinatorial_db/reactions.py', 'tests', 'scripts',
     'deploy', 'ansible', '.github/workflows', 'requirements',

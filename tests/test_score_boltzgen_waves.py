@@ -80,3 +80,36 @@ def test_wave_with_the_upstream_diffusion_sample_count_is_accepted(tmp_path):
     path.write_text(json.dumps(payload))
 
     assert _validated_wave(path, ["AAAA"], "P20809", require_structures=True)
+
+
+def test_later_wave_failure_preserves_completed_evidence_without_finishing_dispatch(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from nanobody_opt import score_boltzgen_waves as waves
+    from nanobody_opt.exact_checkpoints import exact_paths
+    from nanobody_opt_v2.sequential_exact_race import _pooled_exact_paths
+    from tools.publish_current_nanobody import _current_epoch_exact_inputs
+    source = tmp_path / 'candidates.json'
+    source.write_text(json.dumps({'sequences': ['AAAA', 'CCCCC']}))
+    out = tmp_path / 'live/epoch100/producer/iteration_01/race/screen/tranche_01'
+    monkeypatch.setattr(sys, 'argv', ['waves', '--sequences', str(source), '--config', 'unused',
+        '--target', 'P20809', '--output-dir', str(out)])
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 2:
+            raise subprocess.CalledProcessError(1, ['fake-scorer'])
+        Path(command[command.index('--out') + 1]).write_text(json.dumps(_payload()))
+    monkeypatch.setattr(waves.subprocess, 'run', run)
+    with pytest.raises(subprocess.CalledProcessError): waves.main()
+    partial = out / 'exact_partial_000.json'
+    data = json.loads(partial.read_text())
+    assert data['n'] == 1 and data['complete'] is False
+    assert not (out / 'exact_all.json').exists()
+    assert _current_epoch_exact_inputs(tmp_path, 100) == (partial,)
+    assert _pooled_exact_paths([], tmp_path / 'live/epoch100/producer', tmp_path / 'later') == [partial]
+    # Finishing the same run never counts the checkpoint as another pass.
+    complete = out / 'exact_all.json'
+    complete.write_text(json.dumps({**data, 'complete': True}))
+    assert exact_paths(out) == [complete]

@@ -55,4 +55,35 @@ def test_the_scorer_still_matches_its_pinned_digest():
     import hashlib
 
     digest = hashlib.sha256((VENDOR / "fast_score_batch.py").read_bytes()).hexdigest()
-    assert digest == "530f5dcbc54d4a012571f4f9a7ddb6c016552291606652766d02c91643a7d531"
+    assert digest == "b982b2438b549b09d4a1dab169d2aedb531702ce1dfa7be586c0fb64adc5b288"
+
+
+def test_non_synthetic_chunks_rebuild_inputs_after_directory_cleanup(tmp_path):
+    """Execute the actual worker's chunk setup twice, without loading a GPU."""
+    import shutil
+    import types
+    tree = ast.parse((VENDOR / "fast_score_batch.py").read_text())
+    chunk = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "run_chunk")
+    setup = []
+    for statement in chunk.body:
+        setup.append(statement)
+        if isinstance(statement, ast.If) and ast.unparse(statement.test) == "'cfg_dir' not in cached":
+            # Keep its real input write; configuration/model creation is not
+            # needed to exercise directory cleanup and input regeneration.
+            statement.body = statement.body[:1] + ast.parse("cached['cfg_dir'] = 'configured'").body
+            break
+    else:
+        raise AssertionError("worker setup contract changed")
+    chunk.body = setup
+    tree = ast.fix_missing_locations(ast.Module(body=[chunk], type_ignores=[]))
+    class Wrapper:
+        def _deduplicate_nanobodies(self, data): return data[0]['sequences']
+        def _write_yaml_files(self):
+            for sequence in self.unique_sequences:
+                (Path(self.input_dir) / (sequence + '.yaml')).write_text(sequence)
+    namespace = dict(Path=Path, shutil=shutil, bw=types.SimpleNamespace(BoltzgenWrapper=Wrapper),
+                     cached={}, synth=None, subnet_config={})
+    exec(compile(tree, '<chunk-setup-test>', 'exec'), namespace)
+    for sequence in ['FIRST', 'SECOND', 'THIRD']:
+        namespace['run_chunk'](tmp_path / 'chunk', [sequence])
+        assert [p.read_text() for p in (tmp_path / 'chunk/inputs').glob('*.yaml')] == [sequence]

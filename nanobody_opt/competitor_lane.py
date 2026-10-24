@@ -12,6 +12,7 @@ at the top-15, so it is stable and safe to pin rather than re-learn each epoch.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -375,7 +376,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
              min_passes: int = 10,
              epoch: int | None = None,
              elite_history_scores: dict[str, float] | None = None,
-             priority_scores: dict[str, float] | None = None) -> dict[str, Any]:
+             priority_scores: dict[str, float] | None = None,
+             excluded_sequences: set[str] | None = None) -> dict[str, Any]:
     # Parent source: the BROAD public archive (any miner, any rank, any score),
     # rank-blind. Codex-corrected: no rival restriction and no top-50 parent
     # exclusion -- validity is enforced at the CHILD level by
@@ -488,6 +490,11 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     # single-edits by predicted improvement (best edit per parent first) so
     # --limit keeps the strongest edit of each parent, in parent-merit order.
     items = priority_items + broad_items
+    excluded_count = 0
+    if excluded_sequences is not None:
+        before = len(items)
+        items = [item for item in items if item["sequence"] not in excluded_sequences]
+        excluded_count = before - len(items)
     ranker_applied = False
     if ranker_model is not None:
         import pandas as pd
@@ -505,6 +512,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         items = items[:limit]
     return {
         "source": "competitor_position_lane",
+        "unseen_before_limit": excluded_sequences is not None,
+        "previously_evaluated_excluded": excluded_count,
         "positions": positions,
         "multipass_required": mutation_database is not None,
         "multipass_ranked_pool": multipass_ranked,
@@ -521,6 +530,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--exclude", type=Path, default=None,
+                        help="CSV of already evaluated sequences, excluded before the proposal cap")
     parser.add_argument("--positions", default=",".join(map(str, HOT_POSITIONS)),
                         help="comma-separated 1-indexed positions (default: measured hot set)")
     parser.add_argument("--limit", type=int, default=None,
@@ -599,6 +610,10 @@ def main() -> None:
             args.mutation_database, before_epoch=epoch,
             min_passes=max(args.elite_history_min_passes, args.min_passes),
             limit=args.elite_history_limit)
+    excluded_sequences = None
+    if args.exclude is not None:
+        with args.exclude.open(newline="") as handle:
+            excluded_sequences = {row["sequence"].strip().upper() for row in csv.DictReader(handle)}
     payload = generate(args.archive, positions, args.limit, pool_limit=args.pool_limit,
                        top50=top50, top50_cdr3s=top50_cdr3s,
                        min_parent_distance=args.min_parent_distance,
@@ -609,7 +624,7 @@ def main() -> None:
                        min_passes=args.min_passes,
                        epoch=epoch,
                        elite_history_scores=elite_history_scores,
-                       priority_scores=priority_scores)
+                       priority_scores=priority_scores, excluded_sequences=excluded_sequences)
     if args.mutation_database is not None and payload["pool_size"] == 0:
         raise SystemExit(
             f"--mutation-database given but zero parents have >= "

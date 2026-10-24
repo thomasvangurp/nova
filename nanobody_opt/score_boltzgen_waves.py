@@ -238,6 +238,12 @@ def main() -> None:
         observation_id = str(json.loads(manifest_path.read_text())["observation_id"])
     else:
         observation_id = str(uuid.uuid4())
+        _atomic_json(manifest_path, {
+            "observation_id": observation_id, "target": args.target,
+            "source": str(args.sequences), "source_sha256": _sha256(args.sequences),
+            "candidate_count": len(sequences), "completed_count": 0,
+            "completed_waves": [],
+        })
     completed = []
     all_components: dict[str, dict] = {}
     all_structures: dict[str, dict] = {}
@@ -314,6 +320,16 @@ def main() -> None:
                 "sha256": _sha256(wave_output),
             }
         )
+        # A later length group may fail or hit the epoch deadline. Preserve
+        # completed observations for ranking/ingestion without marking this
+        # whole dispatch complete. The final aggregate uses the same run ID.
+        _atomic_json(args.output_dir / f"exact_partial_{wave_index:03d}.json", {
+            "target": args.target, "scorer_protocol": SCORER_PROTOCOL,
+            "observation_id": observation_id, "n": len(all_components),
+            "wave_count": len(completed), "complete": False,
+            "per_nanobody_components": {"0": all_components},
+            "structures": all_structures,
+        })
         _atomic_json(
             manifest_path,
             {

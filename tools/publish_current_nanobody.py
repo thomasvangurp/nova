@@ -531,7 +531,8 @@ def _current_epoch_exact_inputs(
     root = score_bank_root / "live" / f"epoch{epoch}"
     if not root.is_dir():
         return ()
-    return tuple(sorted(root.glob("**/exact_all.json")))
+    from nanobody_opt.exact_checkpoints import exact_paths
+    return tuple(exact_paths(root))
 
 
 def _previous_confirmed_pool(epoch_root: Path, target: str) -> tuple[set[str], tuple[Path, ...]]:
@@ -1185,6 +1186,8 @@ def _prechecked_comparison_scope(
     *, args: argparse.Namespace, epoch_root: Path, target: str,
     database: Path, archive: Path, config: Path, exclusion: Path,
     pixi_manifest: Path, ready_artifact: bool = True,
+    minimum_observations: int | None = None, cheap_only: bool = False,
+    epoch: int | None = None, runner=None,
 ) -> Path:
     """Apply current gates to stored AND newly confirmed candidates before ranking.
 
@@ -1192,7 +1195,9 @@ def _prechecked_comparison_scope(
     valid only for this epoch, target, archive, config and gate implementation.
     No exact scorer is invoked and no discovery-budget reservation is made.
     """
-    minimum = int(publication_gates.gate_defaults()["--minimum-observations"])
+    minimum = (int(publication_gates.gate_defaults()["--minimum-observations"])
+               if minimum_observations is None else minimum_observations)
+    run = runner or _run
     candidates = _stored_comparison_sequences(database, target, minimum)
     with archive.open(newline="") as handle:
         historical = {str(row.get("sequence") or "").strip().upper()
@@ -1202,12 +1207,15 @@ def _prechecked_comparison_scope(
     proof_key = {
         "schema_version": PUBLISHER_STATE_SCHEMA_VERSION,
         "policy": "incremental-layer2-v1",
-        "epoch": int(epoch_root.name.removeprefix("epoch")), "target": target,
+        "epoch": int(epoch_root.name.removeprefix("epoch")) if epoch is None else epoch,
+        "target": target,
         "archive": _file_digest(archive), "config": _file_digest(config),
         "gates": {name: _file_digest(args.nanobody_opt_root / name) for name in (
             "check_validator_novelty.py", "filter_layer2.py",
         )},
     }
+    if cheap_only:
+        proof_key.update(confirmation_only=True, minimum_observations=minimum)
     proof_path = epoch_root / "comparison_precheck.json"
     proof = _read_json(proof_path) or {}
     if proof.get("key") != proof_key:
@@ -1233,7 +1241,7 @@ def _prechecked_comparison_scope(
         novelty = epoch_root / "comparison_precheck_novelty.json"
         _atomic_json(inputs, {"target": target, "sequences": sorted(pending)})
         novelty.unlink(missing_ok=True)
-        _run(_novelty_command(
+        run(_novelty_command(
             pixi_manifest=pixi_manifest, rankings=inputs, archive=archive,
             target=target, output=novelty, pixi=args.pixi,
         ) + ["--summary-only"])
@@ -1252,12 +1260,13 @@ def _prechecked_comparison_scope(
     from nanobody_opt.filter_layer2 import _developability_cache_digest, _measured_developability
     waiting = (candidates & novel) - checked
     cached = set()
-    for sequence in waiting:
+    for sequence in (() if cheap_only else waiting):
         measurement = _read_json(args.layer2_cache_dir / (_developability_cache_digest(sequence) + ".json"))
         if (measurement and measurement.get("sequence") == sequence
                 and _measured_developability(measurement.get("developability"))):
             cached.add(sequence)
-    batch = cached or set(sorted(waiting)[:32])
+    batch = (set(sorted(waiting)[:2048]) if cheap_only
+             else cached or set(sorted(waiting)[:32]))
     if not ready_artifact and candidates & allowed:
         # After a restart or interrupted publish, deliver the proven fleet
         # before starting any further cold work. Resume the backlog next cycle.
@@ -1267,12 +1276,14 @@ def _prechecked_comparison_scope(
         layer2 = epoch_root / "comparison_precheck_layer2.json"
         _atomic_json(layer2_input, {"target": target, "sequences": sorted(batch)})
         layer2.unlink(missing_ok=True)
-        _run(_layer2_command(
+        run(_layer2_command(
             pixi_manifest=pixi_manifest, rankings=layer2_input, config=config,
             output=layer2, concurrency=args.layer2_concurrency,
             cache_dir=args.layer2_cache_dir, pixi=args.pixi,
-        ))
-        passed = _current_layer2_passes(layer2)
+        ) + (["--igblast-only"] if cheap_only else []))
+        passed = ({r["sequence"] for r in json.loads(layer2.read_text()).get("candidates", [])
+                   if r.get("igblast_passed") is True}
+                  if cheap_only else _current_layer2_passes(layer2))
         if json.loads(layer2.read_text()).get("input_count") != len(batch) or not passed <= batch:
             raise RuntimeError("comparison Layer-2 proof does not cover its input")
         checked.update(batch)
@@ -1283,7 +1294,7 @@ def _prechecked_comparison_scope(
     output.write_text("".join(s + "\n" for s in sorted(eligible)))
     print(f"COMPARISON_PRECHECK candidates={len(candidates)} new_checks={len(pending)} "
           f"eligible={len(eligible)} pending_checks={len(candidates - checked)}", flush=True)
-    if not eligible:
+    if not eligible and not cheap_only:
         raise RuntimeError("no comparison candidate passes current pre-checks")
     return output
 
