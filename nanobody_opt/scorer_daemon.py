@@ -64,6 +64,54 @@ SOCKET_PATH = os.environ.get("NANOBODY_SCORER_SOCKET",
 #: cannot block a producer forever, so it belongs well above any real round.
 REQUEST_TIMEOUT = float(os.environ.get("NANOBODY_SCORER_TIMEOUT", "3600"))
 
+#: Resident worker processes per GPU. One worker folds one shard at a time, so a GPU idles through
+#: that worker's host-side stages (setup, featurisation, hand-off). With several workers per GPU
+#: one worker's host-side stage overlaps another's GPU stage. 1 keeps the old behaviour exactly.
+WORKERS_PER_GPU_FILE = os.environ.get("NANOBODY_SCORER_WORKERS_FILE",
+                                      "/root/artifacts/scorer_workers_per_gpu")
+#: A job only gets the extra workers when it has at least this many sequences per worker, so
+#: small rounds (a shortlist of a few dozen) keep their single-worker layout unchanged.
+MIN_SEQUENCES_PER_WORKER = 4
+
+
+def workers_per_gpu() -> int:
+    """Operator setting, re-read every round so it changes without a restart.
+
+    The environment wins, then the one-line file, then 1. Anything unreadable or non-numeric
+    means 1: the old single-worker behaviour.
+    """
+    raw = os.environ.get("NANOBODY_SCORER_WORKERS_PER_GPU")
+    if raw is None:
+        try:
+            with open(WORKERS_PER_GPU_FILE) as handle:
+                raw = handle.read().strip()
+        except OSError:
+            return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _worker_key(gpu, slot: int) -> str:
+    """Registry key of the `slot`-th worker on `gpu`; slot 0 keeps the bare GPU id."""
+    return str(gpu) if slot == 0 else "%s#%d" % (gpu, slot)
+
+
+def effective_shards_per_gpu(requested: int, sequences: int, gpus: int) -> int:
+    """Shards per GPU to use for a job that asked for `requested`.
+
+    A caller that already asks for several shards per GPU keeps its choice (those shards now run
+    on separate workers). A caller that asks for one -- the screening tranche -- is widened to the
+    worker count, but only when the job is large enough to give every worker real work.
+    """
+    workers = workers_per_gpu()
+    if requested != 1 or workers <= 1:
+        return requested
+    if sequences < MIN_SEQUENCES_PER_WORKER * workers * max(1, gpus):
+        return requested
+    return workers
+
 
 def _send(sock, payload: dict) -> None:
     body = json.dumps(payload).encode()
@@ -126,6 +174,15 @@ def score(job: dict, path: str | None = None,
 
 # --- shard workers ----------------------------------------------------------
 
+def _client_disconnected(conn) -> bool:
+    import select
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+        return bool(ready) and not conn.recv(1, socket.MSG_PEEK)
+    except OSError:
+        return True
+
+
 class ShardWorker:
     """One persistent process pinned to one GPU.
 
@@ -139,9 +196,11 @@ class ShardWorker:
     threads -- 2.6x SLOWER, because the shards serialised onto one GPU.
     """
 
-    def __init__(self, gpu: str, scorer_path: str, python: str | None = None):
+    def __init__(self, gpu: str, scorer_path: str, python: str | None = None,
+                 slot: int = 0):
         import subprocess
         self.gpu = str(gpu)
+        self.slot = int(slot)
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = self.gpu   # pinned once, privately
         self.proc = subprocess.Popen(
@@ -152,11 +211,16 @@ class ShardWorker:
             # with it and the parent sees only an empty read.
             stderr=open(os.path.join(
                 os.environ.get("NANOBODY_WORKER_LOG_DIR", "/tmp"),
-                "shard_worker_gpu%s.log" % self.gpu), "w"),
-            env=env, text=True, bufsize=1)
+                "shard_worker_gpu%s.log" % self.gpu if self.slot == 0
+                else "shard_worker_gpu%s_s%d.log" % (self.gpu, self.slot)), "w"),
+            env=env, text=True, bufsize=1, start_new_session=True)
         #: Serialises request/reply on this worker's pipe.
         self._pipe = threading.Lock()
-        line = self.proc.stdout.readline()
+        try:
+            line = self._read_reply(120)
+        except Exception:
+            self.close()
+            raise
         try:
             hello = json.loads(line)
         except Exception:
@@ -168,7 +232,33 @@ class ShardWorker:
     def alive(self) -> bool:
         return self.proc.poll() is None
 
-    def run(self, args: list, target: str | None = None) -> dict:
+    def _read_reply(self, timeout: float, cancelled=None) -> str:
+        """Bound waits even when a dead worker's child retains its pipe.
+
+        A blocking readline cannot notice worker death or client cancellation.
+        Read bytes only when available, and check both between partial replies.
+        """
+        import select
+        deadline = time.monotonic() + timeout
+        data = bytearray()
+        while True:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("scoring client disconnected; cancelling shard")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("shard worker reply deadline exceeded")
+            ready, _, _ = select.select([self.proc.stdout], [], [], min(0.25, remaining))
+            if ready:
+                chunk = os.read(self.proc.stdout.fileno(), 65536)
+                if not chunk:
+                    raise RuntimeError("shard worker closed its reply pipe")
+                data.extend(chunk)
+                if b"\n" in data:
+                    return bytes(data).split(b"\n", 1)[0].decode()
+            if self.proc.poll() is not None:
+                raise RuntimeError("shard worker exited before completing its reply")
+
+    def run(self, args: list, target: str | None = None, cancelled=None) -> dict:
         """One request at a time down this worker's pipe.
 
         `shards_per_gpu > 1` puts two shards on one device, and dispatch
@@ -182,22 +272,28 @@ class ShardWorker:
         with self._pipe:
             if not self.alive():
                 raise RuntimeError("shard worker on gpu %s is dead" % self.gpu)
-            self.proc.stdin.write(
-                json.dumps({"args": args, "target": target}) + "\n")
-            self.proc.stdin.flush()
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("shard worker on gpu %s closed" % self.gpu)
-            return json.loads(line)
+            try:
+                self.proc.stdin.write(
+                    json.dumps({"args": args, "target": target}) + "\n")
+                self.proc.stdin.flush()
+                return json.loads(self._read_reply(900, cancelled))
+            except Exception:
+                self.close()
+                raise
 
     def close(self) -> None:
+        import signal
         try:
             if self.alive():
                 self.proc.stdin.close()
-                self.proc.wait(timeout=10)
+                self.proc.wait(timeout=2)
         except Exception:
-            try: self.proc.kill()
-            except Exception: pass
+            pass  # Always clean the isolated process group, including orphans.
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.proc.wait(timeout=2)
 
 
 def _install_chunk_reuse(module) -> dict:
@@ -403,7 +499,7 @@ def shard_worker_main(scorer_path: str) -> int:
             args[3] = flattened_config(module, args[3], request.get("target"))
             worker(tuple(args))
             reply({"ok": True})
-        except Exception as error:
+        except (Exception, SystemExit) as error:
             import traceback as _tb
             reply({"ok": False,
                    "error": "%s: %s" % (type(error).__name__, error),
@@ -468,21 +564,42 @@ class Daemon:
         self._worker = module._worker
         self._workers = {}
 
-    def start_workers(self, gpus, python=None) -> dict:
-        """One pinned process per GPU, each importing and building once.
+    def start_workers(self, gpus, python=None, slots: int = 1) -> dict:
+        """`slots` pinned processes per GPU (default one), each importing and building once.
 
         Guarded: rounds now run concurrently on disjoint devices, so two of
         them can reach this at the same moment. Unguarded, both would see no
         worker for a GPU and each spawn one, and the loser would be dropped
         from the dict still holding its share of device memory.
         """
+        import concurrent.futures
         with self._registry_lock:
+            missing = []
             for gpu in gpus:
                 gpu = str(gpu)
-                existing = self._workers.get(gpu)
-                if existing is not None and existing.alive():
-                    continue
-                self._workers[gpu] = ShardWorker(gpu, self.scorer_path, python)
+                for slot in range(max(1, int(slots))):
+                    existing = self._workers.get(_worker_key(gpu, slot))
+                    if existing is not None and existing.alive():
+                        continue
+                    missing.append((gpu, slot))
+            if missing:
+                # Each worker blocks on its own import/build handshake; start them together so a
+                # cold start costs one build, not N.
+                failure = None
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(missing)) as pool:
+                    pending = [(gpu, slot, pool.submit(
+                        ShardWorker, gpu, self.scorer_path, python, slot))
+                        for gpu, slot in missing]
+                    for gpu, slot, future in pending:
+                        try:
+                            # Register every worker that did start, so a failed sibling never
+                            # leaves one running and untracked.
+                            self._workers[_worker_key(gpu, slot)] = future.result()
+                        except Exception as error:   # noqa: BLE001
+                            failure = failure or error
+                if failure is not None:
+                    raise failure
             return {"workers": sorted(self._workers)}
 
     def _locks_for(self, gpus):
@@ -509,27 +626,35 @@ class Daemon:
             buckets[index % count].append(seq)
         return buckets
 
-    def _merge(self, shard_paths, expected, out_path, job):
+    def _merge(self, work, expected, out_path, job):
         """Merge at the SEQUENCE level and refuse a partial result.
 
         Every shard writes uid 0, so a plain dict.update() drops whole shards
-        -- this mirrors the scorer's own merge, including its refusal.
+        -- this mirrors the scorer's own merge, including its refusal. When the
+        refusal fires it now names WHICH shard(s) came back short, so a lost
+        sequence is a diagnosis instead of a bare count mismatch.
         """
         import json as _json
         merged: dict = {}
         structures: dict = {}
-        for path in shard_paths:
-            if not os.path.exists(path):
-                raise RuntimeError("shard did not write %s" % path)
-            data = _json.load(open(path))
+        short = []
+        for index, gpu, bucket, out in work:
+            if not os.path.exists(out):
+                raise RuntimeError("shard did not write %s" % out)
+            data = _json.load(open(out))
+            got = sum(len(v) for v in data.get("components", {}).values())
+            if got < len(bucket):
+                short.append("shard %d produced %d/%d"
+                             % (index, got, len(bucket)))
             for uid, by_seq in data["components"].items():
                 merged.setdefault(uid, {}).update(by_seq)
             structures.update(data.get("structures") or {})
         produced = sum(len(v) for v in merged.values())
         if produced != expected:
+            detail = "; ".join(short) if short else "no individual shard identified"
             raise RuntimeError(
-                "MERGE LOST SEQUENCES: submitted %d, merged %d"
-                % (expected, produced))
+                "MERGE LOST SEQUENCES: submitted %d, merged %d. Short shards: %s"
+                % (expected, produced, detail))
         # The live producer always passes --require-structures. The scorer
         # refuses a result the pipeline would reject; without the same
         # refusal the daemon writes a wave that _validated_wave throws out
@@ -565,7 +690,73 @@ class Daemon:
                         "structures": structures},
                        handle, indent=2, default=str)
 
-    def handle(self, job: dict) -> dict:
+    @staticmethod
+    def _shard_args(index, gpu, bucket, out, job, root):
+        """The scorer _worker's positional args for one shard.
+
+        Single source of truth for both the first dispatch and the retry, so
+        the two can never hand the pinned worker different arguments.
+        """
+        return [index, gpu, bucket, job["subnet_config"], out,
+                job["batch_size"], job.get("keep_work_dir", False),
+                root, job.get("fold_matmul", "high"),
+                job.get("fold_steps", 50), job.get("fold_samples"),
+                job.get("design_steps", 100),
+                job.get("synth_reference"), job.get("synth_library"),
+                job.get("structure_dir"), job["observation_id"]]
+
+    def _rerun_short_shards(self, work, job, root, gpus, slots, cancelled=None) -> None:
+        """Re-run once every shard that came back short.
+
+        A shard worker replies "ok" while its out file holds fewer components
+        than its bucket: the pinned scorer's collection can return EMPTY
+        WITHOUT raising, so the protocol sees success and only the file shows
+        the loss. Re-running only the short shards (overwriting their out
+        files) turns one transient GPU hiccup into ~one shard re-fold instead
+        of a whole-epoch abort; _merge's count guard remains the last line of
+        defense. Idempotent: same bucket, same paths, and _merge reads each
+        file once, so nothing is double-counted.
+        """
+        import json as _json
+
+        def produced(out):
+            try:
+                with open(out) as handle:
+                    data = _json.load(handle)
+                return sum(len(v) for v in data.get("components", {}).values())
+            except Exception:
+                return 0
+
+        short = [(index, gpu, bucket, out)
+                 for index, gpu, bucket, out in work
+                 if produced(out) < len(bucket)]
+        if not short:
+            return
+        import sys as _sys
+        print("RETRY_SHORT_SHARDS " + "; ".join(
+            "shard %d produced %d/%d" % (index, produced(out), len(bucket))
+            for index, gpu, bucket, out in short), file=_sys.stderr, flush=True)
+        for index, gpu, bucket, out in short:
+            worker = self._workers.get(
+                _worker_key(gpu, (index // len(gpus)) % slots))
+            if worker is None:
+                print("RETRY_SHARD_FAILED shard %d: no worker for gpu %s"
+                      % (index, gpu), file=_sys.stderr, flush=True)
+                continue
+            try:
+                reply = worker.run(
+                    self._shard_args(index, gpu, bucket, out, job, root),
+                    job["target"], cancelled)
+                if not reply.get("ok"):
+                    print("RETRY_SHARD_FAILED shard %d: %s"
+                          % (index, reply.get("error")),
+                          file=_sys.stderr, flush=True)
+            except Exception as error:
+                print("RETRY_SHARD_FAILED shard %d: %s: %s"
+                      % (index, type(error).__name__, error),
+                      file=_sys.stderr, flush=True)
+
+    def handle(self, job: dict, cancelled=None) -> dict:
         # Dispatch needs pinned WORKERS, not an in-process _worker. Guarding
         # on the latter was left over from the thread design, which is the
         # thing that made shards serialise onto one GPU.
@@ -581,19 +772,30 @@ class Daemon:
         import concurrent.futures
 
         gpus = [g for g in str(job["gpus"]).split(",") if g]
-        shards_per_gpu = int(job.get("shards_per_gpu", 1))
+        requested_shards = int(job.get("shards_per_gpu", 1))
         sequences = job["sequences"]
+        shards_per_gpu = effective_shards_per_gpu(requested_shards, len(sequences), len(gpus))
+        if shards_per_gpu != requested_shards:
+            import sys as _sys
+            print("WORKERS_PER_GPU_APPLIED shards_per_gpu=%d->%d sequences=%d gpus=%d"
+                  % (requested_shards, shards_per_gpu, len(sequences), len(gpus)),
+                  file=_sys.stderr, flush=True)
         buckets = self._shard(sequences, gpus, shards_per_gpu)
         root = job["shard_root"]
         os.makedirs(root, exist_ok=True)
         # Start or replace any worker this round needs. A dead worker is
         # replaced rather than reused.
-        self.start_workers(gpus, job.get("python"))
+        # Workers per device are capped by what the round can use AND by the operator's setting;
+        # with the default of 1 every shard of a device queues on its single worker, as before.
+        slots = max(1, min(workers_per_gpu(), shards_per_gpu))
+        self.start_workers(gpus, job.get("python"), slots)
 
         import contextlib
         with contextlib.ExitStack() as stack:
             for lock in self._locks_for(gpus):
                 stack.enter_context(lock)
+            if cancelled is not None and cancelled():
+                raise RuntimeError("scoring client disconnected before dispatch")
             started = time.time()
             work = []
             for index, bucket in enumerate(buckets):
@@ -608,20 +810,17 @@ class Daemon:
                     max_workers=max(1, len(work))) as pool:
                 futures = {}
                 for index, gpu, bucket, out in work:
-                    args = [index, gpu, bucket, job["subnet_config"], out,
-                            job["batch_size"], job.get("keep_work_dir", False),
-                            root, job.get("fold_matmul", "high"),
-                            job.get("fold_steps", 50), job.get("fold_samples"),
-                            job.get("design_steps", 100),
-                            job.get("synth_reference"), job.get("synth_library"),
-                            job.get("structure_dir"), job["observation_id"]]
-                    worker = self._workers.get(gpu)
+                    args = self._shard_args(index, gpu, bucket, out, job, root)
+                    # Shard `index` sits on gpus[index % len(gpus)]; its position among that
+                    # device's shards picks the worker.
+                    worker = self._workers.get(
+                        _worker_key(gpu, (index // len(gpus)) % slots))
                     if worker is None:
                         errors.append("shard %d: no worker for gpu %s" % (index, gpu))
                         continue
                     # The thread only blocks on a pipe; the work happens in
                     # the pinned process on the other end.
-                    futures[pool.submit(worker.run, args, job["target"])] = (index, out)
+                    futures[pool.submit(worker.run, args, job["target"], cancelled)] = (index, out)
                 for future in concurrent.futures.as_completed(futures):
                     index, _out = futures[future]
                     try:
@@ -633,10 +832,13 @@ class Daemon:
                                       % (index, type(error).__name__, error))
             if errors:
                 raise RuntimeError("; ".join(errors))
+            # Re-run any shard that came back short before the merge guard is
+            # allowed to abort: one transient GPU hiccup costs ~one shard
+            # re-fold, not a whole epoch.
+            self._rerun_short_shards(work, job, root, gpus, slots, cancelled)
             wall = time.time() - started
             job["_wall"] = round(wall, 2)
-            self._merge([out for _i, _g, _b, out in work], len(sequences),
-                        job["out_path"], job)
+            self._merge(work, len(sequences), job["out_path"], job)
             return {"ok": True, "seconds": round(wall, 2),
                     "shards": len(work), "gpus": len(gpus),
                     "out_path": job["out_path"]}
@@ -688,7 +890,7 @@ class Daemon:
                     _send(conn, self.stats())
                 elif op == "score":
                     try:
-                        reply = self.handle(request["job"])
+                        reply = self.handle(request["job"], lambda: _client_disconnected(conn))
                         self.served += 1
                     except Exception as error:
                         self.failed += 1

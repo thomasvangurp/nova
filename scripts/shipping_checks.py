@@ -20,6 +20,8 @@ TEST_FILES = (
     'tests/test_deferred_tnp_pipeline.py',
     'tests/test_nanobody_waves.py',
     'tests/test_score_boltzgen_waves.py',
+    'tests/test_score_boltzgen_fast_adapter.py',
+    'tests/test_scorer_daemon.py',
     'tests/test_developability_hoist_regressions.py',
     'tests/test_competitor_position_lane.py',
     'tests/test_slot_value_pricing.py',

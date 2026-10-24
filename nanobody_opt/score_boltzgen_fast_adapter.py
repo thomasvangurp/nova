@@ -135,19 +135,24 @@ def build_command(
     if args.require_structures:
         command.append("--require-structures")
 
-    reference = settings.get("synth_reference")
-    if not reference:
-        raise SystemExit(
-            "fast scorer config lacks synth_reference; refusing to fall back "
-            "to the slow diffusion design stage"
-        )
     lengths = _sequence_lengths(Path(args.sequences))
     if len(lengths) != 1:
         raise SystemExit(
             f"fast scorer wave has mixed candidate lengths {sorted(lengths)}; "
-            "refusing to fall back to the slow diffusion design stage"
+            "partition the admitted candidates by length before dispatch"
         )
-    command.extend(["--synth-reference", str(reference)])
+    length = next(iter(lengths))
+    # A single-length wave still cannot use a reference of ANOTHER length.
+    # Reference registrations are validated at installation; an unregistered
+    # length uses the pinned scorer's ordinary design stage instead of killing
+    # every resident worker with SystemExit inside synthesis.
+    references = settings.get("synth_references") or {}
+    reference = references.get(f"{args.target}:{length}")
+    if (not reference and settings.get("synth_reference_length") == length
+            and settings.get("synth_reference_target") == args.target):
+        reference = settings.get("synth_reference")
+    if reference:
+        command.extend(["--synth-reference", str(reference)])
     for key, flag in (
         ("fold_sampling_steps", "--fold-sampling-steps"),
         ("fold_diffusion_samples", "--fold-diffusion-samples"),
@@ -191,6 +196,10 @@ def main() -> None:
         settings.get("scorer_sha256"),
     )
     command = build_command(args, settings)
+    if "--synth-reference" not in command:
+        print("FAST_SCORER_DESIGN_FALLBACK no registered reference for "
+              f"target={args.target} lengths={sorted(_sequence_lengths(args.sequences))}",
+              flush=True)
 
     # A warm daemon holds the BoltzGen import, the template library and the
     # analysis pool across waves, so the ~33 s of fixed setup in the measured

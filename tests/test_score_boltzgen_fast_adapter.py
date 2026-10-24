@@ -55,15 +55,39 @@ def test_structures_are_not_requested_when_the_contract_omits_them(tmp_path):
 
 
 def test_grafting_reference_is_used_only_for_one_candidate_length(tmp_path):
-    settings = {"synth_reference": "/ref/design.cif"}
+    settings = {"synth_reference": "/ref/design.cif",
+                "synth_reference_length": 4, "synth_reference_target": "P20809"}
 
     same = adapter.build_command(_args(tmp_path), settings)
     assert same[same.index("--synth-reference") + 1] == "/ref/design.cif"
 
     mixed = tmp_path / "mixed.json"
     mixed.write_text(json.dumps({"sequences": ["AAAA", "BBB"]}))
-    command = adapter.build_command(_args(tmp_path, sequences=mixed), settings)
+    with pytest.raises(SystemExit, match="mixed candidate lengths"):
+        adapter.build_command(_args(tmp_path, sequences=mixed), settings)
+
+
+def test_reference_registry_selects_target_and_length(tmp_path):
+    settings = {"synth_reference": "/wrong-length.cif",
+                "synth_reference_length": 127, "synth_reference_target": "P20809",
+                "synth_references": {"P20809:4": "/correct.cif", "OTHER:4": "/wrong-target.cif"}}
+    command = adapter.build_command(_args(tmp_path), settings)
+    assert command[command.index("--synth-reference") + 1] == "/correct.cif"
+
+
+@pytest.mark.parametrize("settings", [
+    {"synth_reference": "/unregistered.cif"},
+    {"synth_reference": "/wrong-length.cif", "synth_reference_length": 127,
+     "synth_reference_target": "P20809"},
+    {"synth_reference": "/wrong-target.cif", "synth_reference_length": 4,
+     "synth_reference_target": "OTHER"},
+])
+def test_unregistered_reference_uses_standard_design_without_changing_fold_settings(tmp_path, settings):
+    command = adapter.build_command(_args(tmp_path), {**settings,
+        "fold_sampling_steps": 50, "fold_diffusion_samples": 5})
     assert "--synth-reference" not in command
+    assert command[command.index("--fold-sampling-steps") + 1] == "50"
+    assert command[command.index("--fold-diffusion-samples") + 1] == "5"
 
 
 def test_tuning_knobs_come_from_box_settings(tmp_path):

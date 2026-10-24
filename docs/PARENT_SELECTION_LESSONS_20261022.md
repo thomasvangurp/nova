@@ -340,3 +340,23 @@ now includes the actual wave runner and its validation suites, plus mixed-length
 execution and interruption/resume regressions that invoke the adapter's real
 shape check. End-to-end verification must exercise production input shapes;
 a small homogeneous diagnostic is insufficient evidence of production recovery.
+
+Splitting lengths alone was insufficient: all four installed reference designs
+were length 127, while 4,313 of the 4,800 admitted entries were length 125.
+Synthesis raised SystemExit for a same-length reference mismatch, killing all
+24 resident workers. Memory-event counters showed no OOM or OOM kill. A real
+125-residue reference was generated with the pinned standard pipeline using an
+already published candidate; that diagnostic completed with the required
+structure and scoring protocol. Reference selection is now explicit by target
+and length. Unregistered lengths use the pinned standard design stage, with
+unchanged folding settings and a visible fallback event, instead of crashing
+workers. Reference registration must validate chain length and target identity.
+
+The daemon now reports scorer SystemExit as a failed request and remains
+available. Reply reads check process liveness, partial-reply deadlines and
+client disconnection instead of relying on blocking readline. Each worker owns
+an isolated process group; failure/cancellation closes that group so abandoned
+work releases GPU locks when the epoch runner terminates its client. Real-process
+CI covers a dead parent whose child holds the pipe open, a partial reply,
+disconnection and SystemExit. The previously deployed three-workers-per-GPU,
+parallel startup and short-shard retry changes are retained in source control.

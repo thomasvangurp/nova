@@ -84,3 +84,98 @@ def test_job_from_command_drops_empty_items(tmp_path: Path) -> None:
     path.write_text(json.dumps({"sequences": [{"sequence": "AAAA"}, ""]}))
     job = sd.job_from_command(_command(path))
     assert job["sequences"] == ["AAAA"]
+
+
+def _real_worker(code):
+    import subprocess
+    import sys
+    import threading
+    worker = sd.ShardWorker.__new__(sd.ShardWorker)
+    worker.gpu = "test"
+    worker._pipe = threading.Lock()
+    worker.proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        start_new_session=True,
+    )
+    return worker
+
+
+def test_dead_worker_cannot_hide_behind_child_holding_reply_pipe():
+    import time
+    worker = _real_worker(
+        "import subprocess,sys,os; "
+        "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+        "sys.stdout.write('{'); sys.stdout.flush(); os._exit(1)"
+    )
+    start = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="exited"):
+            worker._read_reply(3)
+        assert time.monotonic() - start < 2
+    finally:
+        worker.close()
+
+
+def test_disconnect_cancels_live_worker_and_releases_its_process_group():
+    import socket
+    worker = _real_worker("import time; time.sleep(30)")
+    server, client = socket.socketpair()
+    try:
+        assert not sd._client_disconnected(server)
+        client.close()
+        with pytest.raises(RuntimeError, match="client disconnected"):
+            worker.run([], "TEST", lambda: sd._client_disconnected(server))
+        assert worker.proc.poll() is not None
+    finally:
+        server.close()
+        client.close()
+        worker.close()
+
+
+def test_partial_reply_has_a_deadline():
+    worker = _real_worker("import sys,time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(30)")
+    try:
+        with pytest.raises(TimeoutError, match="deadline"):
+            worker._read_reply(0.3)
+    finally:
+        worker.close()
+
+
+def test_session_wires_disconnect_detection_into_scoring(monkeypatch):
+    import socket
+    server, client = socket.socketpair()
+    daemon = sd.Daemon("unused")
+    def handle(job, cancelled):
+        assert not cancelled()
+        client.close()
+        assert cancelled()
+        return {"ok": True}
+    monkeypatch.setattr(daemon, "handle", handle)
+    sd._send(client, {"op": "score", "job": {}})
+    daemon._session(server)
+    assert daemon.served == 1
+
+
+def test_worker_reports_system_exit_and_remains_available(tmp_path):
+    import subprocess
+    import sys
+    scorer = tmp_path / "fake_scorer.py"
+    scorer.write_text("def _worker(args):\n    raise SystemExit(7)\n")
+    (tmp_path / "resident_scorer.py").write_text(
+        "def bootstrap(path): pass\ndef install_all(module): pass\n")
+    (tmp_path / "chunk_reuse.py").write_text(
+        "ENABLED = {}\ndef install_all(module): return {}\n")
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from nanobody_opt.scorer_daemon import shard_worker_main; "
+        "raise SystemExit(shard_worker_main(sys.argv[2]))"
+    )
+    request = json.dumps({"args": [0, 1, 2, {}], "target": "TEST"}) + "\n"
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path), str(scorer)],
+                            input=request * 2, capture_output=True, text=True, timeout=10)
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    assert result.returncode == 0
+    assert replies[0] == {"ready": True}
+    assert len(replies) == 3
+    assert all(not reply["ok"] and "SystemExit" in reply["error"] for reply in replies[1:])
