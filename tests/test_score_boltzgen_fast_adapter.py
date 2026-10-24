@@ -82,6 +82,27 @@ def test_replica_capability_is_explicit_and_preserved_for_slave(tmp_path):
     assert "--allow-replicates" in adapter.build_command(args, {"worker_argument_schema": "replicates-v1"})
 
 
+def test_box_settings_enable_daemon_without_launcher_environment(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps({"sequences": ["AAAA"]}))
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"use_daemon": True}))
+    jobs = []
+    monkeypatch.setattr(adapter, "_scorer_daemon", SimpleNamespace(
+        ENABLED=False, available=lambda: True, job_from_command=lambda command: {},
+        score=jobs.append,
+    ))
+    monkeypatch.setattr(sys, "argv", ["adapter", "--sequences", str(source),
+        "--config", "unused.yaml", "--target", "P20809", "--work-root", str(tmp_path / "work"),
+        "--out", str(tmp_path / "out.json"), "--settings", str(settings)])
+    with pytest.raises(SystemExit) as exited:
+        adapter.main()
+    assert exited.value.code == 0
+    assert jobs == [{"worker_argument_schema": "base-v1"}]
+
+
 @pytest.mark.parametrize("settings", [
     {"synth_reference": "/unregistered.cif"},
     {"synth_reference": "/wrong-length.cif", "synth_reference_length": 127,

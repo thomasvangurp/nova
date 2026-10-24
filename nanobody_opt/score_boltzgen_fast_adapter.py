@@ -213,7 +213,7 @@ def main() -> None:
     # runs the same shards, the same chunk composition and the same merge --
     # the metric is unchanged, and a daemon fault falls back to this very
     # subprocess rather than losing the wave.
-    if _scorer_daemon is not None and _scorer_daemon.ENABLED:
+    if _scorer_daemon is not None and (_scorer_daemon.ENABLED or settings.get("use_daemon") is True):
         try:
             if _scorer_daemon.available():
                 job = _scorer_daemon.job_from_command(command)

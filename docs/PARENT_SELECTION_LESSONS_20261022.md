@@ -376,3 +376,9 @@ monitoring checks the daemon's lifetime rather than requiring it to be the
 worker's direct parent: the configured Python launcher may insert a process.
 CI exercises both argument formats, replica-flag forwarding and indirect-parent
 ownership using real processes.
+
+Enable daemon use in the box's scorer settings as well as supporting the
+existing launcher environment. Otherwise an incident replay launched directly
+can silently take the colder subprocess route even when the daemon is healthy.
+Both routes must remain correct; their throughput and verification evidence
+must be distinguished.
