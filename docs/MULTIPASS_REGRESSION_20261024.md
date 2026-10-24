@@ -222,3 +222,42 @@ release tests. The rank-only replay benchmark alone could not detect this
 runtime attrition bug. A passing CI run validates these failure paths; the
 first live gated width, completed depth and subsequent independent replay
 must still be checked before claiming competitive recovery.
+
+### Why 25870–25890 behaved better
+
+The dated cutover record in `PARENT_SELECTION_LESSONS_20261022.md` places
+`unseen-candidates-v2` at 25892. Before that, 25889 and 25890 evaluated only
+799 and 623 genuinely new candidates while reporting 4,785 and 4,788 covered.
+The system could still benefit from reused candidates and their existing
+evidence. The user's NEW-only budget requirement was correct; the implementation
+incorrectly coupled discovery exclusions to comparison, and left candidates
+with 1–19 stored folds outside both confirmation and publication. After the
+new exclusion was enabled, filtering evaluated proposals after generation caps
+also exposed the exhaustion/fallback problem documented above.
+
+One-pass selection optimism was already measurable in the better window:
+retained 25889/25890 finalists scored approximately 39%/24% worse on subsequent
+draws than on their selected initial draws. Likewise the 200-process TNP
+setting predates the regression. Neither is, alone, a demonstrated explanation
+for its onset. Distinguish the original discovery/comparison and generation
+failures from the later gate-attrition defect that defeated broader confirmation.
+
+### Eligibility repair release
+
+Runtime `e649cebe1bead936d228042649fba614dd96c794` passed 592 mandatory local
+shipping checks with zero failures/errors/skips, and GitHub CI:
+https://github.com/thomasvangurp/nova/actions/runs/40127567333 . All 639 packaged
+files were verified on the master; thirteen installed files matched that
+artifact, including the live TNP shim. A real full Layer-2 canary accepted 147
+of 147 cached profiles in 2.09 seconds under the current configuration. This
+does not itself assert novelty, fleet diversity or competitive replay quality.
+
+The release was installed during 25916 discovery, whose active race has zero
+repeat rounds. Its closing successor will import the new confirmation module.
+The in-flight discovery process was preserved. A master-side tmux job
+`nova-eligibility-producer-refresh` waits for completed confirmation and no
+active race before reloading the long-lived producer; the next launch argv
+explicitly sets TNP concurrency to sixteen. Until then the shared GPU-slot
+wrapper already bounds newly launched TNP jobs. No Mac process owns this
+handoff. Receipt: `/root/artifacts/eligibility_refill_release_20261024.json`.
+Live gated width, completed depth and independent replay remain pending.
