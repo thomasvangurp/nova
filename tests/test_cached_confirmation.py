@@ -80,7 +80,8 @@ def test_cached_precheck_includes_thin_history_and_drains_all_batches_without_fr
     assert not list(tmp_path.rglob("fresh_screen_budget.json"))
 
 
-def test_confirmation_compares_cached_partial_folds_without_rescreening_or_repeating_deep_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize("has_fresh", [True, False])
+def test_confirmation_compares_cached_partial_folds_without_rescreening_or_repeating_deep_history(tmp_path, monkeypatch, has_fresh):
     race = import_shipping("nanobody_opt_v2.sequential_exact_race", monkeypatch)
     rank = import_shipping("nanobody_opt.rank_exact", monkeypatch)
     from nanobody_opt_v2 import screen_budget
@@ -105,15 +106,23 @@ def test_confirmation_compares_cached_partial_folds_without_rescreening_or_repea
     monkeypatch.setattr(race, "_prior_evaluation_sequences", lambda *a, **kw: set())
     monkeypatch.setattr(race, "_chain_allows_work", lambda *a: True)
     monkeypatch.setattr(race, "_remaining_blocks", lambda *a: 300)
-    monkeypatch.setattr(race, "_pooled_exact_paths", lambda *a: [tmp_path / "fresh_exact.json"])
-    monkeypatch.setattr(rank, "_observations", lambda *a: {"FRESH": [{}]})
+    exact = [tmp_path / "fresh_exact.json"] if has_fresh else []
+    pooled = []
+    monkeypatch.setattr(race, "_exact_paths", lambda *a: exact)
+    def pool(local, *args):
+        pooled.append(local)
+        return local
+    monkeypatch.setattr(race, "_pooled_exact_paths", pool)
+    monkeypatch.setattr(rank, "_observations", lambda *a: {"FRESH": [{}]} if a[0] else {})
     monkeypatch.setattr(race, "_apply_basin_shrinkage", lambda *a, **kw: None)
     def run(command, **kw):
         assert "--current-exact-candidates-only" not in command
         scope = Path(command[command.index("--only-sequences") + 1])
-        assert set(scope.read_text().splitlines()) == {"FRESH", "OLD1", "OLD5", "DEEP"}
+        allowed = {"OLD1", "OLD5", "DEEP"} | ({"FRESH"} if has_fresh else set())
+        assert set(scope.read_text().splitlines()) == allowed
         rows = [{"sequence": s, "observation_count": depth, "multipass_rank": score}
                 for s, depth, score in [("DEEP", 20, 800), ("OLD5", 5, 1144), ("FRESH", 1, 1300), ("OLD1", 1, 2008)]]
+        rows = [r for r in rows if r['sequence'] in allowed]
         producer._atomic_json(out / "screen_ranking.json", {"sequences": [r["sequence"] for r in rows], "candidates": rows})
     monkeypatch.setattr(race.subprocess, "run", run)
     gates = []
@@ -121,7 +130,8 @@ def test_confirmation_compares_cached_partial_folds_without_rescreening_or_repea
     confirmations = []
     monkeypatch.setattr(race, "_run_replication_rounds", lambda **kw: confirmations.append(kw["shortlist"]) or 0)
     race.main()
-    assert gates == confirmations == [["OLD5", "FRESH"]]
+    assert gates == confirmations == [["OLD5", "FRESH" if has_fresh else "OLD1"]]
+    assert exact in pooled
     assert len(screen_budget.snapshot(root, 100, 4800)["reserved"]) == 1
 
 

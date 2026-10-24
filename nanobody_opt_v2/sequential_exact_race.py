@@ -2614,7 +2614,7 @@ def main() -> None:
     replication_shortlist: list[str] = []
     if args.replication_rounds:
         pooled_for_ranking = _pooled_exact_paths(
-            [], args.pooled_exact_root, args.output_dir
+            _exact_paths(args.output_dir), args.pooled_exact_root, args.output_dir
         )
         already_confirmed = set()
         comparison_scope = None
