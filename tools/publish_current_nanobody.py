@@ -880,6 +880,11 @@ def _live_sequences(payload: dict[str, Any] | None, epoch: int) -> list[str]:
     return fleet_module.artifact_sequences(payload)
 
 
+def _artifact_passes_scope(payload: dict[str, Any] | None, epoch: int, scope: Path) -> bool:
+    """Use the artifact reader's real list contract for current eligibility."""
+    return set(_live_sequences(payload, epoch)) <= set(scope.read_text().splitlines())
+
+
 def _run(command: list[str]) -> None:
     run_epoch_command(command, deadline=_COMMAND_DEADLINE, timeout=300)
 
@@ -2471,7 +2476,7 @@ def _publish_once(args: argparse.Namespace) -> None:
         strict_fingerprint = _sha256_bytes(json.dumps([strict_fingerprint, scope_fingerprint]).encode())
         previous_prechecked = (
             observation_history is None
-            or _live_sequences(previous, epoch) <= set(candidate_scope.read_text().splitlines())
+            or _artifact_passes_scope(previous, epoch, candidate_scope)
         )
         current_qualified = current_qualified and previous_prechecked
         if (

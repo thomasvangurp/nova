@@ -518,3 +518,16 @@ def test_scope_change_invalidates_old_publisher_noop_state(monkeypatch, tmp_path
     path = tmp_path / "state.json"
     publisher._write_publisher_state(path, **common, strict_fingerprint="same")
     assert publisher._publisher_state_matches(json.loads(path.read_text()), **common)
+
+
+@pytest.mark.parametrize("artifact,expected", [
+    (None, True),
+    ({"epoch": 99, "submissions": [{"sequence": "RETIRED"}]}, True),
+    ({"epoch": 100, "submissions": [{"sequence": "READY"}]}, True),
+    ({"epoch": 100, "submissions": [{"sequence": "INELIGIBLE"}]}, False),
+])
+def test_current_artifact_retention_uses_real_sequence_list_contract(monkeypatch, tmp_path, artifact, expected):
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    scope = tmp_path / "scope.txt"
+    scope.write_text("READY\n")
+    assert publisher._artifact_passes_scope(artifact, 100, scope) is expected
