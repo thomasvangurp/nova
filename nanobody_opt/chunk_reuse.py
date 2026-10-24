@@ -256,18 +256,26 @@ def install_warm_lightning() -> bool:
 def _shutdown_pools() -> None:
     """Send the sentinel the patched close() withheld.
 
-    The analysis child is non-daemonic, so multiprocessing joins it at
-    interpreter exit and would block forever on a pool nobody closed. This
-    atexit hook is registered after multiprocessing's, and atexit runs LIFO,
-    so it fires first.
+    A spawned worker calls multiprocessing's exit function BEFORE ordinary
+    atexit callbacks. Its non-daemon analysis child must receive the sentinel
+    before that function joins children. Never leave an unresponsive child
+    alive for the subsequent unbounded multiprocessing join.
     """
     while _LIVE_POOLS:
         pool = _LIVE_POOLS.pop()
         try:
             pool.job_q.put(None)
-            pool.proc.join(timeout=30)
-        except Exception:                     # nothing useful to do at exit
+            pool.proc.join(timeout=5)
+        except Exception:  # A broken queue must still allow child cleanup.
             pass
+        for action in ("terminate", "kill"):
+            try:
+                if not pool.proc.is_alive():
+                    break
+                getattr(pool.proc, action)()
+                pool.proc.join(timeout=1)
+            except Exception:  # Continue to the stronger cleanup if needed.
+                pass
 
 
 def install_persistent_analysis_pool(scorer_module) -> bool:
@@ -284,6 +292,13 @@ def install_persistent_analysis_pool(scorer_module) -> bool:
     if pool_class is None or getattr(pool_class, "_chunk_reuse_persistent", False):
         return False
 
+    real_init = pool_class.__init__
+
+    def init(self, *args, **kwargs) -> None:
+        real_init(self, *args, **kwargs)
+        # A scoring exception can precede close(); that child needs cleanup too.
+        _LIVE_POOLS.add(self)
+
     def close(self) -> None:
         pending = getattr(self, "pending", 0)
         if pending:
@@ -295,9 +310,15 @@ def install_persistent_analysis_pool(scorer_module) -> bool:
         _LIVE_POOLS.add(self)
 
     pool_class._chunk_reuse_real_close = pool_class.close
+    pool_class._chunk_reuse_real_init = real_init
+    pool_class.__init__ = init
     pool_class.close = close
     pool_class._chunk_reuse_persistent = True
     _PATCHED_POOLS.add(pool_class)
+    from multiprocessing.util import Finalize
+    # Positive finalizers run before multiprocessing joins non-daemon children;
+    # 100 also precedes Queue's priority-10 close/flush cleanup.
+    Finalize(None, _shutdown_pools, exitpriority=100)
     atexit.register(_shutdown_pools)
     return True
 
@@ -361,6 +382,7 @@ def reset() -> None:
     while _PATCHED_POOLS:
         pool_class = _PATCHED_POOLS.pop()
         pool_class.close = pool_class._chunk_reuse_real_close
+        pool_class.__init__ = pool_class._chunk_reuse_real_init
         pool_class._chunk_reuse_persistent = False
     _KEYS.clear()
     _LIVE_POOLS.clear()

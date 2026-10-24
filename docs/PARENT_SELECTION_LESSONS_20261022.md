@@ -272,3 +272,21 @@ cache invalidation, incremental arrivals, interrupted/empty gates, stale aggrega
 fallback, sealed-own evidence, and a 1,001-invalid-entry shortlist regression.
 Release verification must include a current artifact reaching the Pi, not merely
 a successful ranking command or passing unit tests.
+
+
+## Spawned scorer shutdown must release analysis children (2026-10-24)
+
+At epoch 25899 the fallback scorer's eight GPU workers were waiting on live
+analysis children while all eight GPUs were idle. The persistent analysis-pool
+optimization withheld the shutdown sentinel until an ordinary atexit hook.
+Python's multiprocessing worker bootstrap joins non-daemon children before
+ordinary atexit hooks, so successful scoring or an early error could hang the
+fallback until the epoch deadline. A CPU-only real-spawn reproduction failed
+for both completion and exception paths before this repair.
+
+Register pools when constructed, and use a positive-priority multiprocessing
+finalizer before child joins and queue teardown. Send the sentinel, then bound
+cleanup and terminate an unresponsive analysis child. Keep reuse within a live
+worker. The real-spawn regression must wait for its analysis child to start;
+otherwise a semaphore startup failure can masquerade as successful cleanup.
+Both cases are now part of the mandatory epoch-deadline suite.

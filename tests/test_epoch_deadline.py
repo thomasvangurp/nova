@@ -60,6 +60,65 @@ def test_time_budget_cancels_work_even_when_clock_stops_advancing(tmp_path):
             deadline=EpochDeadline(state, 72), timeout=.1)
 
 
+@pytest.mark.parametrize("fail_before_close", [False, True])
+def test_spawned_scorer_releases_persistent_analysis_child(tmp_path, fail_before_close):
+    """A real spawn child exits through multiprocessing, before normal atexit."""
+    script = tmp_path / "spawned_scorer.py"
+    script.write_text('''
+import multiprocessing as mp
+import os
+from types import SimpleNamespace
+from nanobody_opt import chunk_reuse
+
+def analyze(queue, ready):
+    ready.put(True)
+    while queue.get() is not None:
+        pass
+
+class AnalysisPool:
+    def __init__(self, ctx):
+        self.job_q = ctx.Queue()
+        self.ready = ctx.Queue()
+        self.proc = ctx.Process(target=analyze, args=(self.job_q, self.ready))
+        self.proc.start()
+        assert self.ready.get(timeout=3)
+        self.pending = 0
+    def close(self):
+        self.job_q.put(None)
+        self.proc.join()
+
+def scorer(fail):
+    module = SimpleNamespace(_AnalysisPool=AnalysisPool)
+    chunk_reuse.install_persistent_analysis_pool(module)
+    pool = module._AnalysisPool(mp.get_context("spawn"))
+    if fail:
+        raise RuntimeError("synthetic scorer failure before close")
+    pool.close()
+    assert pool.proc.is_alive()  # reuse within the worker remains enabled
+
+if __name__ == "__main__":
+    worker = mp.get_context("spawn").Process(target=scorer, args=(''' + repr(fail_before_close) + ''',))
+    worker.start()
+    worker.join(timeout=4)
+    if worker.is_alive():
+        os._exit(9)
+    assert worker.exitcode == ''' + ('1' if fail_before_close else '0') + '''
+''')
+    process = subprocess.Popen([sys.executable, str(script)], start_new_session=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        process.wait(timeout=6)
+        assert process.returncode == 0, "scorer remained blocked on its analysis child"
+        stdout, stderr = process.communicate(timeout=1)
+        assert process.returncode == 0, stderr.decode()
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
 def test_handoff_reserve_refuses_to_start_and_stale_clock_fails_closed(tmp_path):
     state = tmp_path / 'clock.json'
     clock(state, offset=330)
