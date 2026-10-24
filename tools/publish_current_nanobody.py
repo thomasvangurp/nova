@@ -65,6 +65,7 @@ from compound_miner.nanobody_provider import (  # noqa: E402
 from nanobody_opt import fleet as fleet_module  # noqa: E402
 from nanobody_opt import publication_gates  # noqa: E402
 from nanobody_opt import db  # noqa: E402
+from nanobody_opt import submission_timing
 from nanobody_opt.epoch_deadline import EpochDeadline, run as run_epoch_command
 
 _COMMAND_DEADLINE: EpochDeadline | None = None
@@ -1590,6 +1591,13 @@ def _publish_fleet(
         unassigned=fleet_module.uncovered(crew, published),
         sequence_pool=sequence_pool,
     )
+    if getattr(args, "_submission_timing", None) is not None:
+        _COMMAND_DEADLINE.remaining()
+        current = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
+        artifact["submission_handoff"] = submission_timing.publication_receipt(
+            epoch=epoch, timing=args._submission_timing,
+            confirmation=args._confirmation_at_start, block=current.block,
+            epoch_length=epoch_length)
     return artifact, published, CommitContext(
         spares=tuple(spare_sequences),
         known_uids=frozenset(member.uid for member in crew),
@@ -2090,6 +2098,7 @@ def _commit_fleet(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    submission_timing.add_arguments(parser)
     parser.add_argument("--network", default="finney")
     parser.add_argument("--netuid", type=int, default=68)
     parser.add_argument(
@@ -2265,8 +2274,14 @@ def _publish_once(args: argparse.Namespace) -> None:
             args.chain_state, args.netuid, args.maximum_chain_state_age
         )
         epoch, block, epoch_length = chain.epoch, chain.block, chain.epoch_length
-        _COMMAND_DEADLINE = EpochDeadline(args.chain_state, epoch, args.reserve_blocks,
-                                          args.maximum_chain_state_age)
+        args._submission_timing = submission_timing.configured_plan(args)
+        args._confirmation_at_start = submission_timing.confirmation_digest(args.runtime_root, epoch)
+        publication_reserve = max(args.reserve_blocks,
+            (args._submission_timing or {}).get("publication_reserve_blocks", 0))
+        _COMMAND_DEADLINE = EpochDeadline(args.chain_state, epoch, publication_reserve,
+                                         args.maximum_chain_state_age)
+        if args._submission_timing is not None:
+            _COMMAND_DEADLINE.remaining()
         if args.epoch is not None and args.epoch != epoch:
             raise SystemExit(
                 f"requested epoch {args.epoch} is not the chain epoch {epoch}"
@@ -2281,6 +2296,14 @@ def _publish_once(args: argparse.Namespace) -> None:
             wallet_name=args.wallet_name,
         )
         crew = fleet_module.discover_fleet(chain.neurons, coldkey, netuid=args.netuid)
+        args._submission_timing = submission_timing.configured_plan(args, len(crew))
+        if args._submission_timing is not None:
+            _atomic_json(args.runtime_root / "artifacts/submission_handoff.json",
+                         {**args._submission_timing, "epoch": epoch})
+            _COMMAND_DEADLINE = EpochDeadline(args.chain_state, epoch,
+                max(args.reserve_blocks, args._submission_timing["publication_reserve_blocks"]),
+                args.maximum_chain_state_age)
+            _COMMAND_DEADLINE.remaining()
         report_unregistered_hotkeys(
             wallet_root=args.wallet_path,
             wallet_name=args.wallet_name,
@@ -2444,6 +2467,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
         # A bank/crew match alone cannot reuse eligibility under changed rules.
         gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path)]
+        if args._submission_timing is not None:
+            gate_fingerprint.append(args._confirmation_at_start)
         exact_fingerprint = _sha256_bytes(json.dumps([exact_fingerprint, gate_fingerprint]).encode())
         strict_fingerprint = _sha256_bytes(json.dumps([strict_fingerprint, gate_fingerprint]).encode())
 
@@ -2868,6 +2893,8 @@ def _publish_once(args: argparse.Namespace) -> None:
 
 def _assert_same_epoch(args: argparse.Namespace, epoch: int, consequence: str) -> None:
     """Refuse to publish into an epoch that rolled while we were scoring."""
+    if getattr(args, "pi_handoff", False) and _COMMAND_DEADLINE is not None:
+        _COMMAND_DEADLINE.remaining()
     current = _chain_view(
         args.chain_state, args.netuid, args.maximum_chain_state_age
     )

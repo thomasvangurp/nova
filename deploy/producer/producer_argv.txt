@@ -110,3 +110,4 @@ adaptive
 4800
 --epoch-confirmation-finalists
 64
+--pi-handoff

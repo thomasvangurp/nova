@@ -463,3 +463,36 @@ deployment, then verify the actual Pi snapshot and commit receipt in the
 first affected epoch. No timing correction was deployed during this audit.
 
 Numeric evidence: `docs/evidence/epoch_25914_handoff_audit_20261024.json`.
+
+### Timing correction implementation
+
+The shipping producer and publisher now opt into `pi-handoff-v1`, defined in
+`nanobody_opt/submission_timing.py`. The Pi imports the same commitment reserve
+and late-pull margin. With thirteen crew members the final-pull reserve is
+91 blocks. Publication must finish at end-96, leaving sixty seconds for
+transfer. Scoring must finish at end-126, leaving six minutes for publisher
+polling, ranking and gates. That allowance covers the observed approximately
+246-second final-confirmation-to-gate delay plus the 45-second polling interval
+with margin. It is an operational allowance, not proof every workload fits.
+
+The publisher records the current fleet capacity for the producer; both retain
+a thirteen-slot floor even if registrations have not propagated. Larger
+observed fleets increase the reserve. Existing larger explicit reserves remain
+effective. The 4,800 NEW-only discovery cap and confirmation evidence thresholds
+are unchanged. CPU preparation for the following epoch can use the idle
+post-handoff window, but remains bound to the real current epoch's cancellation
+clock so it cannot occupy the next epoch.
+
+Each newly built artifact records its timing policy and the digest of the
+completed confirmation receipt observed **before** publication starts. A
+confirmation finishing during publication cannot falsely label an earlier
+snapshot as final. A retained previous artifact retains its original receipt.
+The Pi logs the digest of the exact fetched artifact and its confirmation
+receipt; a policy-enabled fallback without completed confirmation produces an
+alert while retaining the existing validated fallback submission behavior.
+
+`tests/test_submission_handoff.py` is mandatory in shipping CI. It tests the
+actual launch profiles, adaptive budgeting, fleet growth, confirm/publish/pull
+timing, the publisher's live deadline guard, stale receipts, and preparation
+across rollover. The old 36-block reserve fails the same handoff invariant.
+Activation and live delivery verification are recorded separately below.

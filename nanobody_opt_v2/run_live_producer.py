@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from nanobody_opt.storage_retention import prune_generated_tree
+from nanobody_opt import submission_timing
 
 
 CONFIG_URL = "https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml"
@@ -322,7 +323,9 @@ def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> 
                     screen_cutoff_block=int(state["epoch_length"]) - _handoff_reserve(args))
     _atomic_json(producer_root / "budget.json", {"epoch": int(state["epoch"]),
                  "commitment_reserve_blocks": args.reserve_blocks,
-                 "publication_prepare_blocks": args.publication_prepare_blocks, **plan})
+                 "publication_prepare_blocks": args.publication_prepare_blocks,
+                 "submission_handoff": submission_timing.configured_plan(args),
+                 "effective_handoff_reserve_blocks": _handoff_reserve(args), **plan})
     return plan
 
 
@@ -333,6 +336,9 @@ def _closing(args: argparse.Namespace, state: dict, producer_root: Path) -> bool
 
 
 def _handoff_reserve(args: argparse.Namespace) -> int:
+    timing = submission_timing.configured_plan(args)
+    if timing is not None:
+        return max(args.reserve_blocks, timing["publication_reserve_blocks"]) + timing["publication_prepare_blocks"]
     return args.reserve_blocks + (args.publication_prepare_blocks if args.budget_mode == "adaptive" else 0)
 
 
@@ -1738,6 +1744,7 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    submission_timing.add_arguments(parser)
     parser.add_argument("--confirmation-policy", choices=("legacy", "broad"), default="broad",
                         help="budget-preserving broader repeats before elimination")
     parser.add_argument(
@@ -2285,7 +2292,11 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
     was_nice = getattr(_STAGED, "nice", False)
     previous_deadline = getattr(_STAGED, 'deadline', None)
     from nanobody_opt.epoch_deadline import EpochDeadline
-    _STAGED.deadline = EpochDeadline(args.chain_state, int(state['epoch']), _handoff_reserve(args),
+    # Future-pool CPU preparation can use the post-handoff idle window. It
+    # still belongs to the real current epoch and is cancelled on rollover;
+    # it must not borrow the future epoch's clock or delay its GPU work.
+    preparation_reserve = 0 if epoch > int(state['epoch']) else _handoff_reserve(args)
+    _STAGED.deadline = EpochDeadline(args.chain_state, int(state['epoch']), preparation_reserve,
                                      args.maximum_chain_state_age)
     _STAGED.nice = True
     try:

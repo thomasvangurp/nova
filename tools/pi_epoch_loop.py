@@ -30,15 +30,17 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from nanobody_opt import submission_timing
 PI = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "thomasg@100.64.243.65"]
 PROD = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
         "-i", "/Users/tvgdeena/.ssh/id_ed25519", "-p", "15470", "root@ssh2.vast.ai"]
 EPOCH_LENGTH = 361
 # The validator stops reading at end-16.
-BLACKOUT_BLOCKS = 16
+BLACKOUT_BLOCKS = submission_timing.BLACKOUT_BLOCKS
 # Measured on-chain at 25248: ten uids committed 5 blocks apart, 69 blocks left
 # down to 26. Almost all of it is set_commitment waiting for the extrinsic.
-BLOCKS_PER_UID = 5
+BLOCKS_PER_UID = submission_timing.BLOCKS_PER_UID
 
 # The window-open margin below (WINDOW_OPEN_BLOCKS) has to leave real slack
 # for the producer-wait after commit_reserve() is subtracted, but crew size
@@ -195,7 +197,7 @@ def commit_reserve(uids: int) -> int:
     commits into the blackout, too large and we stop waiting for a producer we
     still had time for. It depends on how many uids there are, so compute it.
     """
-    return BLACKOUT_BLOCKS + BLOCKS_PER_UID * max(1, uids)
+    return submission_timing.commit_reserve(uids)
 
 
 def say(**f):
@@ -371,7 +373,8 @@ def main() -> int:
     parser.add_argument("--late-commit", action=argparse.BooleanOptionalAction, default=True,
                         help="hold the commit until just before the safe deadline so it carries the "
                              "producer's in-epoch repeat scoring (--no-late-commit: first artifact)")
-    parser.add_argument("--late-commit-margin-seconds", type=int, default=120,
+    parser.add_argument("--late-commit-margin-seconds", type=int,
+                        default=submission_timing.LATE_COMMIT_MARGIN_SECONDS,
                         help="stop holding this long before the commit deadline, leaving time for "
                              "the final pull and the crew refresh")
     parser.add_argument("--confirmation-min-observations", type=int, default=8,
@@ -952,6 +955,12 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 return
         else:
             say(event="pulled")
+            receipt = submission_timing.artifact_receipt(
+                Path("/opt/nova-submit/nanobody_result.json"), epoch)
+            say(event="submission_handoff", epoch=epoch, **receipt)
+            if receipt.get("handoff_policy") == submission_timing.POLICY and not receipt["confirmation_complete_at_start"]:
+                pi_alert("ERROR", f"epoch {epoch}: final Pi input lacks completed confirmation; "
+                         "committing the available validated fallback")
 
         # Who wrote what we are about to commit (P1 / R4). Must never cost the
         # epoch: any error in the check itself is logged and ignored.

@@ -40,6 +40,7 @@ TEST_FILES = (
     'tests/test_deploy_stamp.py',
     'tests/test_release_pipeline.py',
     'tests/test_epoch_deadline.py',
+    'tests/test_submission_handoff.py',
     'tests/test_dashboard_cohort.py',
     'tests/test_pi_dashboard.py',
     'tests/test_nanobody_dash_operational.py',
