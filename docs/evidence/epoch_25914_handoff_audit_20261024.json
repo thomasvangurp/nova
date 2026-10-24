@@ -1,0 +1,391 @@
+{
+  "audit_date": "2026-10-24",
+  "scope": "Read-only diagnosis; no runtime or configuration change",
+  "sources": {
+    "matched_inputs": "Pi /opt/nova-submit/archive/epoch{25913,25914}/nanobody_result.json matched by sequence to independent replay; identifiers omitted",
+    "replay": "Pi /opt/nova-dashboard/nanobody_dash/multipass_comparison.json; scores may change as replay deepens",
+    "events": "Pi /opt/nova-submit/loop.log; local timestamps UTC-04:00",
+    "qualified": "Master /root/live/epoch25914/producer/iteration_02/race/qualified_after_rounds.json",
+    "final_checks": "Master epoch25914 comparison_precheck.json, provisional_rankings.json, provisional_novelty.json and provisional_layer2.json",
+    "timing_contract": "Live Pi /opt/nova-submit/tools/pi_epoch_loop.py and master producer budget/argv"
+  },
+  "matched_submission_evidence": [
+    {
+      "epoch": 25913,
+      "archive_count": 12,
+      "matched": [
+        {
+          "local": 740.1851851851852,
+          "replay": 874.7666666666667,
+          "local_passes": 27
+        },
+        {
+          "local": 983.8571428571429,
+          "replay": 950.7333333333333,
+          "local_passes": 21
+        },
+        {
+          "local": 1014.0,
+          "replay": 1006.4,
+          "local_passes": 21
+        },
+        {
+          "local": 1034.2857142857142,
+          "replay": 1055.0666666666666,
+          "local_passes": 21
+        },
+        {
+          "local": 1064.095238095238,
+          "replay": 966.6,
+          "local_passes": 21
+        },
+        {
+          "local": 1079.4285714285713,
+          "replay": 1159.8333333333333,
+          "local_passes": 21
+        },
+        {
+          "local": 1108.2380952380952,
+          "replay": 1093.3666666666666,
+          "local_passes": 21
+        },
+        {
+          "local": 1150.7142857142858,
+          "replay": 1090.6,
+          "local_passes": 21
+        },
+        {
+          "local": 1154.1904761904761,
+          "replay": 1219.8,
+          "local_passes": 21
+        },
+        {
+          "local": 1159.857142857143,
+          "replay": 1264.8333333333333,
+          "local_passes": 21
+        },
+        {
+          "local": 1168.6666666666667,
+          "replay": 1040.9666666666667,
+          "local_passes": 21
+        },
+        {
+          "local": 1206.095238095238,
+          "replay": 1201.4333333333334,
+          "local_passes": 21
+        }
+      ],
+      "pool_type": "list",
+      "pool_count": 16,
+      "local_matched_mean": 1071.9678130511463,
+      "replay_matched_mean": 1077.0333333333333
+    },
+    {
+      "epoch": 25914,
+      "archive_count": 12,
+      "matched": [
+        {
+          "local": 778.28,
+          "replay": 843.3666666666667,
+          "local_passes": 25
+        },
+        {
+          "local": 836.4,
+          "replay": 858.7,
+          "local_passes": 25
+        },
+        {
+          "local": 1152.8,
+          "replay": 1156.1666666666667,
+          "local_passes": 25
+        },
+        {
+          "local": 1195.7619047619048,
+          "replay": 1456.5,
+          "local_passes": 21
+        },
+        {
+          "local": 1199.047619047619,
+          "replay": 1348.0,
+          "local_passes": 21
+        },
+        {
+          "local": 1284.4761904761904,
+          "replay": 1375.4666666666667,
+          "local_passes": 21
+        },
+        {
+          "local": 1349.095238095238,
+          "replay": 1377.7333333333333,
+          "local_passes": 21
+        },
+        {
+          "local": 2533.0238095238096,
+          "replay": 2467.2,
+          "local_passes": 42
+        },
+        {
+          "local": 2536.25,
+          "replay": 2512.95,
+          "local_passes": 20
+        },
+        {
+          "local": 2540.230769230769,
+          "replay": 2611.2,
+          "local_passes": 39
+        },
+        {
+          "local": 2543.240740740741,
+          "replay": 2499.55,
+          "local_passes": 54
+        },
+        {
+          "local": 2545.4,
+          "replay": 2542.85,
+          "local_passes": 20
+        }
+      ],
+      "pool_type": "list",
+      "pool_count": 16,
+      "local_matched_mean": 1707.8338559896893,
+      "replay_matched_mean": 1754.1402777777778
+    }
+  ],
+  "fleet_replay_snapshot": [
+    {
+      "epoch": 25913,
+      "count": 12,
+      "mean": 1077.0333333333333,
+      "passes_min": 30,
+      "passes_max": 30,
+      "rival_5Gh_mean": 1045.9266666666667
+    },
+    {
+      "epoch": 25914,
+      "count": 13,
+      "mean": 1815.8602564102564,
+      "passes_min": 10,
+      "passes_max": 30,
+      "additional_rebound_entry_replay": 2556.5,
+      "rival_5Gh_mean": null,
+      "rival_coverage_complete": false
+    }
+  ],
+  "pi_log_events": {
+    "events": [
+      {
+        "epoch": 25913,
+        "event": "wait_budget",
+        "at": "13:10:48",
+        "uids": 12,
+        "reserve": 76,
+        "blocks_to_wait": 59
+      },
+      {
+        "epoch": 25913,
+        "event": "producer_ready",
+        "at": "13:10:58"
+      },
+      {
+        "epoch": 25913,
+        "event": "late_commit_ready",
+        "at": "13:20:46",
+        "deep": 12,
+        "total": 12,
+        "minimum": 8
+      },
+      {
+        "epoch": 25913,
+        "event": "pulled",
+        "at": "13:20:55"
+      },
+      {
+        "epoch": 25913,
+        "event": "producer_identity_ok",
+        "at": "13:20:55",
+        "pool": 16
+      },
+      {
+        "epoch": 25913,
+        "event": "crew_refreshed",
+        "at": "13:21:07",
+        "before": 12,
+        "after": 12
+      },
+      {
+        "epoch": 25913,
+        "event": "plan",
+        "crew": 12,
+        "committing": 12,
+        "with_sequence": 12
+      },
+      {
+        "epoch": 25913,
+        "event": "done",
+        "committed": 12,
+        "failed": 0,
+        "dropped_to_blackout": 0
+      },
+      {
+        "epoch": 25913,
+        "event": "committed",
+        "at": "13:22:34",
+        "rc": 0
+      },
+      {
+        "epoch": 25913,
+        "event": "archived",
+        "at": "13:22:34"
+      },
+      {
+        "epoch": 25914,
+        "event": "wait_budget",
+        "at": "14:19:44",
+        "uids": 13,
+        "reserve": 81,
+        "blocks_to_wait": 54
+      },
+      {
+        "epoch": 25914,
+        "event": "producer_ready",
+        "at": "14:19:53"
+      },
+      {
+        "epoch": 25914,
+        "event": "late_commit_ready",
+        "at": "14:28:41",
+        "deep": 12,
+        "total": 12,
+        "minimum": 8
+      },
+      {
+        "epoch": 25914,
+        "event": "pulled",
+        "at": "14:28:51"
+      },
+      {
+        "epoch": 25914,
+        "event": "producer_identity_ok",
+        "at": "14:28:51",
+        "pool": 16
+      },
+      {
+        "epoch": 25914,
+        "event": "crew_refreshed",
+        "at": "14:29:01",
+        "before": 13,
+        "after": 13
+      },
+      {
+        "epoch": 25914,
+        "event": "plan",
+        "crew": 13,
+        "committing": 13,
+        "with_sequence": 13
+      },
+      {
+        "epoch": 25914,
+        "event": "done",
+        "committed": 13,
+        "failed": 0,
+        "dropped_to_blackout": 0
+      },
+      {
+        "epoch": 25914,
+        "event": "committed",
+        "at": "14:30:23",
+        "rc": 0
+      },
+      {
+        "epoch": 25914,
+        "event": "archived",
+        "at": "14:30:23"
+      }
+    ],
+    "last_waits": {
+      "25913": {
+        "epoch": 25913,
+        "event": "late_commit_wait",
+        "at": "13:20:12",
+        "seconds_left": 24,
+        "deep": 12,
+        "total": 12,
+        "minimum": 8
+      },
+      "25914": {
+        "epoch": 25914,
+        "event": "late_commit_wait",
+        "at": "14:28:01",
+        "seconds_left": 30,
+        "deep": 12,
+        "total": 12,
+        "minimum": 8
+      }
+    }
+  },
+  "timestamps_utc": {
+    "25913_pulled_artifact_checkpoint_first": "2026-10-24T17:10:59Z",
+    "25913_pulled_artifact_checkpoint_last": "2026-10-24T17:11:36Z",
+    "25913_final_pull": "2026-10-24T17:20:55Z",
+    "25913_committed": "2026-10-24T17:22:34Z",
+    "25914_pulled_artifact_checkpoint_first": "2026-10-24T18:27:25Z",
+    "25914_pulled_artifact_checkpoint_last": "2026-10-24T18:28:00Z",
+    "25914_final_pull": "2026-10-24T18:28:51Z",
+    "25914_committed": "2026-10-24T18:30:23Z",
+    "25914_qualified_file_mtime": "2026-10-24T18:31:06.948659Z",
+    "25914_final_rankings_mtime": "2026-10-24T18:35:04.612792Z",
+    "25914_final_layer2_mtime": "2026-10-24T18:35:12.844804Z"
+  },
+  "late_qualified_25914": {
+    "count": 17,
+    "observations_each": 21,
+    "local_multipass_ranks": [
+      944.6666666666666,
+      956.0952380952381,
+      959.3333333333334,
+      965.2857142857143,
+      980.6190476190476,
+      984.7619047619048,
+      1024.952380952381,
+      1061.7142857142858,
+      1071.1904761904761,
+      1078.8095238095239,
+      1099.904761904762,
+      1121.2857142857142,
+      1123.7142857142858,
+      1142.904761904762,
+      1157.952380952381,
+      1213.3333333333333,
+      1451.952380952381
+    ],
+    "present_in_final_publisher_ranking": 17,
+    "comparison_precheck_eligible": 17,
+    "final_novelty_passed": 17,
+    "final_layer2_passed": 17,
+    "qualification_seconds_after_final_pull": 135.948659,
+    "qualification_seconds_after_committed": 43.948659,
+    "layer2_seconds_after_committed": 289.844804
+  },
+  "deadline_contract": {
+    "epoch_blocks": 361,
+    "assumed_seconds_per_block": 12,
+    "producer_commitment_reserve_blocks": 36,
+    "producer_publication_prepare_blocks": 0,
+    "pi_blackout_blocks": 16,
+    "pi_blocks_per_uid": 5,
+    "pi_late_commit_margin_seconds": 120,
+    "pi_reserve_12_uids": 76,
+    "pi_reserve_13_uids": 81,
+    "pi_hold_cutoff_13_uids_nominal_blocks_before_end": 91,
+    "nominal_producer_vs_pi_gap_blocks": 55,
+    "nominal_producer_vs_pi_gap_seconds": 660
+  },
+  "limitations": [
+    "Matched archive has twelve entries; the Pi rebinds the sixteen-entry pool to thirteen crew members for epoch25914.",
+    "Archive uses copy2; archive mtime preserves pull time and is not the commit time. Commit timing comes from loop events.",
+    "The local ranks of the seventeen late candidates are not independent replay or a guaranteed counterfactual fleet mean.",
+    "Final gate files establish later passing status, not that the strong final artifact reached the Pi before its snapshot.",
+    "The independent replay coverage of rival25914 is incomplete.",
+    "The eligibility refill release e649ceb does not align producer and Pi deadlines."
+  ]
+}

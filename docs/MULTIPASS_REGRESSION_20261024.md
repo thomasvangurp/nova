@@ -371,3 +371,95 @@ eligibility, evidence-preservation and budget-accounting fixes in both variants.
 Numeric evidence: `docs/evidence/config_revert_evaluation_20261024.json`.
 Reproduce the allocation comparison with:
 `python tools/evaluate_confirmation_rollback.py --output /tmp/rollback-replay.json`.
+
+## Epoch 25914: good confirmation results missed the Pi's submission cutoff
+
+The direct 25913/25914 comparison identifies an additional delivery defect.
+This audit made no live configuration or runtime changes. Epoch 25913's
+independent replay mean is 1077.03 for twelve entries, all with thirty passes.
+The current 25914 snapshot is 1815.86 for thirteen entries with ten to thirty
+passes. Rival 25914 replay remains incomplete. The changing replay depth means
+the 25914 figure supersedes, rather than contradicts, the earlier snapshot.
+
+The weak tail was already visible before submission. The Pi's archived 25914
+input contains five entries locally scoring 2533.02–2545.40 with twenty to
+fifty-four observations; their later replay scores are 2467.20–2611.20. Across
+the twelve archived entries matched to replay, local/replay means are
+1707.83/1754.14. For 25913 the corresponding means are 1071.97/1077.03. The Pi
+rebound the sixteen-entry sequence pool to thirteen crew members in 25914;
+the additional entry replayed at 2556.50. Do not conflate the twelve-entry
+archived assignments with the thirteen-entry actual fleet. First-pass noise
+does not explain this particular weak tail.
+
+Seventeen stronger 25914 candidates eventually completed twenty-one local
+observations, with scores 944.67–1451.95. All seventeen appear in the final
+publisher ranking, pass comparison precheck, and pass the final novelty and
+Layer-2 checks. Their existence corrects any inference that this epoch simply
+failed to produce enough qualified alternatives. They arrived too late for
+the Pi's frozen submission input:
+
+| Event on 2026-10-24 | 25913, UTC | 25914, UTC |
+| --- | --- | --- |
+| Checkpoints in the artifact eventually pulled | 17:10:59–17:11:36 | 18:27:25–18:28:00 |
+| Pi's final pull | 17:20:55 | 18:28:51 |
+| Commit process completed, zero failures | 17:22:34 | 18:30:23 |
+| Strong final confirmation file written | Earlier file no longer retained | 18:31:06.949 |
+| Final publisher ranking written | Earlier file no longer retained | 18:35:04.613 |
+| Final publisher Layer-2 output written | Earlier file no longer retained | 18:35:12.845 |
+
+The 25914 confirmation file therefore arrived 136 seconds after the final
+pull and 44 seconds after the commit process completed. Final publisher
+checks followed approximately five minutes after commitment. These local
+scores are not independent replay or a guaranteed counterfactual fleet mean,
+but the later passing candidates could not improve an already committed fleet.
+The actual Pi log establishes the pull and commit times. Archive `copy2`
+preserves source modification times, so an archive's mtime cannot establish
+when commitment happened. The master's per-entry planned commit blocks are
+also not the Pi's actual schedule: the submitter loads the pulled input once
+and commits using its own orchestration.
+
+### The producer and the Pi budget against different deadlines
+
+The master planned a 36-block commitment reserve and zero publication
+preparation blocks. Its adaptive handoff reserve is the sum of those two
+values. The Pi independently reserves `16 + 5 * crew_size` blocks, then ends
+its late-commit wait another 120 seconds before that deadline. For thirteen
+crew members, this is nominally 81 + 10 = 91 blocks before epoch end at the
+assumed twelve seconds per block. The producer can therefore budget work
+55 blocks, approximately eleven minutes, beyond the Pi's intended final-pull
+cutoff, even before allowing for publication processing. Polling and transfer
+latency affect the exact pull time; the observed logs demonstrate the miss.
+
+Both epochs used the broad policy, but 25913's good submitted estimates were
+ready before its final pull, while 25914's stronger final results were not.
+This explains the observed difference without attributing it solely to random
+ranking noise or claiming a configuration rollback would fix delivery. The
+eligibility refill release `e649ceb` does not align these deadlines, so that
+repair alone cannot establish that the timing defect is resolved.
+
+### Required correction and regression coverage
+
+Use one explicit, epoch-scoped handoff contract based on the Pi's actual
+final-pull cutoff and current fleet size. Budget confirmation backwards from
+that cutoff, reserving measured publisher preparation and transfer time.
+Retain the conservative commit safety window until both parallel operation
+and serial fallback have been evaluated; do not simply shorten the Pi's
+reserve to conceal the mismatch. Preserve the 4,800-NEW accounting contract;
+if measured capacity cannot fit discovery, confirmation and handoff, report
+the capacity shortfall instead of counting late work as useful delivery.
+
+CI must exercise the producer, publisher and Pi timing contract together:
+thirteen crew members, the late-pull margin, nonzero publication latency,
+eligibility refill, a final ranked pool reaching the Pi before its snapshot,
+and late old-epoch work remaining isolated from the next epoch. A completed
+confirmation marker or a healthy publisher process does not prove delivery.
+Record the committed artifact's identity and quality separately from later
+master-side results, and alert when good finalists miss the final pull.
+
+Before any implementation, reconcile the live Pi loop against the versioned
+file: the relevant reserve logic matches, but the whole-file hashes differ.
+Do not overwrite unrelated live changes. Run the required shipping CI before
+deployment, then verify the actual Pi snapshot and commit receipt in the
+first affected epoch. No timing correction was deployed during this audit.
+
+Numeric evidence: `docs/evidence/epoch_25914_handoff_audit_20261024.json`.
