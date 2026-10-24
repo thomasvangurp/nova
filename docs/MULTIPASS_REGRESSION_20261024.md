@@ -72,3 +72,32 @@ than a strong pool unexpectedly collapsing on replay.
 
 The target of 900 is an objective, not a measured guarantee or a license to
 weaken eligibility. A weak confirmed pool must be reported as such.
+
+## Deployment and recovered evidence
+
+Runtime revision `730f4100356cfdb7fb563beac2ca97f467c5c1f1` passed 538 local
+shipping checks (zero failures/errors/skips) and GitHub CI:
+https://github.com/thomasvangurp/nova/actions/runs/40100041637 . Installed
+runtime hashes and the scorer pin were checked against the tested artifact.
+Master receipt: `/root/artifacts/selection_repair_release_20261024.json`.
+
+The ordinary-design canary used two already measured length-123 candidates,
+one candidate per chunk. It completed both in 114.6 seconds with
+`validator-dual-sample-v1`, zero daemon fallbacks and zero empty-design errors.
+The first attempt timed out because restarting only the daemon child retained
+the supervisor's old scorer pin. The supervisor reads its settings before its
+loop: repinning requires restarting the supervisor as well as its workers.
+Do not infer loaded-code identity from the settings file alone.
+
+Validated retained wave hashes and protocol before recovering 4,488 raw
+observations from fourteen interrupted tranches: 1,318 from 25903; 1,355 from
+25904; 1,106 from 25908; 709 from 25909. All fourteen imports sealed, with zero
+incomplete observations or refused files. Recovery reused the original run
+identities and structures and performed no GPU evaluations. Receipt:
+`/root/artifacts/partial_wave_recovery_20261024.json`.
+
+Activated during the idle close of 25910. Its completed confirmation remains
+untouched. The unstarted 25911 proposal manifest was preserved under a backup
+name and rebuilt; its discovery ledger had no reservations. Epoch 25911 is the
+first epoch scheduled to use the corrected generation and comparison paths.
+Its resulting fleet multipass score must be measured after submission.
