@@ -1217,6 +1217,8 @@ def _prechecked_comparison_scope(
     }
     if cheap_only:
         proof_key.update(confirmation_only=True, minimum_observations=minimum)
+    if getattr(args, "adaptive_confirmation_depth", False):
+        proof_key["exclusion"] = _file_digest(exclusion)
     proof_path = epoch_root / "comparison_precheck.json"
     proof = _read_json(proof_path) or {}
     prior_eligible = set(proof.get("eligible_sequences", []))
@@ -2502,15 +2504,23 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
                 file=sys.stderr,
                 flush=True,
             )
+        effective_ledger = args.ledger
+        if getattr(args, "pi_handoff", False):
+            from nanobody_opt import publication_ledger
+            effective_ledger = publication_ledger.effective(
+                args.ledger, epoch=epoch, target=target, history=args.history_dir,
+                outcomes=args.runtime_root / "artifacts/pi_submission_outcomes.json",
+                output=epoch_root / "submission_exclusions.txt")
         exclusion_path = fleet_module.write_exclusion_file(
             epoch_root / "excluded_sequences.txt",
-            args.ledger,
+            effective_ledger,
             _live_sequences(previous, epoch),
         )
         if not archive_ready:
             _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
         # A bank/crew match alone cannot reuse eligibility under changed rules.
-        gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path)]
+        gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path),
+                            _file_digest(exclusion_path)]
         if getattr(args, "adaptive_confirmation_depth", False):
             gate_fingerprint.append(args._confirmation_depth)
         if args._submission_timing is not None:
@@ -2686,7 +2696,7 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
                 commit_context = CommitContext(
                     known_uids=frozenset(member.uid for member in crew),
                 )
-            _atomic_json(args.artifact, artifact)
+            _write_submission_artifact(args, artifact)
             _report(artifact, "provisional")
             ledger_fingerprint = _record_fleet(args.ledger, assignments)
             # Commit what we already have before the strict rank, which has
@@ -2912,7 +2922,7 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
             novelty=qualified_novelty,
             cdr_annotations=qualified_cdrs,
         )
-        _atomic_json(args.artifact, artifact)
+        _write_submission_artifact(args, artifact)
         _report(artifact, "qualified")
         ledger_fingerprint = _record_fleet(args.ledger, assignments)
         _write_publisher_state(
@@ -2949,6 +2959,17 @@ def _assert_same_epoch(args: argparse.Namespace, epoch: int, consequence: str) -
             f"epoch rolled from {epoch} to {current.epoch} at block "
             f"{current.block}; {consequence}"
         )
+
+
+def _write_submission_artifact(args, artifact):
+    if getattr(args, "pi_handoff", False):
+        from nanobody_opt import publication_ledger
+        sequences = list(dict.fromkeys([
+            *fleet_module.artifact_sequences(artifact), *artifact.get("sequence_pool", [])]))
+        fleet_module.record_published(args.ledger, sequences)
+        publication_ledger.record(args.ledger, epoch=artifact["epoch"],
+                                  target=artifact["target"], sequences=sequences)
+    _atomic_json(args.artifact, artifact)
 
 
 def _record_fleet(

@@ -741,3 +741,44 @@ Shipping tests exercise actual producer completion/retry, timing after pruning,
 target isolation, and discovery-aware reserves. Deployment verification follows
 the shipping run; score recovery still requires the actual committed fleet and
 independent replay.
+
+### Scheduling deployment and verified unused-publication loss
+
+Release `779c5f3ad04dd34f7782fa7c65fcd452521dc08e` passed all 637
+mandatory checks (zero failures, errors or skips) and
+[GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/40148022097).
+It activated during 25920 after draining and preserving a completed 700-candidate
+batch; 25921 is its first full epoch. Its actual budget now uses a 12-second
+startup estimate, a ten-observation planning reserve, and screening through block
+235 while retaining the 76-block handoff reserve and 4,800 NEW cap. The exact
+activation script and receipt are retained alongside this report.
+
+A separate confirmed defect permanently excluded candidates when the master
+wrote a publication artifact, regardless of whether Pi fetched or submitted it.
+The all-epoch Pi validator database and current archive show ten unused strong
+candidates from 25914 (local scores 944.67–1078.81) and twenty from 25915
+(801.24–1369.43). All thirty were in the publication ledger and excluded from
+the following epoch. All thirty passed both next-epoch and current-25920 novelty
+checks. The earlier master board directory was incomplete; absence from that
+directory is not the submission evidence. The authoritative comparison uses
+Pi's complete available validator database, recorded in
+`docs/evidence/unused_publication_audit_20261025.json`.
+
+The correction preserves the original publication ledger and derives effective
+exclusions from recent Pi outcome evidence. Any candidate appearing in any
+archived Pi input (including spares) or validator result remains protected.
+Only a known publication with continuous finalized coverage and no such match
+can return to comparison. Missing, stale, wrong-target or incomplete evidence
+retains exclusions. Every new artifact journals its entire pool before becoming
+visible, including repeated publications, so a candidate cannot be released
+again while its newer outcome remains unknown. Current novelty, Layer-2 and
+observation requirements still apply; stored evidence is not billed as NEW work.
+
+The existing Pi dashboard job exports and atomically sends the proof to the
+master. Exclusion changes invalidate cached eligibility in both the producer
+and publisher, and running prechecks refresh their exclusion snapshots between
+batches. The mandatory shipping suite now tests unused versus actual/possible
+submissions, stale/gapped evidence, repeat publications, journal-before-artifact
+ordering, the entire Pi pool, atomic transfer, real producer wiring and cached
+scope invalidation. Deployment and candidate recovery must be verified before
+claiming this correction is active; score recovery still needs independent replay.

@@ -161,3 +161,40 @@ def test_seen_children_do_not_use_the_new_proposal_limit(tmp_path, monkeypatch):
     assert not seen & {r["sequence"] for r in fresh["candidates"]}
     assert fresh["previously_evaluated_excluded"] == 2
     assert fresh["unseen_before_limit"]
+
+
+def test_released_publication_invalidates_the_cached_exclusion_proof(tmp_path):
+    archive, config, opt = tmp_path / "archive", tmp_path / "config", tmp_path / "opt"
+    archive.write_text("archive"); config.write_text("config"); opt.mkdir()
+    for name in ("check_validator_novelty.py", "filter_layer2.py"):
+        (opt / name).write_text("gate")
+    exclusion = tmp_path / "exclusions.txt"
+    exclusion.write_text("UNUSED\n")
+    root = tmp_path / "scope"
+    data = proof(root, epoch=100, target="TEST", archive=archive, config=config,
+                 opt_root=opt, allowed={"OTHER"})
+    data["key"]["exclusion"] = cached.digest(exclusion)
+    (root / "comparison_precheck.json").write_text(json.dumps(data))
+    kwargs = dict(epoch=100, target="TEST", archive=archive, config=config,
+                  opt_root=opt, exclusion=exclusion)
+    assert cached.read_scope(root, **kwargs)[1]["ready"]
+    exclusion.write_text("")
+    assert cached.read_scope(root, **kwargs) == (set(), {"ready": False, "reason": "scope_changed"})
+
+
+def test_running_precheck_refreshes_released_publications_between_batches(tmp_path, monkeypatch):
+    publisher = import_shipping("tools.publish_current_nanobody", monkeypatch)
+    archive, config, exclusion = tmp_path / "archive", tmp_path / "config", tmp_path / "ledger"
+    archive.write_text("archive"); config.write_text("config"); exclusion.write_text("UNUSED\n")
+    snapshots = []
+    def batch(**kw):
+        snapshots.append(kw["exclusion"].read_text())
+        exclusion.write_text("")
+        producer._atomic_json(kw["epoch_root"] / "comparison_precheck.json", {
+            "eligible_count": len(snapshots), "pending_count": 1 if len(snapshots) == 1 else 0})
+    monkeypatch.setattr(publisher, "_prechecked_comparison_scope", batch)
+    args = argparse.Namespace(runtime_root=tmp_path, mutation_database=tmp_path / "db",
+                              ledger=exclusion, layer2_concurrency=2, adaptive_confirmation_depth=True)
+    cached.prepare(args=args, state={"epoch": 100, "nanobody_target": "TEST"},
+                   archive=archive, config=config, root=tmp_path / "scope", runner=lambda *a: None)
+    assert snapshots == ["UNUSED\n", ""]

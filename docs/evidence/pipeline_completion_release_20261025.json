@@ -1,0 +1,41 @@
+{
+  "release": "779c5f3ad04dd34f7782fa7c65fcd452521dc08e",
+  "parent_release": "18b902a42efda74790a40000d353513a51a75737",
+  "activation": "active",
+  "shipping_tests": 637,
+  "verified_package_files": 644,
+  "ci_url": "https://github.com/thomasvangurp/nova/actions/runs/40148022097",
+  "previous_files": {
+    "nanobody_opt_v2/compute_budget.py": "2f24d777fb19044cb9e56954a3a29ebd5e8e6fb6147cf4d2c5c9d09e83aa8c1d",
+    "nanobody_opt_v2/run_live_producer.py": "798b51dc697bd6128f56847f9f6eb2e8b587a32a9929478526df6f1a686869d2"
+  },
+  "runtime_files": {
+    "nanobody_opt_v2/compute_budget.py": "3e02bd65448d66759fabc512efdd1a7282d61a97bbfa9124a7e8806a810d3b0f",
+    "nanobody_opt_v2/run_live_producer.py": "6d2e9778db2f3c9fba15aabb04dd0b2a1677cd2b1f7ead026d7ac04e1a806289"
+  },
+  "runtime_canary_passed": true,
+  "activation_checks_passed": 4,
+  "activation_epoch": 25920,
+  "first_full_epoch": 25921,
+  "producer_pid": 4169288,
+  "old_producer_pid": 3264138,
+  "activation_source_sha256": "c8a86e4c160c9a9fa10fccea449b075c541fc6f0ee037672b79db36968d61202",
+  "drained_discovery": {
+    "epoch": 25920,
+    "iteration": "iteration_01",
+    "completed_tranches": 1,
+    "completed_observations": 700,
+    "preserved_files": {
+      "live/epoch25920/producer/iteration_01/race/screen/tranche_01/exact_all.json": "9261c1e2bbfe39e07a07e4ede7f8353069aac91675dda564a1b57ffd90c8a336"
+    }
+  },
+  "live_budget": {
+    "planning_minimum_observations": 10,
+    "pending_new_evaluations": 4100,
+    "replication_reserve_blocks": 50,
+    "screen_cutoff_block": 235,
+    "load_seconds": 11.989999999999998,
+    "gpu_seconds_per_candidate": 4.8,
+    "effective_handoff_reserve_blocks": 76
+  }
+}

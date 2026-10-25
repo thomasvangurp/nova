@@ -2674,6 +2674,14 @@ def _one_pass(args, completed_iterations, exhausted_epochs, finished_epochs):
     try:
         state = _chain_state(args.chain_state, args.maximum_chain_state_age)
         epoch = int(state["epoch"])
+        if getattr(args, "pi_handoff", False):
+            from nanobody_opt import publication_ledger
+            effective_ledger = publication_ledger.effective(
+                args.ledger, epoch=epoch, target=state["nanobody_target"],
+                history=args.runtime_root / "artifacts/nanobody_history",
+                outcomes=args.runtime_root / "artifacts/pi_submission_outcomes.json",
+                output=args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer/submission_exclusions.txt")
+            args = argparse.Namespace(**{**vars(args), "ledger": effective_ledger})
         from nanobody_opt.epoch_deadline import EpochDeadline
         _STAGED.deadline = EpochDeadline(args.chain_state, epoch, _handoff_reserve(args),
                                          args.maximum_chain_state_age)

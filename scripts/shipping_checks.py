@@ -20,6 +20,7 @@ TEST_FILES = (
     'tests/test_confirmation_policy.py',
     'tests/test_confirmation_eligibility.py',
     'tests/test_adaptive_confirmation_depth.py',
+    'tests/test_publication_ledger.py',
     'tests/test_nanobody_filter_layer2.py',
     'tests/test_tnp_slots.py',
     'tests/test_complete_screen_pool.py',

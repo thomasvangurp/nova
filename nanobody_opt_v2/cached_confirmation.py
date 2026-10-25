@@ -16,7 +16,7 @@ def digest(path: Path) -> str:
 
 
 def read_scope(root: Path, *, epoch: int, target: str, archive: Path,
-               config: Path, opt_root: Path) -> tuple[set[str], dict]:
+               config: Path, opt_root: Path, exclusion: Path | None = None) -> tuple[set[str], dict]:
     """Never admit an unchecked entry or a stale epoch/target/gate proof."""
     try:
         from tools.publish_current_nanobody import PUBLISHER_STATE_SCHEMA_VERSION
@@ -29,6 +29,7 @@ def read_scope(root: Path, *, epoch: int, target: str, archive: Path,
                 or key.get("minimum_observations") != 1
                 or key.get("archive") != digest(archive)
                 or key.get("config") != digest(config)
+                or (exclusion is not None and key.get("exclusion") != digest(exclusion))
                 or key.get("gates") != {name: digest(opt_root / name) for name in (
                     "check_validator_novelty.py", "filter_layer2.py")}):
             return set(), {"ready": False, "reason": "scope_changed"}
@@ -60,7 +61,10 @@ def prepare(*, args, state, archive: Path, config: Path, root: Path, runner) -> 
             # A parent iteration can refresh the archive while this background
             # job is alive. Switch snapshots between bounded batches instead
             # of finishing an obsolete whole-bank proof first.
-            for source, snapshot in ((archive, snapshot_archive), (config, snapshot_config)):
+            snapshots = [(archive, snapshot_archive), (config, snapshot_config)]
+            if ledger and Path(ledger).is_file():
+                snapshots.append((Path(ledger), exclusion))
+            for source, snapshot in snapshots:
                 if digest(source) != digest(snapshot):
                     shutil.copy2(source, snapshot)
         _prechecked_comparison_scope(
@@ -88,7 +92,9 @@ def start(*, args, state, archive: Path, config: Path, producer_root: Path) -> N
         return
     _, status = read_scope(root, epoch=state["epoch"], target=state["nanobody_target"],
                            archive=archive, config=config,
-                           opt_root=args.runtime_root / "nanobody_opt")
+                           opt_root=args.runtime_root / "nanobody_opt",
+                           exclusion=(getattr(args, "ledger", None)
+                                      if getattr(args, "adaptive_confirmation_depth", False) else None))
     if status.get("ready") and not status["pending"]:
         return
     record = {}
@@ -113,10 +119,12 @@ def start(*, args, state, archive: Path, config: Path, producer_root: Path) -> N
 
 
 def write_ranking_scope(*, root: Path, epoch: int, target: str, archive: Path,
-                        config: Path, fresh_sequences: set[str], output: Path) -> Path | None:
+                        config: Path, fresh_sequences: set[str], output: Path,
+                        exclusion: Path | None = None) -> Path | None:
     from nanobody_opt_v2 import sequential_exact_race as race
     cached, status = read_scope(root, epoch=epoch, target=target, archive=archive,
-                               config=config, opt_root=Path(race.__file__).resolve().parents[1] / "nanobody_opt")
+                               config=config, opt_root=Path(race.__file__).resolve().parents[1] / "nanobody_opt",
+                               exclusion=exclusion)
     print(f"CACHED_CONFIRMATION_SCOPE epoch={epoch} ready={status['ready']} "
           f"cached={len(cached)} pending={status.get('pending', 0)}", flush=True)
     if not cached:

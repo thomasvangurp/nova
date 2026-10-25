@@ -118,6 +118,7 @@ def multipass() -> dict:
     host, port = master_endpoint()
     options = ["-i", str(IDENTITY), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
                "-o", "ConnectTimeout=12", "-o", "StrictHostKeyChecking=accept-new"]
+    outcomes_ok = submission_outcomes(host, port, options)
     # timeout runs remotely too: losing SSH must not leave an unbounded export.
     try:
         exported = run(["ssh", *options, "-p", str(port), "root@" + host,
@@ -137,10 +138,30 @@ def multipass() -> dict:
         pending.unlink(missing_ok=True)
     latest = latest_leaderboard()
     caught_up = latest is None or newest >= latest
-    return {"ok": export_code == 0 and caught_up,
+    return {"ok": export_code == 0 and caught_up and outcomes_ok,
             "export_returncode": export_code, "multipass_epoch": newest,
+            "submission_outcomes_synced": outcomes_ok,
             "leaderboard_epoch": latest,
             "reason": "current" if caught_up else "awaiting_multipass_export"}
+
+
+def submission_outcomes(host, port, options) -> bool:
+    """Push Pi's finalized input/outcome proof through the existing scheduled job."""
+    from .submission_outcomes import export
+    path = DATA / "pi_submission_outcomes.json"
+    try:
+        export(DATA / "nanobody_dash.sqlite", Path("/opt/nova-submit/archive"), path)
+        pending = "/root/artifacts/pi_submission_outcomes.json.next"
+        copied = run(["scp", "-O", *options, "-P", str(port), str(path),
+                      f"root@{host}:{pending}"], 60)
+        if copied.returncode:
+            return False
+        promoted = run(["ssh", *options, "-p", str(port), "root@" + host,
+                        "mv /root/artifacts/pi_submission_outcomes.json.next "
+                        "/root/artifacts/pi_submission_outcomes.json"], 30)
+        return promoted.returncode == 0
+    except (OSError, ValueError, sqlite3.Error, subprocess.TimeoutExpired):
+        return False
 
 
 def status_text() -> str:

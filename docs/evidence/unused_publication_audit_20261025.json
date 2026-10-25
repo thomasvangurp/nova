@@ -1,0 +1,142 @@
+{
+  "validator_evidence": {
+    "25913": {
+      "strong_candidates": 16,
+      "seen_in_any_validator_result": 16,
+      "never_seen_in_validator_results": 0
+    },
+    "25914": {
+      "strong_candidates": 19,
+      "seen_in_any_validator_result": 9,
+      "never_seen_in_validator_results": 10
+    },
+    "25915": {
+      "strong_candidates": 21,
+      "seen_in_any_validator_result": 1,
+      "never_seen_in_validator_results": 20
+    },
+    "25916": {
+      "strong_candidates": 20,
+      "seen_in_any_validator_result": 20,
+      "never_seen_in_validator_results": 0
+    },
+    "25917": {
+      "strong_candidates": 7,
+      "seen_in_any_validator_result": 7,
+      "never_seen_in_validator_results": 0
+    },
+    "25918": {
+      "strong_candidates": 0,
+      "seen_in_any_validator_result": 0,
+      "never_seen_in_validator_results": 0
+    }
+  },
+  "validator_epoch_rows": {
+    "25903": 51,
+    "25904": 50,
+    "25905": 51,
+    "25906": 49,
+    "25907": 51,
+    "25908": 42,
+    "25909": 49,
+    "25910": 50,
+    "25911": 47,
+    "25912": 49,
+    "25913": 49,
+    "25914": 50,
+    "25915": 49,
+    "25916": 49,
+    "25917": 50,
+    "25918": 49
+  },
+  "unused_publications": {
+    "25914": {
+      "in_published_ledger": 19,
+      "excluded_next_epoch": 10,
+      "local_scores": [
+        944.6666666666666,
+        956.0952380952381,
+        959.3333333333334,
+        965.2857142857143,
+        980.6190476190476,
+        984.7619047619048,
+        1024.952380952381,
+        1061.7142857142858,
+        1071.1904761904761,
+        1078.8095238095239
+      ]
+    },
+    "25915": {
+      "in_published_ledger": 21,
+      "excluded_next_epoch": 20,
+      "local_scores": [
+        801.2380952380952,
+        832.9047619047619,
+        913.2857142857143,
+        945.2380952380952,
+        946.047619047619,
+        946.9047619047619,
+        961.4285714285714,
+        981.3809523809524,
+        986.8571428571429,
+        996.0,
+        1064.2857142857142,
+        1116.4761904761904,
+        1159.5714285714287,
+        1179.5714285714287,
+        1184.5238095238096,
+        1186.7619047619048,
+        1228.142857142857,
+        1281.5714285714287,
+        1317.6666666666667,
+        1369.4285714285713
+      ]
+    }
+  },
+  "novelty_checks": [
+    {
+      "origin_epoch": 25914,
+      "check_epoch": 25915,
+      "return_code": 0,
+      "metrics": {
+        "archive_count": 74526,
+        "algorithm2_top_count": 50,
+        "input_count": 10,
+        "pass_count": 10
+      }
+    },
+    {
+      "origin_epoch": 25915,
+      "check_epoch": 25916,
+      "return_code": 0,
+      "metrics": {
+        "archive_count": 74574,
+        "algorithm2_top_count": 50,
+        "input_count": 20,
+        "pass_count": 20
+      }
+    },
+    {
+      "origin_epoch": 25914,
+      "check_epoch": 25920,
+      "return_code": 0,
+      "metrics": {
+        "archive_count": 74717,
+        "algorithm2_top_count": 50,
+        "input_count": 10,
+        "pass_count": 10
+      }
+    },
+    {
+      "origin_epoch": 25915,
+      "check_epoch": 25920,
+      "return_code": 0,
+      "metrics": {
+        "archive_count": 74717,
+        "algorithm2_top_count": 50,
+        "input_count": 20,
+        "pass_count": 20
+      }
+    }
+  ]
+}

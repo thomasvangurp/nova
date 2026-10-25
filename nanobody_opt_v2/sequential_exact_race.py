@@ -2859,6 +2859,7 @@ def main() -> None:
                 target=args.target, archive=args.archive, config=args.config,
                 fresh_sequences=set(_observations(pooled_for_ranking, args.target)),
                 output=args.output_dir / "confirmation_scope.txt",
+                exclusion=args.ledger if getattr(args, "adaptive_confirmation_depth", False) else None,
             )
         if args.maximum_current_epoch_observations:
             from nanobody_opt.rank_exact import _observations
