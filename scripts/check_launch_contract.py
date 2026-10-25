@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 
 def check(root: Path, *, installed: bool = False) -> None:
-    sys.path.insert(0, str(root))
     stamp = root / 'build_stamp.json'
     if installed and stamp.is_file() and json.loads(stamp.read_text()).get('deployment_profile') == 'release-controls':
         from scripts.control_release import verify_application

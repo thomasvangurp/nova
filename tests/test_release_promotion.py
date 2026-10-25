@@ -445,7 +445,8 @@ def test_backup_failure_never_pauses_running_services(tmp_path, monkeypatch):
     db.close()
 
 
-def test_pi_receipt_uses_installed_allocation_without_main_or_commits(tmp_path, monkeypatch):
+@pytest.mark.parametrize('embedded_stamp', [True, False])
+def test_pi_receipt_uses_installed_allocation_without_main_or_commits(tmp_path, monkeypatch, embedded_stamp):
     from scripts import pi_shadow_receipt as pi
     consumer_root = tmp_path / 'consumer'
     consumer_root.mkdir()
@@ -456,12 +457,21 @@ def test_pi_receipt_uses_installed_allocation_without_main_or_commits(tmp_path, 
                         None if reason == 'receipt_requires_pi' else original_require(condition, reason))
     monkeypatch.setattr(pi.time, 'time', lambda: NOW)
     artifact = tmp_path / 'trial.json'
-    write(artifact, {'target': 'TEST', 'epoch': 26000, 'updated_at_unix': NOW,
-                     'sequence_pool': [f'trial-{i}' for i in range(13)]})
-    receipt = pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000, uids=list(range(13)))
+    payload = {'target': 'TEST', 'epoch': 26000, 'sequence_pool': [f'trial-{i}' for i in range(13)]}
+    if embedded_stamp: payload['updated_at_unix'] = NOW
+    write(artifact, payload)
+    receipt = pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+                         uids=list(range(13)), publication_mtime=NOW)
     assert receipt['accepted_entries'] == 13 and receipt['submission_attempts'] == 0
     assert receipt['consumer_sha256'] == gate.digest(consumer_root / 'pi_submit.py')
     assert receipt['artifact_sha256'] == gate.digest(artifact)
+    if not embedded_stamp:
+        with pytest.raises(ValueError, match='stale_trial_artifact'):
+            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+                       uids=list(range(13)), publication_mtime=NOW-901)
+        with pytest.raises(ValueError, match='missing_publication_clock'):
+            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+                       uids=list(range(13)))
 
 
 def test_shadow_rejects_credentials_symlinks_and_reused_outputs(tmp_path):

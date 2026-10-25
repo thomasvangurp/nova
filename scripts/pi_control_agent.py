@@ -88,7 +88,8 @@ def tick(*, vast=VAST, consumer_root=Path('/opt/nova-submit')):
     request = message['request']
     require(request['schema'] == 'sn68-control-pi-request-v1'
             and sha(request['candidate_sha'], 40) and sha(request['nonce'], 32)
-            and request['created_at'] <= time.time() < request['expires_at'], 'invalid_qualification_request')
+            and request['created_at'] <= time.time() < request['expires_at']
+            and 0 <= time.time() - request['publication_mtime'] <= 900, 'invalid_qualification_request')
     raw = base64.b64decode(message['artifact'], validate=True)
     require(hashlib.sha256(raw).hexdigest() == request['artifact_sha256'], 'qualification_artifact_mismatch')
     artifact = json.loads(raw)
@@ -96,7 +97,8 @@ def tick(*, vast=VAST, consumer_root=Path('/opt/nova-submit')):
     with tempfile.TemporaryDirectory(prefix='nova-control-proof-') as temporary:
         trial = Path(temporary) / 'trial.json'; trial.write_bytes(raw); trial.chmod(0o600)
         receipt = collect(trial, consumer_root, revision=request['candidate_sha'], target=request['target'],
-                          epoch=request['epoch'], uids=uids)
+                          epoch=request['epoch'], uids=uids,
+                          publication_mtime=request['publication_mtime'])
     receipt['request_nonce'] = request['nonce']
     require(remote(host, port, DELIVER, json.dumps(receipt))['status'] == 'delivered', 'receipt_not_delivered')
     return {'status': 'verified', 'revision': request['candidate_sha'], 'epoch': request['epoch'],

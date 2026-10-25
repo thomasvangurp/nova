@@ -52,6 +52,10 @@ immutable artifact snapshot, calls the installed consumer without committing,
 and returns a fresh receipt. It never rewrites the Pi's submission input.
 Requests bind the revision, nonce, target, epoch and exact artifact hash; stale
 or mismatched receipts refuse installation. No Mac process is needed.
+Legacy publications may omit `updated_at_unix`; the qualification request then
+supplies the original publication file's mtime, captured from the same open
+file descriptor as its bytes. Both source age and current epoch are checked.
+A copied trial's new mtime cannot make an old publication appear fresh.
 
 Bootstrap procedure:
 

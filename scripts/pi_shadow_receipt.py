@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import platform
 import sys
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.promotion_gate import digest, read, require, sha
 
 
-def collect(artifact, consumer_root, *, revision, target, epoch, uids):
+def collect(artifact, consumer_root, *, revision, target, epoch, uids, publication_mtime=None):
     artifact, consumer_root = Path(artifact).resolve(), Path(consumer_root).resolve()
     require(consumer_root == Path('/opt/nova-submit') and platform.system() == 'Linux'
             and platform.machine() in {'aarch64', 'arm64'}, 'receipt_requires_pi')
@@ -30,7 +31,13 @@ def collect(artifact, consumer_root, *, revision, target, epoch, uids):
     before = digest(artifact)
     payload = read(artifact)
     require(payload['target'] == target and payload['epoch'] == epoch, 'trial_artifact_scope')
-    require(0 <= time.time() - payload['updated_at_unix'] <= 900, 'stale_trial_artifact')
+    # The installed consumer supports legacy publications without an embedded
+    # clock. For those, use the producer-observed mtime of the ORIGINAL file,
+    # never the fresh mtime of this copied trial.
+    published = payload.get('updated_at_unix', publication_mtime)
+    require(isinstance(published, (int, float)) and not isinstance(published, bool)
+            and math.isfinite(published), 'missing_publication_clock')
+    require(0 <= time.time() - published <= 900, 'stale_trial_artifact')
     consumer = consumer_root / 'pi_submit.py'
     consumer_hash = digest(consumer)
     spec = importlib.util.spec_from_file_location('sn68_installed_pi_consumer', consumer)
@@ -57,12 +64,14 @@ def main():
     parser.add_argument('--target', required=True)
     parser.add_argument('--epoch', type=int, required=True)
     parser.add_argument('--uids', type=int, nargs='+', required=True)
+    parser.add_argument('--publication-mtime', type=float)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     try:
         require(not args.output.exists(), 'receipt_already_exists')
         receipt = collect(args.artifact, args.consumer_root, revision=args.candidate_sha,
-                          target=args.target, epoch=args.epoch, uids=args.uids)
+                          target=args.target, epoch=args.epoch, uids=args.uids,
+                          publication_mtime=args.publication_mtime)
         with args.output.open('x') as handle:
             handle.write(json.dumps(receipt, indent=2) + '\n')
         print(json.dumps({'status': 'pi_trial_passed', 'accepted_entries': receipt['accepted_entries']}))

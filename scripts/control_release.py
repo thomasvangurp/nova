@@ -230,6 +230,7 @@ def install_controls(stage, evidence, snapshot_path, pi_receipt, root):
             and request['epoch'] == clock['epoch'] and request['target'] == clock['nanobody_target']
             and request['artifact_sha256'] == pi['artifact_sha256']
             and request['created_at'] <= pi['verified_at']
+            and 0 <= time.time() - request['publication_mtime'] <= 900
             and request['expires_at'] > time.time()
             and 0 <= time.time() - pi['verified_at'] <= 900, 'current_pi_receipt_required')
     require(sha(request['nonce'], 32), 'invalid_pi_request')
@@ -299,7 +300,11 @@ def request_pi(stage, evidence, root):
     clock = read(root / 'artifacts/chain_state.json')
     require(0 <= time.time() - clock['updated_at_unix'] <= 90, 'stale_live_clock')
     original = root / 'artifacts/nanobody_result.json'
-    raw = original.read_bytes(); artifact = json.loads(raw)
+    with original.open('rb') as handle:
+        raw = handle.read()
+        publication_mtime = os.fstat(handle.fileno()).st_mtime
+    require(0 <= time.time() - publication_mtime <= 900, 'stale_original_publication')
+    artifact = json.loads(raw)
     fixture = read(stage / FIXTURES / 'fixture.json')
     require(artifact['epoch'] == clock['epoch'] and artifact['target'] == clock['nanobody_target']
             and fixture['target'] == artifact['target'], 'pi_trial_scope')
@@ -309,6 +314,7 @@ def request_pi(stage, evidence, root):
     trial.write_bytes(raw); trial.chmod(0o600)
     request = {'schema': 'sn68-control-pi-request-v1', 'candidate_sha': qualification['revision'],
         'nonce': nonce, 'epoch': clock['epoch'], 'target': artifact['target'],
+        'publication_mtime': publication_mtime,
         'artifact_sha256': hashlib.sha256(raw).hexdigest(), 'created_at': time.time(),
         'expires_at': time.time() + 900}
     save(root / 'artifacts/control_qualification_request.json', request)

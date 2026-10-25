@@ -9,6 +9,8 @@ on:
       - '.github/workflows/qualify-nanobody-release.yml'
       - '.github/workflows/ci.yml'
       - 'deploy_gate.sh'
+      - 'deploy/submit_host/nova-control-qualification.*'
+      - 'ansible/**'
   workflow_dispatch:
 
 permissions:

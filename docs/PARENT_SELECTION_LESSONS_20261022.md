@@ -455,3 +455,8 @@ The real `producer_relaunch.sh` must invoke the verified restart gate. Installin
 a gate file alone does not enforce it. The control installer preserves the
 original command body and arguments, adds one pinned gate call, and records
 both launcher hashes without restarting work.
+
+Qualification must accept the same timestamp formats as the installed Pi
+consumer. An optional `updated_at_unix` field cannot become an accidental
+mandatory dependency. Preserve freshness with the producer-observed original
+publication mtime and current epoch; never use a copied trial's new timestamp.

@@ -2,6 +2,7 @@
 import base64
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import time
@@ -81,6 +82,7 @@ def setup_install(tmp_path, monkeypatch, entries=12):
                                                'updated_at_unix': NOW})
     artifact = {'epoch': 26000, 'target': 'P20809', 'submissions': [{'uid': i} for i in range(entries)]}
     write(root / 'artifacts/nanobody_result.json', artifact)
+    os.utime(root / 'artifacts/nanobody_result.json', (NOW, NOW))
     request = control.request_pi(stage, proof, root)
     pi = tmp_path / 'pi.json'
     write(pi, {'schema': 'sn68-pi-shadow-v1', 'host': 'pi', 'candidate_sha': NEW, 'target': 'P20809',
@@ -97,6 +99,25 @@ def test_actual_recorded_handoffs_are_not_synthetic_fleets():
     assert [r['entries'] for r in report['cases']] == [12, 13, 13, 13, 13, 13]
     assert report['submission_attempts'] == report['scoring_calls'] == 0
     assert all(row['wrong_epoch_refused'] for row in report['cases'])
+
+
+@pytest.mark.parametrize('epoch', [25913, 25916, 25918, 25921, 25926, 25927])
+def test_receipt_wrapper_accepts_real_archived_publication_formats(tmp_path, monkeypatch, epoch):
+    from scripts import pi_shadow_receipt as pi
+    fixtures = ROOT / control.FIXTURES
+    fixture = gate.read(fixtures / 'fixture.json')
+    case = next(row for row in fixture['cases'] if row['epoch'] == epoch)
+    consumer = tmp_path / 'consumer'; consumer.mkdir()
+    shutil.copyfile(fixtures / fixture['consumer']['path'], consumer / 'pi_submit.py')
+    original_require = pi.require
+    monkeypatch.setattr(pi, 'require', lambda condition, reason:
+                        None if reason == 'receipt_requires_pi' else original_require(condition, reason))
+    monkeypatch.setattr(pi.time, 'time', lambda: case['replay_time'])
+    receipt = pi.collect(fixtures / case['artifact']['path'], consumer,
+                         revision=NEW, target=fixture['target'], epoch=epoch, uids=case['uids'],
+                         publication_mtime=case['replay_time'])
+    assert receipt['accepted_entries'] == len(case['uids'])
+    assert receipt['submission_attempts'] == 0
 
 
 def test_observed_application_capture_is_honest_and_role_specific(tmp_path):
@@ -178,6 +199,18 @@ def test_control_install_refuses_bad_pi_evidence_without_writing(tmp_path, monke
     assert not (root / 'scripts/control_release.py').exists()
 
 
+@pytest.mark.parametrize('age', [901, -1])
+def test_old_unstamped_publication_cannot_be_freshened_by_copying_it(tmp_path, monkeypatch, age):
+    root, stage, snapshot, proof, pi = setup_install(tmp_path, monkeypatch)
+    request = root / 'artifacts/control_qualification_request.json'
+    previous = request.read_bytes()
+    original = root / 'artifacts/nanobody_result.json'
+    os.utime(original, (NOW-age, NOW-age))
+    with pytest.raises(ValueError, match='stale_original_publication'):
+        control.request_pi(stage, proof, root)
+    assert request.read_bytes() == previous
+
+
 def test_failed_control_copy_restores_controls_without_rewinding_concurrent_work(tmp_path, monkeypatch):
     root, stage, snapshot, proof, pi = setup_install(tmp_path, monkeypatch)
     old = root / 'scripts/shipping_checks.py'; old.parent.mkdir(parents=True)
@@ -221,6 +254,7 @@ def test_pi_agent_uses_private_scratch_and_only_delivers_a_read_only_receipt(tmp
     import hashlib
     request = {'schema': 'sn68-control-pi-request-v1', 'candidate_sha': NEW, 'nonce': 'a'*32,
         'epoch': 26000, 'target': 'P20809', 'created_at': NOW-1, 'expires_at': NOW+60,
+        'publication_mtime': NOW-2,
         'artifact_sha256': hashlib.sha256(raw).hexdigest()}
     monkeypatch.setattr(agent.time, 'time', lambda: NOW)
     monkeypatch.setattr(agent, 'endpoint', lambda *a: ('producer.example', 22))
@@ -236,6 +270,7 @@ def test_pi_agent_uses_private_scratch_and_only_delivers_a_read_only_receipt(tmp
     def collect(path, consumer_root, **kwargs):
         assert path.read_bytes() == raw and not path.is_relative_to(consumer_root)
         assert kwargs['uids'] == list(range(12)); paths.append(path)
+        assert kwargs['publication_mtime'] == NOW-2
         return {'accepted_entries': 12, 'submission_attempts': 0, 'read_only': True}
     monkeypatch.setattr(agent, 'collect', collect)
     assert agent.tick()['status'] == 'verified'
