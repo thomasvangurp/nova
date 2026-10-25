@@ -161,3 +161,11 @@ quality and coverage regression, late handoff, one-pass evidence, unsafe shadow
 settings, live baseline drift, legacy bypass, Pi consumer allocation, timeout
 container cleanup, SQLite WAL backup, and a failed-start rollback preserving
 new measurements and reservations. Full shipping CI remains mandatory.
+
+SSH disconnect and normal cancellation enter the rollback/cleanup path;
+repeated termination signals cannot interrupt restoration. Derived caches for
+both the current epoch and a prepared next epoch are quarantined, while both
+epochs' budget reservations survive. Host loss or `SIGKILL` cannot be handled
+by a process-local exception handler: inspect the per-attempt backup and tested
+manifest before restarting after such a failure. Never restore the state
+snapshot over newer durable data.

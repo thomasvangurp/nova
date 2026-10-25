@@ -20,12 +20,43 @@ import sys
 import time
 import fcntl
 import uuid
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.promotion_gate import read, require, verify_host, digest
 from scripts.release_manifest import safe_path, verify
 from scripts.release_state import capture, quarantine_derived
+
+
+@contextmanager
+def cleanup_on_disconnect():
+    """SSH disconnect/cancellation must enter the same rollback/finally path."""
+    received = False
+    def interrupted(_signum, _frame):
+        nonlocal received
+        if not received:
+            received = True
+            raise InterruptedError('promotion_interrupted')
+        # Repeated cancellation must not interrupt restoration halfway through.
+    previous = {sig: signal.signal(sig, interrupted) for sig in
+                [signal.SIGHUP, signal.SIGTERM, signal.SIGINT]}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@contextmanager
+def ignore_cancellation():
+    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in
+                [signal.SIGHUP, signal.SIGTERM, signal.SIGINT]}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def save(path, value):
@@ -122,7 +153,9 @@ def install(source, root, manifest, *, deadline=None):
         pending = destination.with_suffix(destination.suffix + '.promotion-new')
         shutil.copy2(safe_path(source, name), pending)
         pending.replace(destination)
-    save(root / 'build_stamp.json', manifest)
+    pending = root / 'build_stamp.promotion-new'
+    shutil.copy2(source / 'build_stamp.json', pending)
+    pending.replace(root / 'build_stamp.json')
 
 
 def healthy(root, *, epoch, activated, previous_pids):
@@ -178,7 +211,7 @@ def promote(stage, bundle, root, *, host, target, readiness_seconds=None):
         path = safe_path(backup, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(safe_path(root, name), path)
-    save(backup / 'build_stamp.json', baseline)
+    shutil.copy2(root / 'build_stamp.json', backup / 'build_stamp.json')
     argv = root / 'artifacts/producer_argv.txt'
     shutil.copy2(argv, backup / 'producer_argv.txt')
     capture(root, attempt / 'state-before-promotion', epoch=qualification['activation_epoch'],
@@ -186,8 +219,8 @@ def promote(stage, bundle, root, *, host, target, readiness_seconds=None):
     verify_host(bundle, runtime_root=root, candidate_sha=candidate['git_sha'], host=host, target=target)
     try:
         for pid in previous.values():
-            os.kill(pid, signal.SIGSTOP)
             paused.append(pid)
+            os.kill(pid, signal.SIGSTOP)
         require(not descendants(processes(), set(previous.values())), 'runtime_has_inflight_children')
         verify_host(bundle, runtime_root=root, candidate_sha=candidate['git_sha'], host=host, target=target)
         copied = True
@@ -217,28 +250,29 @@ def promote(stage, bundle, root, *, host, target, readiness_seconds=None):
         save(receipt_path, receipt)
         return receipt
     except BaseException:
-        if copied:
-            # Preserve NEW reservations and measurements produced by the failed
-            # release. Only code and its launch contract go backwards.
-            table = processes()
-            live = [pid for pid, (_, args) in table.items() if
-                    'nanobody_opt_v2.run_live_producer' in args or
-                    any(a.endswith('/publish_current_nanobody.py') for a in args)]
-            stop(live)
-            paused.clear()
-            install(backup, root, baseline)
-            for name in set(candidate['runtime_files']) - set(baseline['runtime_files']):
-                safe_path(root, name).unlink(missing_ok=True)
-            shutil.copy2(backup / 'producer_argv.txt', root / 'artifacts/producer_argv.txt')
-            quarantine_derived(root, attempt / 'failed-release-derived', epoch=qualification['activation_epoch'])
-            verify(root, baseline, expected_sha=baseline['git_sha'], runtime_only=True, require_tests=False)
-            if old_receipt:
-                save(receipt_path, old_receipt)
-            else:
-                receipt_path.unlink(missing_ok=True)
-            launch(publisher)
-            save(attempt / 'promotion_failure.json', {'status': 'rolled_back', 'candidate_sha': candidate['git_sha'],
-                'baseline_sha': baseline['git_sha'], 'durable_state_restored': False, 'at': time.time()})
+        with ignore_cancellation():
+            if copied:
+                # Preserve NEW reservations and measurements produced by the failed
+                # release. Only code and its launch contract go backwards.
+                table = processes()
+                live = [pid for pid, (_, args) in table.items() if
+                        'nanobody_opt_v2.run_live_producer' in args or
+                        any(a.endswith('/publish_current_nanobody.py') for a in args)]
+                stop(live)
+                paused.clear()
+                install(backup, root, baseline)
+                for name in set(candidate['runtime_files']) - set(baseline['runtime_files']):
+                    safe_path(root, name).unlink(missing_ok=True)
+                shutil.copy2(backup / 'producer_argv.txt', root / 'artifacts/producer_argv.txt')
+                quarantine_derived(root, attempt / 'failed-release-derived', epoch=qualification['activation_epoch'])
+                verify(root, baseline, expected_sha=baseline['git_sha'], runtime_only=True, require_tests=False)
+                if old_receipt:
+                    save(receipt_path, old_receipt)
+                else:
+                    receipt_path.unlink(missing_ok=True)
+                launch(publisher)
+                save(attempt / 'promotion_failure.json', {'status': 'rolled_back', 'candidate_sha': candidate['git_sha'],
+                    'baseline_sha': baseline['git_sha'], 'durable_state_restored': False, 'at': time.time()})
         raise
     finally:
         for pid in paused:
@@ -259,7 +293,7 @@ def main():
     try:
         require(args.runtime_root.resolve() == Path('/root'), 'production_root_required')
         lock_path = args.runtime_root / 'artifacts/release_promotion.lock'
-        with lock_path.open('a') as lock:
+        with cleanup_on_disconnect(), lock_path.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = promote(args.stage, args.bundle, args.runtime_root, host=args.host, target=args.target)
         print(json.dumps({k: result[k] for k in ['status', 'candidate_sha', 'baseline_sha', 'activation_epoch']}))

@@ -253,10 +253,15 @@ def test_snapshot_includes_wal_and_quarantine_never_rewinds_new_work(tmp_path):
     write(root / 'live/epoch26000/producer/fresh_screen_budget.json', {'reserved': 120})
     cache = root / 'live/epoch26000/producer/full_scan_confirmation.json'
     write(cache, {'derived': True})
+    next_cache = root / 'live/epoch26001/comparison_precheck.json'
+    write(next_cache, {'prepared_ahead': True})
+    next_budget = root / 'live/epoch26001/producer/fresh_screen_budget.json'
+    write(next_budget, {'reserved': 5})
     raw = root / 'live/epoch26000/producer/iteration_00/exact_all.json'
     write(raw, {'observations': [1, 2]})
     receipt = state.quarantine_derived(root, tmp_path / 'quarantine', epoch=26000)
     assert receipt['restores_durable_state'] is False and not cache.exists()
+    assert not next_cache.exists() and gate.read(next_budget)['reserved'] == 5
     assert raw.is_file() and db.execute('SELECT COUNT(*) FROM measurements').fetchone()[0] == 2
     assert 'submitted-after' in (root / state.DURABLE[0]).read_text()
     assert gate.read(root / 'live/epoch26000/producer/fresh_screen_budget.json')['reserved'] == 120
@@ -282,6 +287,8 @@ def release(root, revision, *, extra=False):
 def test_failed_promotion_restores_code_but_keeps_candidate_measurements_and_reservations(tmp_path, monkeypatch):
     root, stage = tmp_path / 'runtime', tmp_path / 'stage'
     release(root, OLD); release(stage, NEW, extra=True)
+    (root / 'build_stamp.json').write_text(json.dumps(gate.read(root / 'build_stamp.json')))
+    original_manifest_hash = gate.digest(root / 'build_stamp.json')
     db = durable(root)
     (root / 'artifacts/producer_argv.txt').write_text('original argv')
     monkeypatch.setattr(deploy, 'deployment_plan', lambda *a, **k: ('guarded', {}))
@@ -305,6 +312,7 @@ def test_failed_promotion_restores_code_but_keeps_candidate_measurements_and_res
         transaction.promote(stage, tmp_path / 'proof', root, host='producer.example', target='TEST')
     assert launches == [NEW, OLD]
     assert (root / 'scripts/version.py').read_text() == OLD
+    assert gate.digest(root / 'build_stamp.json') == original_manifest_hash
     assert not (root / 'scripts/new_only.py').exists()
     assert (root / 'artifacts/producer_argv.txt').read_text() == 'original argv'
     assert db.execute('SELECT COUNT(*) FROM measurements').fetchone()[0] == 2
@@ -459,3 +467,23 @@ def test_shadow_rejects_credentials_symlinks_and_reused_outputs(tmp_path):
     with pytest.raises(ValueError, match='trial_output_overlap'):
         shadow.run(baseline=directory, candidate=directory, fixtures=directory, output=directory,
                    driver='scripts/driver.py', image='runtime@sha256:' + ident(1))
+
+
+def test_disconnect_enters_cleanup_and_repeated_signals_cannot_interrupt_rollback(monkeypatch):
+    registered = {}
+    sentinel = object()
+    def register(sig, handler):
+        previous = registered.get(sig, sentinel)
+        registered[sig] = handler
+        return previous
+    monkeypatch.setattr(transaction.signal, 'signal', register)
+    cleaned = []
+    with pytest.raises(InterruptedError, match='promotion_interrupted'):
+        with transaction.cleanup_on_disconnect():
+            try:
+                registered[transaction.signal.SIGHUP](transaction.signal.SIGHUP, None)
+            finally:
+                registered[transaction.signal.SIGTERM](transaction.signal.SIGTERM, None)
+                cleaned.append('restoration completed')
+    assert cleaned == ['restoration completed']
+    assert set(registered.values()) == {sentinel}

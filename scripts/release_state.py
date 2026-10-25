@@ -80,10 +80,11 @@ def quarantine_derived(root, output, *, epoch):
             continue
     before = {str(p): digest(p) for p in protected_paths(root, epoch)}
     names = [*DERIVED]
-    for suffix in ['comparison_precheck.json', 'comparison_candidate_scope.txt',
-                   'producer/full_scan_confirmation.json', 'producer/confirmation_attempt.json',
-                   'producer/cached_confirmation/comparison_precheck.json']:
-        names.append(f'live/epoch{epoch}/{suffix}')
+    for scope in [epoch, epoch + 1]:
+        for suffix in ['comparison_precheck.json', 'comparison_candidate_scope.txt',
+                       'producer/full_scan_confirmation.json', 'producer/confirmation_attempt.json',
+                       'producer/cached_confirmation/comparison_precheck.json']:
+            names.append(f'live/epoch{scope}/{suffix}')
     output.mkdir(parents=True, mode=0o700)
     moved = []
     for name in names:
