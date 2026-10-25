@@ -126,6 +126,8 @@
         sha256: 525a51ef306da7282a54d23a4a5b91212fc60d0ff6b23b56dd6351de3b387530
 
   tasks:
+    - name: Protect an existing runtime from legacy provisioning
+      ansible.builtin.include_tasks: tasks/refuse_live_reprovision.yml
     - name: Require committed deployment source
       ansible.builtin.command:
         argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]

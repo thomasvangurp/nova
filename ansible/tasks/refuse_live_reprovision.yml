@@ -1,0 +1,11 @@
+---
+- name: Inspect whether this host already has a tested runtime
+  ansible.builtin.stat:
+    path: /root/build_stamp.json
+  register: sn68_existing_release
+  changed_when: false
+- name: Refuse legacy provisioning over a live release
+  ansible.builtin.assert:
+    that:
+      - not sn68_existing_release.stat.exists
+    fail_msg: Existing releases require deploy_tested_release.py and qualified promotion evidence.

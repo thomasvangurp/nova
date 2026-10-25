@@ -14,6 +14,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.release_manifest import safe_path, verify
+from scripts.promotion_gate import verify as qualify, digest, read, require
+
+
+def deployment_plan(manifest_path, revision, host, activate, bundle=None, target=None):
+    """Resolve the only permitted path before accessing any SSH credential."""
+    if not activate:
+        return 'ansible/stage_nanobody_release.yml', {}
+    require(bundle is not None and bool(target), 'promotion_evidence_required')
+    bundle = Path(bundle).resolve()
+    qualify(bundle, candidate_sha=revision, host=host, target=target)
+    plan = read(bundle / 'promotion.json')
+    receipt = read(safe_path(bundle, plan['shadow_receipt']['path']))
+    require(receipt['runs']['candidate']['manifest_sha256'] == digest(manifest_path),
+            'candidate_manifest_mismatch')
+    # Copy only checked, explicitly referenced documents, never an entire
+    # operator-supplied directory that could contain credentials or symlinks.
+    paths = ['promotion.json'] + [plan[k]['path'] for k in (
+        'fixture', 'baseline_report', 'candidate_report', 'shadow_receipt',
+        'rollback_receipt', 'rollback_report', 'pi_receipt', 'state_snapshot')]
+    require(len(paths) == len(set(paths)), 'duplicate_evidence_paths')
+    for name in paths:
+        require(safe_path(bundle, name).is_file(), 'missing_evidence_document')
+    return 'ansible/promote_nanobody_release.yml', {
+        'sn68_promotion_dir': str(bundle), 'sn68_promotion_files': paths,
+        'sn68_deploy_host': host, 'sn68_target': target}
 
 
 def unpack_release(archive: Path, destination: Path, manifest: dict, revision: str) -> None:
@@ -42,6 +67,10 @@ def main() -> int:
             raise ValueError('invalid deployment endpoint')
         manifest = json.loads((release / 'build_stamp.json').read_text())
         verify(ROOT, manifest, expected_sha=revision)
+        activate = os.environ.get('SN68_DEPLOY_ACTIVATE') == 'true'
+        phase = 'promotion qualification' if activate else 'staging verification'
+        playbook, promotion = deployment_plan(release / 'build_stamp.json', revision, host,
+            activate, os.environ.get('SN68_PROMOTION_DIR'), os.environ.get('SN68_TARGET'))
         # Ansible needs a key file. It exists only in this private temporary
         # directory and is removed on success, exception, or subprocess failure.
         with tempfile.TemporaryDirectory(prefix='sn68-deploy-') as temporary:
@@ -67,14 +96,14 @@ def main() -> int:
                 'sn68_release_archive': str((release / 'sn68-release.tar.gz').resolve()),
                 'sn68_release_manifest': str((release / 'build_stamp.json').resolve()),
                 'sn68_tested_sha': revision,
-                'nanobody_producer_activate': os.environ.get('SN68_DEPLOY_ACTIVATE') == 'true',
+                **promotion,
             }))
             phase = 'Ansible deployment'
             environment = os.environ.copy()
             environment.pop('SSH_PRIVATE_KEY', None)
             environment['ANSIBLE_HOST_KEY_CHECKING'] = 'True'
             result = subprocess.run([
-                'ansible-playbook', '-i', str(inventory), 'ansible/nanobody.yml',
+                'ansible-playbook', '-i', str(inventory), playbook,
                 '--private-key', str(key), '-e', '@' + str(variables),
                 '--ssh-common-args', f'-o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}',
             ], cwd=ROOT, env=environment, capture_output=True, timeout=7000)

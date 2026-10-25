@@ -1,0 +1,44 @@
+---
+- name: Qualify then promote a tested source release at an idle epoch boundary
+  hosts: nanobody_producer
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Require qualification documents before staging
+      ansible.builtin.assert:
+        that:
+          - sn68_promotion_dir is defined
+          - sn68_promotion_files is defined
+          - sn68_deploy_host is defined
+          - sn68_target is defined
+    - name: Stage and verify immutable release bytes
+      ansible.builtin.include_tasks: tasks/prepare_tested_release.yml
+    - name: Create evidence directories
+      ansible.builtin.file:
+        path: "{{ sn68_release_root }}/promotion/{{ item | dirname }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ sn68_promotion_files }}"
+    - name: Copy only the checked qualification documents
+      ansible.builtin.copy:
+        src: "{{ sn68_promotion_dir }}/{{ item }}"
+        dest: "{{ sn68_release_root }}/promotion/{{ item }}"
+        mode: "0600"
+      loop: "{{ sn68_promotion_files }}"
+    - name: Verify the live baseline and execute the guarded promotion transaction
+      ansible.builtin.command:
+        argv:
+          - /root/.pixi/envs/bgen/bin/python
+          - "{{ sn68_release_root }}/scripts/promote_release.py"
+          - --stage
+          - "{{ sn68_release_root }}"
+          - --bundle
+          - "{{ sn68_release_root }}/promotion"
+          - --host
+          - "{{ sn68_deploy_host }}"
+          - --target
+          - "{{ sn68_target }}"
+      no_log: true

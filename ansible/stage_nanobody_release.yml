@@ -1,0 +1,11 @@
+---
+- name: Stage a tested release without changing the running installation
+  hosts: nanobody_producer
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Stage and verify immutable release bytes
+      ansible.builtin.include_tasks: tasks/prepare_tested_release.yml

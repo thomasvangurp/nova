@@ -1,0 +1,54 @@
+name: Qualify nanobody release evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Producer SSH host bound into the qualification documents
+        required: true
+        type: string
+      target:
+        description: Exact target bound into the qualification documents
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sn68-qualification-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  qualification:
+    needs: checks
+    # Dedicated non-production runner; never label the producer or Pi as this
+    # runner. No workflow secrets or submission credentials are supplied.
+    runs-on: [self-hosted, linux, sn68-release-qualification]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: sn68-tested-release
+          path: ${{ runner.temp }}/sn68-tested-release
+      - name: Verify independently collected evidence and export checked documents
+        env:
+          SN68_QUALIFICATION_ROOT: /var/lib/nova/qualification
+          SN68_TESTED_SHA: ${{ github.sha }}
+          SN68_RELEASE_DIR: ${{ runner.temp }}/sn68-tested-release
+          SN68_EVIDENCE_OUTPUT: ${{ runner.temp }}/sn68-promotion-evidence
+          SN68_DEPLOY_HOST: ${{ inputs.host }}
+          SN68_TARGET: ${{ inputs.target }}
+        run: python3 scripts/export_promotion_evidence.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sn68-promotion-evidence
+          if-no-files-found: error
+          retention-days: 2
+          path: ${{ runner.temp }}/sn68-promotion-evidence

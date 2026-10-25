@@ -41,6 +41,7 @@ TEST_FILES = (
     'tests/test_shipping_producer.py',
     'tests/test_deploy_stamp.py',
     'tests/test_release_pipeline.py',
+    'tests/test_release_promotion.py',
     'tests/test_epoch_deadline.py',
     'tests/test_submission_handoff.py',
     'tests/test_dashboard_cohort.py',

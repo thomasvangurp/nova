@@ -135,6 +135,8 @@
     nanobody_network: finney
 
   tasks:
+    - name: Protect an existing runtime from legacy provisioning
+      ansible.builtin.include_tasks: tasks/refuse_live_reprovision.yml
     - name: Require committed deployment source
       ansible.builtin.command:
         argv: [git, -C, "{{ repo }}", status, --porcelain, --untracked-files=all]

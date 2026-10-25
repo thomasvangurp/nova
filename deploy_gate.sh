@@ -8,3 +8,5 @@ TASK_PYTHON="${BGEN_PYTHON:-$TASK_ROOT/.pixi/envs/bgen/bin/python}"
   --root "$TASK_ROOT" --manifest "$TASK_ROOT/build_stamp.json" \
   --expected-sha "$SN68_TESTED_SHA" --runtime-only
 "$TASK_PYTHON" "$TASK_ROOT/scripts/check_launch_contract.py" --root "$TASK_ROOT"
+"$TASK_PYTHON" "$TASK_ROOT/scripts/promotion_gate.py" --restart \
+  --runtime-root "$TASK_ROOT" --candidate-sha "$SN68_TESTED_SHA"
