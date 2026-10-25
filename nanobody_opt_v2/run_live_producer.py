@@ -12,6 +12,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -42,6 +43,8 @@ ARCHIVE_URL = (
 #: plan of an epoch has real replication rows to fit; short enough that a
 #: genuine change in cost is reflected within an epoch or two.
 BUDGET_SEED_EPOCHS = 3
+TIMING_HISTORY_EPOCHS = 10
+_TIMING_HISTORY_LOCK = threading.Lock()
 DEFAULT_MINIMUM_FREE_GIB = 2.0
 DEFAULT_MAXIMUM_PERSISTED_RANKING_MIB = 64.0
 DEFAULT_RETAINED_EPOCHS = 2
@@ -253,6 +256,113 @@ def maintain_runtime_storage(
     }
 
 
+def _budget_measurements(args, state, producer_root):
+    """Retain bounded numeric timing evidence independently of raw-fold pruning."""
+    epoch = int(state["epoch"])
+    live_root = producer_root.parent.parent
+    path = live_root / "producer_timing_history.json"
+    target = state.get("nanobody_target")
+    with _TIMING_HISTORY_LOCK:
+        try:
+            previous = json.loads(path.read_text())
+        except (OSError, ValueError):
+            previous = {}
+        entries = (previous.get("entries", []) if isinstance(previous, dict)
+                   and previous.get("schema") == 1 and previous.get("target") == target else [])
+        records = {}
+        for entry in entries if isinstance(entries, list) else []:
+            try:
+                past, iteration, index, row = (entry[k] for k in ("epoch", "iteration", "line", "row"))
+                if (not isinstance(past, int) or not epoch - TIMING_HISTORY_EPOCHS <= past <= epoch
+                        or not isinstance(iteration, str) or not iteration.startswith("iteration_")
+                        or not isinstance(index, int) or index < 0 or not isinstance(row, dict)
+                        or row.get("phase") not in {"replication_round", "replication_round_shared",
+                                                   "screen_tranche", "layer2_gate", "producer_preparation"}
+                        or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                               or not math.isfinite(v) or v < 0 for k, v in row.items() if k != "phase")):
+                    continue
+                records[(past, iteration, index)] = entry
+            except (KeyError, TypeError, ValueError):
+                continue
+        for past in range(epoch - BUDGET_SEED_EPOCHS, epoch + 1):
+            root = live_root / f"epoch{past}" / "producer"
+            for timing in sorted(root.glob("iteration_[0-9][0-9]/race/timings.jsonl")):
+                try:
+                    lines = timing.read_text().splitlines()
+                except OSError:
+                    continue
+                for index, line in enumerate(lines):
+                    try:
+                        row = json.loads(line)
+                        phase = row.get("phase")
+                        if phase not in {"replication_round", "replication_round_shared",
+                                         "screen_tranche", "layer2_gate", "producer_preparation"}:
+                            continue
+                        numeric = {key: value for key, value in row.items()
+                                   if key in {"candidates", "shortlist", "seconds", "scoring_seconds",
+                                              "bookkeeping_seconds", "gpu_count"}
+                                   and isinstance(value, (int, float)) and not isinstance(value, bool)
+                                   and math.isfinite(value) and value >= 0}
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    identity = (past, timing.parent.parent.name, index)
+                    records[identity] = {"epoch": past, "iteration": identity[1], "line": index,
+                                         "row": {"phase": phase, **numeric}}
+        ordered = [records[key] for key in sorted(records)]
+        confirmations = [r for r in ordered if r["row"]["phase"].startswith("replication_round")][-80:]
+        other = [r for r in ordered if not r["row"]["phase"].startswith("replication_round")][-100:]
+        retained = sorted(confirmations + other, key=lambda r: (r["epoch"], r["iteration"], r["line"]))
+        _atomic_json(path, {"schema": 1, "target": target, "entries": retained})
+    return [entry["row"] for entry in retained]
+
+
+def _discovery_confirmation_budget(args, state, producer_root, model, plan, records):
+    """Reserve ten-pass confirmation when the NEW-work plus twenty-pass plan cannot fit."""
+    if not getattr(args, "adaptive_confirmation_depth", False):
+        return plan
+    cycle_start = getattr(args, "epoch_cycle_start", None)
+    if not getattr(args, "fresh_screen_budget", 0) and not (
+            cycle_start is not None and int(state["epoch"]) >= cycle_start):
+        return plan
+    limit = int(getattr(args, "fresh_screen_budget", 0) or getattr(args, "epoch_candidate_budget", 0))
+    if not limit or getattr(args, "confirmation_policy", "legacy") != "broad":
+        return plan
+    from nanobody_opt.confirmation_depth import COLD_GATE_SECONDS, FALLBACK
+    from nanobody_opt_v2 import confirmation_policy
+    from nanobody_opt_v2.screen_budget import snapshot
+    pending = max(limit - len(snapshot(producer_root, int(state["epoch"]), limit)["reserved"]), 0)
+    screen = [r for r in records if r.get("phase") == "screen_tranche"
+              and r.get("candidates", 0) > 0 and r.get("scoring_seconds", 0) > 0][-14:]
+    per_candidate = (sum(r["scoring_seconds"] for r in screen) / sum(r["candidates"] for r in screen)
+                     if screen else model.gpu_seconds_per_candidate / len(args.gpus.split(",")))
+    bookkeeping = max((r.get("bookkeeping_seconds", 0) for r in screen), default=0)
+    discovery_seconds = 1.15 * (pending * per_candidate
+                               + math.ceil(pending / args.screen_tranche_size) * bookkeeping)
+    remaining = int(state["epoch_length"]) - int(state.get("block", 0)) % int(state["epoch_length"])
+    available = max(remaining - _handoff_reserve(args), 0) * 12
+    full = plan["confirmation_schedule"]
+    overhead = max(model.cpu_guard_seconds, COLD_GATE_SECONDS) + 30
+    full_seconds = confirmation_policy.seconds(full, model, len(args.gpus.split(","))) + overhead
+    reserve_seconds = full_seconds
+    minimum = 20
+    if pending and discovery_seconds + full_seconds > available:
+        shorter, left = [], FALLBACK - 1
+        for width, rounds in full:
+            take = min(rounds, left)
+            if take:
+                shorter.append((width, take))
+                left -= take
+        if not left:
+            reserve_seconds = confirmation_policy.seconds(shorter, model, len(args.gpus.split(","))) + overhead
+            minimum = FALLBACK
+    reserve = min(math.ceil(reserve_seconds / 12), max(int(state["epoch_length"]) - _handoff_reserve(args), 0))
+    return {**plan, "replication_reserve_blocks": reserve,
+            "screen_cutoff_block": int(state["epoch_length"]) - _handoff_reserve(args) - reserve,
+            "planning_minimum_observations": minimum, "pending_new_evaluations": pending,
+            "estimated_remaining_discovery_seconds": round(discovery_seconds, 1),
+            "reserved_confirmation_seconds": round(reserve_seconds, 1)}
+
+
 def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> dict:
     if args.budget_mode != "adaptive" or not args.replication_rounds:
         return {"replication_reserve_blocks": args.replication_reserve_blocks,
@@ -270,25 +380,7 @@ def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> 
     # Oldest first: the fit keeps the most recent window, so this epoch's
     # rows must come last and displace older ones as they arrive.
     epoch = int(state["epoch"])
-    live_root = producer_root.parent.parent
-    roots = [live_root / f"epoch{past}" / "producer"
-             for past in range(epoch - BUDGET_SEED_EPOCHS, epoch)]
-    records = []
-    for root in [*roots, producer_root]:
-        if not root.is_dir():
-            continue
-        for path in sorted(root.glob("iteration_[0-9][0-9]/race/timings.jsonl")):
-            try:
-                text = path.read_text()
-            except OSError:
-                continue
-            for line in text.splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    records = _budget_measurements(args, state, producer_root)
     model = TimingModel(args.budget_load_seconds, args.budget_gpu_seconds,
                         args.budget_cpu_guard_seconds).fit_from_measurements(
                             records, len(args.gpus.split(",")))
@@ -315,6 +407,7 @@ def _budget_plan(args: argparse.Namespace, state: dict, producer_root: Path) -> 
                     confirmation_schedule=comparison["schedule"],
                     confirmation_repeat_evaluation_cap=comparison["evaluation_cap"],
                     confirmation_first_stage_candidates=comparison["schedule"][0][0])
+        plan = _discovery_confirmation_budget(args, state, producer_root, model, plan, records)
     if getattr(args, "complete_screen_until_epoch", None) is not None and epoch < args.complete_screen_until_epoch:
         # The current fleet is already qualified. Use the rest of this epoch
         # to screen the frozen pool for the explicitly requested next epoch.
@@ -2377,7 +2470,8 @@ def _prepare_following_epoch_pool(args, state) -> None:
         return  # The independent preparation must never block the producer.
     root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
     # Finish the current confirmation before spending spare CPU time on the next pool.
-    if not (root / "full_scan_confirmation.json").is_file():
+    if not any((root / name).is_file() for name in (
+            "full_scan_confirmation.json", "confirmation_attempt.json")):
         return
     fresh = _chain_state(args.chain_state, args.maximum_chain_state_age)
     if int(fresh["epoch"]) == epoch:
@@ -2433,6 +2527,22 @@ def _complete_pool_coverage(*, pool: dict, producer_root: Path, database: Path,
     return report
 
 
+def _confirmation_finishes_epoch(args, state, root, coverage, health):
+    """Rounds alone never prove a useful fleet or an exhausted discovery window."""
+    if not getattr(args, "adaptive_confirmation_depth", False):
+        return True
+    if not health or health.get("status") != "healthy":
+        return False
+    if coverage.get("complete"):
+        return True
+    current = _chain_state(args.chain_state, args.maximum_chain_state_age)
+    if int(current["epoch"]) != int(state["epoch"]):
+        return False
+    plan = _budget_plan(args, current, root)
+    affordable, _ = _screen_budget(args, current, root, plan)
+    return affordable < 1
+
+
 def _run_complete_screen_pool(args, state) -> str:
     """Finish a frozen pool, carrying raw evidence across the epoch boundary.
 
@@ -2447,8 +2557,17 @@ def _run_complete_screen_pool(args, state) -> str:
         raise ValueError("complete-screen pool target differs from the chain target")
     root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
     root.mkdir(parents=True, exist_ok=True)
-    if (root / "full_scan_confirmation.json").is_file():
-        return PRODUCER_WAIT
+    confirmed = root / "full_scan_confirmation.json"
+    if confirmed.is_file():
+        previous = json.loads(confirmed.read_text())
+        if _confirmation_finishes_epoch(args, state, root, previous,
+                                        previous.get("confirmation_health")):
+            return PRODUCER_WAIT
+        # Retain the attempted result, but do not let its mere existence ban
+        # further useful work. Publication keeps its independently validated
+        # prior fleet until a new artifact is ready.
+        _atomic_json(root / "confirmation_attempt.json", previous)
+        confirmed.unlink()
     prior_roots = [root.parent.parent / f"epoch{e}" / "producer"
                    for e in range(int(source["origin_epoch"]), epoch)]
     _atomic_json(root / "pooled_roots.json", {"roots": [str(p) for p in prior_roots]})
@@ -2488,7 +2607,6 @@ def _run_complete_screen_pool(args, state) -> str:
         pool=pool, producer_root=root, database=args.mutation_database,
         target=target, epoch=epoch, until_epoch=until)
     print("PRODUCER_FULL_SCAN " + json.dumps(coverage), flush=True)
-    confirmed = root / "full_scan_confirmation.json"
     if confirmed.is_file() or (coverage["complete"] and epoch < until):
         return PRODUCER_WAIT
     remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
@@ -2525,15 +2643,19 @@ def _run_complete_screen_pool(args, state) -> str:
             coverage.update(confirmation_health=health)
             _atomic_json(root / "full_scan_coverage.json", coverage)
         required = (health or {}).get("required_observations", args.minimum_publishable_observations)
+        attempt = {**coverage, "iteration": iteration,
+                   "rounds": result.get("replication_rounds_completed", 0),
+                   "required_observations": required,
+                   "confirmation_health": health}
+        if health:
+            _atomic_json(root / "confirmation_attempt.json", attempt)
         if result.get("replication_rounds_completed", 0) >= required - 1:
             best = result.get("incumbent_rank")
             score_target = float(source.get("target_multipass_score", 900))
-            _atomic_json(confirmed, {**coverage, "iteration": iteration,
-                                    "rounds": result["replication_rounds_completed"],
-                                    "required_observations": required,
-                                    "best_confirmed_multipass": best,
-                                    "target_multipass_score": score_target,
-                                    "score_target_met": best is not None and best <= score_target})
+            attempt.update(best_confirmed_multipass=best, target_multipass_score=score_target,
+                           score_target_met=best is not None and best <= score_target)
+            if _confirmation_finishes_epoch(args, state, root, coverage, health):
+                _atomic_json(confirmed, attempt)
     return PRODUCER_ADVANCED
 
 

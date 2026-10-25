@@ -165,6 +165,19 @@ class TimingModel:
                         for xj, yj in rows[i + 1:]
                         if xj != xi)
         if not slopes:                  # every round the same width: no slope
+            if all(x == 1 for x, _ in rows):
+                # A full tournament can fit in one GPU wave. Twenty such
+                # measurements still identify its fixed overhead, even though
+                # they cannot identify a new per-candidate slope. Keep the
+                # prior slope and calibrate only the intercept; otherwise a
+                # 45-second cold-start default survives 9-14 second rounds.
+                costs = sorted(y for _, y in rows)
+                total = safety * costs[min(int(quantile * (n - 1)), n - 1)]
+                return TimingModel(
+                    self._clamp(total - widened.gpu_seconds_per_candidate,
+                                self.HARD_FLOOR_LOAD,
+                                self.MAX_INFLATION * self.load_seconds),
+                    widened.gpu_seconds_per_candidate, widened.cpu_guard_seconds)
             return widened
         slope = slopes[len(slopes) // 2]
         if slope <= 0:                  # genuinely no relationship; stay safe

@@ -311,3 +311,125 @@ def test_actual_race_uses_nine_rounds_and_qualifies_ten_observations(tmp_path, m
     assert complete["replication_rounds_completed"] == 9
     assert complete["confirmation_health"]["required_observations"] == 10
     assert complete["confirmation_health"]["qualified_candidates"] == 20
+
+
+@pytest.mark.parametrize("samples,width,narrows", [(20, 8, True), (19, 8, False), (20, 24, False)])
+def test_single_wave_timing_learns_overhead_without_inventing_a_slope(samples, width, narrows):
+    rows = [{"phase": "replication_round", "candidates": width, "gpu_count": 8,
+             "seconds": 9 + i % 6} for i in range(samples)]
+    model = TimingModel().fit_from_measurements(rows, 8)
+    assert (model.load_seconds < 45) == narrows
+    assert model.gpu_seconds_per_candidate == 4.8
+    if narrows:
+        assert 14 <= model.round_seconds(8, 8) < 17
+
+
+def test_timing_evidence_survives_raw_pruning_without_duplication_or_cross_target_reuse(tmp_path):
+    from nanobody_opt_v2 import run_live_producer as producer
+    root = tmp_path / "live/epoch100/producer"
+    timing = root / "iteration_01/race/timings.jsonl"
+    timing.parent.mkdir(parents=True)
+    rows = [{"phase": "replication_round", "candidates": 8, "gpu_count": 8,
+             "seconds": 9 + i % 6, "unrelated_field": "do not retain"} for i in range(20)]
+    timing.write_text("\n".join(json.dumps(row) for row in rows))
+    state = {"epoch": 100, "nanobody_target": "TEST"}
+    args = SimpleNamespace()
+    first = producer._budget_measurements(args, state, root)
+    assert len(first) == len(producer._budget_measurements(args, state, root)) == 20
+    assert all("unrelated_field" not in row for row in first)
+    timing.unlink()
+    later = producer._budget_measurements(args, {**state, "epoch": 104},
+                                          tmp_path / "live/epoch104/producer")
+    assert later == first
+    assert TimingModel().fit_from_measurements(later, 8).load_seconds < 45
+    assert producer._budget_measurements(args, {**state, "epoch": 111},
+                                        tmp_path / "live/epoch111/producer") == []
+    timing.write_text("\n".join(json.dumps(row) for row in rows))
+    producer._budget_measurements(args, state, root)
+    assert producer._budget_measurements(args, {"epoch": 104, "nanobody_target": "OTHER"},
+                                        tmp_path / "live/epoch104/producer") == []
+
+
+@pytest.mark.parametrize("screen_seconds,expected", [(200, 20), (550, 10)])
+def test_front_end_reserve_accounts_for_the_remaining_new_evaluations(tmp_path, screen_seconds, expected):
+    from nanobody_opt_v2 import run_live_producer as producer
+    args = producer._parser().parse_args([])
+    args.adaptive_confirmation_depth = True
+    args.gpus = "0,1,2,3,4,5,6,7"
+    args.pi_handoff = True
+    args.confirmation_policy = "broad"
+    args.replication_rounds = 20
+    args.epoch_cycle_start = 100
+    model = TimingModel(6, 5, 120)
+    plan = {"confirmation_schedule": [(147, 2), (40, 5), (20, 13)]}
+    state = {"epoch": 100, "epoch_length": 361, "block": 36100}
+    records = [{"phase": "screen_tranche", "candidates": 700,
+                "scoring_seconds": screen_seconds, "bookkeeping_seconds": 20}]
+    result = producer._discovery_confirmation_budget(args, state, tmp_path, model, plan, records)
+    assert result["planning_minimum_observations"] == expected
+    assert result["pending_new_evaluations"] == 4800
+    assert result["screen_cutoff_block"] + result["replication_reserve_blocks"] == 361 - 76
+    full_seconds = policy.seconds(plan["confirmation_schedule"], model, 8) + 150
+    assert (result["reserved_confirmation_seconds"] < full_seconds) == (expected == 10)
+    assert args.replication_rounds == 20  # Closing may still attain the preferred depth.
+
+
+@pytest.mark.parametrize("healthy,covered,affordable,finished", [
+    (False, False, 0, False), (False, True, 0, False),
+    (True, False, 30, False), (True, False, 0, True), (True, True, 30, True),
+])
+def test_actual_producer_completion_requires_quality_and_no_useful_discovery_remaining(
+        tmp_path, monkeypatch, healthy, covered, affordable, finished):
+    from nanobody_opt_v2 import run_live_producer as producer
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.adaptive_confirmation_depth = True
+    args.complete_screen_until_epoch = 100
+    args.complete_screen_pool = tmp_path / "pool.json"
+    args.complete_screen_pool.write_text(json.dumps({"target": "TEST", "origin_epoch": 100,
+                                                   "candidates": [{"sequence": "TEST_CANDIDATE"}]}))
+    state = {"epoch": 100, "epoch_length": 361, "block": 36100 + 100, "nanobody_target": "TEST"}
+    root = tmp_path / "live/epoch100/producer"
+    coverage = {"complete": covered, "attempted": 1191, "screened": 1191,
+                "budget": 4800, "pending": 3609}
+    health = {"status": "healthy" if healthy else "degraded_no_new_confirmed_candidates",
+              "required_observations": 10, "qualified_candidates": 20 if healthy else 2,
+              "fresh_confirmed_candidates": 1 if healthy else 0}
+    # Reproduce the old false terminal marker: twenty rounds, only two qualified.
+    producer._atomic_json(root / "full_scan_confirmation.json", {
+        **coverage, "rounds": 20, "confirmation_health": {
+            **health, "status": "degraded_no_new_confirmed_candidates"}})
+    monkeypatch.setattr(producer, "_chain_state", lambda *a: state)
+    monkeypatch.setattr(producer, "_prepare_epoch", lambda **kw: (tmp_path / "cfg", tmp_path / "archive", "TEST"))
+    monkeypatch.setattr(producer, "_validator_novel_sequences", lambda **kw: {"TEST_CANDIDATE"})
+    monkeypatch.setattr(producer, "_complete_pool_coverage", lambda **kw: dict(coverage))
+    monkeypatch.setattr(producer, "_budget_plan", lambda *a: {})
+    monkeypatch.setattr(producer, "_screen_budget", lambda *a: (affordable, 5.0))
+    calls = []
+    def run(**kw):
+        calls.append(kw)
+        producer._atomic_json(kw["iteration_root"] / "race/complete.json", {
+            "replication_rounds_completed": 9, "confirmation_health": health, "incumbent_rank": 950})
+    monkeypatch.setattr(producer, "_run_race", run)
+    producer._run_complete_screen_pool(args, state)
+    assert len(calls) == 1
+    assert (root / "full_scan_confirmation.json").exists() == finished
+    assert (root / "confirmation_attempt.json").exists()
+    if finished:
+        producer._run_complete_screen_pool(args, state)
+        assert len(calls) == 1
+
+
+def test_failed_confirmation_does_not_block_next_epoch_preparation(tmp_path, monkeypatch):
+    from nanobody_opt_v2 import run_live_producer as producer
+    args = producer._parser().parse_args([])
+    args.runtime_root = tmp_path
+    args.epoch_cycle_start = 100
+    state = {"epoch": 100}
+    producer._atomic_json(tmp_path / "live/epoch100/producer/confirmation_attempt.json", {
+        "confirmation_health": {"status": "degraded_no_new_confirmed_candidates"}})
+    monkeypatch.setattr(producer, "_chain_state", lambda *a: state)
+    calls = []
+    monkeypatch.setattr(producer, "_prepare_epoch_pool", lambda a, s, e: calls.append(e))
+    producer._prepare_following_epoch_pool(args, state)
+    assert calls == [101]

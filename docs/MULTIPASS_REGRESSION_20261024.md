@@ -686,3 +686,58 @@ and verified receipt are retained in
 This verifies deployment, not a recovered multipass score. Evaluate the actual
 committed fleet from 25920 and its independent replay before attributing a
 quality improvement to the policy.
+
+### Remaining scheduling failures and the 25903–25918 pattern
+
+The 2026-10-25 follow-up reconciled independent replay with the Pi's archived
+inputs. Epoch 25918 averaged **2548.67** on complete thirteen-entry replay.
+Before submission, its thirteen archived entries already averaged **2556.73**,
+ranging from 2553.04 to 2559.60 with 20–268 observations each. All thirteen
+were provisional fallback entries. This was a known weak fleet, not an
+unexpected one-pass collapse. Its rival replay is incomplete.
+
+The stronger epochs 25913 and 25916 replayed at 1077.03 and 1036.63, closely
+matching local estimates of 1071.97 and 1035.26. Epoch 25910 was better than
+its neighbors but still replayed at 1307.89. There is no established fixed
+three-epoch trigger. The verified causal chain differs across the interval:
+the repeated-chunk/input and aggregate visibility defects affected 25903–25904;
+strong 25914 finalists missed Pi's final pull; archive invalidation and a gate
+budget too small to start uncached work withheld confirmation in 25917–25918.
+Both latter epochs completed zero confirmation rounds. These failures starve
+the eligible, sufficiently measured pool available at the real submission
+deadline. The earlier sections identify the corresponding repairs and releases.
+
+The new live audit found a further feedback failure. Raw producer timing files
+are pruned after two retained epochs, while budgeting searched three epochs.
+After two epochs with no confirmation, 25919 therefore fell back to a
+45-second startup estimate. It reserved 111 blocks for confirmation, stopped
+discovery after 1,191 of 4,800 NEW dispatches, then completed twenty rounds on
+only eight candidates. Those rounds actually took 225.7 seconds in total.
+Only two candidates qualified, with no newly confirmed candidates, yet the
+round-count condition wrote a terminal confirmation marker. At that point
+the producer stopped trying even though the receipt itself said degraded.
+
+The correction retains a compact, numeric, deduplicated timing history outside
+pruned epoch trees, capped at eighty confirmation and one hundred other timing
+rows and ten epochs. Target changes invalidate it. At least twenty single-GPU-
+wave measurements can calibrate startup overhead while retaining the prior
+per-candidate slope; smaller samples and wider single-width samples retain the
+conservative behavior. This fixes the case where identical-width rounds could
+never lower the 45-second default.
+
+The producer now considers outstanding NEW work when reserving confirmation
+time. If that work plus the twenty-pass schedule cannot fit, it reserves the
+ten-pass fallback and leaves the real closing race free to achieve twenty if
+time permits. Gate time, handoff and the 4,800 reservation cap remain hard.
+The full-epoch marker now requires healthy confirmation and either completed
+discovery or no affordable discovery window. Degraded attempts remain recorded
+and retryable; they also permit next-epoch CPU preparation. An old degraded
+marker cannot permanently suppress a retry. No change silently suppresses
+weak fleet entries to make the dashboard average appear better.
+
+Numeric evidence is retained in
+`docs/evidence/epoch_25903_25919_pipeline_audit_20261025.json`.
+Shipping tests exercise actual producer completion/retry, timing after pruning,
+target isolation, and discovery-aware reserves. Deployment verification follows
+the shipping run; score recovery still requires the actual committed fleet and
+independent replay.
