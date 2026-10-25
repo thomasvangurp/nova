@@ -882,6 +882,14 @@ def _live_sequences(payload: dict[str, Any] | None, epoch: int) -> list[str]:
     return fleet_module.artifact_sequences(payload)
 
 
+def _live_publication_pool(payload: dict[str, Any] | None, epoch: int) -> list[str]:
+    """Keep this epoch's assigned entries and Pi spares available for upgrades."""
+    if not isinstance(payload, dict) or payload.get("epoch") != epoch:
+        return []
+    return list(dict.fromkeys([
+        *fleet_module.artifact_sequences(payload), *payload.get("sequence_pool", [])]))
+
+
 def _artifact_passes_scope(payload: dict[str, Any] | None, epoch: int, scope: Path) -> bool:
     """Use the artifact reader's real list contract for current eligibility."""
     return set(_live_sequences(payload, epoch)) <= set(scope.read_text().splitlines())
@@ -2514,7 +2522,7 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
         exclusion_path = fleet_module.write_exclusion_file(
             epoch_root / "excluded_sequences.txt",
             effective_ledger,
-            _live_sequences(previous, epoch),
+            _live_publication_pool(previous, epoch),
         )
         if not archive_ready:
             _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
@@ -2964,8 +2972,7 @@ def _assert_same_epoch(args: argparse.Namespace, epoch: int, consequence: str) -
 def _write_submission_artifact(args, artifact):
     if getattr(args, "pi_handoff", False):
         from nanobody_opt import publication_ledger
-        sequences = list(dict.fromkeys([
-            *fleet_module.artifact_sequences(artifact), *artifact.get("sequence_pool", [])]))
+        sequences = _live_publication_pool(artifact, artifact["epoch"])
         fleet_module.record_published(args.ledger, sequences)
         publication_ledger.record(args.ledger, epoch=artifact["epoch"],
                                   target=artifact["target"], sequences=sequences)

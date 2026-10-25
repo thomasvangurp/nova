@@ -83,6 +83,19 @@ def test_durable_event_is_written_before_the_artifact_becomes_visible(tmp_path, 
     assert calls == [artifact]
 
 
+def test_current_epoch_spares_remain_selectable_but_do_not_leak_into_next_epoch(tmp_path):
+    raw = tmp_path / "published.txt"
+    raw.write_text("ASSIGNED\nSPARE\nOLD\n")
+    artifact = {"epoch": 12, "submissions": [{"sequence": "ASSIGNED"}],
+                "sequence_pool": ["ASSIGNED", "SPARE"]}
+    current = publisher.fleet_module.write_exclusion_file(
+        tmp_path / "current.txt", raw, publisher._live_publication_pool(artifact, 12))
+    assert current.read_text().splitlines() == ["OLD"]
+    following = publisher.fleet_module.write_exclusion_file(
+        tmp_path / "following.txt", raw, publisher._live_publication_pool(artifact, 13))
+    assert set(following.read_text().splitlines()) == {"ASSIGNED", "SPARE", "OLD"}
+
+
 def test_pi_export_protects_entire_inputs_and_requires_finalized_archives(tmp_path):
     database = tmp_path / "dashboard.sqlite"
     with sqlite3.connect(database) as db:

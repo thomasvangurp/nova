@@ -782,3 +782,10 @@ submissions, stale/gapped evidence, repeat publications, journal-before-artifact
 ordering, the entire Pi pool, atomic transfer, real producer wiring and cached
 scope invalidation. Deployment and candidate recovery must be verified before
 claiming this correction is active; score recovery still needs independent replay.
+
+Same-epoch publication pools must remain selectable in full, including an
+unassigned Pi spare. Recording the entire pool protects future epochs, while
+the current publisher explicitly keeps that same pool out of its exclusion
+file. A mandatory test checks both sides of this boundary. Final deployment
+review caught this interaction before master runtime activation; the paused
+batch scheduler was resumed and the corrected package was revalidated.
