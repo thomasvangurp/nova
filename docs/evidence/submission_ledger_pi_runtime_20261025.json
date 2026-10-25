@@ -1,0 +1,9 @@
+{
+  "nova-submit-loop.service": "active",
+  "nova-dashboard-multipass.timer": "active",
+  "custom_gate_sha256": "05a0c931c0021a80ff9ddac2682ffffa513a6bc6c2e9691ff266ccd57cd91732",
+  "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+  "files_match": true,
+  "automatic_outcomes_sync": true,
+  "automatic_sync_age": 78.55803298950195
+}

@@ -1,0 +1,120 @@
+{
+  "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+  "ci_url": "https://github.com/thomasvangurp/nova/actions/runs/40149490982",
+  "validation": {
+    "passed": true,
+    "tests": 653,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "test_files": [
+      "tests/test_parent_merit.py",
+      "tests/test_epoch_screen_budget.py",
+      "tests/test_cached_confirmation.py",
+      "tests/test_confirmation_policy.py",
+      "tests/test_confirmation_eligibility.py",
+      "tests/test_adaptive_confirmation_depth.py",
+      "tests/test_publication_ledger.py",
+      "tests/test_nanobody_filter_layer2.py",
+      "tests/test_tnp_slots.py",
+      "tests/test_complete_screen_pool.py",
+      "tests/test_deferred_tnp_pipeline.py",
+      "tests/test_nanobody_waves.py",
+      "tests/test_score_boltzgen_waves.py",
+      "tests/test_score_boltzgen_fast_adapter.py",
+      "tests/test_scorer_daemon.py",
+      "tests/test_fast_scorer_vendoring.py",
+      "tests/test_developability_hoist_regressions.py",
+      "tests/test_competitor_position_lane.py",
+      "tests/test_slot_value_pricing.py",
+      "tests/test_slot_manager.py",
+      "tests/test_commit_side_effects.py",
+      "tests/test_round_trip.py",
+      "tests/validate_against_validator.py",
+      "tests/test_ci_guardrails.py",
+      "tests/test_shipping_producer.py",
+      "tests/test_deploy_stamp.py",
+      "tests/test_release_pipeline.py",
+      "tests/test_epoch_deadline.py",
+      "tests/test_submission_handoff.py",
+      "tests/test_dashboard_cohort.py",
+      "tests/test_pi_dashboard.py",
+      "tests/test_nanobody_dash_operational.py",
+      "tests/test_compound_dashboard.py",
+      "tests/test_nanobody_rank_exact.py",
+      "tests/test_topup_slave.py",
+      "nanobody_opt_v2/tests/test_flags.py",
+      "nanobody_opt_v2/tests/test_replication.py",
+      "nanobody_opt_v2/tests/test_compute_budget.py"
+    ]
+  },
+  "verified_package_files": 647,
+  "previous_files": {
+    "nanobody_opt/publication_ledger.py": null,
+    "nanobody_opt_v2/cached_confirmation.py": "2200df1e1df266033bebc3f91619677ae26372ad759e139b9bd005a8765527cb",
+    "nanobody_opt_v2/run_live_producer.py": "6d2e9778db2f3c9fba15aabb04dd0b2a1677cd2b1f7ead026d7ac04e1a806289",
+    "nanobody_opt_v2/sequential_exact_race.py": "ca8763ab328480392a6c01acfb16f7539e1d613ca0feefc52625db43b1c5268d",
+    "tools/publish_current_nanobody.py": "ed7d03dd609d79c0d3cbeea82bd3ee73cd3c7ba1c6ec29ff6eee4c1c68782cab"
+  },
+  "runtime_files": {
+    "nanobody_opt/publication_ledger.py": "0a002c777df697a8d68ccbc04060c0c7a352b5071e122500571df4a99ab9f7bb",
+    "nanobody_opt_v2/cached_confirmation.py": "1c26bc83a33177abfd68f2048944d83367280b6dedca04b641734a56b4763dab",
+    "nanobody_opt_v2/run_live_producer.py": "ce5912a2def0264ecd644a94d54ac62cc35515c7e6780696d6aa0ea27592f206",
+    "nanobody_opt_v2/sequential_exact_race.py": "54665333add11fc32053605d20ac6f51b9f7cc322f91f2d7a483a73b69d7b5ab",
+    "tools/publish_current_nanobody.py": "77047955a330cd935a16d112cc5a6fe550f20429e93be3aa0a7345dba3d4f61e"
+  },
+  "activation": "active",
+  "activation_epoch": 25920,
+  "first_full_epoch": 25921,
+  "independently_verified_at": 1792891443.690284,
+  "initial_verification": {
+    "status": "failed",
+    "error_type": "RuntimeError"
+  },
+  "initial_verification_reason": "120-second readiness timeout; resumed budget appeared afterward",
+  "processes": {
+    "producer": {
+      "pid": 602789,
+      "started_at": 1792891238.47
+    },
+    "publisher": {
+      "pid": 602873,
+      "started_at": 1792891238.74
+    }
+  },
+  "preserved_completed_observations": 2100,
+  "preserved_files": {
+    "live/epoch25920/producer/iteration_01/race/screen/tranche_01/exact_all.json": "9261c1e2bbfe39e07a07e4ede7f8353069aac91675dda564a1b57ffd90c8a336",
+    "live/epoch25920/producer/iteration_02/race/screen/tranche_01/exact_all.json": "57d155661bc1b510e2203c73ec94491b326f19f72e0a20d15fb8fc29ee21dee7",
+    "live/epoch25920/producer/iteration_02/race/screen/tranche_02/exact_all.json": "cb73a1e4fbe6fc54d3cc3fb92b8564f59d0c94dd2eec81dbe581ddeabdc2b671"
+  },
+  "recovered_audited_candidates": 30,
+  "recovered_in_published_fleet": 10,
+  "published_local_mean": 947.2637362637362,
+  "publication_observations": [
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21
+  ],
+  "activation_source_sha256": "f39b4128e3030da189c892032b0ea0825e4d89858c8335dc83dea347c1f4e385",
+  "independent_verifier_sha256": "54c119532ce760bba8ff48f58c592fdd09697f5f23ea5c9e708ad1372979c617",
+  "live_budget": {
+    "planning_minimum_observations": 10,
+    "pending_new_evaluations": 2700,
+    "replication_reserve_blocks": 50,
+    "screen_cutoff_block": 235,
+    "load_seconds": 11.989999999999998,
+    "gpu_seconds_per_candidate": 4.8,
+    "effective_handoff_reserve_blocks": 76
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "reachable_from_pi": true,
+  "epoch": 25920,
+  "count": 13,
+  "mean": 947.2637362637361,
+  "observations": [
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21
+  ],
+  "active_input_unchanged": true,
+  "verified_at": 1792891493.732049
+}

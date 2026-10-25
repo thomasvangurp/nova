@@ -1,0 +1,55 @@
+{
+  "verified_at": 1792890649.1407418,
+  "epoch": 25920,
+  "offset": 134,
+  "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+  "activation": {
+    "status": "failed",
+    "error_type": "SystemExit"
+  },
+  "installed_files_match": false,
+  "pi_proof_age_seconds": 176.09893918037415,
+  "artifact": {
+    "epoch": 25920,
+    "stage": "provisional",
+    "mtime": 1792890583.1491544,
+    "audited_recovered_count": 0,
+    "local_scores": {
+      "count": 13,
+      "mean": 2571.570579702249,
+      "minimum": 2569.375939849624,
+      "maximum": 2573.5753424657532
+    },
+    "observations": [
+      133,
+      165,
+      72,
+      29,
+      82,
+      34,
+      47,
+      40,
+      34,
+      47,
+      52,
+      206,
+      73
+    ]
+  },
+  "exclusion_receipts": {
+    "producer/submission_exclusions": {},
+    "submission_exclusions": {}
+  },
+  "rankings": {
+    "provisional_rankings.json": {
+      "mtime": 1792890523.5325882,
+      "count": 430,
+      "audited_recovered_count": 0
+    },
+    "rankings.json": {
+      "mtime": null,
+      "count": 0,
+      "audited_recovered_count": 0
+    }
+  }
+}

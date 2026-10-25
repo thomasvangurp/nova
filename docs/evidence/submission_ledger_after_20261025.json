@@ -1,0 +1,78 @@
+{
+  "verified_at": 1792891569.2139513,
+  "epoch": 25920,
+  "offset": 211,
+  "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+  "activation": {
+    "activation": "active",
+    "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+    "activation_epoch": 25920,
+    "first_full_epoch": 25921,
+    "recovered_audited_candidates": 30,
+    "recovered_in_published_fleet": 10,
+    "published_local_mean": 947.2637362637362,
+    "preserved_completed_observations": 2100,
+    "independently_verified_at": 1792891443.690284
+  },
+  "installed_files_match": true,
+  "pi_proof_age_seconds": 68.44733905792236,
+  "artifact": {
+    "epoch": 25920,
+    "stage": "provisional",
+    "mtime": 1792891530.6710365,
+    "audited_recovered_count": 11,
+    "local_scores": {
+      "count": 13,
+      "mean": 947.2637362637362,
+      "minimum": 831.4761904761905,
+      "maximum": 995.7619047619048
+    },
+    "observations": [
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21,
+      21
+    ]
+  },
+  "exclusion_receipts": {
+    "producer/submission_exclusions": {
+      "epoch": 25920,
+      "last_finalized_epoch": 25918,
+      "policy": "pi-submission-outcomes-v1",
+      "proof_generated_at": 1792891160.987476,
+      "released_unused": 71,
+      "retained": 7137,
+      "target": "P20809"
+    },
+    "submission_exclusions": {
+      "epoch": 25920,
+      "last_finalized_epoch": 25918,
+      "policy": "pi-submission-outcomes-v1",
+      "proof_generated_at": 1792891160.987476,
+      "released_unused": 55,
+      "retained": 7153,
+      "target": "P20809"
+    }
+  },
+  "rankings": {
+    "provisional_rankings.json": {
+      "mtime": 1792891445.1147532,
+      "count": 488,
+      "audited_recovered_count": 30
+    },
+    "rankings.json": {
+      "mtime": null,
+      "count": 0,
+      "audited_recovered_count": 0
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "activation": "active",
+  "release": "76ea3a057362607f5fc7ef0932650b58586313dc",
+  "activation_epoch": 25920,
+  "first_full_epoch": 25921,
+  "recovered_audited_candidates": 30,
+  "recovered_in_published_fleet": 10,
+  "published_local_mean": 947.2637362637362,
+  "preserved_completed_observations": 2100,
+  "independently_verified_at": 1792891443.690284
+}

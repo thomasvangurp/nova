@@ -789,3 +789,58 @@ the current publisher explicitly keeps that same pool out of its exclusion
 file. A mandatory test checks both sides of this boundary. Final deployment
 review caught this interaction before master runtime activation; the paused
 batch scheduler was resumed and the corrected package was revalidated.
+
+### Submission-ledger release: deployment and observed selection recovery
+
+Release `76ea3a057362607f5fc7ef0932650b58586313dc` passed all **653**
+mandatory shipping checks with zero failures, errors or skips, and
+[GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/40149490982).
+All 647 package files were hash-verified before selecting the five master runtime
+files and three Pi dashboard files. The Pi files are unchanged from the preceding
+`d50ded3` package and match the final release. Its custom publication gates still
+hash to `05a0c931c0021a80ff9ddac2682ffffa513a6bc6c2e9691ff266ccd57cd91732`;
+the submit loop and dashboard timer are active. The scheduled Pi job independently
+reported `submission_outcomes_synced=true`.
+
+The master activated during **25920**; **25921** is the first full affected
+epoch. The activation drained the current tranche and preserved **2,100** completed
+NEW evaluations. Its resumed budget records 2,700 NEW evaluations remaining, a
+ten-observation planning reserve, screening through block 235 and the unchanged
+76-block handoff reserve. Both restarted process start times are after the runtime
+installation; both actual argument lists retain handoff and adaptive-depth flags,
+and the producer retains the 4,800 NEW cap.
+
+The bounded activation check initially timed out after 120 seconds while the
+producer resumed its existing bank. The new budget appeared immediately afterward.
+The independent finalizer verified the live process start times against source
+installation times, all installed and backup hashes, fresh exclusion receipts,
+Pi proof age, the actual new artifact, and preserved scoring aggregates before
+marking the release active. Its receipt retains the original timeout status.
+The exact activation, numeric verification and independent finalizer scripts are
+stored beside the release receipt. A 900-second drain bound still cannot cross
+the existing epoch/deadline guard; no scoring job was stopped to force deployment.
+
+The actual publisher output changed as follows, within the same epoch:
+
+| Evidence | Before | After |
+| --- | ---: | ---: |
+| Assigned entries | 13 | 13 |
+| Local multipass mean rank-sum | 2571.57 | **947.26** |
+| Local score range | 2569.38–2573.58 | 831.48–995.76 |
+| Observations per new assigned entry | — | **21 each** |
+| Audited unused candidates in live rankings | 0 | **30** |
+
+The policy released 71 positively accounted unused publications, including all
+30 audited strong candidates. Ten of the thirteen assigned entries come from
+that audited group; eleven appear in the union of assigned entries and the
+handoff pool. Current gates and ranking produced the fleet; no rank or score was
+manually substituted. The original publication ledger remains retained.
+
+Pi directly retrieved the new epoch-25920 artifact and independently reported
+thirteen entries, a 947.26 local mean and twenty-one observations on each. This
+was a read-only transport check: its active input and the real submission window
+were not advanced. The current input was still 25919 at that check. Accordingly,
+this is verified publication recovery, not a claim of completed epoch-25920
+submission or an independent replay score. Evaluate the actual committed fleet
+and replay next. The before/after snapshots, Pi readback, Pi service health and
+release receipt are retained in `docs/evidence/submission_ledger_*_20261025.*`.
