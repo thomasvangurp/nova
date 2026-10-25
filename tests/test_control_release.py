@@ -147,7 +147,7 @@ def test_control_install_protects_application_and_actual_current_fleet(tmp_path,
     assert control.verify_installed(root, NEW)['status'] == 'verified'
     assert gate.verify_restart(root, NEW)['status'] == 'verified'
     from scripts.check_launch_contract import check
-    check(root)  # no deployment template is present; check the actual launcher
+    check(root, installed=True)  # no template is present; check the actual launcher
 
 
 def test_restart_guard_preserves_exact_commands_and_does_not_accumulate():

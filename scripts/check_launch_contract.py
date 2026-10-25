@@ -10,10 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def check(root: Path) -> None:
+def check(root: Path, *, installed: bool = False) -> None:
     sys.path.insert(0, str(root))
     stamp = root / 'build_stamp.json'
-    if stamp.is_file() and json.loads(stamp.read_text()).get('deployment_profile') == 'release-controls':
+    if installed and stamp.is_file() and json.loads(stamp.read_text()).get('deployment_profile') == 'release-controls':
         from scripts.control_release import verify_application
         verify_application(root, json.loads((root / 'artifacts/observed_application.json').read_text()))
         return
@@ -44,12 +44,11 @@ def main() -> int:
     parser.add_argument('--root', type=Path, default=ROOT)
     args = parser.parse_args()
     try:
-        check(args.root)
+        check(args.root, installed=True)
     except (OSError, ValueError):
         print('LAUNCH CONTRACT FAILED')
         return 1
-    print(json.dumps({'launch_contract': 'passed', 'first_epoch': 25872,
-                      'proposal_budget': 8000, 'screen_budget': 4800, 'minimum_observations': 20}))
+    print(json.dumps({'launch_contract': 'passed', 'proposal_budget': 8000, 'screen_budget': 4800}))
     return 0
 
 
