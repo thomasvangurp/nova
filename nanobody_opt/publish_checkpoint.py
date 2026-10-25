@@ -112,7 +112,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
         raise
 
 
-def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
+def validate_exact_robustness(winner: dict, *, minimum_observations: int = MINIMUM_EXACT_OBSERVATIONS) -> tuple[int, float, float]:
     """Enforce the live publisher's stochastic-repeat qualification floor.
 
     The p90 gates here are ROBUSTNESS floors on a separate field -- the p90 tail
@@ -125,9 +125,11 @@ def validate_exact_robustness(winner: dict) -> tuple[int, float, float]:
     not a new rejection source.
     """
     observation_count = int(winner.get("observation_count", 0))
-    if observation_count < MINIMUM_EXACT_OBSERVATIONS:
+    if minimum_observations not in (10, 20):
+        raise ValueError("unsupported evidence floor")
+    if observation_count < minimum_observations:
         raise ValueError(
-            f"winner has fewer than {MINIMUM_EXACT_OBSERVATIONS} exact observations"
+            f"winner has fewer than {minimum_observations} exact observations"
         )
     competitive_rate = float(winner.get("competitive_rate", float("nan")))
     if (
@@ -322,6 +324,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--target", required=True)
     parser.add_argument("--epoch", required=True, type=int)
+    parser.add_argument("--minimum-observations", type=int, choices=(10, 20))
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
         "--provisional",
@@ -386,7 +389,13 @@ def main() -> None:
                 if args.provisional
                 else validate_exact_robustness
             )
-            observation_count, competitive_rate, observation_rate = validator(candidate)
+            if args.minimum_observations is not None and int(candidate.get("observation_count", 0)) < args.minimum_observations:
+                raise ValueError("candidate is below the epoch evidence floor")
+            if not args.provisional and args.minimum_observations is not None:
+                observation_count, competitive_rate, observation_rate = validate_exact_robustness(
+                    candidate, minimum_observations=args.minimum_observations)
+            else:
+                observation_count, competitive_rate, observation_rate = validator(candidate)
         except ValueError as error:
             print(f"PUBLISH_SKIP {seq[:16]}: exact evidence: {error}", flush=True)
             continue
@@ -529,6 +538,10 @@ def main() -> None:
             "layer2_sha256": [_sha256(path) for path in args.layer2],
         },
     }
+    if args.minimum_observations is not None:
+        from nanobody_opt.confirmation_depth import decision
+        payload["confirmation_depth"] = decision(epoch=args.epoch, target=args.target,
+                                                minimum=args.minimum_observations, schedule=[])
     try:
         previous = json.loads(args.output.read_text())
     except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):

@@ -612,3 +612,43 @@ submission validity boundary must remain unchanged.
 At this snapshot the rival fleets for 25917 are incomplete, so no rival mean
 is used to explain the difference. Evidence and the numerical reproduction:
 `docs/evidence/epoch_25916_25917_confirmation_audit_20261024.json`.
+
+### Adaptive confirmation depth
+
+The user approved deployment of a twenty-observation target with a ten-
+observation deadline fallback. Five observations remain experimental and are
+not an allowed publication floor. On two fixed historical replay cohorts,
+1,000 held-out splits per cohort gave ten-pass fleet means 0.93–1.06% worse
+than twenty, with 33% less modeled confirmation wall time. These selected
+cohorts do not estimate eligibility attrition or guarantee future performance.
+Numerical results: `docs/evidence/confirmation_depth_evaluation_20261024.json`.
+
+`--adaptive-confirmation-depth` enables `deadline-depth-v1` in the shipping
+producer and publisher. The repeat planner reserves gate time first: 120
+seconds when an uncached batch is needed, thirty for a sufficient measured
+cache. It prefers full depth for the configured survivor pool and otherwise
+truncates the repeat tail to nine rounds plus the independent initial fold.
+It still narrows the shortlist if necessary and starts no impossible work.
+The selected schedule remains frozen on resume. Discovery's 4,800 NEW cap,
+repeat evaluation cap, shared handoff deadlines and validator gates remain.
+
+An epoch/target-bound decision records whether the effective floor is twenty
+or ten. Race qualification, completion health, publisher comparison, ranking,
+per-UID checkpoint creation and checkpoint consumption use the same floor.
+Publication fingerprints include the decision. The evidence scope resets after
+each publisher attempt, including exceptions, so a fallback cannot leak into
+the next epoch. Checkpoints carry the decision for consumers in other processes;
+nine-pass and wrong-epoch receipts are rejected, including provisional inputs.
+
+Stored-bank novelty revalidation now runs in batches of at most 4,096 when this
+policy is enabled. Previously eligible entries and measured passing profiles
+receive priority, but must pass the current archive's gates again. Cheap
+Layer-2 batches likewise prioritize those entries. Partial current proof is
+usable while the backlog continues, and pending counts retain every unchecked
+candidate. No stored candidate is charged as a NEW evaluation.
+
+The mandatory adaptive-depth suite covers cold-gate starvation, full and short
+windows, no sub-ten fallback, frozen resume, the actual race runner and
+qualification, the actual publisher and consumer, epoch isolation, changed-
+archive partial revalidation, and the shipping flags. Deployment and loaded
+process verification are recorded separately from these test results.

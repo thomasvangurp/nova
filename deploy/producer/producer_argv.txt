@@ -111,3 +111,4 @@ adaptive
 --epoch-confirmation-finalists
 64
 --pi-handoff
+--adaptive-confirmation-depth

@@ -763,6 +763,7 @@ def _run_iteration(
             "candidate_limit", "screen_tranche_size", "finalists",
             "replication_rounds", "replication_rounds_per_stage",
             "replication_keep_fraction", "replication_minimum_keep", "minimum_publishable_observations",
+            "adaptive_confirmation_depth",
             "qualification_observations", "basin_core_limit",
             "basin_parent_limit", "basin_fraction", "basin_evidence_fraction",
             "public_neighbourhood_distance", "scout_iterations",
@@ -1476,6 +1477,8 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         race_command.append("--screen-all-candidates")
     if getattr(args, "minimum_selection_observations", None) is not None:
         race_command.extend(["--minimum-selection-observations", str(args.minimum_selection_observations)])
+    if getattr(args, "adaptive_confirmation_depth", False):
+        race_command.append("--adaptive-confirmation-depth")
     if args.budget_mode == "adaptive":
         race_command.extend([
             "--carry-pending-candidates", "--maximum-screen-tranches",
@@ -1745,6 +1748,8 @@ def merge_graft_candidates(candidates: Path, grafts: Path) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     submission_timing.add_arguments(parser)
+    from nanobody_opt.confirmation_depth import add_arguments
+    add_arguments(parser)
     parser.add_argument("--confirmation-policy", choices=("legacy", "broad"), default="broad",
                         help="budget-preserving broader repeats before elimination")
     parser.add_argument(
@@ -2519,11 +2524,13 @@ def _run_complete_screen_pool(args, state) -> str:
             _atomic_json(root / "confirmation_health.json", health)
             coverage.update(confirmation_health=health)
             _atomic_json(root / "full_scan_coverage.json", coverage)
-        if result.get("replication_rounds_completed", 0) >= args.minimum_publishable_observations - 1:
+        required = (health or {}).get("required_observations", args.minimum_publishable_observations)
+        if result.get("replication_rounds_completed", 0) >= required - 1:
             best = result.get("incumbent_rank")
             score_target = float(source.get("target_multipass_score", 900))
             _atomic_json(confirmed, {**coverage, "iteration": iteration,
                                     "rounds": result["replication_rounds_completed"],
+                                    "required_observations": required,
                                     "best_confirmed_multipass": best,
                                     "target_multipass_score": score_target,
                                     "score_target_met": best is not None and best <= score_target})

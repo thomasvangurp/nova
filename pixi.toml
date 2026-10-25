@@ -295,7 +295,7 @@ mysqlclient = ">=2.3.0, <3"
 
 [feature.chain310.tasks]
 check = "python -c \"import bittensor,timelock; from async_substrate_interface.sync_substrate import SubstrateInterface; print(bittensor.__version__)\""
-publish-current-nanobody = "cd /root && python tools/publish_current_nanobody.py --pi-handoff"
+publish-current-nanobody = "cd /root && python tools/publish_current_nanobody.py --pi-handoff --adaptive-confirmation-depth"
 test-nanobody-publisher = "cd /root && python -m pytest -q tests/test_publish_current_nanobody.py"
 # There is deliberately no slot-manager task here. This workspace is linux-64
 # only and the slot purchase agent needs the coldkey and the macOS Keychain, so

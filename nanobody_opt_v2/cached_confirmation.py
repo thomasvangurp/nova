@@ -53,6 +53,7 @@ def prepare(*, args, state, archive: Path, config: Path, root: Path, runner) -> 
         nanobody_opt_root=args.runtime_root / "nanobody_opt",
         layer2_cache_dir=args.runtime_root / "layer2_cache",
         layer2_concurrency=args.layer2_concurrency, pixi=Path("/usr/local/bin/pixi"),
+        adaptive_confirmation_depth=getattr(args, "adaptive_confirmation_depth", False),
     )
     while True:
         _prechecked_comparison_scope(

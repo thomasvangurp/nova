@@ -1,0 +1,116 @@
+{
+  "purpose": "Offline staged-confirmation depth comparison; all policies use the same initial shortlist and held-out folds per trial.",
+  "limitations": [
+    "Selected historical replay cohorts, not rejected production proposals.",
+    "Eligibility, archive invalidation, publication and transaction timing are not simulated.",
+    "Monte Carlo standard errors describe resampling precision on these fixed cohorts, not uncertainty across future epochs."
+  ],
+  "results": [
+    {
+      "cohort": "30folds",
+      "candidates": 346,
+      "heldout_passes": 9,
+      "trials": 1000,
+      "results": [
+        {
+          "total_passes": 5,
+          "heldout_mean": 1056.9662564102564,
+          "paired_delta_vs_20": 29.105247863247875,
+          "relative_difference_percent": 2.8316326450004423,
+          "monte_carlo_se_of_delta": 1.1418841876320813,
+          "repeat_evaluations": 374,
+          "modeled_gpu_wall_seconds": 311.88
+        },
+        {
+          "total_passes": 8,
+          "heldout_mean": 1042.5484957264957,
+          "paired_delta_vs_20": 14.687487179487187,
+          "relative_difference_percent": 1.4289370894854279,
+          "monte_carlo_se_of_delta": 0.8806940575863985,
+          "repeat_evaluations": 494,
+          "modeled_gpu_wall_seconds": 417.79499999999996
+        },
+        {
+          "total_passes": 10,
+          "heldout_mean": 1038.7584957264958,
+          "paired_delta_vs_20": 10.897487179487188,
+          "relative_difference_percent": 1.0602101927080543,
+          "monte_carlo_se_of_delta": 0.8156558660371918,
+          "repeat_evaluations": 534,
+          "modeled_gpu_wall_seconds": 464.025
+        },
+        {
+          "total_passes": 20,
+          "heldout_mean": 1027.8610085470084,
+          "paired_delta_vs_20": 0.0,
+          "relative_difference_percent": 0.0,
+          "monte_carlo_se_of_delta": 0.0,
+          "repeat_evaluations": 734,
+          "modeled_gpu_wall_seconds": 695.175
+        },
+        {
+          "total_passes": 21,
+          "heldout_mean": 1027.396299145299,
+          "paired_delta_vs_20": -0.46470940170939945,
+          "relative_difference_percent": -0.04521130754500707,
+          "monte_carlo_se_of_delta": 0.38192424117341844,
+          "repeat_evaluations": 754,
+          "modeled_gpu_wall_seconds": 718.29
+        }
+      ]
+    },
+    {
+      "cohort": "40folds",
+      "candidates": 367,
+      "heldout_passes": 19,
+      "trials": 1000,
+      "results": [
+        {
+          "total_passes": 5,
+          "heldout_mean": 1063.2617773279353,
+          "paired_delta_vs_20": 28.953461538461532,
+          "relative_difference_percent": 2.7993066570640246,
+          "monte_carlo_se_of_delta": 0.926012673460556,
+          "repeat_evaluations": 374,
+          "modeled_gpu_wall_seconds": 311.88
+        },
+        {
+          "total_passes": 8,
+          "heldout_mean": 1047.8719352226722,
+          "paired_delta_vs_20": 13.563619433198383,
+          "relative_difference_percent": 1.3113710125056333,
+          "monte_carlo_se_of_delta": 0.6968967828381326,
+          "repeat_evaluations": 494,
+          "modeled_gpu_wall_seconds": 417.79499999999996
+        },
+        {
+          "total_passes": 10,
+          "heldout_mean": 1043.9335668016195,
+          "paired_delta_vs_20": 9.625251012145746,
+          "relative_difference_percent": 0.9305978560946714,
+          "monte_carlo_se_of_delta": 0.6237037710794142,
+          "repeat_evaluations": 534,
+          "modeled_gpu_wall_seconds": 464.025
+        },
+        {
+          "total_passes": 20,
+          "heldout_mean": 1034.3083157894737,
+          "paired_delta_vs_20": 0.0,
+          "relative_difference_percent": 0.0,
+          "monte_carlo_se_of_delta": 0.0,
+          "repeat_evaluations": 734,
+          "modeled_gpu_wall_seconds": 695.175
+        },
+        {
+          "total_passes": 21,
+          "heldout_mean": 1033.8924048582996,
+          "paired_delta_vs_20": -0.4159109311740924,
+          "relative_difference_percent": -0.0402115041351701,
+          "monte_carlo_se_of_delta": 0.30052847929838855,
+          "repeat_evaluations": 754,
+          "modeled_gpu_wall_seconds": 718.29
+        }
+      ]
+    }
+  ]
+}

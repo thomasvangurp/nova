@@ -791,6 +791,16 @@ def _replication_shortlist(
     return sequences[:limit]
 
 
+def _record_confirmation_depth(args, receipt):
+    if not getattr(args, "adaptive_confirmation_depth", False):
+        return
+    value = receipt["confirmation_depth"]
+    args._effective_minimum_observations = value["minimum_observations"]
+    root = getattr(args, "pooled_exact_root", None)
+    if root is not None:
+        _atomic_json(root / "confirmation_depth.json", value)
+
+
 def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timings):
     """Freeze a fully gated, budgeted tournament so restarts cannot change it."""
     from nanobody_opt_v2 import confirmation_policy as policy
@@ -798,6 +808,9 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
     from nanobody_opt_v2.compute_budget import TimingModel
     from nanobody_opt.filter_layer2 import cached_developability_result
 
+    from nanobody_opt import confirmation_depth as depth
+    adaptive = getattr(args, "adaptive_confirmation_depth", False)
+    minimum = getattr(args, "minimum_publishable_observations", depth.TARGET)
     receipt_path = args.output_dir / "confirmation_plan.json"
     model = TimingModel(args.replication_load_seconds,
                         args.replication_seconds_per_observation, 0)
@@ -805,12 +818,15 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
              "eligibility_policy": eligibility.VERSION,
              "config_sha256": hashlib.sha256(args.config.read_bytes()).hexdigest(),
              "archive_sha256": hashlib.sha256(args.archive.read_bytes()).hexdigest()}
+    if adaptive:
+        proof["evidence_policy"] = depth.POLICY
     if receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text())
         if (receipt.get("epoch") != args.epoch or receipt.get("policy") != policy.POLICY
                 or receipt.get("rounds") != args.replication_rounds
                 or receipt.get("proof") != proof):
             raise ValueError("confirmation resume plan mismatch")
+        _record_confirmation_depth(args, receipt)
         return receipt["shortlist"], [tuple(s) for s in receipt["schedule"]], model
 
     planned = policy.plan(
@@ -839,6 +855,19 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
     known_failed = {s for s in ordered if cached(s) is False}
     observations = {r["sequence"]: int(r.get("observation_count", 1))
                     for r in payload.get("candidates", []) if r.get("sequence")}
+    gate_seconds = 30.0
+    if adaptive:
+        cached_passes = sum(cached(s) is True for s in ordered if s not in known_failed)
+        gate_seconds = (depth.CACHED_GATE_SECONDS if cached_passes >= args.replication_minimum_keep
+                        else depth.COLD_GATE_SECONDS) if command else 0.0
+        gate_schedule, minimum = policy.fit_depth(planned["schedule"],
+            available=len(ordered), usable_seconds=max(usable - args.replication_finish_guard_seconds - gate_seconds, 0),
+            model=model, gpus=len(gpus), minimum_keep=args.replication_minimum_keep)
+        gate_width = gate_schedule[0][0] if gate_schedule else 0
+        if minimum == depth.FALLBACK:
+            # Stored folds already meeting the epoch's floor compete through
+            # publication; they do not consume another confirmation race.
+            ordered = [s for s in ordered if observations.get(s, 1) < minimum]
     selected, reasons = policy.shortlist(
         [s for s in ordered if s not in known_failed],
         width=gate_width, metadata=metadata,
@@ -891,9 +920,14 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
     # A single noisy metric must not undo the second-chance sample. Full
     # biological eligibility still runs above; publication's gates remain.
     usable = max(_remaining_blocks(args.chain_state, args.epoch) - args.reserve_blocks, 0) * 12.0
-    schedule = policy.fit(gate_schedule, available=len(selected),
-                          usable_seconds=max(usable - args.replication_finish_guard_seconds, 0),
-                          model=model, gpus=len(gpus))
+    if adaptive:
+        schedule, minimum = policy.fit_depth(gate_schedule, available=len(selected),
+            usable_seconds=max(usable - args.replication_finish_guard_seconds, 0),
+            model=model, gpus=len(gpus), minimum_keep=args.replication_minimum_keep)
+    else:
+        schedule = policy.fit(gate_schedule, available=len(selected),
+                              usable_seconds=max(usable - args.replication_finish_guard_seconds, 0),
+                              model=model, gpus=len(gpus))
     selected = selected[:schedule[0][0]] if schedule else []
     receipt = {**planned, "epoch": args.epoch, "rounds": args.replication_rounds, "proof": proof,
                "schedule": schedule, "shortlist": selected,
@@ -905,6 +939,11 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
                "planned_evaluations": policy.evaluation_count(schedule),
                "planned_seconds": policy.seconds(schedule, model, len(gpus)),
                "status": "ready" if selected else "insufficient_time_or_eligible_candidates"}
+    if adaptive:
+        receipt["gate_budget_seconds"] = gate_seconds
+        receipt["confirmation_depth"] = depth.decision(epoch=args.epoch, target=args.target,
+                                                       minimum=minimum, schedule=schedule)
+        _record_confirmation_depth(args, receipt)
     _atomic_json(receipt_path, receipt)
     print(f"EXACT_CONFIRMATION_PLAN policy={policy.POLICY} candidates={len(selected)} "
           f"repeat_evaluations={receipt['planned_evaluations']}/{planned['evaluation_cap']} "
@@ -2273,6 +2312,8 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--minimum-basin-samples", type=int, default=3)
+    from nanobody_opt.confirmation_depth import add_arguments
+    add_arguments(parser)
     return parser
 
 
@@ -2873,6 +2914,10 @@ def main() -> None:
                 args=args, ranking=screen_ranking,
                 exclude=set(repeated_finalists) | already_confirmed,
                 metadata=candidate_metadata, gpus=gpus, timings=timings_path)
+            if getattr(args, "adaptive_confirmation_depth", False):
+                args.minimum_publishable_observations = args._effective_minimum_observations
+                strict_gate_overrides = {**(strict_gate_overrides or {}),
+                                        "--minimum-observations": args.minimum_publishable_observations}
         else:
             replication_shortlist = _replication_shortlist(
                 screen_ranking, exclude=set(repeated_finalists) | already_confirmed, limit=args.finalists
@@ -2969,7 +3014,7 @@ def main() -> None:
 
         replication_rounds_completed = _run_replication_rounds(
             shortlist=replication_shortlist,
-            rounds=args.replication_rounds,
+            rounds=sum(n for _, n in stage_schedule) if stage_schedule is not None else args.replication_rounds,
             root=args.output_dir,
             config=args.config,
             target=args.target,

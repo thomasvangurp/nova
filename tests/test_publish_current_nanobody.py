@@ -108,7 +108,7 @@ def _checkpoint(epoch=EPOCH, sequence=SEQUENCE, stage="qualified"):
             },
         },
         "exact": {
-            "observation_count": 8,
+            "observation_count": int(publication_gates.gate_defaults()["--minimum-observations"]),
             "pose_stability": {
                 "structure_observation_count": 8,
                 "contact_jaccard_median": 0.5,
@@ -889,13 +889,13 @@ def test_the_strict_pass_uses_the_shared_gates_and_win_probability(tmp_path, mon
 
 def test_every_commitment_lands_in_the_end_of_epoch_reserve(tmp_path, monkeypatch):
     host = _Host(tmp_path, monkeypatch, uids=(0, 1, 2))
-
-    _publish_once(host.args())
+    args = host.args()
+    _publish_once(args)
 
     artifact = json.loads(host.artifact.read_text())
     blocks = [entry["commit_block"] for entry in artifact["submissions"]]
     epoch_end = EPOCH_LENGTH * (EPOCH + 1)
-    assert blocks == list(range(epoch_end - RESERVE_BLOCKS, epoch_end - RESERVE_BLOCKS + 3))
+    assert blocks == list(range(epoch_end - args.reserve_blocks, epoch_end - args.reserve_blocks + 3))
     assert len(set(blocks)) == 3, "max_regs_per_block is 1"
 
 
@@ -1168,7 +1168,7 @@ def test_the_provisional_fleet_commits_before_the_strict_rank_runs():
     commitment for the epoch, so the provisional fleet must reach the chain
     first and let the qualified upgrade re-commit if the rate limit allows.
     """
-    source = inspect.getsource(publish_current_nanobody._publish_once)
+    source = inspect.getsource(publish_current_nanobody._publish_once_current_epoch)
     provisional = source.index('_report(artifact, "provisional")')
     strict_rank = source.index("strict=True")
     commit = source.index("_commit_fleet(", provisional)

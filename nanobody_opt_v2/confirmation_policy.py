@@ -74,6 +74,33 @@ def fit(schedule, *, available, usable_seconds, model, gpus):
     return result
 
 
+def fit_depth(schedule, *, available, usable_seconds, model, gpus, minimum_keep):
+    """Prefer full depth for the target pool, then ten total observations.
+
+    Shortening only the tail retains the existing early pruning and never
+    exceeds the original evaluation or time cap. Nine repeats plus the
+    independent screen are ten observations; fewer are never a fallback.
+    """
+    from nanobody_opt.confirmation_depth import TARGET, FALLBACK
+    preferred = fit(schedule, available=available, usable_seconds=usable_seconds,
+                    model=model, gpus=gpus)
+    if (preferred and sum(r for _, r in preferred) >= TARGET - 1
+            and preferred[-1][0] >= min(minimum_keep, available)):
+        return preferred, TARGET
+    remaining = FALLBACK - 1
+    shorter = []
+    for width, rounds in schedule:
+        take = min(remaining, rounds)
+        if take:
+            shorter.append((width, take))
+            remaining -= take
+    if remaining:
+        return [], FALLBACK
+    fallback = fit(shorter, available=available, usable_seconds=usable_seconds,
+                   model=model, gpus=gpus)
+    return fallback, FALLBACK
+
+
 def shortlist(ordered, *, width, metadata, observations, epoch, broadened):
     """Keep the leading bulk plus small, deterministic second-chance samples.
 

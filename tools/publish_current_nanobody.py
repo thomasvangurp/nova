@@ -566,7 +566,7 @@ def _previous_confirmed_pool(epoch_root: Path, target: str) -> tuple[set[str], t
                 depth = int(candidate['observation_count'])
             except (KeyError, TypeError, ValueError):
                 continue
-            if sequence in allowed and depth >= 20 and math.isfinite(score):
+            if sequence in allowed and depth >= _strict_minimum_observations() and math.isfinite(score):
                 candidates.append((score, sequence, rounds))
     selected: dict[str, Path] = {}
     for _, sequence, rounds in sorted(candidates):
@@ -950,7 +950,7 @@ def _rank_command(
         command.extend(["--pose-config", str(config)])
         command.extend(
             _archive_field_rank_qualification_arguments() if full_archive_field
-            else RANK_QUALIFICATION_ARGUMENTS
+            else publication_gates.gate_arguments()
         )
     else:
         # The provisional pass exists so that an epoch always submits something;
@@ -1219,6 +1219,9 @@ def _prechecked_comparison_scope(
         proof_key.update(confirmation_only=True, minimum_observations=minimum)
     proof_path = epoch_root / "comparison_precheck.json"
     proof = _read_json(proof_path) or {}
+    prior_eligible = set(proof.get("eligible_sequences", []))
+    if minimum != 20 and not cheap_only:
+        proof_key["minimum_observations"] = minimum
     if proof.get("key") != proof_key:
         proof = {}
     checked = set(proof.get("checked_sequences", []))
@@ -1226,6 +1229,16 @@ def _prechecked_comparison_scope(
     novelty_checked = set(proof.get("novelty_checked_sequences", []))
     novel = set(proof.get("novel_sequences", [])) & novelty_checked
     pending = candidates - novelty_checked
+    if getattr(args, "adaptive_confirmation_depth", False) and len(pending) > 4096:
+        # Revalidation must yield usable current proof before the whole bank
+        # finishes. Old eligibility is ordering only, never admission.
+        from nanobody_opt.filter_layer2 import _developability_cache_digest, cached_developability_result
+        cache_keys = {p.stem for p in args.layer2_cache_dir.glob("*.json")}
+        measured = {s for s in pending if _developability_cache_digest(s) in cache_keys
+                    and (cached_developability_result(s, args.layer2_cache_dir) or {}).get("passed") is True}
+        priority = [*sorted(measured), *sorted((prior_eligible & pending) - measured),
+                    *sorted(pending - measured - prior_eligible)]
+        pending = set(priority[:4096])
 
     def checkpoint():
         _atomic_json(proof_path, {"key": proof_key,
@@ -1266,7 +1279,15 @@ def _prechecked_comparison_scope(
         if (measurement and measurement.get("sequence") == sequence
                 and _measured_developability(measurement.get("developability"))):
             cached.add(sequence)
-    batch = (set(sorted(waiting)[:2048]) if cheap_only
+    if cheap_only and getattr(args, "adaptive_confirmation_depth", False):
+        from nanobody_opt.filter_layer2 import cached_developability_result
+        measured = {s for s in waiting if
+                    (cached_developability_result(s, args.layer2_cache_dir) or {}).get("passed") is True}
+        ordered_waiting = [*sorted(measured), *sorted((prior_eligible & waiting) - measured),
+                           *sorted(waiting - measured - prior_eligible)]
+    else:
+        ordered_waiting = sorted(waiting)
+    batch = (set(ordered_waiting[:2048]) if cheap_only
              else cached or set(sorted(waiting)[:32]))
     if not ready_artifact and candidates & allowed:
         # After a restart or interrupted publish, deliver the proven fleet
@@ -1410,6 +1431,11 @@ def _publish_fleet(
 ) -> tuple[dict[str, Any], list[fleet_module.Assignment]]:
     """Bind k distinct sequences to k uids and build the single fleet artifact."""
     payload = json.loads(rankings.read_text())
+    if getattr(args, "adaptive_confirmation_depth", False):
+        payload = _restrict_pool(payload,
+            {r["sequence"] for r in payload.get("candidates", [])
+             if int(r.get("observation_count", 0)) >= _strict_minimum_observations()},
+            gate="independent-observations", source=rankings)
     # Assign only from sequences that hold a CURRENT Layer-2 pass. The ranking
     # is ordered by win probability and knows nothing about Layer-2, so the
     # top-k slice routinely contained sequences publish_checkpoint.py then
@@ -1544,6 +1570,8 @@ def _publish_fleet(
             "--sequence", assignment.sequence,
             "--output", str(destination),
         ])
+        if getattr(args, "adaptive_confirmation_depth", False):
+            command.extend(["--minimum-observations", str(_strict_minimum_observations())])
         if stage == "provisional":
             command.append("--provisional")
         try:
@@ -1591,6 +1619,8 @@ def _publish_fleet(
         unassigned=fleet_module.uncovered(crew, published),
         sequence_pool=sequence_pool,
     )
+    if getattr(args, "_confirmation_depth", None) is not None:
+        artifact["confirmation_depth"] = args._confirmation_depth
     if getattr(args, "_submission_timing", None) is not None:
         _COMMAND_DEADLINE.remaining()
         current = _chain_view(args.chain_state, args.netuid, args.maximum_chain_state_age)
@@ -2099,6 +2129,8 @@ def _commit_fleet(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     submission_timing.add_arguments(parser)
+    from nanobody_opt.confirmation_depth import add_arguments
+    add_arguments(parser)
     parser.add_argument("--network", default="finney")
     parser.add_argument("--netuid", type=int, default=68)
     parser.add_argument(
@@ -2264,6 +2296,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _publish_once(args: argparse.Namespace) -> None:
+    # Reset even on failure/rollover; a ten-pass decision belongs to one epoch.
+    with publication_gates.evidence_floor():
+        return _publish_once_current_epoch(args)
+
+
+def _publish_once_current_epoch(args: argparse.Namespace) -> None:
     global _COMMAND_DEADLINE
     with _exclusive_lock(args.lock):
         if args.expected_gpus and _gpu_count() != args.expected_gpus:
@@ -2334,6 +2372,12 @@ def _publish_once(args: argparse.Namespace) -> None:
                 f"live target is {configured_target!r}, exact bank is {args.target!r}; fail closed"
             )
         target = configured_target
+        args._confirmation_depth = None
+        if getattr(args, "adaptive_confirmation_depth", False):
+            from nanobody_opt import confirmation_depth as depth
+            args._confirmation_depth = depth.read(epoch_root / "producer", epoch=epoch, target=target)
+            publication_gates.set_evidence_floor((args._confirmation_depth or {}).get(
+                "minimum_observations", depth.TARGET))
         requirements = config["nanobody_requirements"]
 
         previous = _read_json(args.artifact)
@@ -2467,6 +2511,8 @@ def _publish_once(args: argparse.Namespace) -> None:
             _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
         # A bank/crew match alone cannot reuse eligibility under changed rules.
         gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path)]
+        if getattr(args, "adaptive_confirmation_depth", False):
+            gate_fingerprint.append(args._confirmation_depth)
         if args._submission_timing is not None:
             gate_fingerprint.append(args._confirmation_at_start)
         exact_fingerprint = _sha256_bytes(json.dumps([exact_fingerprint, gate_fingerprint]).encode())

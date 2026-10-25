@@ -20,6 +20,8 @@ side can load is not shared at all.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -61,9 +63,32 @@ INTEGRITY_GATES: dict[str, str] = {
 }
 
 
+_EVIDENCE_FLOOR = ContextVar("publication_evidence_floor", default=None)
+
+
+def set_evidence_floor(minimum: int) -> None:
+    if minimum not in (10, 20):
+        raise ValueError("unsupported publication evidence floor")
+    _EVIDENCE_FLOOR.set(minimum)
+
+
+@contextmanager
+def evidence_floor(minimum: int = 20):
+    if minimum not in (10, 20):
+        raise ValueError("unsupported publication evidence floor")
+    token = _EVIDENCE_FLOOR.set(minimum)
+    try:
+        yield
+    finally:
+        _EVIDENCE_FLOOR.reset(token)
+
+
 def gate_defaults() -> dict[str, str]:
     """Every gate, by flag name."""
-    return {**EVIDENCE_GATES, **QUALITY_GATES, **INTEGRITY_GATES}
+    gates = {**EVIDENCE_GATES, **QUALITY_GATES, **INTEGRITY_GATES}
+    if _EVIDENCE_FLOOR.get() is not None:
+        gates["--minimum-observations"] = str(_EVIDENCE_FLOOR.get())
+    return gates
 
 
 def _canonical(flag: str) -> str:

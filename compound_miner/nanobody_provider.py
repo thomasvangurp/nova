@@ -111,12 +111,23 @@ def _gate(flag: str) -> float:
     return float(publication_gates.gate_defaults()[flag])
 
 
+def _checkpoint_evidence_floor(payload: Mapping[str, Any], default: int) -> int:
+    if "confirmation_depth" not in payload:
+        return default
+    from nanobody_opt.confirmation_depth import validate
+    decision = validate(payload["confirmation_depth"], epoch=payload.get("epoch"),
+                        target=payload.get("target"))
+    if decision is None:
+        raise NanobodyCheckpointError("invalid epoch confirmation-depth decision")
+    return decision["minimum_observations"]
+
+
 def _validate_robust_exact_evidence(payload: Mapping[str, Any]) -> None:
     exact = payload.get("exact")
     selection = payload.get("selection")
     if not isinstance(exact, Mapping) or not isinstance(selection, Mapping):
         raise NanobodyCheckpointError("robust exact-selection evidence is missing")
-    minimum_observations = int(_gate("--minimum-observations"))
+    minimum_observations = _checkpoint_evidence_floor(payload, int(_gate("--minimum-observations")))
     if _integer(exact, "observation_count") < minimum_observations:
         raise NanobodyCheckpointError(
             f"checkpoint has fewer than {minimum_observations} exact observations"
@@ -174,7 +185,7 @@ def _validate_provisional_exact_evidence(payload: Mapping[str, Any]) -> None:
     selection = payload.get("selection")
     if not isinstance(exact, Mapping) or not isinstance(selection, Mapping):
         raise NanobodyCheckpointError("provisional exact-selection evidence is missing")
-    if _integer(exact, "observation_count") < 1:
+    if _integer(exact, "observation_count") < _checkpoint_evidence_floor(payload, 1):
         raise NanobodyCheckpointError("checkpoint has no exact observations")
     _finite_number(selection, "score")
     _finite_number(selection, "score_p90")
