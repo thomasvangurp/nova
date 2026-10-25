@@ -654,3 +654,35 @@ windows, no sub-ten fallback, frozen resume, the actual race runner and
 qualification, the actual publisher and consumer, epoch isolation, changed-
 archive partial revalidation, and the shipping flags. Deployment and loaded
 process verification are recorded separately from these test results.
+
+### Adaptive-depth deployment verification
+
+Runtime release `18b902a42efda74790a40000d353513a51a75737` passed all 625
+mandatory shipping checks with no failures, errors or skips, and
+[GitHub CI](https://github.com/thomasvangurp/nova/actions/runs/40147018420).
+All 644 packaged files and the nine installed master runtime files were
+verified by hash. The Pi's two updated consumer files match the same release;
+its existing publication-gate settings, loop and signer were preserved. The
+consumer variant passed two additional tests and its submission service is
+active.
+
+The master activated after the protected handoff window in epoch 25919.
+At 2026-10-25 00:37:42 UTC, exactly one producer and one publisher were running
+with both `--adaptive-confirmation-depth` and `--pi-handoff`. The actual
+producer arguments retained the 4,800 NEW-candidate cap. Epoch **25920** is
+the first full affected epoch. Activation ran on the master, with no Mac
+timer or ongoing Mac dependency.
+
+The first activation attempt stopped before changing processes because tmux
+reported its pane command with an enclosing layer of shell quoting. The
+one-time activation script now removes enclosing single-token quoting before
+applying its existing launch allowlist. Six local parsing checks covered
+plain and quoted launches and rejected unsupported settings or constructs.
+The runtime release did not change. The successful activation's exact script
+and verified receipt are retained in
+`docs/evidence/adaptive_depth_activation_20261024.py` and
+`docs/evidence/adaptive_depth_release_20261024.json`.
+
+This verifies deployment, not a recovered multipass score. Evaluate the actual
+committed fleet from 25920 and its independent replay before attributing a
+quality improvement to the policy.

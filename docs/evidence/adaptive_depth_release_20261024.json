@@ -1,0 +1,54 @@
+{
+  "verified_at_utc": "2026-10-25T00:37:42.106323+00:00",
+  "release": "18b902a42efda74790a40000d353513a51a75737",
+  "policy": "deadline-depth-v1",
+  "preferred_observations": 20,
+  "deadline_fallback_observations": 10,
+  "fresh_new_candidate_cap": 4800,
+  "ci_url": "https://github.com/thomasvangurp/nova/actions/runs/40147018420",
+  "shipping_validation": {
+    "passed": true,
+    "tests": 625,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "master": {
+    "activation": "active",
+    "release": "18b902a42efda74790a40000d353513a51a75737",
+    "activation_epoch": 25919,
+    "first_full_epoch": 25920,
+    "verified_runtime_files": 9,
+    "verified_package_files": 644,
+    "shipping_tests": 625,
+    "processes": {
+      "producer": [
+        {
+          "pid": 3264138,
+          "policy_and_handoff_flags": true,
+          "fresh_budget_4800": true
+        }
+      ],
+      "publisher": [
+        {
+          "pid": 3264274,
+          "policy_and_handoff_flags": true,
+          "fresh_budget_4800": null
+        }
+      ]
+    },
+    "epoch_at_verification": 25919,
+    "block_at_verification": 9357089,
+    "activation_source_sha256": "80af1b4c63bb6986af25c6d196bea4f1b027c2aa21c088ecf26a9f1cfb32106d"
+  },
+  "pi": {
+    "release": "18b902a42efda74790a40000d353513a51a75737",
+    "activation": "active_for_new_processes",
+    "verified_runtime_files": 2,
+    "original_publication_gates_preserved": true,
+    "submit_loop_active": true,
+    "consumer_tests": 2,
+    "shipping_tests": 625
+  },
+  "quality_verification": "Await the committed fleet and independent multipass replay for the first full epoch."
+}
