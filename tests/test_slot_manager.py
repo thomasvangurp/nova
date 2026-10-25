@@ -569,17 +569,19 @@ def test_registration_reuses_owned_idle_identity_without_growing_staking_index(m
     addresses = {'slot-1': 'active', 'slot-2': 'failed-new-key',
                  'slot-3': 'owned-unstaked', 'slot-4': 'owned-staked'}
     loaded = []
+    membership_reads = []
     def wallet(**kw):
         loaded.append(kw['hotkey'])
         return SimpleNamespace(hotkey=SimpleNamespace(ss58_address=addresses[kw['hotkey']]))
     chain = SimpleNamespace(
         query_subtensor=lambda name, **kw: (['active', 'owned-unstaked', 'owned-staked']
             if name == 'OwnedHotkeys' else ['active', 'owned-staked']),
-        get_netuids_for_hotkey=lambda **kw: [])
+        get_netuids_for_hotkey=lambda **kw: membership_reads.append(kw['hotkey_ss58']) or [])
     chosen = sm.registration_hotkey(chain, wallet, wallet_name='wallet', prefix='slot',
                                     coldkey='public-test-coldkey', live_hotkeys=['active'])
     assert chosen == 'slot-4'
     assert loaded == ['slot-1', 'slot-2', 'slot-3', 'slot-4']
+    assert membership_reads == ['owned-staked'], 'do not RPC-scan hundreds of lower-priority identities'
 
 
 def test_registration_never_reuses_a_key_active_on_another_subnet(monkeypatch):

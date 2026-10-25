@@ -481,6 +481,9 @@ not count already-registered keys as new purchases. Reuse an owned key that
 is unregistered on every subnet, preferring one already present in both
 ownership and staking indexes. Never reuse a currently active key or change
 the economic limits to work around a software failure.
+Check membership for identities in the staking index before making RPC calls
+for older identities outside it; the live wallet had 573 local candidates,
+and checking all lower-priority keys first delayed otherwise valid recovery.
 
 Keep the original spending log. `tools/audit_slot_spend.py` correlates its
 claimed purchases with the exact signer, hotkey, subnet, call and failed chain

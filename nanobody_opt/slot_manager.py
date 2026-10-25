@@ -1439,22 +1439,30 @@ def registration_hotkey(
     if not isinstance(owned, list) or not isinstance(staked, list):
         raise EmptyRosterError('hotkey ownership indexes unavailable; refusing a new identity')
     owned, staked, live = set(owned), set(staked), set(live_hotkeys)
-    fallback = None
+    def idle(address):
+        networks = subtensor.get_netuids_for_hotkey(hotkey_ss58=address)
+        if not isinstance(networks, list):
+            raise EmptyRosterError('hotkey memberships unavailable; refusing identity reuse')
+        return not networks
+
+    fallbacks = []
     for name in sorted(candidates, key=lambda value: int(value[len(prefix) + 1:])):
         wallet = wallet_factory(name=wallet_name, hotkey=name)
         address = str(wallet.hotkey.ss58_address)
         if address not in owned or address in live:
             continue
-        networks = subtensor.get_netuids_for_hotkey(hotkey_ss58=address)
-        if not isinstance(networks, list):
-            raise EmptyRosterError('hotkey memberships unavailable; refusing identity reuse')
-        if networks:
+        if address not in staked:
+            fallbacks.append((name, address))
             continue
-        if address in staked:
+        if idle(address):
             return name
-        if fallback is None:
-            fallback = name
-    return fallback or next_hotkey_name(names, prefix)
+    # Checking membership requires an RPC. Defer all lower-priority keys until
+    # the bounded staking index has no reusable key; historical wallets can
+    # contain hundreds of earlier identities outside that index.
+    for name, address in fallbacks:
+        if idle(address):
+            return name
+    return next_hotkey_name(names, prefix)
 
 
 SECRET_SOURCES = ("auto", "keychain", "systemd")
