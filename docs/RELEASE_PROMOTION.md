@@ -6,25 +6,99 @@ enforced by `scripts/deploy_tested_release.py`, the deployment workflow, the
 remote transaction, and the normal restart gate. It does not guarantee a score
 or replace independent validator results.
 
-## What is implemented, and what remains operational evidence
+## Operational control releases
+
+Deployment controls now have their own `release-controls` package profile.
+Its fixed `CONTROL_FILES` allowlist contains only deployment/checking scripts
+and the restart gate. It cannot install application, model, selector, publisher,
+Pi submission-loop, dependency or launch-argument files. The sole launcher edit
+inserts a fixed release-gate call before its existing body, preserving every
+original command and argument byte. An existing guard is replaced, not stacked.
+The full artifact is
+tested, but the installed control payload is explicitly distinguished from the
+existing application snapshot. Both before and after installation, every
+captured application file must match. The launcher is verified against its
+prior snapshot before the fixed insertion and against its new hash afterwards.
+
+This repairs the earlier inventory error: Mac tooling, Pi dashboard code, and
+test files are not required application files on the GPU host. An observed
+source snapshot records present producer-side code, absent optional files and
+the real launcher; it names its source commit and does **not** assert that the
+running application passed the control release's CI. `build_stamp.json` states
+the `release-controls` role, while `artifacts/observed_application.json` records
+application provenance separately. Application promotion cannot use a control
+stamp as a supposedly qualified application baseline.
+
+The real fixture set in `tests/fixtures/production_handoff` contains projected
+publication artifacts from epochs 25913, 25916, 25918, 25921, 25926 and 25927.
+It retains original artifact hashes and the hash of the actual installed Pi
+consumer. Its allocation functions were extracted without changing their
+bodies. The replay checks all 12 or 13 recorded fleet entries and rejection of
+a wrong epoch. It uses the archived publication clock; it does not invent a
+historical Pi read time, GPU measurements, or performance improvement.
+
+`scripts/replay_handoff.py` is the executable recorded-input driver.
+`scripts/control_release.py qualify` runs it in a pinned-image container with
+no network, credentials, capabilities, or writable release inputs. The
+qualification workflow uses a GitHub-hosted Ubuntu runner and the same passing
+package that it uploads. A separately registered self-hosted runner is no
+longer a prerequisite. Neither a simulated fixture nor a manually completed
+receipt can replace that workflow's result in deployment.
+
+The Pi runs `nova-control-qualification.timer` independently of submission and
+dashboard jobs. Its agent discovers the producer through the existing Vast
+CLI authentication, reads a bounded qualification request and a separate
+immutable artifact snapshot, calls the installed consumer without committing,
+and returns a fresh receipt. It never rewrites the Pi's submission input.
+Requests bind the revision, nonce, target, epoch and exact artifact hash; stale
+or mismatched receipts refuse installation. No Mac process is needed.
+
+Bootstrap procedure:
+
+1. Preserve observed application source in an audit commit and retain the
+   source manifest. Do not copy old, inactive Pi or slot-manager modules from
+   the GPU host into the current Pi deployment.
+2. Build and qualify a `release-controls` artifact through CI. The hosted
+   workflow performs the actual recorded replay after shipping checks pass.
+3. Stage that exact artifact. Run `control_release.py capture --root /root
+   --source-manifest <observed-source-manifest> --output <new-snapshot>`.
+   This verifies every present application byte against its captured source;
+   missing required entrypoints and any mismatched byte refuse capture.
+4. Install the tested Pi agent under `/opt/nova-release-controls`, without
+   changing `/opt/nova-submit`, and enable its independent timer.
+5. Request the Pi check using `control_release.py request-pi --stage <release>
+   --evidence <qualification>`. Once the Pi responds, use the `install` action
+   with `--snapshot <observed-snapshot>` and `--pi-receipt
+   /root/artifacts/control_pi_receipt.json`.
+6. Verify with `control_release.py verify --revision <control-release-sha>`.
+   The installation receipt records unchanged application files and arguments,
+   the installed restart guard, the current Pi proof, and
+   `services_restarted: false`. The running producer is never restarted.
+
+Subsequent control deployments use the `release-controls` workflow input and
+the stored application snapshot. Ansible requests a fresh Pi check and waits
+only for the control transaction; it does not pause epoch work. The actual
+available fleet size is checked, so twelve registered entries do not pretend
+to be thirteen and do not unnecessarily block a control-only repair.
+
+On installation failure, only control files and their metadata are restored.
+Concurrent measurements, reservations, ledger entries and service processes
+remain untouched. The application/scoring promotion contract below remains
+required whenever application behavior is changed.
+
+## Application and scoring releases
 
 The release contains the evidence checker, isolated trial runner, read-only Pi
 consumer receipt tool, state snapshot/quarantine tools, guarded source promotion,
 rollback, workflows, and mandatory failure tests. The tests use synthetic IDs
 and injected failures. They are **not** production replay evidence.
 
-A real qualification requires approved recorded production workloads and a
-workload driver that executes each release's production pipeline. There is no
-approved production driver or production fixture bundle supplied by this
-change. Until those have been collected and run, promotion deliberately fails
-closed. Do not substitute the test fixture, fabricate receipts, or use the
-new evidence schema as a reason to claim live score improvement. The current
-production release is not changed by committing these deployment controls.
-
-The evidence export workflow requires a dedicated runner with labels
-`self-hosted`, `linux`, `sn68-release-qualification`. Its setup is an operational
-prerequisite, not something this code assumes is already installed. Never run
-it on the live producer or the Pi, and never give it submission credentials.
+A scoring qualification requires workload-specific production inputs and a
+driver executing each release's production pipeline. A control handoff replay
+is not evidence for a selection or scoring change. Do not fabricate missing
+GPU observations or use the control-only profile to install application code.
+The generic application trial runner below remains isolated from live state
+and submission credentials.
 
 ## Staging and qualification
 
@@ -51,10 +125,10 @@ it on the live producer or the Pi, and never give it submission credentials.
    not copy credentials. This calls its installed `sequences_by_uid` consumer
    without invoking main, pulling live input, reading wallets, or committing.
    This proves consumer compatibility and allocation, not on-chain acceptance.
-6. Assemble the evidence contract below in the dedicated runner's
-   `/var/lib/nova/qualification/<sha>`. Run the **Qualify nanobody release
-   evidence** workflow for that same commit. It first requires CI and exports
-   only the checked documents as `sn68-promotion-evidence`.
+6. Assemble the application evidence contract below from the actual paired
+   runs. Use `scripts/export_promotion_evidence.py` to verify and export only
+   the checked documents. The hosted control qualification workflow does not
+   issue application-performance qualifications.
 7. Activate using **Deploy tested nanobody release**, that qualification run ID,
    exact host and target. It checks the successful run's repository, workflow
    identity, and commit; both controller and host verify evidence hashes and

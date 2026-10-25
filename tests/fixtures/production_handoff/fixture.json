@@ -1,0 +1,168 @@
+{
+  "schema": "sn68-recorded-handoff-v1",
+  "target": "P20809",
+  "captured_at": 1792929671.014773,
+  "installed_consumer_sha256": "ea9677c4c199800b2aed736d82998b425743f67a4bf5ba1fb7eb82ef03deeb52",
+  "consumer": {
+    "path": "installed_pi_consumer.py",
+    "sha256": "d9377a0be36aca4f591d5583459784b96c09e11e21ef88e17fae9f167966a3eb"
+  },
+  "provenance": "Projection of archived producer artifacts; actual installed Pi allocation functions; publication-clock replay, not a claimed historical Pi read time.",
+  "cases": [
+    {
+      "epoch": 25913,
+      "original_artifact_sha256": "8e21b4de4eb0cfdf1b7ef565ecf96db2901bc6daee9b5cd374304ac8d609d03e",
+      "source_path": "artifacts/nanobody_history/epoch25913.json",
+      "replay_time": 1792863075.9205234,
+      "uids": [
+        12,
+        14,
+        22,
+        23,
+        30,
+        33,
+        34,
+        43,
+        47,
+        53,
+        54,
+        60
+      ],
+      "artifact": {
+        "path": "epoch25913.json",
+        "sha256": "300e29148c034c30c4da47691daa2b2409805914982962668c4ddd08b03c837d"
+      },
+      "expected_allocation_sha256": "7c3201c21e98e208ea6e3dc6e092a6c6d500a74e670599450d634a47af600479"
+    },
+    {
+      "epoch": 25916,
+      "original_artifact_sha256": "a392d38127a9458f16298189aa01db7e69df94ef55a4d0573adfa0ec5d151045",
+      "source_path": "artifacts/nanobody_history/epoch25916.json",
+      "replay_time": 1792876072.6012113,
+      "uids": [
+        16,
+        22,
+        23,
+        30,
+        33,
+        34,
+        43,
+        45,
+        47,
+        48,
+        53,
+        54,
+        60
+      ],
+      "artifact": {
+        "path": "epoch25916.json",
+        "sha256": "17b4f258934d8147dd97c455535e6aded4427bf44c75217422929863e0af3228"
+      },
+      "expected_allocation_sha256": "15a9f596a0c2703f9fd4b288337913731e88a8efbe4efcb2fbceef62c8124120"
+    },
+    {
+      "epoch": 25918,
+      "original_artifact_sha256": "4ddb674705a9bdc9c5f4d5e5c68739a09d39fbbedf75e23c6ebee514c07deeb9",
+      "source_path": "artifacts/nanobody_history/epoch25918.json",
+      "replay_time": 1792884730.7893207,
+      "uids": [
+        16,
+        22,
+        23,
+        30,
+        33,
+        34,
+        43,
+        45,
+        47,
+        48,
+        53,
+        54,
+        60
+      ],
+      "artifact": {
+        "path": "epoch25918.json",
+        "sha256": "c4c59a6fbf77948914a60bffa5466f152f111429e174758f00ff3302cdedd3f5"
+      },
+      "expected_allocation_sha256": "6d17ff9945d90851959de66d97df5b83e4474d5533d838249b19310fd3f81e87"
+    },
+    {
+      "epoch": 25921,
+      "original_artifact_sha256": "714218d987e980bc3f1267456a9675375c17654b3dea888f8c01f310a3f8c4f0",
+      "source_path": "artifacts/nanobody_history/epoch25921.json",
+      "replay_time": 1792897738.4710886,
+      "uids": [
+        16,
+        22,
+        23,
+        32,
+        34,
+        35,
+        43,
+        45,
+        47,
+        48,
+        53,
+        54,
+        60
+      ],
+      "artifact": {
+        "path": "epoch25921.json",
+        "sha256": "39bbd7af830b22a62068358241e1086ea16d0cc62f8bf28d5576761e8b4bb45f"
+      },
+      "expected_allocation_sha256": "52ccbe5db30b253b9e0856297838ec31bbb17eb9b7139cb5c8e742114d759af7"
+    },
+    {
+      "epoch": 25926,
+      "original_artifact_sha256": "16d77c5b456cb1565b04f4f7e0d7e3a59f04a371d4679b57e5a7f7e3fed178f6",
+      "source_path": "artifacts/nanobody_history/epoch25926.json",
+      "replay_time": 1792919398.1669009,
+      "uids": [
+        8,
+        16,
+        23,
+        32,
+        34,
+        35,
+        40,
+        44,
+        45,
+        47,
+        48,
+        53,
+        54
+      ],
+      "artifact": {
+        "path": "epoch25926.json",
+        "sha256": "316135fec745f012116200d59630415747f4324196b963f94e000660db9b5e2a"
+      },
+      "expected_allocation_sha256": "d58702c447dc8cf61dccf8c45268269124766c994c01dfd91c587335ffed0a17"
+    },
+    {
+      "epoch": 25927,
+      "original_artifact_sha256": "026e0f1c4bd9f164e19a84c943aab6de645e084f3a7b38fda5808f4f7aaf9a17",
+      "source_path": "artifacts/nanobody_history/epoch25927.json",
+      "replay_time": 1792923711.7371964,
+      "uids": [
+        8,
+        16,
+        23,
+        32,
+        34,
+        35,
+        40,
+        44,
+        45,
+        47,
+        48,
+        53,
+        54
+      ],
+      "artifact": {
+        "path": "epoch25927.json",
+        "sha256": "d5226f4f4df3a78a502a957145b4efb548e2c175ddda9837679ca4531612a9c2"
+      },
+      "expected_allocation_sha256": "b61924aadad821ebfb4df3f27a342a6a4ee427ff082bab47e8612d49aa29fae1"
+    }
+  ]
+}

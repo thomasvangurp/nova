@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
   workflow_call:
+    inputs:
+      release_profile:
+        type: string
+        required: false
+        default: application
   workflow_dispatch:
 
 permissions:
@@ -30,7 +35,9 @@ jobs:
           sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
           python -m pip install -r requirements/shipping-tests.txt
       - name: Test and package the committed shipping tree
-        run: python scripts/shipping_checks.py --output "$RUNNER_TEMP/sn68-release"
+        env:
+          SN68_RELEASE_PROFILE: ${{ inputs.release_profile || 'application' }}
+        run: python scripts/shipping_checks.py --output "$RUNNER_TEMP/sn68-release" --profile "$SN68_RELEASE_PROFILE"
       - name: Upload only a passing release
         uses: actions/upload-artifact@v4
         with:

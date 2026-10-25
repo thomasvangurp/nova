@@ -17,6 +17,14 @@ on:
         required: true
         default: false
         type: boolean
+      release_profile:
+        description: Application deployment or deployment-controls-only update
+        required: true
+        type: choice
+        default: application
+        options:
+          - application
+          - release-controls
       promotion_run_id:
         description: Successful same-revision Actions run containing sn68-promotion-evidence (required for activation)
         required: false
@@ -37,6 +45,8 @@ concurrency:
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
+    with:
+      release_profile: ${{ inputs.release_profile }}
   deploy:
     needs: checks
     runs-on: ubuntu-latest

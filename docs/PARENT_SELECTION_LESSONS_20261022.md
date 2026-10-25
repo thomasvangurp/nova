@@ -7,6 +7,16 @@ alone is not production qualification. Synthetic regression cases must never
 be reported as real replay improvement; the new qualification path remains
 closed until its operational evidence and dedicated runner are available.
 
+Operational correction (2026-10-25): deployment-control updates now have a
+strict install allowlist, real recorded handoff fixtures, a runnable replay
+driver on GitHub-hosted infrastructure, and a separate Pi qualification timer.
+They preserve and attest the observed application instead of copying a generic
+repository tree over it. The previous all-host inventory incorrectly treated
+Mac/Pi tooling and tests as required GPU-host files. The application snapshot
+and the tested control release are labelled separately; the former is never
+silently presented as having passed the latter's CI. Scoring/selection changes
+still require their own performance evidence.
+
 Parents are ranked by the mean of independent pass ranks against the same current ten-epoch field, with at least ten raw folds. Historical scores, owner quotas, family reservations, and rank-of-mean-metrics must not replace this ordering. Repair-only parents keep their validity routing and capacity cap. Child proposals visit the measured parents in merit order before spending another edit on the same parent.
 
 The full live audit for epoch 25872 compared 1,456 measured, gated parents and selected 155. The cutoff was 934.25, best 591.35, and top-twenty mean 706.2390625, against epochs 25860–25869 (371 rows). Five of competitor 5GhREcsK's eight epoch-25868 parents qualified at positions 21, 28, 34, 54, and 122. The other three scored 963.55, 1025.35, and 1099.55 on that same field and fell below the cutoff. This supersedes the earlier limited-bank comparison. Parent quality is evidence for generation, not a guarantee of child quality.
@@ -440,3 +450,8 @@ reserved and completed counts distinct, validate epoch/target identity, and
 report monitoring-write failures without aborting healthy scoring. Mandatory CI
 exercises the live race through reservation and completion before it returns,
 including partial completion and invalid-scope/write-failure cases.
+
+The real `producer_relaunch.sh` must invoke the verified restart gate. Installing
+a gate file alone does not enforce it. The control installer preserves the
+original command body and arguments, adds one pinned gate call, and records
+both launcher hashes without restarting work.

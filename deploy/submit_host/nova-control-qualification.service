@@ -1,0 +1,12 @@
+[Unit]
+Description=Read-only qualification of release-control artifacts on the Pi
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=thomasg
+WorkingDirectory=/opt/nova-release-controls
+ExecStart=/usr/bin/python3 /opt/nova-release-controls/scripts/pi_control_agent.py --state /opt/nova-release-controls/state
+TimeoutStartSec=110
+NoNewPrivileges=true
+UMask=0077

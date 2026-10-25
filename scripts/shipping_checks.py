@@ -42,6 +42,7 @@ TEST_FILES = (
     'tests/test_deploy_stamp.py',
     'tests/test_release_pipeline.py',
     'tests/test_release_promotion.py',
+    'tests/test_control_release.py',
     'tests/test_epoch_deadline.py',
     'tests/test_submission_handoff.py',
     'tests/test_dashboard_cohort.py',
@@ -56,12 +57,12 @@ TEST_FILES = (
 )
 
 
-def run(root: Path, output: Path) -> int:
+def run(root: Path, output: Path, *, profile: str = 'application') -> int:
     sys.path.insert(0, str(root))
     from scripts.release_manifest import stage, verify
     output.mkdir(parents=True, exist_ok=True)
     artifact = output / 'staged'
-    manifest = stage(root, artifact)
+    manifest = stage(root, artifact, profile=profile)
     for name in TEST_FILES:
         if not (artifact / name).is_file():
             raise ValueError(f'missing required regression suite: {name}')
@@ -107,9 +108,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--profile', choices=['application', 'release-controls'], default='application')
     args = parser.parse_args()
     try:
-        return run(args.root.resolve(), args.output.resolve())
+        return run(args.root.resolve(), args.output.resolve(), profile=args.profile)
     except (OSError, ValueError, py_compile.PyCompileError) as error:
         print(f'SHIPPING CHECKS FAILED: {error}')
         return 1

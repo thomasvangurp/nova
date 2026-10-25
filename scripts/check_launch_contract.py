@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def check(root: Path) -> None:
     sys.path.insert(0, str(root))
+    stamp = root / 'build_stamp.json'
+    if stamp.is_file() and json.loads(stamp.read_text()).get('deployment_profile') == 'release-controls':
+        from scripts.control_release import verify_application
+        verify_application(root, json.loads((root / 'artifacts/observed_application.json').read_text()))
+        return
     from nanobody_opt_v2.run_live_producer import _parser
     argv = (root / 'deploy/producer/producer_argv.txt').read_text().splitlines()
     if argv[:3] != ['/root/.pixi/envs/bgen/bin/python', '-m', 'nanobody_opt_v2.run_live_producer']:

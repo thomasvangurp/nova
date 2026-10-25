@@ -17,12 +17,22 @@ from scripts.release_manifest import safe_path, verify
 from scripts.promotion_gate import verify as qualify, digest, read, require
 
 
-def deployment_plan(manifest_path, revision, host, activate, bundle=None, target=None):
+def deployment_plan(manifest_path, revision, host, activate, bundle=None, target=None, stage=None):
     """Resolve the only permitted path before accessing any SSH credential."""
     if not activate:
         return 'ansible/stage_nanobody_release.yml', {}
     require(bundle is not None and bool(target), 'promotion_evidence_required')
     bundle = Path(bundle).resolve()
+    if read(manifest_path).get('deployment_profile') == 'release-controls':
+        require(stage is not None, 'control_stage_required')
+        from scripts.control_release import verify_evidence
+        qualification, _ = verify_evidence(stage, bundle)
+        require(qualification['revision'] == revision
+                and qualification['manifest_sha256'] == digest(manifest_path), 'control_manifest_mismatch')
+        return 'ansible/promote_release_controls.yml', {
+            'sn68_promotion_dir': str(bundle),
+            'sn68_promotion_files': ['qualification.json', 'report.json'],
+            'sn68_deploy_host': host, 'sn68_target': target}
     qualify(bundle, candidate_sha=revision, host=host, target=target)
     plan = read(bundle / 'promotion.json')
     receipt = read(safe_path(bundle, plan['shadow_receipt']['path']))
@@ -69,13 +79,14 @@ def main() -> int:
         verify(ROOT, manifest, expected_sha=revision)
         activate = os.environ.get('SN68_DEPLOY_ACTIVATE') == 'true'
         phase = 'promotion qualification' if activate else 'staging verification'
-        playbook, promotion = deployment_plan(release / 'build_stamp.json', revision, host,
-            activate, os.environ.get('SN68_PROMOTION_DIR'), os.environ.get('SN68_TARGET'))
         # Ansible needs a key file. It exists only in this private temporary
         # directory and is removed on success, exception, or subprocess failure.
         with tempfile.TemporaryDirectory(prefix='sn68-deploy-') as temporary:
             scratch = Path(temporary)
             unpack_release(release / 'sn68-release.tar.gz', scratch / 'release', manifest, revision)
+            playbook, promotion = deployment_plan(release / 'build_stamp.json', revision, host,
+                activate, os.environ.get('SN68_PROMOTION_DIR'), os.environ.get('SN68_TARGET'),
+                stage=scratch / 'release')
             phase = 'SSH setup'
             key = scratch / 'identity'
             descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -1,0 +1,58 @@
+---
+- name: Activate qualified deployment controls while preserving the application
+  hosts: nanobody_producer
+  remote_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repo: "{{ playbook_dir }}/.."
+    sn68_application_snapshot: /root/artifacts/observed_application.json
+  tasks:
+    - name: Require the qualified control bundle
+      ansible.builtin.assert:
+        that:
+          - sn68_promotion_dir is defined
+          - sn68_promotion_files == ['qualification.json', 'report.json']
+    - name: Stage the exact passing control package
+      ansible.builtin.include_tasks: tasks/prepare_tested_release.yml
+    - name: Create the control evidence directory
+      ansible.builtin.file:
+        path: "{{ sn68_release_root }}/control-evidence"
+        state: directory
+        mode: "0700"
+    - name: Copy checked qualification documents
+      ansible.builtin.copy:
+        src: "{{ sn68_promotion_dir }}/{{ item }}"
+        dest: "{{ sn68_release_root }}/control-evidence/{{ item }}"
+        mode: "0600"
+      loop: "{{ sn68_promotion_files }}"
+    - name: Request an independent Pi consumer check
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ sn68_release_root }}/scripts/control_release.py"
+          - request-pi
+          - --stage
+          - "{{ sn68_release_root }}"
+          - --evidence
+          - "{{ sn68_release_root }}/control-evidence"
+      no_log: true
+    - name: Install only the tested control allowlist after the Pi responds
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ sn68_release_root }}/scripts/control_release.py"
+          - install
+          - --stage
+          - "{{ sn68_release_root }}"
+          - --evidence
+          - "{{ sn68_release_root }}/control-evidence"
+          - --snapshot
+          - "{{ sn68_application_snapshot }}"
+          - --pi-receipt
+          - /root/artifacts/control_pi_receipt.json
+      register: sn68_control_install
+      retries: 36
+      delay: 5
+      until: sn68_control_install.rc == 0
+      no_log: true

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh release qualification evidence independently of submissions
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=nova-control-qualification.service
+
+[Install]
+WantedBy=timers.target

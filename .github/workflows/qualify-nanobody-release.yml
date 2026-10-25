@@ -1,54 +1,65 @@
-name: Qualify nanobody release evidence
+name: Qualify nanobody release controls
 
 on:
+  push:
+    paths:
+      - 'scripts/**'
+      - 'tests/fixtures/production_handoff/**'
+      - 'tests/test_control_release.py'
+      - '.github/workflows/qualify-nanobody-release.yml'
+      - '.github/workflows/ci.yml'
+      - 'deploy_gate.sh'
   workflow_dispatch:
-    inputs:
-      host:
-        description: Producer SSH host bound into the qualification documents
-        required: true
-        type: string
-      target:
-        description: Exact target bound into the qualification documents
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: sn68-qualification-${{ github.sha }}
+  group: sn68-control-qualification-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
+    with:
+      release_profile: release-controls
   qualification:
     needs: checks
-    # Dedicated non-production runner; never label the producer or Pi as this
-    # runner. No workflow secrets or submission credentials are supplied.
-    runs-on: [self-hosted, linux, sn68-release-qualification]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: sn68-tested-release
           path: ${{ runner.temp }}/sn68-tested-release
-      - name: Verify independently collected evidence and export checked documents
+      - name: Unpack the exact passing release
         env:
-          SN68_QUALIFICATION_ROOT: /var/lib/nova/qualification
           SN68_TESTED_SHA: ${{ github.sha }}
-          SN68_RELEASE_DIR: ${{ runner.temp }}/sn68-tested-release
-          SN68_EVIDENCE_OUTPUT: ${{ runner.temp }}/sn68-promotion-evidence
-          SN68_DEPLOY_HOST: ${{ inputs.host }}
-          SN68_TARGET: ${{ inputs.target }}
-        run: python3 scripts/export_promotion_evidence.py
+        run: |
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          from scripts.deploy_tested_release import unpack_release
+          root = Path(os.environ['RUNNER_TEMP'])
+          release = root / 'sn68-tested-release'
+          unpack_release(release / 'sn68-release.tar.gz', root / 'sn68-control-stage',
+                         json.loads((release / 'build_stamp.json').read_text()), os.environ['SN68_TESTED_SHA'])
+          PYTHON
+      - name: Replay real archived handoffs in an isolated container
+        run: >-
+          python scripts/control_release.py qualify
+          --stage "$RUNNER_TEMP/sn68-control-stage"
+          --output "$RUNNER_TEMP/sn68-promotion-evidence"
       - uses: actions/upload-artifact@v4
         with:
           name: sn68-promotion-evidence
           if-no-files-found: error
-          retention-days: 2
+          retention-days: 7
           path: ${{ runner.temp }}/sn68-promotion-evidence

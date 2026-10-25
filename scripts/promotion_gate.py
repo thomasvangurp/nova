@@ -240,6 +240,9 @@ def verify(bundle, *, candidate_sha, host, target, epoch=None, now=None):
 
 def verify_restart(root, revision):
     root = Path(root)
+    if read(root / 'build_stamp.json').get('deployment_profile') == 'release-controls':
+        from scripts.control_release import verify_installed
+        return verify_installed(root, revision)
     receipt = read(root / 'artifacts/release_promotion.json')
     require(receipt['status'] == 'active' and receipt['candidate_sha'] == revision
             and receipt['manifest_sha256'] == digest(root / 'build_stamp.json')
@@ -258,6 +261,8 @@ def verify_host(bundle, *, runtime_root, candidate_sha, host, target):
     require(state['block'] % state['epoch_length'] < 12, 'not_epoch_boundary')
     require(digest(root / 'build_stamp.json') == result['baseline_manifest_sha256'], 'live_baseline_changed')
     manifest = read(root / 'build_stamp.json')
+    require(manifest.get('deployment_profile', 'application') == 'application',
+            'application_release_requires_application_baseline')
     from scripts.release_manifest import verify as verify_release
     verify_release(root, manifest, expected_sha=result['baseline_sha'], runtime_only=True, require_tests=False)
     # Do not kill in-flight work to make a release fit its activation window.

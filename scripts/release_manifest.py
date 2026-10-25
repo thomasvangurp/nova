@@ -26,6 +26,15 @@ RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'ne
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
                 'tests', 'scripts', 'deploy')
 LIVE_CONFIG = {'config/config.yaml', 'config/boltzgen_config.yaml'}
+CONTROL_FILES = frozenset({
+    'deploy_gate.sh', 'scripts/release_manifest.py', 'scripts/shipping_checks.py',
+    'scripts/check_launch_contract.py', 'scripts/deploy_tested_release.py',
+    'scripts/promotion_gate.py', 'scripts/promote_release.py',
+    'scripts/release_state.py', 'scripts/shadow_release.py',
+    'scripts/pi_shadow_receipt.py', 'scripts/export_promotion_evidence.py',
+    'scripts/control_release.py', 'scripts/replay_handoff.py',
+    'scripts/pi_control_agent.py',
+})
 
 
 def digest(path: Path) -> str:
@@ -57,7 +66,9 @@ def safe_path(root: Path, name: str) -> Path:
     return path
 
 
-def stage(root: Path, destination: Path) -> dict:
+def stage(root: Path, destination: Path, *, profile: str = 'application') -> dict:
+    if profile not in {'application', 'release-controls'}:
+        raise ValueError('unknown deployment profile')
     revision = git(root, 'rev-parse', 'HEAD').strip()
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('release revision must be a full commit SHA')
@@ -80,6 +91,10 @@ def stage(root: Path, destination: Path) -> dict:
         raise ValueError('release is missing the shipping producer or lockfile')
     manifest = {'schema': 1, 'git_sha': revision, 'pixi_lock_hash': files['pixi.lock'],
                 'files': files, 'runtime_files': [p for p in files if runtime_file(p)]}
+    if profile == 'release-controls':
+        if not CONTROL_FILES <= set(files):
+            raise ValueError('release control package is incomplete')
+        manifest.update(deployment_profile=profile, runtime_files=sorted(CONTROL_FILES))
     (destination / 'build_stamp.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return manifest
 
@@ -92,7 +107,13 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
     if (manifest.get('schema') != 1 or not files
             or manifest.get('pixi_lock_hash') != files.get('pixi.lock')):
         raise ValueError('invalid release manifest')
-    expected_runtime = sorted(p for p in files if runtime_file(p))
+    profile = manifest.get('deployment_profile', 'application')
+    if profile not in {'application', 'release-controls'}:
+        raise ValueError('unknown deployment profile')
+    if profile == 'release-controls' and not CONTROL_FILES <= set(files):
+        raise ValueError('release control package is incomplete')
+    expected_runtime = (sorted(CONTROL_FILES) if profile == 'release-controls' else
+                        sorted(p for p in files if runtime_file(p)))
     if sorted(manifest.get('runtime_files', [])) != expected_runtime:
         raise ValueError('release runtime inventory is incomplete')
     names = expected_runtime if runtime_only else sorted(files)

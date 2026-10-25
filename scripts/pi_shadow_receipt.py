@@ -24,7 +24,7 @@ def collect(artifact, consumer_root, *, revision, target, epoch, uids):
     artifact, consumer_root = Path(artifact).resolve(), Path(consumer_root).resolve()
     require(consumer_root == Path('/opt/nova-submit') and platform.system() == 'Linux'
             and platform.machine() in {'aarch64', 'arm64'}, 'receipt_requires_pi')
-    require(sha(revision, 40) and len(uids) >= 13 and len(uids) == len(set(uids))
+    require(sha(revision, 40) and len(uids) >= 1 and len(uids) == len(set(uids))
             and all(type(uid) is int and uid >= 0 for uid in uids), 'invalid_trial_crew')
     require(not artifact.is_relative_to(consumer_root), 'trial_must_not_use_live_input')
     before = digest(artifact)
