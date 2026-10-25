@@ -1,11 +1,17 @@
 ---
-- name: Inspect whether this host already has a tested runtime
+- name: Inspect release stamp and runtime entrypoints independently
   ansible.builtin.stat:
-    path: /root/build_stamp.json
-  register: sn68_existing_release
+    path: "{{ item }}"
+  loop:
+    - /root/build_stamp.json
+    - /root/nanobody_opt_v2/run_live_producer.py
+    - /root/nanobody_opt/run_live_producer.py
+    - /root/tools/publish_current_nanobody.py
+    - /root/artifacts/producer_argv.txt
+  register: sn68_existing_runtime
   changed_when: false
 - name: Refuse legacy provisioning over a live release
   ansible.builtin.assert:
     that:
-      - not sn68_existing_release.stat.exists
-    fail_msg: Existing releases require deploy_tested_release.py and qualified promotion evidence.
+      - sn68_existing_runtime.results | selectattr('stat.exists') | list | length == 0
+    fail_msg: Existing runtimes, including unstamped ones, require a verified baseline and qualified promotion evidence.

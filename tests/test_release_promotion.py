@@ -359,6 +359,13 @@ def test_legacy_paths_and_restart_cannot_bypass_promotion():
         plays = yaml.safe_load((ROOT / 'ansible' / playbook).read_text())
         tasks = next(p['tasks'] for p in plays if 'tasks' in p)
         assert tasks[0]['ansible.builtin.include_tasks'] == 'tasks/refuse_live_reprovision.yml'
+    guard = yaml.safe_load((ROOT / 'ansible/tasks/refuse_live_reprovision.yml').read_text())
+    # The live incident host had no readable build stamp. Missing metadata must
+    # never turn an installed producer into a supposedly fresh machine.
+    assert {'/root/build_stamp.json', '/root/nanobody_opt_v2/run_live_producer.py',
+            '/root/tools/publish_current_nanobody.py', '/root/artifacts/producer_argv.txt'} <= set(guard[0]['loop'])
+    assert guard[1]['ansible.builtin.assert']['that'] == [
+        "sn68_existing_runtime.results | selectattr('stat.exists') | list | length == 0"]
     assert 'promotion_gate.py" --restart' in (ROOT / 'deploy_gate.sh').read_text()
     workflow = yaml.load((ROOT / '.github/workflows/deploy-nanobody.yml').read_text(), Loader=yaml.BaseLoader)
     steps = workflow['jobs']['deploy']['steps']

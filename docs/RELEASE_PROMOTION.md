@@ -137,6 +137,12 @@ provisioning is refused before its first mutating task. Fresh-host provisioning
 must be planned separately; do not use the legacy services playbook as an
 upgrade path over a stamped release.
 
+The legacy guard checks installed producer/publisher entrypoints and launch
+arguments independently of the manifest. A missing or unreadable stamp is not
+evidence of an empty host. An unstamped existing runtime needs its baseline
+bytes independently verified before it can enter the promotion path; never
+invent a build stamp to bypass this check.
+
 Before pausing owners, take forensic backups using SQLite's backup API so
 committed WAL data is included. Reverify the baseline and boundary afterwards.
 Pause only idle owners, install verified files with a bounded copy interval,
