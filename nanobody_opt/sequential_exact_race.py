@@ -770,6 +770,7 @@ def _run_replication_rounds(
                     print(f"EXACT_REPLICATION_FINISH_GUARD rounds={completed}/{rounds}", flush=True)
                     return completed
             started = time.monotonic()
+            shared = _gpu_shared()
             _run_screen(
                 source=source,
                 config=config,
@@ -782,16 +783,20 @@ def _run_replication_rounds(
             )
             completed += 1
             seconds = time.monotonic() - started
+            shared = shared or _gpu_shared()
             _append_timing(
                 timings,
                 {
-                    "phase": "replication_round",
+                    # a round that shared the GPUs with the top-up is recorded under its own phase, so the
+                    # planner (which fits only "replication_round") never prices confirmation from it
+                    "phase": "replication_round_shared" if shared else "replication_round",
                     "round": index,
                     "stage": stage,
                     "shortlist": len(alive),
                     "candidates": len(alive),
                     "gpu_count": len(gpus),
                     "seconds": round(seconds, 1),
+                    **({"shared_gpu": True} if shared else {}),
                 },
             )
             print(
@@ -810,6 +815,24 @@ def _run_replication_rounds(
                 )
                 alive = pruned
     return completed
+
+
+#: The top-up worker (tools/topup_publishable.py) writes this while it scores on the same GPUs.
+TOPUP_MARKER = Path("/root/artifacts/topup_running.json")
+
+
+def _gpu_shared() -> bool:
+    """True while the top-up worker holds the scorer daemon's GPUs alongside the race.
+
+    A confirmation round that overlaps a top-up pass waits behind it on the daemon's per-GPU locks and
+    runs ~10 s longer (measured: fixed cost 7.3 s alone, 18.3 s shared).  Those rounds say nothing about
+    the cost of confirmation, and the budget planner refits its timing model from them -- it read the
+    inflated overhead, concluded confirmation was dearer, and narrowed the shortlist from 149 to 135.
+    """
+    try:
+        return TOPUP_MARKER.is_file() and time.time() - TOPUP_MARKER.stat().st_mtime < 1800
+    except OSError:
+        return False
 
 
 def _append_timing(path: Path, record: dict[str, Any]) -> None:

@@ -31,7 +31,6 @@ import json
 import math
 import os
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -856,9 +855,6 @@ def fleet_artifact(
     return {
         "schema_version": FLEET_ARTIFACT_SCHEMA_VERSION,
         "artifact_kind": "nanobody-fleet",
-        # Stamp when evidence is assembled on the publisher/writing host.
-        # Retaining a previous artifact must retain its original timestamp.
-        "updated_at_unix": time.time(),
         "status": stage,
         "publication_stage": stage,
         "target": target,

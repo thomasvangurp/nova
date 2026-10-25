@@ -10,14 +10,14 @@ from pathlib import Path
 sys.path.insert(0, "/root/tools")
 import collect_slave_multipass_seqs as c  # noqa: E402
 
-PASSES, LOOKBACK = 10, 20
-DONE = Path("/root/artifacts/slave_multipass_all_done")
+PASSES, FIRST_EPOCH = 20, 25737
+DONE = Path("/root/artifacts/slave_multipass_20x_done")
 
 
 def main() -> int:
     latest = int(json.load(open("/root/artifacts/chain_state.json"))["epoch"])
-    for epoch in range(latest - 1, latest - 1 - LOOKBACK, -1):
-        if (DONE / f"{epoch}.done").exists():
+    for epoch in range(latest - 1, FIRST_EPOCH - 1, -1):
+        if epoch < latest - 3 and (DONE / f"{epoch}.done").exists():
             continue
         try:
             board = c.leaderboard_sequences(epoch)

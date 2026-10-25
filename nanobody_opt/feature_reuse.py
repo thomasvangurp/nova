@@ -85,19 +85,6 @@ files.
    folding and does its own fresh imports -- installing it in the parent has
    no effect there.
 
-3. `install_analysis_child_hook()` is how (2) actually gets installed where
-   it must run. It rebinds `fast_score_batch._analysis_child` in the
-   PARENT process, before any `_AnalysisPool` is constructed there, to
-   `_analysis_child_with_reuse` -- a wrapper defined in THIS module that,
-   once it is running inside the freshly-spawned child (multiprocessing's
-   "spawn" context pickles a plain function target by module+qualname, so
-   the child resolves it via its own fresh `import feature_reuse`, never
-   touching whatever the parent patched), calls `install_analysis_side()`
-   for itself and then delegates to the real `_analysis_child` loop. See
-   the "3. cross the _AnalysisPool spawn boundary" section below for the
-   full reasoning and a pointer to the standalone spawn test that checked
-   it empirically.
-
 BATCH SIZE. Both the generated `folding.yaml` and `analysis.yaml` pin
 `data.cfg.batch_size: 1` in production (verified against the live configure
 output, not assumed). The write side only persists when the batch it was
@@ -308,13 +295,6 @@ def install_analysis_side(data_module=None, force: bool = False) -> bool:
                 try:
                     if _consistent(cached, ss_type, binding_type):
                         _STATS["reused"] += 1
-                        # PID in the line: the only way, short of attaching a
-                        # debugger, to tell from the daemon's own log whether
-                        # this fired in the long-lived parent (it never
-                        # should -- get_feat is only ever called from
-                        # analysis) or inside the spawned analysis child.
-                        print(f"[feature_reuse] reuse HIT design={path} "
-                              f"pid={os.getpid()}", flush=True)
                         return cached
                 except Exception as exc:  # noqa: BLE001
                     _warn_once("consistency-check", exc)
@@ -324,96 +304,6 @@ def install_analysis_side(data_module=None, force: bool = False) -> bool:
     cls.get_feat = get_feat
     cls._feature_reuse_read_patched = True
     cls._feature_reuse_real_get_feat = real_get_feat
-    return True
-
-
-# --- 3. cross the _AnalysisPool spawn boundary ------------------------------
-#
-# `install_analysis_side()` patches a class method on a module object living
-# in THIS process's memory. `_AnalysisPool.__init__` (fast_score_batch.py)
-# does `ctx.Process(target=_analysis_child, ...)` with multiprocessing's
-# "spawn" start method: the child is a brand-new interpreter that does its
-# own fresh `import fast_score_batch` and every module it imports -- nothing
-# patched in the parent's copy of any module is visible there. Calling
-# `install_analysis_side()` in the parent before `_AnalysisPool` is ever
-# constructed therefore patches a dataset class the child's own `get_feat`
-# calls never touch.
-#
-# The fix rebinds `fast_score_batch._analysis_child` itself -- a plain
-# module-global lookup that `ctx.Process(target=_analysis_child, ...)`
-# resolves at the moment `_AnalysisPool.__init__` runs, not at
-# module/class-definition time -- to a wrapper defined here. Two facts make
-# this work instead of silently doing nothing, both specific to how
-# multiprocessing's "spawn" context pickles a plain function target:
-#
-#   1. A module-level function is pickled BY REFERENCE: `(__module__,
-#      __qualname__)`, not by value. `_analysis_child_with_reuse` is defined
-#      at module scope right here, so it pickles as
-#      `("feature_reuse", "_analysis_child_with_reuse")`.
-#   2. Unpickling that reference in the child does `import feature_reuse`
-#      (an ordinary, UNPATCHED module read fresh off disk -- the parent
-#      mutating its own in-memory module object does not change the file)
-#      then `getattr(feature_reuse, "_analysis_child_with_reuse")`. No state
-#      from the parent process crosses the boundary, and none is needed: the
-#      wrapper installs the patch for itself, inside the child, the first
-#      time it runs.
-#
-# Verified empirically with a standalone spawn test (see
-# tools/verify_spawn_hook.py / this session's report), not just reasoned
-# through: patching `fast_score_batch._analysis_child` in the parent before
-# constructing `_AnalysisPool` changes what the spawned child executes, and
-# the child's `get_feat` patch is independent of whatever is or is not
-# patched in the parent.
-
-
-def _analysis_child_with_reuse(job_q, done_q) -> None:
-    """Real `_AnalysisPool` child entry point once hooked.
-
-    Runs inside the freshly-spawned child -- its own fresh import of
-    `fast_score_batch`, never touched by any patch applied in the parent.
-    Installs the get_feat reuse patch here (the one place it can take
-    effect for this child's lifetime), then delegates to the real,
-    unmodified `_analysis_child` loop so job/queue handling, hydra
-    instantiation and exception behaviour are exactly what production
-    already runs -- this does not reimplement that loop.
-    """
-    try:
-        applied = install_analysis_side()
-        print(f"[feature_reuse] analysis child pid={os.getpid()} "
-              f"install_analysis_side -> {applied} enabled={ENABLED}",
-              flush=True)
-    except Exception as exc:  # noqa: BLE001 - a failed patch here must fall
-        _warn_once("child-install", exc)       # back to production, not die
-    import fast_score_batch as _fsb  # fresh import: genuinely unpatched here
-    _fsb._analysis_child(job_q, done_q)
-
-
-def install_analysis_child_hook(scorer_module=None, force: bool = False) -> bool:
-    """Rebind `_analysis_child` so the NEXT `_AnalysisPool` spawned from
-    this process runs `_analysis_child_with_reuse` in the child instead.
-
-    Must run in the PARENT process, before any `_AnalysisPool` is
-    constructed there (i.e. alongside `install_folding_side()`, at worker
-    start-up) -- `ctx.Process(target=_analysis_child, ...)` reads the
-    module-global name at call time, so rebinding it later than that is a
-    no-op for any pool already created, and a correctly-timed call here has
-    no effect on a child already spawned either way.
-    """
-    if not (force or ENABLED):
-        return False
-    module = scorer_module
-    if module is None:
-        try:
-            import fast_score_batch as module  # type: ignore
-        except ImportError:
-            return False
-    if getattr(module, "_feature_reuse_child_hooked", False):
-        return False
-    if not callable(getattr(module, "_analysis_child", None)):
-        return False
-    module._feature_reuse_real_analysis_child = module._analysis_child
-    module._analysis_child = _analysis_child_with_reuse
-    module._feature_reuse_child_hooked = True
     return True
 
 
@@ -447,13 +337,6 @@ def reset() -> None:
         if cls is not None and getattr(cls, "_feature_reuse_read_patched", False):
             cls.get_feat = cls._feature_reuse_real_get_feat
             cls._feature_reuse_read_patched = False
-    except ImportError:
-        pass
-    try:
-        import fast_score_batch as fsb
-        if getattr(fsb, "_feature_reuse_child_hooked", False):
-            fsb._analysis_child = fsb._feature_reuse_real_analysis_child
-            fsb._feature_reuse_child_hooked = False
     except ImportError:
         pass
     _WARNED.clear()

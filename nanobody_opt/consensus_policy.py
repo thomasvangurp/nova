@@ -31,10 +31,12 @@ def order_key(item: Mapping[str, Any], policy: str = "tier") -> tuple:
     probability = float(item.get("win_probability") or 0.0)
     if not math.isfinite(probability):
         raise ValueError("ranking probability must be finite")
+    mean = item.get("score_mean")
+    mean = float(mean) if mean is not None else math.inf
     return (
         0 if probability >= CHANCE_FLOOR else 1,
         int(item.get("settled_deviations", 0)) if policy == "tier" else 0,
-        -probability,
+        mean,
     )
 
 

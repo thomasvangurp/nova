@@ -208,11 +208,18 @@ def _worker(args):
     # candidates by an artefact of how we happened to group them.
     components = {}
     structures = {}
+    # Worker stdout is swallowed by spawn + pool.map, so the exception text that
+    # used to be printed here never reached the log. Record it on the output
+    # dict instead; main() reads it back and names the shard + reason whenever a
+    # shard comes back short, so a future MERGE LOST is a diagnosis, not a bare
+    # count mismatch.
+    errors = []
     for start in range(0, len(seqs), batch_size):
         chunk = seqs[start:start + batch_size]
+        chunk_index = start // batch_size
         # a fresh tmp dir per chunk: the wrapper reads predictions back out of a
         # fixed directory, so a reused one would pick up the previous chunk
-        chunk_dir = os.path.join(shard_dir, f"chunk{start // batch_size}")
+        chunk_dir = os.path.join(shard_dir, f"chunk{chunk_index}")
         bw.BOLTZGEN_TMP_FILES_DIR = chunk_dir
         shutil.rmtree(chunk_dir, ignore_errors=True)
         os.makedirs(os.path.join(chunk_dir, "inputs"), exist_ok=True)
@@ -224,7 +231,13 @@ def _worker(args):
         try:
             got = wrapper.run_nanobody_inference({0: {"sequences": chunk}}, subnet_config)
         except Exception as exc:
-            print(f"  shard {shard_id} chunk {start // batch_size} raised "
+            errors.append({
+                "chunk": chunk_index,
+                "sequences": len(chunk),
+                "type": type(exc).__name__,
+                "message": str(exc),
+            })
+            print(f"  shard {shard_id} chunk {chunk_index} raised "
                   f"({type(exc).__name__}); continuing", flush=True)
             got = getattr(wrapper, "per_nanobody_components", {}) or {}
         for uid, by_seq in (got or {}).items():
@@ -244,7 +257,7 @@ def _worker(args):
     elapsed = time.time() - started
     json.dump({"shard": shard_id, "gpu": gpu, "n": len(seqs),
                "seconds": elapsed, "components": components,
-               "structures": structures},
+               "structures": structures, "errors": errors},
               open(out_path, "w"), default=str)
     return out_path, len(seqs), elapsed
 
@@ -333,9 +346,6 @@ def main():
 
     started = time.time()
     ctx = mp.get_context("spawn")   # never fork a CUDA process
-    with ctx.Pool(len(jobs)) as pool:
-        results = pool.map(_worker, jobs)
-    wall = time.time() - started
 
     # components is {uid: {sequence: {target: metrics}}} and EVERY shard uses
     # uid 0, so a plain dict.update() replaces the previous shard's entry
@@ -343,20 +353,80 @@ def main():
     # was caught. Merge at the SEQUENCE level instead.
     merged = {}
     merged_structures = {}
-    for path, n, secs in results:
+
+    def _merge_result(res):
+        """Merge one worker output file into merged/merged_structures.
+
+        Sequence-level dict.update makes re-merging a retried shard idempotent:
+        the union of the first (partial) attempt and the retry is exactly the
+        retry's coverage, so nothing is double-counted. Returns (d, got) where
+        got is the number of sequences that shard actually produced.
+        """
+        path, n, secs = res
         d = json.load(open(path))
         for uid, by_seq in d["components"].items():
             merged.setdefault(uid, {}).update(by_seq)
         for sequence, by_target in d.get("structures", {}).items():
             merged_structures.setdefault(sequence, {}).update(by_target)
+        got = sum(len(v) for v in d.get("components", {}).values())
+        errs = d.get("errors") or []
+        err_note = ""
+        if errs:
+            err_note = " errors=[" + "; ".join(
+                f"chunk {e.get('chunk')} {e.get('type')}: {e.get('message')}"
+                for e in errs
+            ) + "]"
         print(f"  shard {d['shard']} gpu {d['gpu']}: {n} seqs in {secs:.1f}s "
-              f"({secs/max(n,1):.1f}s/seq)", flush=True)
+              f"({secs/max(n,1):.1f}s/seq) got {got}{err_note}", flush=True)
+        return d, got
+
+    with ctx.Pool(len(jobs)) as pool:
+        results = pool.map(_worker, jobs)
+
+    last = [_merge_result(res) for res in results]
+
+    # One transient GPU hiccup must not kill an epoch. Re-run exactly once any
+    # shard that came back short (n>0 but fewer components than it was handed
+    # -- the signature of "run_nanobody_inference raised and the worker fell
+    # back to empty"), then merge the retry into the same dicts. Only the final
+    # n_out guard below is allowed to abort, so a flake costs one shard retry,
+    # not a whole epoch.
+    for idx, res in enumerate(results):
+        n = res[1]
+        d, got = last[idx]
+        if n > 0 and got < n:
+            errs = d.get("errors") or []
+            err_note = ""
+            if errs:
+                err_note = " " + "; ".join(
+                    f"chunk {e.get('chunk')} {e.get('type')}: {e.get('message')}"
+                    for e in errs
+                )
+            print(f"  RETRY shard {d['shard']} (got {got}/{n}){err_note}", flush=True)
+            with ctx.Pool(1) as pool:
+                retry_results = pool.map(_worker, [jobs[idx]])
+            for rres in retry_results:
+                last[idx] = _merge_result(rres)
+
+    wall = time.time() - started
     n_out = sum(len(v) for v in merged.values())
     print(f"TOTAL {len(seqs)} sequences in {wall:.1f}s "
           f"({wall/max(len(seqs),1):.1f}s per sequence wall-clock)", flush=True)
     if n_out != len(seqs):
-        raise SystemExit(f"MERGE LOST SEQUENCES: submitted {len(seqs)}, "
-                         f"merged {n_out}. Refusing to write a partial result.")
+        short = []
+        for idx, res in enumerate(results):
+            d, got = last[idx]
+            if res[1] > 0 and got < res[1]:
+                errs = d.get("errors") or []
+                detail = "; ".join(
+                    f"chunk {e.get('chunk')} {e.get('type')}: {e.get('message')}"
+                    for e in errs
+                ) or "no worker error recorded"
+                short.append(f"shard {d['shard']}: got {got}/{res[1]} ({detail})")
+        raise SystemExit(
+            f"MERGE LOST SEQUENCES: submitted {len(seqs)}, merged {n_out}. "
+            f"Short shards after retry: {'; '.join(short)}. "
+            f"Refusing to write a partial result.")
     if a.require_structures and len(merged_structures) != len(seqs):
         raise SystemExit(
             f"STRUCTURE CAPTURE LOST COMPLEXES: submitted {len(seqs)}, retained "

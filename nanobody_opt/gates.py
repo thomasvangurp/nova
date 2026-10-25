@@ -115,7 +115,7 @@ def check_sequence(seq: str, cfg: dict) -> list[str]:
     if cfg["min_cysteines"] > 1 and not has_plausible_cys_pair(
             s, cfg["cys_pair_min_separation"], cfg["cys_pair_max_separation"]):
         fails.append("no_plausible_cys_pair")
-    if cfg.get("reject_signal_peptides", True) and looks_like_signal_peptide(
+    if looks_like_signal_peptide(
             s, cfg["sp_window"], cfg["sp_hydro_min_in_window"],
             cfg["sp_scan_prefix"]):
         fails.append("signal_peptide")

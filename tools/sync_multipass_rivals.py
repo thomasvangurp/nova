@@ -1,54 +1,73 @@
 #!/usr/bin/env python3
-"""Pull multipass_comparison.json directly from master's local sqlite build.
+"""Pull the box's multi-pass rival scoring into the dashboard JSON.
 
-User, 2026-10-11: "Dashboard needs to read from SQLite!" / "One source of
-truth please." This used to pull 100+ separate per-epoch JSON files from the
-dashboard box (a snapshot of whatever field was live when each was written,
-independently cached, with its own pin-tracking state to survive the box
-silently reverting out-of-band fixes -- see git history on this file for
-that whole saga). master's local sqlite is the actual primary store now
-(nanobody_opt/mutation_network.py routes there by file existence, no env
-var); tools/build_multipass_comparison.py runs continuously there and
-already produces the complete, consistently-scaled file this dashboard
-wants. Pulling that one file is now a straight overwrite -- there is no
-second, independently-drifting source left to protect against, so the old
-pin/merge machinery is gone, not hardened further.
+The box cron loop runs ``multipass_all_rivals.py`` per completed epoch and
+writes ``/root/multipass_all_rivals/<epoch>/multipass_<epoch>.json``. This
+script reads every such JSON from the box and merges it into
+``nanobody_dash/multipass_comparison.json`` (overwriting any null placeholder
+with the real per-rival ``mean``/``stdev``/``fleet_size``/``scores``).
+
+The dashboard refresh loop (launchd, every 60s) then rebuilds + publishes the
+changed JSON with no further action here.
 """
 from __future__ import annotations
 
+import json
 import subprocess
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-MASTER = "root@ssh9.vast.ai"
-PORT = "10616"
-REMOTE_PATH = "/root/artifacts/multipass_comparison.json"
-LOCAL = ROOT / "nanobody_dash" / "multipass_comparison.json"
+BOX = "root@ssh3.vast.ai"
+PORT = "11806"
+REMOTE = "/root/multipass_all_rivals"
+LOCAL = Path(__file__).resolve().parents[1] / "nanobody_dash" / "multipass_comparison.json"
+SSHO = [
+    "-o", "ConnectTimeout=20",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "BatchMode=yes",
+]
+
+
+def _ssh(args: list[str]) -> str:
+    completed = subprocess.run(
+        ["ssh", *SSHO, "-p", PORT, BOX, *args],
+        capture_output=True, text=True, timeout=45,
+    )
+    return completed.stdout if completed.returncode == 0 else ""
 
 
 def main() -> int:
-    tmp = LOCAL.with_suffix(".json.tmp")
-    result = subprocess.run(
-        [
-            "scp", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-            "-P", PORT, f"{MASTER}:{REMOTE_PATH}", str(tmp),
-        ],
-        capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        print(f"MULTIPASS_SYNC_FAILED rc={result.returncode} "
-              f"stderr={result.stderr.strip()[-500:]}", file=sys.stderr, flush=True)
-        tmp.unlink(missing_ok=True)
-        return 1
-    if not tmp.is_file() or tmp.stat().st_size == 0:
-        print("MULTIPASS_SYNC_FAILED empty or missing file after scp",
-              file=sys.stderr, flush=True)
-        tmp.unlink(missing_ok=True)
-        return 1
-    tmp.replace(LOCAL)
-    print(f"MULTIPASS_SYNC_OK bytes={LOCAL.stat().st_size}", flush=True)
+    listing = _ssh(["find", REMOTE, "-name", "multipass_*.json"])
+    remote_files = [line.strip() for line in listing.splitlines()
+                    if line.strip().endswith(".json")]
+    if not remote_files:
+        return 0
+
+    try:
+        data = json.loads(LOCAL.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+
+    changed = False
+    for remote in sorted(remote_files):
+        raw = _ssh(["cat", remote])
+        if not raw:
+            continue
+        try:
+            epoch_data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for epoch, value in epoch_data.items():
+            if not isinstance(value, dict):
+                continue
+            # only commit epochs that carry a real ours-entry or >=1 rival
+            if value.get("ours") or value.get("rivals"):
+                data[epoch] = value
+                changed = True
+
+    if changed:
+        LOCAL.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        print(f"merged {len(remote_files)} remote files into {LOCAL}")
     return 0
 
 

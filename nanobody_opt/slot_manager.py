@@ -138,89 +138,6 @@ REASON_ABOVE_FLOOR = "price_above_decay_floor"
 REASON_CEILING = "price_above_recycle_ceiling"
 REASON_BUDGET = "daily_budget_would_be_exceeded"
 REASON_SUBMISSION_FREEZE = "validator_submission_window"
-REASON_BUY_VALUE = "slot_worth_its_price"
-REASON_VALUE_CAP = "price_above_slot_value"
-
-# ---------------------------------------------------------------------------
-# Value pricing: pay for the k-th slot only what the k-th slot is worth.
-# ---------------------------------------------------------------------------
-
-#: Immunity as epochs: a registration is safe from eviction for this long.
-IMMUNITY_EPOCHS = IMMUNITY_PERIOD / EPOCH_LENGTH
-#: 12-second blocks.
-BLOCK_SECONDS = 12
-#: Alpha the validator pays the nanobody winner per epoch (``Payout sent ...
-#: component=nanobody amount_alpha=41.6``).  Multiplied by the live alpha price
-#: to get the TAO value of a win.
-DEFAULT_WIN_PAYOUT_ALPHA = 41.6
-#: Typical slot lifespan in epochs, measured on 364 completed slots (mean 17.6,
-#: median 18, IQR 17-18, stable at 16.8-18.2 across every period).  It is a
-#: PRIOR: :func:`estimate_slot_life` replaces it with what the ledger observes.
-DEFAULT_SLOT_LIFE_EPOCHS = 18.0
-#: Value-pricing curve parameters, fitted to re-played real epoch fields
-#: (25672-25680, one random stored replay pass per submission, our top-k tickets
-#: against every rival's real submission): P(win an epoch with k tickets) ~
-#: 0.061 * k**0.57, i.e. 6.1% for one ticket, 18% for six, 25% for twelve.
-WIN_CURVE_SCALE = 0.061
-WIN_CURVE_EXPONENT = 0.57
-
-
-def marginal_win_curve(
-    slots: int = 13,
-    scale: float = WIN_CURVE_SCALE,
-    exponent: float = WIN_CURVE_EXPONENT,
-) -> tuple[float, ...]:
-    """Extra win probability per epoch from the k-th ticket, k = 1..``slots``.
-
-    ``P(k) = scale * k**exponent`` is concave because winner-take-all makes the
-    next ticket mostly redundant with the ones already held, so the marginal
-    value falls from 6.1 points for the first ticket to about 1.2 for the
-    twelfth.  The curve is the fit; refit it from fresh replays when the field
-    changes, and pass the result with ``--win-curve``.
-    """
-    if slots < 1:
-        raise ValueError("a win curve needs at least one slot")
-    totals = [0.0] + [scale * k**exponent for k in range(1, slots + 1)]
-    return tuple(totals[k] - totals[k - 1] for k in range(1, slots + 1))
-
-
-DEFAULT_MARGINAL_WIN_CURVE = marginal_win_curve()
-
-
-@dataclass(frozen=True)
-class SlotEconomics:
-    """What a slot is worth right now; both fields are measured, not configured.
-
-    ``win_value_tao`` is the TAO value of one nanobody win (payout alpha times
-    the live alpha price).  ``slot_life_epochs`` is how long a registration is
-    expected to keep earning, from :func:`estimate_slot_life`.  ``None`` means
-    "could not be read this tick", which the policy treats as "fall back to the
-    cheap-reserve ceiling" and never as "free".
-    """
-
-    win_value_tao: float | None = None
-    slot_life_epochs: float | None = None
-
-
-def slot_value_cap_tao(
-    slot_index: int,
-    curve: Sequence[float],
-    economics: SlotEconomics | None,
-) -> float | None:
-    """Most we should pay for slot number ``slot_index`` (1-based), in TAO.
-
-    The k-th slot adds ``curve[k-1]`` win probability each epoch for its whole
-    life, and each win is worth ``win_value_tao``, so it is worth
-    ``curve[k-1] * win_value_tao * slot_life_epochs``.  Beyond the curve a slot
-    is worth nothing.  ``None`` when the economics are unknown.
-    """
-    if slot_index < 1:
-        raise ValueError("slot index is 1-based")
-    if economics is None or economics.win_value_tao is None or economics.slot_life_epochs is None:
-        return None
-    if slot_index > len(curve):
-        return 0.0
-    return curve[slot_index - 1] * economics.win_value_tao * economics.slot_life_epochs
 
 
 def default_stagger_blocks(target: int) -> int:
@@ -281,10 +198,6 @@ class ChainState:
     #: this deliberately excludes the decision log: it answers whether a live
     #: uid is about to lose immunity, not when we last attempted a purchase.
     oldest_registration_block: int | None = None
-    #: ``(uid, hotkey_ss58, block_at_registration)`` for every slot we hold.
-    #: This is what the slot-life ledger runs on; the decision itself only ever
-    #: needs the counts and blocks above.
-    slots: tuple[tuple[int, str, int], ...] = ()
 
     @property
     def registered(self) -> int:
@@ -317,11 +230,7 @@ class SlotPolicy:
     #: the ranked pool yields 16 leads that are mutually below
     #: ``fleet.MAXIMUM_FLEET_IDENTITY``, and the 55-block commitment reserve
     #: holds 12 commits at the observed ~2.3 blocks per uid.
-    #:
-    #: 2026-10-22 COST CAP (standing until the pipeline scores): the miner is
-    #: capped at MAXIMUM 2 UID slots. Do not register/buy new slots; keep the
-    #: current UIDs, stop ADDING.
-    target: int = 2
+    target: int = 12
     #: Optional buffer above the working target.  This is deliberately not a
     #: larger permanent target: while holding ``target`` we may pre-buy at most
     #: this many cheap registrations, then consume that reserve when churn
@@ -405,25 +314,8 @@ class SlotPolicy:
     floor_tolerance: float = 0.05
     decay_per_block: float = DECAY_PER_BLOCK
     ticket_tao_per_epoch: float = TICKET_TAO_PER_EPOCH
-    #: Value pricing.  Empty keeps the historical policy exactly.  When set it
-    #: is the extra win probability per epoch from the k-th held slot, and the
-    #: policy changes shape: ``target`` becomes the FLOOR (below it we buy at any
-    #: price up to ``max_recycle_tao``, and renew an expiring slot so we never
-    #: dip under it), ``maximum_registered`` becomes the cap, and every slot in
-    #: between is bought whenever its price is at or below what that slot is
-    #: worth (see :func:`slot_value_cap_tao`).  There is no stagger and no
-    #: one-per-interval pause in that zone: the price cap is what stops a burst,
-    #: because every purchase raises the price for the next one.
-    value_curve: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.value_curve:
-            if any(value < 0 for value in self.value_curve):
-                raise ValueError("marginal win probabilities cannot be negative")
-            if len(self.value_curve) < self.target + self.reserve_slots:
-                raise ValueError(
-                    "the win curve must cover every slot up to the maximum"
-                )
         if self.target < 1:
             raise ValueError("target must be at least one hotkey")
         if self.reserve_slots < 0:
@@ -469,10 +361,6 @@ class SlotPolicy:
     def maximum_registered(self) -> int:
         """Hard holding cap including the optional opportunistic reserve."""
         return self.target + self.reserve_slots
-
-    @property
-    def value_pricing(self) -> bool:
-        return bool(self.value_curve)
 
     @property
     def stagger(self) -> int:
@@ -567,7 +455,6 @@ def decide(
     policy: SlotPolicy,
     *,
     now: float | None = None,
-    economics: SlotEconomics | None = None,
 ) -> Decision:
     """Buy or wait, from a chain snapshot and our own history.
 
@@ -603,19 +490,9 @@ def decide(
     life refusing -- observed refusing tau0.092 against a tau0.20 ceiling.  A
     purchaser that never purchases is the expensive failure here, not a slightly
     dear registration.
-
-    With ``policy.value_curve`` set the shape changes (see
-    :attr:`SlotPolicy.value_curve`): below the floor ``target`` we buy at any
-    price up to the hard ceiling; between the floor and ``maximum_registered``
-    we buy whenever the price is at or below what the NEXT slot is worth
-    (:func:`slot_value_cap_tao`), with no stagger and no one-per-interval pause,
-    so a cheap price is always taken and a burst ends by itself when our own
-    purchases lift the price past the next slot's worth.  The hard ceiling, the
-    daily budget and the submission freeze still apply everywhere.
     """
     now = time.time() if now is None else now
     shortfall = policy.target - state.registered
-    value_mode = policy.value_pricing
     reserve_mode = policy.target <= state.registered < policy.maximum_registered
     oldest_age = (
         None
@@ -627,10 +504,6 @@ def decide(
     )
     renewal_due = bool(
         reserve_mode
-        # In value mode the floor is what renewal protects.  Above it we hold
-        # spare slots, and renewing those would pay for slots the value cap has
-        # not approved.
-        and (not value_mode or state.registered <= policy.target)
         and immunity_remaining is not None
         and immunity_remaining <= policy.renewal_lead_blocks
     )
@@ -676,37 +549,6 @@ def decide(
         **wait_economics(state.recycle_tao, policy),
     }
 
-    slot_index = state.registered + 1
-    value_cap = (
-        slot_value_cap_tao(slot_index, policy.value_curve, economics)
-        if value_mode
-        else None
-    )
-    if value_mode:
-        # Unknown economics (alpha price unreadable) must never read as "free":
-        # fall back to the cheap-reserve ceiling, which is a price we have
-        # already decided is worth paying for a spare slot.
-        zone_cap = (
-            policy.reserve_max_recycle_tao
-            if value_cap is None
-            else min(policy.max_recycle_tao, value_cap)
-        )
-        detail.update(
-            value_pricing=True,
-            slot_index=slot_index,
-            slot_value_cap_tao=value_cap,
-            slot_zone_cap_tao=zone_cap,
-            marginal_win=(
-                policy.value_curve[slot_index - 1]
-                if slot_index <= len(policy.value_curve)
-                else 0.0
-            ),
-            win_value_tao=None if economics is None else economics.win_value_tao,
-            slot_life_epochs=None if economics is None else economics.slot_life_epochs,
-        )
-    else:
-        zone_cap = policy.reserve_max_recycle_tao
-
     def verdict(action: str, reason: str) -> Decision:
         return Decision(action=action, reason=reason, detail=detail)
 
@@ -729,8 +571,12 @@ def decide(
     # At the working target, never chase a reserve.  It is bought only at the
     # empirically useful trough price; below target the normal urgent policy
     # still restores the working fleet up to the independent hard ceiling.
-    if reserve_mode and not renewal_due and state.recycle_tao > zone_cap:
-        return verdict(WAIT, REASON_VALUE_CAP if value_mode else REASON_RESERVE_PRICE)
+    if (
+        reserve_mode
+        and not renewal_due
+        and state.recycle_tao > policy.reserve_max_recycle_tao
+    ):
+        return verdict(WAIT, REASON_RESERVE_PRICE)
     # Once the oldest working-fleet uid can expire inside the next validator
     # epoch, this is maintenance rather than speculation.  Registering either
     # builds the thirteenth-slot buffer or replaces one of our own unprotected
@@ -761,10 +607,6 @@ def decide(
     # against ourselves, and the ceiling is the only other brake.  The wait is
     # at most one interval.
     paced = state.registered >= policy.target or not policy.rush_below_target
-    if value_mode and reserve_mode:
-        # Burst: a cheap slot is bought the moment it is cheap.  The value cap
-        # already ends the burst, since each purchase raises the next price.
-        paced = False
     if (
         paced
         and state.last_registration_block is not None
@@ -786,7 +628,7 @@ def decide(
     if paced and blocks_since_ours is not None and blocks_since_ours < policy.stagger:
         return verdict(WAIT, REASON_STAGGER)
     if reserve_mode:
-        return verdict(BUY, REASON_BUY_VALUE if value_mode else REASON_BUY_RESERVE)
+        return verdict(BUY, REASON_BUY_RESERVE)
     # Urgency outranks only the DECAY FLOOR, which is the gate that refuses
     # without bound.  Measured, the price sat within tolerance of the floor in
     # 4.7% of decisions and the gate refused 150 of 251 in a day while the fleet
@@ -891,176 +733,6 @@ def last_executed_block(records: Iterable[dict[str, Any]]) -> int | None:
         and isinstance(record.get("block"), int)
     ]
     return max(blocks) if blocks else None
-
-
-# ---------------------------------------------------------------------------
-# Slot-life ledger: how long our registrations actually last.
-#
-# The value of a slot is (extra win probability) x (value of a win) x (how long
-# the slot lives), so the lifespan is a measured input, not a constant.  Each
-# tick the ledger compares the roster we hold with the last one it saw: a
-# hotkey that left is an end of life, and a slot that is still held is simply
-# not finished yet.  The estimator therefore counts only EXPOSED post-immunity
-# time, which keeps slots that are still alive from dragging the estimate down
-# and slots that were replaced by our own renewal from counting as evictions.
-# ---------------------------------------------------------------------------
-
-LEDGER_ROSTER = "slot_roster"
-LEDGER_DEPARTED = "slot_departed"
-#: Slots registered inside this window feed the estimate (14 days of blocks).
-LIFE_WINDOW_BLOCKS = 14 * BLOCKS_PER_DAY
-#: The prior counts as this many eviction events, so a handful of new
-#: observations nudges the estimate and only a sustained shift moves it.
-LIFE_PRIOR_EVENTS = 20.0
-LIFE_FLOOR_EPOCHS = 10.0
-LIFE_CEILING_EPOCHS = 30.0
-
-
-@dataclass(frozen=True)
-class SlotLife:
-    """One registration's life.  ``end_block`` is ``None`` while it is held."""
-
-    registered_block: int
-    end_block: int | None
-    #: Ended by someone else's registration.  A slot we replaced ourselves
-    #: (a renewal) ended by our own choice and is not evidence about rivals.
-    evicted: bool = False
-
-
-def update_life_ledger(
-    records: Iterable[dict[str, Any]],
-    slots: Sequence[tuple[int, str, int]],
-    block: int,
-) -> list[dict[str, Any]]:
-    """New ledger records implied by the roster we hold right now.
-
-    Returns what to append: nothing when the roster is unchanged, a first
-    snapshot when there is none yet, and otherwise one ``slot_departed`` per
-    lost hotkey plus the new snapshot.  A departed hotkey whose uid now holds a
-    hotkey of ours that was not there before was replaced by our own purchase.
-    An EMPTY current roster is never recorded: it is far more likely a failed
-    read than a fleet that vanished between two ticks.
-    """
-    current = {hotkey: (int(uid), int(reg)) for uid, hotkey, reg in slots}
-    if not current:
-        return []
-    last: dict[str, Any] | None = None
-    for record in records:
-        if record.get("kind") == LEDGER_ROSTER:
-            last = record
-    snapshot = {
-        "kind": LEDGER_ROSTER,
-        "block": int(block),
-        "slots": [[uid, hotkey, reg] for hotkey, (uid, reg) in sorted(current.items(), key=lambda kv: kv[1])],
-    }
-    if last is None:
-        return [snapshot]
-    previous = {
-        str(hotkey): (int(uid), int(reg)) for uid, hotkey, reg in last.get("slots", [])
-    }
-    if previous == current:
-        return []
-    gained_uids = {uid for hotkey, (uid, _) in current.items() if hotkey not in previous}
-    out: list[dict[str, Any]] = []
-    for hotkey, (uid, reg) in sorted(previous.items(), key=lambda kv: kv[1]):
-        if hotkey in current:
-            continue
-        out.append(
-            {
-                "kind": LEDGER_DEPARTED,
-                "block": int(block),
-                "uid": uid,
-                "hotkey": hotkey,
-                "registered_block": reg,
-                "replaced_by_us": uid in gained_uids,
-            }
-        )
-    out.append(snapshot)
-    return out
-
-
-def slot_lives(
-    records: Iterable[dict[str, Any]], slots: Sequence[tuple[int, str, int]]
-) -> list[SlotLife]:
-    """Every registration we know the life of, finished or still running."""
-    lives: list[SlotLife] = []
-    seen: set[tuple[str, int]] = set()
-    for record in records:
-        if record.get("kind") != LEDGER_DEPARTED:
-            continue
-        try:
-            key = (str(record["hotkey"]), int(record["registered_block"]))
-            if key in seen:
-                continue
-            seen.add(key)
-            lives.append(
-                SlotLife(
-                    registered_block=key[1],
-                    end_block=int(record["block"]),
-                    evicted=not record.get("replaced_by_us", False),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    for _uid, hotkey, reg in slots:
-        if (str(hotkey), int(reg)) not in seen:
-            lives.append(SlotLife(registered_block=int(reg), end_block=None))
-    return lives
-
-
-def estimate_slot_life(
-    lives: Iterable[SlotLife],
-    now_block: int,
-    *,
-    prior_epochs: float = DEFAULT_SLOT_LIFE_EPOCHS,
-    prior_events: float = LIFE_PRIOR_EVENTS,
-    window_blocks: int = LIFE_WINDOW_BLOCKS,
-    floor_epochs: float = LIFE_FLOOR_EPOCHS,
-    ceiling_epochs: float = LIFE_CEILING_EPOCHS,
-) -> dict[str, float]:
-    """Expected slot life in epochs: immunity plus the mean post-immunity wait.
-
-    A slot cannot be evicted during its 13.85 epochs of immunity, and after
-    that it is evicted at a roughly constant hazard.  The hazard is estimated
-    as events over exposed post-immunity epochs, blended with a prior worth
-    ``prior_events`` events (a Gamma prior), so a still-held slot adds exposure
-    but no event and cannot bias the estimate downward.  Slots ended by our own
-    renewal add exposure up to the day they ended and are not events.
-    """
-    prior_post = max(prior_epochs - IMMUNITY_EPOCHS, 0.5)
-    events = 0
-    exposure = 0.0
-    counted = 0
-    for life in lives:
-        if life.registered_block < now_block - window_blocks:
-            continue
-        end = now_block if life.end_block is None else life.end_block
-        exposure += max(0.0, (end - life.registered_block - IMMUNITY_PERIOD) / EPOCH_LENGTH)
-        events += 1 if life.evicted else 0
-        counted += 1
-    hazard = (prior_events + events) / (prior_events * prior_post + exposure)
-    epochs = IMMUNITY_EPOCHS + 1.0 / hazard
-    epochs = min(max(epochs, floor_epochs), ceiling_epochs)
-    return {
-        "slot_life_epochs": epochs,
-        "events": float(events),
-        "exposure_epochs": exposure,
-        "hazard_per_epoch": hazard,
-        "slots_in_window": float(counted),
-        "prior_epochs": prior_epochs,
-    }
-
-
-def should_burst(
-    *, executed: bool, bursts_done: int, burst_max: int, value_pricing: bool
-) -> bool:
-    """Take another look right away after a purchase that landed.
-
-    Only value pricing bursts: below the floor the old policy already rushes
-    one purchase per poll, and the poll is five minutes.  ``burst_max`` bounds
-    how many extra looks one run makes, so a bug cannot spin the wallet.
-    """
-    return bool(executed and value_pricing and bursts_done < burst_max - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1322,12 +994,6 @@ def read_chain_state(
     ours_blocks = list(live_registration_blocks)
     if log_last_block is not None:
         ours_blocks.append(int(log_last_block))
-    hotkeys = list(getattr(metagraph, "hotkeys", []) or [])
-    slots = tuple(
-        (uid, str(hotkeys[uid]), int(registration_blocks[uid]))
-        for uid in ours
-        if uid < len(hotkeys) and uid < len(registration_blocks)
-    )
     return ChainState(
         block=int(subtensor.get_current_block()),
         recycle_tao=_recycle_tao(subtensor, netuid),
@@ -1337,7 +1003,6 @@ def read_chain_state(
         oldest_registration_block=(
             min(live_registration_blocks) if live_registration_blocks else None
         ),
-        slots=slots,
     )
 
 
@@ -1569,34 +1234,10 @@ def _register(
     return registered, price_before if registered else None
 
 
-def parse_win_curve(text: str | None, slots: int) -> tuple[float, ...]:
-    """``--win-curve`` as a tuple; the fitted default when none is given."""
-    if text is None or not text.strip():
-        return marginal_win_curve(slots)
-    try:
-        values = tuple(float(part) for part in text.split(",") if part.strip())
-    except ValueError as error:
-        raise SystemExit(f"--win-curve must be comma-separated numbers: {error}") from None
-    if len(values) < slots:
-        raise SystemExit(f"--win-curve needs {slots} values, one per slot; got {len(values)}")
-    return values
-
-
 def _policy_from_args(args: argparse.Namespace) -> SlotPolicy:
-    reserve_slots = args.reserve_slots
-    value_curve: tuple[float, ...] = ()
-    if getattr(args, "value_pricing", False):
-        maximum = args.maximum_hotkeys
-        if maximum is None:
-            maximum = args.target + args.reserve_slots
-        if maximum < args.target:
-            raise SystemExit("--maximum-hotkeys cannot be below the floor (--minimum-hotkeys)")
-        reserve_slots = maximum - args.target
-        value_curve = parse_win_curve(args.win_curve, maximum)
     return SlotPolicy(
         target=args.target,
-        value_curve=value_curve,
-        reserve_slots=reserve_slots,
+        reserve_slots=args.reserve_slots,
         reserve_max_recycle_tao=args.reserve_max_recycle_tao,
         submission_freeze_blocks=args.submission_freeze_blocks,
         urgent_below=args.urgent_below,
@@ -1810,56 +1451,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="actually spend tau and register; omitting it -- which is the "
         "deployed default -- makes every purchase a logged dry run",
     )
-    parser.add_argument(
-        "--value-pricing",
-        action="store_true",
-        help="pay for each slot only what it is worth: --minimum-hotkeys is the "
-        "FLOOR (bought at any price up to --max-recycle-tao and renewed before it "
-        "can expire), --maximum-hotkeys is the cap, and slots in between are "
-        "bought whenever the price is at or below that slot's worth, in bursts "
-        "with no stagger",
-    )
-    parser.add_argument(
-        "--maximum-hotkeys",
-        type=int,
-        default=None,
-        help="value pricing: most registrations to hold (default: the floor "
-        "plus --reserve-hotkeys)",
-    )
-    parser.add_argument(
-        "--win-payout-alpha",
-        type=float,
-        default=DEFAULT_WIN_PAYOUT_ALPHA,
-        help="alpha paid for a nanobody win; times the live alpha price this is "
-        "the TAO value of a win (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--win-curve",
-        default=None,
-        help="comma-separated extra win probability per epoch from slot 1, 2, "
-        "... (default: the fitted 0.061 * k**0.57 curve)",
-    )
-    parser.add_argument(
-        "--slot-life-prior-epochs",
-        type=float,
-        default=DEFAULT_SLOT_LIFE_EPOCHS,
-        help="slot lifespan assumed until the ledger has measured enough "
-        "(default: %(default)s epochs)",
-    )
-    parser.add_argument(
-        "--life-ledger",
-        type=Path,
-        default=None,
-        help="append-only slot roster and departures; default: next to the "
-        "decision log",
-    )
-    parser.add_argument(
-        "--burst-max",
-        type=int,
-        default=1,
-        help="value pricing: most purchases one run may make before it exits, "
-        "re-reading the chain a block later each time (default: %(default)s)",
-    )
     args = parser.parse_args(argv)
     policy = _policy_from_args(args)
     _preflight(args)
@@ -1869,10 +1460,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     coldkey_ss58 = _resolve_coldkey_ss58(bittensor, args.wallet, args.coldkey_ss58)
     subtensor_factory = getattr(bittensor, "Subtensor", None) or bittensor.subtensor
     subtensor = subtensor_factory(network=args.network)
-    ledger_path = args.life_ledger or Path(args.decision_log).with_name(
-        "subnet68_slot_life.jsonl"
-    )
-    bursts = 0
 
     while True:
         records = read_records(args.decision_log)
@@ -1893,38 +1480,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         history = price_history(records) + [
             PriceSample(state.block, state.recycle_tao)
         ]
-        ledger_records = read_records(ledger_path)
-        try:
-            fresh = update_life_ledger(ledger_records, state.slots, state.block)
-            for entry in fresh:
-                append_record(ledger_path, entry)
-            ledger_records = ledger_records + fresh
-        except OSError as error:
-            print(f"SLOT_LEDGER_WRITE_FAILED {type(error).__name__}", flush=True)
-        life = estimate_slot_life(
-            slot_lives(ledger_records, state.slots),
-            state.block,
-            prior_epochs=args.slot_life_prior_epochs,
-        )
-        economics = None
-        alpha_price = 0.0
-        if policy.value_pricing:
-            alpha_price = _alpha_price(subtensor, args.netuid)
-            economics = SlotEconomics(
-                win_value_tao=(
-                    args.win_payout_alpha * alpha_price if alpha_price > 0 else None
-                ),
-                slot_life_epochs=life["slot_life_epochs"],
-            )
         decision = decide(
-            state, history, executed_spends(records), policy,
-            now=time.time(), economics=economics,
-        )
-        decision.detail.update(
-            slot_life_events=life["events"],
-            slot_life_exposure_epochs=life["exposure_epochs"],
-            slot_life_hazard_per_epoch=life["hazard_per_epoch"],
-            alpha_price_tao=alpha_price or None,
+            state, history, executed_spends(records), policy, now=time.time()
         )
         hotkey = None
         executed = False
@@ -1985,14 +1542,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     network=args.network,
                     keychain_service_env=args.keychain_service_env,
                     credential_source=args.credential_source,
-                    maximum_recycle_tao=(
-                        min(
-                            policy.max_recycle_tao,
-                            float(decision.detail.get("slot_zone_cap_tao", policy.max_recycle_tao)),
-                        )
-                        if decision.reason == REASON_BUY_VALUE
-                        else policy.max_recycle_tao
-                    ),
+                    maximum_recycle_tao=policy.max_recycle_tao,
                 )
         # The budget counts the immediately pre-extrinsic Burn returned by
         # _register.  Keep the earlier quote for audit, but never substitute the
@@ -2017,18 +1567,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             },
         )
         _report(decision, executed=executed, hotkey=hotkey)
-        if should_burst(
-            executed=executed,
-            bursts_done=bursts,
-            burst_max=args.burst_max,
-            value_pricing=policy.value_pricing,
-        ):
-            # One registration per block: look again a block later, at the
-            # price our own purchase just moved.
-            bursts += 1
-            time.sleep(BLOCK_SECONDS + 2)
-            continue
-        bursts = 0
         if args.interval <= 0:
             return
         time.sleep(args.interval)

@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-10-25T11:47:18.258423+00:00",
+  "host": "ssh9.vast.ai",
+  "port": 10616,
+  "files": {
+    "nanobody_opt/commit_submission.py": "ffe47cc45f14269128bc128bc9a15110e51f60a66919cf21f9fcdd827e41a4f2",
+    "nanobody_opt/consensus_policy.py": "4e61a889eadf055c1f00cdd31cb5d547b3f17a2d5a35f1e2d5efb7c1d4613e25",
+    "nanobody_opt/diverse_children.py": "222867585104dcbd0772abb558a99794a63bcfeca0a1be7171385bc8436d421b",
+    "nanobody_opt/feature_reuse.py": "eaf70d0a62e422ff7345a3c3bc5f9526b87f5ab3d27e4440a432837ac73bdad2",
+    "nanobody_opt/filter_public_neighborhood.py": "06cc89d00065c21ccf7b17fd511e5fabd956e1e8ee7fab85b80bae3b0efa0140",
+    "nanobody_opt/fleet.py": "452fe59ad93426f399a000b315b8d570b617df28cf7ffd30d72c7256a71da2c2",
+    "nanobody_opt/gates.py": "facec81be4c507e717bf661efd1dc3d1d82fc80fa46a9a7e2cd6ffcf93a3116f",
+    "nanobody_opt/hf_field_refresh.py": "e5d7aa37d0950867854360c57eaafb32046d736d6a09ef44c4c470df40e81ae2",
+    "nanobody_opt/hf_field_refresh_loop.sh": "5eef7da7941b03b897cb8e776067687882b0aef9fa0e55a2916682e741002a86",
+    "nanobody_opt/run_live_producer.py": "22cd124575da41cb0ebc700b7604856bc916578bb1394555b44e5518da27d61a",
+    "nanobody_opt/score_boltzgen_batch.py": "14726cdcd3053c8461f8dbeefe2ac1881507496367716495c452fef144a6a64a",
+    "nanobody_opt/sequential_exact_race.py": "3a9127226023d503c03a0a1f2d58f29e41d1634c974364226746b607d13cddca",
+    "nanobody_opt/slot_manager.py": "8516993ba165ef2221249e224d94ebdc0e975cdf202b0b947061993ff0f12822",
+    "tools/pi_epoch_loop.py": "a5e2df1ce1296643ff3df3c0553ac1720b97f4beb24f177fc807725828dffe86",
+    "tools/rival_coverage_pending.py": "1c142038c31556382b83f3a5a03f7a038b11242e49f25fd79192180ffc6a3c04",
+    "tools/sync_multipass_rivals.py": "8b8d1e2a3809c9912ecb356ae14c3589489a5cb942988d8a42108612bcaff8c2"
+  },
+  "source": "read-only live snapshot",
+  "live_files_changed": false
+}

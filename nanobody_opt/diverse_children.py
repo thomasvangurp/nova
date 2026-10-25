@@ -35,10 +35,13 @@ LEN = 127
 # Framework single-substitution positions x best residues, MEASURED by the
 # exhaustive sweep (scoring_backfill/exhaustive_ranking.json). Pos 114 omitted
 # (its best residue scores worse than most positions' worst).
+# 2026-10-13: 0/123/126 re-ranked from the 60-epoch replay data
+# (local_validator_replay_rank_sum, source-matched delta, ~47k single-sub edges):
+#   0 -> K (was A), 123 -> T (was A), 126 -> G (was A).
 HOT = {
-    0: "ADQGN", 2: "AMVEK", 72: "ATDVQ", 110: "EDQKA", 113: "HMFVY",
-    115: "ASTEH", 120: "ATSVP", 121: "APSVG", 122: "VATIL", 123: "ASPGV",
-    125: "GASPT", 126: "APGES",
+    0: "KADQN", 2: "AMVEK", 72: "ATDVQ", 110: "EDQKA", 113: "HMFVY",
+    115: "ASTEH", 120: "ATSVP", 121: "APSVG", 122: "VATIL", 123: "TASPG",
+    125: "GASPT", 126: "GAPES",
 }
 
 

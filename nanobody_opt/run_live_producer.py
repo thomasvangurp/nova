@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from nanobody_opt import db
+from nanobody_opt.storage_retention import prune_generated_tree
 
 
 CONFIG_URL = "https://raw.githubusercontent.com/metanova-labs/nova/main/config/config.yaml"
@@ -169,29 +170,13 @@ def maintain_runtime_storage(
                 exact_files = sorted(epoch_root.glob("**/exact_all.json"))
                 if not _sealed_exact_files(observation_database, exact_files):
                     continue
-                # Preserve per-residue structures (.cif) before deleting the
-                # epoch tree: they are the only source of per-residue contact
-                # topology (the observations DB stores only aggregate metrics)
-                # and are not cheaply regenerable. The .cif sync loop ships
-                # these to Hetzner for persistence.
-                structures_root = live_root / "structures"
-                structures_root.mkdir(parents=True, exist_ok=True)
-                for cif in epoch_root.rglob("*.cif"):
-                    if not cif.is_file() or cif.is_symlink():
-                        continue
-                    try:
-                        shutil.move(str(cif), str(structures_root / cif.name))
-                    except (FileNotFoundError, shutil.Error):
-                        pass
-                for path in epoch_root.rglob("*"):
-                    try:
-                        if path.is_file() and not path.is_symlink():
-                            removed_bytes += path.stat().st_size
-                            removed_files += 1
-                    except FileNotFoundError:
-                        pass
-                shutil.rmtree(epoch_root)
-                removed_epoch_dirs += 1
+                # Keep publication/selection history and all per-pass poses.
+                # Moving CIFs by basename overwrote replicates and left the
+                # SQLite paths dangling, silently excluding strong candidates.
+                for name in ("producer", "topup", "topup_slave"):
+                    report = prune_generated_tree(epoch_root / name)
+                    removed_bytes += report["removed_bytes"]
+                    removed_files += report["removed_files"]
     free_bytes = shutil.disk_usage(runtime_root).free
     minimum_bytes = int(minimum_free_gib * 1024**3)
     if free_bytes < minimum_bytes:
@@ -476,6 +461,35 @@ def _expected_race_seconds(producer_root: Path) -> float:
     return max(seconds) if seconds else 520.0
 
 
+def _screen_budget(args: argparse.Namespace, state: dict, producer_root: Path,
+                   plan: dict) -> tuple[int, float]:
+    """Fit screening to its observed cost, including CPU bookkeeping.
+
+    Confirmation's smaller, batch-one jobs are not a reliable timing model
+    for screening. In particular, freeing overlapped preparation time must
+    not spend the confirmation reserve on an oversized screening tranche.
+    """
+    gpu_count = len(args.gpus.split(","))
+    per_candidate = float(plan["gpu_seconds_per_candidate"]) / gpu_count
+    bookkeeping = float(args.budget_cpu_guard_seconds)
+    for path in producer_root.glob("iteration_[0-9][0-9]/race/timings.jsonl"):
+        try:
+            for line in path.read_text().splitlines():
+                row = json.loads(line)
+                count = int(row.get("candidates", 0))
+                if row.get("phase") == "screen_tranche" and count > 0:
+                    per_candidate = max(per_candidate, float(row["scoring_seconds"]) / count)
+                    bookkeeping = max(bookkeeping, float(row["bookkeeping_seconds"]))
+        except (OSError, ValueError, KeyError):
+            continue
+    per_candidate *= 1.15
+    remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
+    window = (remaining - _handoff_reserve(args) - plan["replication_reserve_blocks"]) * 12
+    usable = max(0.0, window - bookkeeping * 1.15 - float(plan["load_seconds"]))
+    affordable = int(usable / per_candidate) if per_candidate > 0 else 0
+    return min(args.screen_tranche_size, affordable), per_candidate * gpu_count
+
+
 def _next_iteration_is_screening(args: argparse.Namespace, state: dict, producer_root: Path,
                                  plan: dict, preparation_guard: float) -> bool:
     """True when the iteration after the current race will still screen."""
@@ -536,6 +550,24 @@ def _start_next_epoch_prep(*, args: argparse.Namespace, state: dict) -> None:
     early = argparse.Namespace(**{**vars(args), "chain_state": synthetic_path,
                                   "maximum_screen_tranches_override": args.prescreen_screen_tranches})
     _start_next_prep(args=early, state=synthetic, iteration=iteration - 1)
+
+
+def _remaining_preparation_guard(*, epoch: int, iteration: int, full_guard: float) -> float:
+    """Price only unfinished preparation when deciding to close screening.
+
+    Overlapped CPU work has already consumed wall time included in the current
+    block. Charging its full duration again can discard a ready batch almost a
+    whole screening tranche before the actual confirmation boundary.
+    """
+    record = _NEXT_PREP.get((epoch, iteration))
+    if record is None or record.get("error"):
+        return full_guard
+    if not record["thread"].is_alive():
+        if (record["staging"] / "producer_preparation.json").is_file():
+            return 0.0
+        return full_guard
+    elapsed = max(0.0, time.monotonic() - record["started"])
+    return max(0.0, full_guard - elapsed)
 
 
 def _adopt_staged_prep(*, epoch: int, iteration: int, iteration_root: Path, wait: bool) -> bool:
@@ -617,11 +649,19 @@ def _run_iteration(
     preparations = [json.loads(p.read_text())["seconds"] for p in
                     sorted(producer_root.glob("iteration_[0-9][0-9]/producer_preparation.json"))[-2:]]
     preparation_guard = max(preparations, default=60.0) * 1.15
+    remaining_preparation_guard = _remaining_preparation_guard(
+        epoch=epoch, iteration=iteration, full_guard=preparation_guard,
+    ) if not prepare_only else preparation_guard
     plan = _budget_plan(args, state, producer_root)
     remaining = int(state["epoch_length"]) - int(state["block"]) % int(state["epoch_length"])
     confirmation_due = (
-        remaining * 12 <= (_handoff_reserve(args) + plan["replication_reserve_blocks"]) * 12 + preparation_guard
+        remaining * 12 <= (_handoff_reserve(args) + plan["replication_reserve_blocks"]) * 12 + remaining_preparation_guard
     )
+    if not prepare_only:
+        print(f"PRODUCER_PREPARATION_BUDGET epoch={epoch} iteration={iteration} "
+              f"full_guard_seconds={preparation_guard:.1f} "
+              f"remaining_guard_seconds={remaining_preparation_guard:.1f} "
+              f"confirmation_due={confirmation_due}", flush=True)
     adopted = False
     if not prepare_only:
         adopted = _adopt_staged_prep(epoch=epoch, iteration=iteration,
@@ -992,6 +1032,16 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
     # the observation count strict qualification requires.
     plan = _budget_plan(args, state, producer_root)
     closing = force_confirmation or remaining_blocks <= plan["replication_reserve_blocks"] + _handoff_reserve(args)
+    screen_tranche_size = args.screen_tranche_size
+    screen_gpu_seconds = plan.get("gpu_seconds_per_candidate")
+    if args.budget_mode == "adaptive" and args.replication_rounds and not closing:
+        screen_tranche_size, screen_gpu_seconds = _screen_budget(args, state, producer_root, plan)
+        if screen_tranche_size < 1:
+            closing = force_confirmation = True
+            screen_tranche_size = args.screen_tranche_size
+        print(f"PRODUCER_SCREEN_BUDGET epoch={epoch} iteration={iteration} "
+              f"tranche_size={screen_tranche_size} gpu_seconds_per_candidate={screen_gpu_seconds:.3f} "
+              f"confirmation_due={closing}", flush=True)
     replication_rounds = args.replication_rounds if closing else 0
     print(
         f"PRODUCER_GENERATION iteration={iteration} "
@@ -1015,7 +1065,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
         "--gpus", args.gpus,
         "--scorer", str(args.exact_scorer),
         "--candidate-limit", str(args.candidate_limit),
-        "--screen-tranche-size", str(args.screen_tranche_size),
+        "--screen-tranche-size", str(screen_tranche_size),
         "--maximum-initial-screen-p90", str(args.maximum_initial_screen_p90),
         "--weak-initial-fallback-after", str(args.weak_initial_fallback_after),
         "--finalists", str(plan["confirmation_candidates"] or 1),
@@ -1044,7 +1094,7 @@ def _run_race(*, args: argparse.Namespace, state: dict, iteration: int,
             str(getattr(args, "maximum_screen_tranches_override", 1)),
             "--replication-load-seconds", str(plan["load_seconds"]),
             "--replication-seconds-per-observation", str(plan["gpu_seconds_per_candidate"]),
-            "--screen-gpu-seconds-per-candidate", str(plan["gpu_seconds_per_candidate"]),
+            "--screen-gpu-seconds-per-candidate", str(screen_gpu_seconds),
             "--replication-finish-guard-seconds", "30",
             "--adaptive-finish-guard",
             "--maximum-current-epoch-observations", str(args.replication_rounds + 1),
