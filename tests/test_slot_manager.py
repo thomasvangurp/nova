@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from dataclasses import replace
@@ -36,7 +37,7 @@ def decaying(start_block: int, blocks: int, price: float, decay: float | None = 
 
 
 # Default scenarios stay below the policy target. Tests for legacy decay-floor
-# haggling explicitly select a six-slot target and disable urgency below.
+# haggling select their own below-target scenario and disable urgency below.
 HOLDING_A_FLEET = tuple(range(max(1, sm.SlotPolicy().target - 1)))
 
 # The live policy skips the decay-floor gates below target -- measured, the price
@@ -45,7 +46,7 @@ HOLDING_A_FLEET = tuple(range(max(1, sm.SlotPolicy().target - 1)))
 # tested; they just need a policy that reaches them.
 def haggling_policy(**kw):
     kw.setdefault("urgent_below", 0)
-    kw.setdefault("target", 6)  # Explicit legacy decay-floor scenario holding five slots.
+    kw.setdefault("target", max(6, len(HOLDING_A_FLEET) + 1))
     return sm.SlotPolicy(**kw)
 
 
@@ -476,16 +477,36 @@ def test_legacy_post_registration_price_does_not_inflate_the_spend_window():
     assert spends[0].recycle_tao == pytest.approx(0.175)
 
 
-def test_register_returns_the_pre_extrinsic_burn_not_the_inflated_next_price(
-    monkeypatch,
+class StructuredSDKResult:
+    """SDK 10 uses a structured success flag; truthiness is not its contract."""
+    def __init__(self, success):
+        self.success = success
+        self.message = "controlled SDK boundary fixture"
+
+    def __bool__(self):
+        raise AssertionError("never coerce an SDK result object to bool")
+
+
+@pytest.mark.parametrize('response,expected', [
+    (True, True), (False, False),
+    (StructuredSDKResult(True), True), (StructuredSDKResult(False), False),
+    ((True, None), True), ((False, 'refused'), False),
+    (object(), False), (SimpleNamespace(success='false'), False),
+])
+def test_register_charges_only_explicit_success_at_the_pre_extrinsic_price(
+    monkeypatch, response, expected,
 ):
     class Chain:
         def burned_register(self, **kwargs):
-            return True
+            return response
+
+        def get_uid_for_hotkey_on_subnet(self, **kwargs):
+            return None
 
     chain = Chain()
     fake_bittensor = type("BT", (), {
-        "Wallet": staticmethod(lambda **kwargs: object()),
+        "Wallet": staticmethod(lambda **kwargs: SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address='public-test-hotkey'))),
         "Subtensor": staticmethod(lambda **kwargs: chain),
     })
     reads = []
@@ -504,9 +525,152 @@ def test_register_returns_the_pre_extrinsic_burn_not_the_inflated_next_price(
         maximum_recycle_tao=0.20,
     )
 
-    assert registered is True
-    assert cost == pytest.approx(0.175)
+    assert registered is expected
+    assert cost == (pytest.approx(0.175) if expected else None)
     assert len(reads) == 1, "a post-registration Burn read is the next price, not cost"
+    record = {'action': sm.BUY, 'executed': registered, 'time': 1000.0,
+              'recycle_tao': cost if cost is not None else 0.175}
+    assert len(sm.executed_spends([record])) == int(expected)
+    assert sm.should_burst(executed=registered, bursts_done=0, burst_max=8,
+                           value_pricing=True) is expected
+
+
+def test_already_registered_hotkey_is_not_a_new_paid_registration(monkeypatch):
+    class Chain:
+        def get_uid_for_hotkey_on_subnet(self, **kwargs): return 0
+        def burned_register(self, **kwargs): pytest.fail('already registered')
+    fake = SimpleNamespace(
+        Wallet=lambda **kwargs: SimpleNamespace(hotkey=SimpleNamespace(ss58_address='public-test-hotkey')),
+        Subtensor=lambda **kwargs: Chain())
+    monkeypatch.setattr(sm, '_import_bittensor', lambda: fake)
+    monkeypatch.setattr(sm, '_hotkey_names', lambda name: ['slot-1'])
+    monkeypatch.setattr(sm, '_unlock_coldkey', lambda *a, **k: None)
+    monkeypatch.setattr(sm, '_recycle_tao', lambda *a: 0.10)
+    assert sm._register(wallet_name='wallet', hotkey_name='slot-1', netuid=68,
+                        network='finney', keychain_service_env='SECRET_LOCATOR_ONLY',
+                        maximum_recycle_tao=0.20) == (False, None)
+
+
+def test_failed_structured_conversion_does_not_consume_conversion_allowance(monkeypatch):
+    monkeypatch.setattr(sm, 'alpha_holdings', lambda *a: {
+        'holdings': [{'hotkey': 'public-test-hotkey', 'alpha': 100.0}]})
+    monkeypatch.setitem(sys.modules, 'bittensor', SimpleNamespace(Balance=SimpleNamespace(
+        from_tao=lambda amount: SimpleNamespace(set_unit=lambda unit: amount))))
+    chain = SimpleNamespace(unstake=lambda **kwargs: StructuredSDKResult(False))
+    outcome = sm.top_up_tao(chain, None, netuid=68, coldkey='public-test-coldkey',
+                           need_tao=0.0, target_tao=1.0, price_tao=0.02,
+                           slippage=0.005, daily_cap_alpha=250.0,
+                           spent_alpha_today=0.0, execute=True)
+    assert outcome['converted'] is False and outcome['alpha_converted'] == 0.0
+
+
+def test_registration_reuses_owned_idle_identity_without_growing_staking_index(monkeypatch):
+    monkeypatch.setattr(sm, '_hotkey_names', lambda name: ['slot-1', 'slot-2', 'slot-3', 'slot-4'])
+    addresses = {'slot-1': 'active', 'slot-2': 'failed-new-key',
+                 'slot-3': 'owned-unstaked', 'slot-4': 'owned-staked'}
+    loaded = []
+    def wallet(**kw):
+        loaded.append(kw['hotkey'])
+        return SimpleNamespace(hotkey=SimpleNamespace(ss58_address=addresses[kw['hotkey']]))
+    chain = SimpleNamespace(
+        query_subtensor=lambda name, **kw: (['active', 'owned-unstaked', 'owned-staked']
+            if name == 'OwnedHotkeys' else ['active', 'owned-staked']),
+        get_netuids_for_hotkey=lambda **kw: [])
+    chosen = sm.registration_hotkey(chain, wallet, wallet_name='wallet', prefix='slot',
+                                    coldkey='public-test-coldkey', live_hotkeys=['active'])
+    assert chosen == 'slot-4'
+    assert loaded == ['slot-1', 'slot-2', 'slot-3', 'slot-4']
+
+
+def test_registration_never_reuses_a_key_active_on_another_subnet(monkeypatch):
+    monkeypatch.setattr(sm, '_hotkey_names', lambda name: ['slot-1'])
+    chain = SimpleNamespace(query_subtensor=lambda *a, **k: ['other-subnet'],
+                            get_netuids_for_hotkey=lambda **kw: [2])
+    wallet = lambda **kw: SimpleNamespace(hotkey=SimpleNamespace(ss58_address='other-subnet'))
+    assert sm.registration_hotkey(chain, wallet, wallet_name='wallet', prefix='slot',
+                                  coldkey='public-test-coldkey', live_hotkeys=[]) == 'slot-2'
+
+
+@pytest.mark.parametrize('broken_read', ['ownership', 'memberships'])
+def test_registration_refuses_ambiguous_identity_state(monkeypatch, broken_read):
+    monkeypatch.setattr(sm, '_hotkey_names', lambda name: ['slot-1'])
+    chain = SimpleNamespace(query_subtensor=lambda *a, **k: None if broken_read == 'ownership' else ['idle'],
+                            get_netuids_for_hotkey=lambda **kw: None)
+    wallet = lambda **kw: SimpleNamespace(hotkey=SimpleNamespace(ss58_address='idle'))
+    with pytest.raises(sm.EmptyRosterError):
+        sm.registration_hotkey(chain, wallet, wallet_name='wallet', prefix='slot',
+                               coldkey='public-test-coldkey', live_hotkeys=[])
+
+
+def registration_audit_fixture():
+    purchase = {'action': sm.BUY, 'executed': True, 'time': 1000.0, 'block': 100,
+                'netuid': 68, 'hotkey': 'slot-1', 'coldkey_ss58': 'public-coldkey',
+                'recycle_tao': 0.10}
+    proof = {'schema': 'sn68-registration-chain-receipt-v1',
+             'outcome': 'System.ExtrinsicFailed', 'call_module': 'SubtensorModule',
+             'call_function': 'burned_register', 'netuid': 68, 'block': 101,
+             'observed_through_block': 102, 'block_hash': '0x' + 'a' * 64,
+             'extrinsic_hash': '0x' + 'b' * 64, 'extrinsic_index': 0,
+             'signer_matches': True, 'hotkey_matches': True}
+    correction = {'kind': 'slot_spend_correction', 'at': 1030.0,
+                  'purchase_record_id': sm.purchase_record_id(purchase), 'proof': proof}
+    return purchase, correction
+
+
+def test_failed_chain_receipt_corrects_only_the_exact_record_once():
+    purchase, correction = registration_audit_fixture()
+    before = json.dumps(purchase, sort_keys=True)
+    actual = {**purchase, 'time': 1010.0, 'block': 103, 'hotkey': 'slot-2', 'recycle_tao': 0.2}
+    records = [purchase, actual, correction, correction]
+    spends = sm.executed_spends(records)
+    assert len(spends) == 1 and spends[0].recycle_tao == 0.2
+    assert sm.last_executed_block(records) == 103
+    assert json.dumps(purchase, sort_keys=True) == before
+
+
+@pytest.mark.parametrize('problem', ['success', 'wrong_signer', 'wrong_key', 'wrong_netuid',
+                                   'wrong_record', 'old_block', 'missing_hash', 'sdk_only'])
+def test_unproven_corrections_do_not_release_budget(problem):
+    purchase, correction = registration_audit_fixture()
+    proof = correction['proof']
+    if problem == 'success': proof['outcome'] = 'System.ExtrinsicSuccess'
+    if problem == 'wrong_signer': proof['signer_matches'] = False
+    if problem == 'wrong_key': proof['hotkey_matches'] = False
+    if problem == 'wrong_netuid': proof['netuid'] = 2
+    if problem == 'wrong_record': correction['purchase_record_id'] = 'f' * 64
+    if problem == 'old_block': proof['block'] = 99
+    if problem == 'missing_hash': del proof['extrinsic_hash']
+    if problem == 'sdk_only': proof['schema'] = 'sdk-response-only'
+    assert sm.executed_spends([purchase, correction])[0].recycle_tao == 0.1
+    assert sm.last_executed_block([purchase, correction]) == 100
+
+
+@pytest.mark.parametrize('mismatch', [None, 'signer', 'hotkey', 'netuid', 'success', 'ambiguous',
+                                    'successful_retry'])
+def test_chain_audit_requires_exact_signer_key_subnet_and_failed_call(mismatch):
+    from tools.audit_slot_spend import audit
+    purchase, _ = registration_audit_fixture()
+    class Substrate:
+        def get_block_hash(self, block): return '0x' + f'{block:064x}'
+        def get_events(self, *, block_hash):
+            block = int(block_hash, 16)
+            if block != 101 and not (mismatch in {'ambiguous', 'successful_retry'} and block == 102): return []
+            return [{'module_id': 'System', 'extrinsic_idx': 0, 'attributes': {},
+                     'event_id': 'ExtrinsicSuccess' if mismatch == 'success' or
+                        (mismatch == 'successful_retry' and block == 102) else 'ExtrinsicFailed'}]
+        def get_block(self, *, block_hash):
+            return {'extrinsics': [{'extrinsic_hash': '0x' + 'b' * 64,
+                'address': 'someone-else' if mismatch == 'signer' else 'public-coldkey',
+                'call': {'call_module': 'SubtensorModule', 'call_function': 'burned_register',
+                         'call_args': [{'name': 'netuid', 'value': 2 if mismatch == 'netuid' else 68},
+                                       {'name': 'hotkey', 'value': 'another-key' if mismatch == 'hotkey' else 'public-hotkey'}]}}]}
+    factory = lambda **kw: SimpleNamespace(coldkeypub=SimpleNamespace(ss58_address='public-coldkey'),
+                                           hotkey=SimpleNamespace(ss58_address='public-hotkey'))
+    result = audit(SimpleNamespace(substrate=Substrate()), factory, wallet_name='wallet',
+                   records=[purchase, {'block': 102, 'time': 1020.0}], now=1030.0)
+    assert result['failed_registrations_proven'] == (1 if mismatch is None else 0)
+    assert result['recorded_burn_after_tao'] == (0.0 if mismatch is None else 0.1)
+    assert result['transactions_submitted'] == 0
 
 
 def test_the_log_round_trips_history_budget_and_last_purchase(tmp_path):

@@ -460,3 +460,36 @@ Qualification must accept the same timestamp formats as the installed Pi
 consumer. An optional `updated_at_unix` field cannot become an accidental
 mandatory dependency. Preserve freshness with the producer-observed original
 publication mtime and current epoch; never use a copied trial's new timestamp.
+
+## Slot-purchase failure on 2026-10-25
+
+The Pi buyer was enabled with its existing value policy: minimum five,
+maximum thirteen, 0.25 TAO hard price ceiling, and 4.5 TAO rolling daily burn
+budget. It reported budget exhaustion while the registered fleet fell to
+eight. The failure was outside the scoring pipeline.
+
+Two boundaries were missing. The installed Bittensor 10.4.1 SDK returns an
+`ExtrinsicResponse`; `bool(ExtrinsicResponse(success=False))` is true. The
+buyer counted those failures as successful burns, retried them in bursts, and
+exhausted a fictitious budget. Separately, creating a new identity for every
+replacement filled the coldkey's 256-entry staking-hotkey index. Pruning a
+subnet UID does not remove that identity. Our burned-registration call at
+block 9361820, extrinsic 14 failed with `TooManyStakingHotkeys`.
+
+Read the SDK's explicit success flag, refuse unknown response shapes, and do
+not count already-registered keys as new purchases. Reuse an owned key that
+is unregistered on every subnet, preferring one already present in both
+ownership and staking indexes. Never reuse a currently active key or change
+the economic limits to work around a software failure.
+
+Keep the original spending log. `tools/audit_slot_spend.py` correlates its
+claimed purchases with the exact signer, hotkey, subnet, call and failed chain
+receipt. It appends corrections only for confirmed failed calls. Ambiguous
+attempts retain their original budget charge; transaction fees are not
+refunded by this registration-burn correction. Applying corrections requires
+the buyer service and timer to be stopped, then resumed after verification.
+
+Mandatory slot tests now cover failed structured SDK responses, unknown
+results, already-registered keys, identity reuse, active-key exclusion, and
+receipt-specific, idempotent spending corrections. A boolean-only success
+mock is not an adequate test of an SDK boundary that returns objects.

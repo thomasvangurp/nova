@@ -475,7 +475,8 @@ class FakeChain:
 
 def run_main(monkeypatch, tmp_path, chain, *extra, execute=True):
     monkeypatch.setattr(sm, "_import_bittensor", lambda: types.SimpleNamespace(
-        Subtensor=lambda network=None: chain))
+        Subtensor=lambda network=None: chain,
+        Wallet=lambda **kw: pytest.fail('empty inventory must not load a wallet')))
     monkeypatch.setattr(sm, "_hotkey_names", lambda wallet: [])
     monkeypatch.setattr(sm, "_register", lambda **kw: chain.register())
     monkeypatch.setattr(sm.time, "sleep", lambda seconds: None)

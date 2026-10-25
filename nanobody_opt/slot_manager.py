@@ -68,6 +68,7 @@ import argparse
 import json
 import os
 import contextlib
+import hashlib
 import io
 import subprocess
 import sys
@@ -317,11 +318,7 @@ class SlotPolicy:
     #: the ranked pool yields 16 leads that are mutually below
     #: ``fleet.MAXIMUM_FLEET_IDENTITY``, and the 55-block commitment reserve
     #: holds 12 commits at the observed ~2.3 blocks per uid.
-    #:
-    #: 2026-10-22 COST CAP (standing until the pipeline scores): the miner is
-    #: capped at MAXIMUM 2 UID slots. Do not register/buy new slots; keep the
-    #: current UIDs, stop ADDING.
-    target: int = 2
+    target: int = 12
     #: Optional buffer above the working target.  This is deliberately not a
     #: larger permanent target: while holding ``target`` we may pre-buy at most
     #: this many cheap registrations, then consume that reserve when churn
@@ -856,7 +853,7 @@ def price_history(records: Iterable[dict[str, Any]]) -> list[PriceSample]:
 def executed_spends(records: Iterable[dict[str, Any]]) -> list[SpendRecord]:
     """Purchases that actually hit the chain.  Dry runs are not spending."""
     spends = []
-    for record in records:
+    for record in effective_purchase_records(records):
         if record.get("action") != BUY or not record.get("executed"):
             continue
         try:
@@ -885,12 +882,62 @@ def last_executed_block(records: Iterable[dict[str, Any]]) -> int | None:
     """Block of our most recent executed purchase, per the log."""
     blocks = [
         int(record["block"])
-        for record in records
+        for record in effective_purchase_records(records)
         if record.get("action") == BUY
         and record.get("executed")
         and isinstance(record.get("block"), int)
     ]
     return max(blocks) if blocks else None
+
+
+def purchase_record_id(record: dict[str, Any]) -> str:
+    """Stable identity for an immutable decision-log row."""
+    return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def effective_purchase_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep legacy charges unless an exact failed chain receipt corrects them.
+
+    Corrections append evidence; they never delete or rewrite the original
+    log. They can remove only a matching recorded burn, never subtract an
+    arbitrary amount or refund the same purchase twice. Transaction fees are
+    outside this existing registration-burn budget and are not refunded here.
+    """
+    rows = list(records)
+    purchases = {purchase_record_id(row): row for row in rows
+                 if row.get('action') == BUY and row.get('executed') is True}
+    corrected = set()
+    def hex_hash(value, prefix=False):
+        if not isinstance(value, str): return False
+        if prefix:
+            if not value.startswith('0x'): return False
+            value = value[2:]
+        return len(value) == 64 and all(c in '0123456789abcdef' for c in value)
+    for row in rows:
+        if row.get('kind') != 'slot_spend_correction':
+            continue
+        identifier = row.get('purchase_record_id')
+        if not hex_hash(identifier):
+            continue
+        original = purchases.get(identifier)
+        proof = row.get('proof')
+        if original is None or not isinstance(proof, dict):
+            continue
+        if (proof.get('schema') == 'sn68-registration-chain-receipt-v1'
+                and proof.get('outcome') == 'System.ExtrinsicFailed'
+                and proof.get('call_module') == 'SubtensorModule'
+                and proof.get('call_function') == 'burned_register'
+                and type(proof.get('netuid')) is int
+                and proof.get('netuid') == original.get('netuid')
+                and proof.get('signer_matches') is True and proof.get('hotkey_matches') is True
+                and type(proof.get('block')) is int and type(original.get('block')) is int
+                and type(proof.get('observed_through_block')) is int
+                and original['block'] <= proof['block'] <= proof['observed_through_block']
+                and type(proof.get('extrinsic_index')) is int and proof['extrinsic_index'] >= 0
+                and hex_hash(proof.get('block_hash'), True)
+                and hex_hash(proof.get('extrinsic_hash'), True)):
+            corrected.add(identifier)
+    return [row for identifier, row in purchases.items() if identifier not in corrected]
 
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1302,7 @@ def top_up_tao(
                 allow_partial_stake=True,
                 wait_for_inclusion=True, wait_for_finalization=True,
             )
-            if getattr(response, "success", bool(response)):
+            if extrinsic_succeeded(response):
                 moved += leg["alpha"]
             else:
                 result.setdefault("failures", []).append(
@@ -1369,6 +1416,45 @@ def next_hotkey_name(existing: Sequence[str], prefix: str) -> str:
     while f"{prefix}-{index}" in taken:
         index += 1
     return f"{prefix}-{index}"
+
+
+def registration_hotkey(
+    subtensor: Any, wallet_factory: Any, *, wallet_name: str, prefix: str,
+    coldkey: str, live_hotkeys: Sequence[str],
+) -> str:
+    """Reuse an owned, fully deregistered identity before creating another.
+
+    New identities grow the chain's bounded OwnedHotkeys/StakingHotkeys lists;
+    pruning a UID does not remove that identity. Prefer a key already present
+    in both lists, so re-registration grows neither. Public identities are
+    derived only inside the wallet SDK; keyfile contents are never inspected.
+    """
+    names = _hotkey_names(wallet_name)
+    candidates = [name for name in names
+                  if name.startswith(prefix + '-') and name[len(prefix) + 1:].isdigit()]
+    if not candidates:
+        return next_hotkey_name(names, prefix)
+    owned = _scalar(subtensor.query_subtensor('OwnedHotkeys', params=[coldkey]))
+    staked = _scalar(subtensor.query_subtensor('StakingHotkeys', params=[coldkey]))
+    if not isinstance(owned, list) or not isinstance(staked, list):
+        raise EmptyRosterError('hotkey ownership indexes unavailable; refusing a new identity')
+    owned, staked, live = set(owned), set(staked), set(live_hotkeys)
+    fallback = None
+    for name in sorted(candidates, key=lambda value: int(value[len(prefix) + 1:])):
+        wallet = wallet_factory(name=wallet_name, hotkey=name)
+        address = str(wallet.hotkey.ss58_address)
+        if address not in owned or address in live:
+            continue
+        networks = subtensor.get_netuids_for_hotkey(hotkey_ss58=address)
+        if not isinstance(networks, list):
+            raise EmptyRosterError('hotkey memberships unavailable; refusing identity reuse')
+        if networks:
+            continue
+        if address in staked:
+            return name
+        if fallback is None:
+            fallback = name
+    return fallback or next_hotkey_name(names, prefix)
 
 
 SECRET_SOURCES = ("auto", "keychain", "systemd")
@@ -1512,6 +1598,41 @@ def _create_hotkey_quietly(wallet: Any) -> None:
         buffer.close()
 
 
+def extrinsic_succeeded(response: Any) -> bool:
+    """Read the SDK's result contract without coercing a response object.
+
+    Bittensor 10's ExtrinsicResponse(success=False) is a truthy object. Boolean
+    coercion therefore invents successful registrations and consumes the daily
+    budget even when no slot was acquired. Unknown result shapes fail closed.
+    """
+    if type(response) is bool:
+        return response
+    success = getattr(response, "success", None)
+    if type(success) is bool:
+        return success
+    if isinstance(response, tuple) and len(response) == 2 and type(response[0]) is bool:
+        return response[0]
+    return False
+
+
+def registration_failure_code(response: Any) -> str:
+    """Only fixed diagnostic codes may leave the SDK response boundary."""
+    message = str(getattr(response, "message", "")).lower()
+    for words, code in [
+        (("toomanystakinghotkeys",), "staking_hotkey_capacity"),
+        (("insufficient", "balance"), "insufficient_balance"),
+        (("not enough", "balance"), "insufficient_balance"),
+        (("too many", "registration"), "registration_rate_limit"),
+        (("registration", "not allowed"), "registration_disabled"),
+        (("unlock",), "wallet_unlock_failed"),
+        (("outdated",), "outdated_transaction"),
+        (("already registered",), "already_registered"),
+    ]:
+        if all(word in message for word in words):
+            return code
+    return "sdk_registration_failed"
+
+
 def _register(
     *,
     wallet_name: str,
@@ -1551,14 +1672,22 @@ def _register(
             flush=True,
         )
         return False, None
-    registered = bool(
-        subtensor.burned_register(
+    # A pre-existing registration is an SDK success without a new burn. Do not
+    # record it as a purchase or use it to trigger another burst iteration.
+    hotkey_ss58 = wallet.hotkey.ss58_address
+    if subtensor.get_uid_for_hotkey_on_subnet(hotkey_ss58=hotkey_ss58, netuid=netuid) is not None:
+        print("SLOT_REGISTER_REFUSED already_registered", flush=True)
+        return False, None
+    with io.StringIO() as diagnostics, contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
+        response = subtensor.burned_register(
             wallet=wallet,
             netuid=netuid,
             wait_for_inclusion=True,
             wait_for_finalization=True,
         )
-    )
+    registered = extrinsic_succeeded(response)
+    if not registered:
+        print("SLOT_REGISTER_REFUSED " + registration_failure_code(response), flush=True)
     # The registration consumes the current Burn.  Reading Burn afterwards is
     # NOT a receipt: the successful registration has already multiplied it for
     # the next buyer.  That post-read was about 1.25x the pre-flight quote and
@@ -1930,7 +2059,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         executed = False
         realised_tao: float | None = None
         if decision.is_buy:
-            hotkey = next_hotkey_name(_hotkey_names(args.wallet), args.hotkey_prefix)
+            hotkey = registration_hotkey(
+                subtensor, getattr(bittensor, "Wallet", None) or bittensor.wallet,
+                wallet_name=args.wallet, prefix=args.hotkey_prefix, coldkey=coldkey_ss58,
+                live_hotkeys=[slot[1] for slot in state.slots],
+            )
             # Registration recycles FREE TAO. Holding alpha is not holding the
             # means to register, and an empty balance turns every expiring
             # immunity into a permanent loss.
