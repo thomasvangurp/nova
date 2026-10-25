@@ -56,6 +56,13 @@ def prepare(*, args, state, archive: Path, config: Path, root: Path, runner) -> 
         adaptive_confirmation_depth=getattr(args, "adaptive_confirmation_depth", False),
     )
     while True:
+        if getattr(args, "adaptive_confirmation_depth", False):
+            # A parent iteration can refresh the archive while this background
+            # job is alive. Switch snapshots between bounded batches instead
+            # of finishing an obsolete whole-bank proof first.
+            for source, snapshot in ((archive, snapshot_archive), (config, snapshot_config)):
+                if digest(source) != digest(snapshot):
+                    shutil.copy2(source, snapshot)
         _prechecked_comparison_scope(
             args=gate_args, epoch_root=root, epoch=int(state["epoch"]),
             target=state["nanobody_target"], database=args.mutation_database,

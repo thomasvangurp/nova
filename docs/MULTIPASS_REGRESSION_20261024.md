@@ -645,7 +645,9 @@ policy is enabled. Previously eligible entries and measured passing profiles
 receive priority, but must pass the current archive's gates again. Cheap
 Layer-2 batches likewise prioritize those entries. Partial current proof is
 usable while the backlog continues, and pending counts retain every unchecked
-candidate. No stored candidate is charged as a NEW evaluation.
+candidate. A running background precheck refreshes changed archive/config
+snapshots between batches, rather than finishing obsolete work first. No stored
+candidate is charged as a NEW evaluation.
 
 The mandatory adaptive-depth suite covers cold-gate starvation, full and short
 windows, no sub-ten fallback, frozen resume, the actual race runner and

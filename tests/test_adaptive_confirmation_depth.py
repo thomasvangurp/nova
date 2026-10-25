@@ -170,6 +170,25 @@ def test_shipping_enables_policy_without_changing_new_evaluation_cap():
     assert "--adaptive-confirmation-depth" in task
 
 
+def test_running_precheck_refreshes_changed_archive_between_batches(tmp_path, monkeypatch):
+    from nanobody_opt_v2 import cached_confirmation
+    archive, config, root = tmp_path / "archive", tmp_path / "config", tmp_path / "scope"
+    archive.write_text("initial archive"); config.write_text("config")
+    observed = []
+    def batch(**kwargs):
+        observed.append(kwargs["archive"].read_text())
+        publisher._atomic_json(root / "comparison_precheck.json",
+                              {"eligible_count": 1, "pending_count": int(len(observed) == 1)})
+        if len(observed) == 1:
+            archive.write_text("updated archive")
+    monkeypatch.setattr(publisher, "_prechecked_comparison_scope", batch)
+    args = SimpleNamespace(runtime_root=tmp_path, ledger=None, mutation_database=tmp_path / "db",
+                           layer2_concurrency=2, adaptive_confirmation_depth=True)
+    cached_confirmation.prepare(args=args, state={"epoch": 100, "nanobody_target": "TEST"},
+                                archive=archive, config=config, root=root, runner=None)
+    assert observed == ["initial archive", "updated archive"]
+
+
 def test_publisher_floor_resets_after_a_failed_attempt(monkeypatch):
     def failed(args):
         gates.set_evidence_floor(10)
