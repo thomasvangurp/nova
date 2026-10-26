@@ -144,13 +144,34 @@ def phase_cap(phase, stop_at, *, now=None, publish_reserve=PUBLISH_RESERVE_SECON
     return cap
 
 
-def remote(config, host, request):
+# ssh exits 255 for connection-level failures (closed gateway, banner timeout, refused). Every
+# operation is idempotent ('start' is keyed by the job identity, 'poll' only reads), so a few
+# bounded retries are safe and a one-minute gateway blip must not end an epoch.
+TRANSPORT_ATTEMPTS = 5
+TRANSPORT_BACKOFF_SECONDS = 3
+POLL_FAILURE_LIMIT = 8
+
+
+def remote(config, host, request, *, sleep=time.sleep):
     command = ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
                '-oConnectTimeout=8', '-p', str(config['hosts'][host]['port']),
                config['hosts'][host]['address'], 'python3', '-c', shlex.quote(TRANSPORT)]
-    result = subprocess.run(command, input=json.dumps(request).encode(),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=config.get('transport_timeout_seconds', 120))
+    for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(command, input=json.dumps(request).encode(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=config.get('transport_timeout_seconds', 120))
+        except subprocess.TimeoutExpired as cause:
+            if attempt == TRANSPORT_ATTEMPTS:
+                error = RuntimeError('remote transport timed out')
+                error.diagnostics = {'attempts': attempt}
+                raise error from cause
+            sleep(TRANSPORT_BACKOFF_SECONDS * attempt)
+            continue
+        if result.returncode == 255 and attempt < TRANSPORT_ATTEMPTS:
+            sleep(TRANSPORT_BACKOFF_SECONDS * attempt)
+            continue
+        break
     if result.returncode:
         error = RuntimeError('remote transport failed')
         error.diagnostics = {'returncode': result.returncode,
@@ -229,12 +250,24 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         raise TimeoutError('epoch cutoff before launch')
     host, request = phase_request(config, challenge, phase, files, stop_at, clock)
     result = transport(config, host, request)
+    failures = 0
     while result['running']:
         sleep(5)
-        request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock_state(chain)}
-        result = transport(config, host, request)
         if time.time() > stop_at + 15:
             raise TimeoutError('remote receipt deadline')
+        try:
+            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock_state(chain)}
+            result = transport(config, host, request)
+            failures = 0
+        except (RuntimeError, OSError) as error:
+            # The remote job keeps running under its own supervisor; a failed poll is only a
+            # missed look at it. Give up on the phase only after sustained failure.
+            failures += 1
+            if diagnostics is not None:
+                diagnostics.setdefault('poll_failures', []).append(type(error).__name__)
+            if failures > POLL_FAILURE_LIMIT:
+                raise
+            result = {'running': True}
     receipt = result['receipt']
     atomic(local / (phase + '-supervisor.json'), receipt)
     if diagnostics is not None:

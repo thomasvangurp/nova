@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -484,3 +485,90 @@ def test_sanitize_bounds_and_redacts_diagnostic_text():
     assert 'zzzz' not in cleaned and '<redacted>' in cleaned
     assert 'plain line' in cleaned
     assert len(controller.sanitize('y' * 9000)) <= controller.TAIL_BYTES
+
+
+# --- transient transport failures -------------------------------------------------
+
+def _completed(returncode, stdout=b'', stderr=b''):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_remote_retries_connection_level_ssh_failures(tmp_path, monkeypatch):
+    replies = [_completed(255, stderr=b'Connection closed by remote'), _completed(255),
+               _completed(0, stdout=b'banner\n{"running": true}\n')]
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return replies[len(calls) - 1]
+
+    monkeypatch.setattr(controller.subprocess, 'run', fake_run)
+    result = controller.remote(config(tmp_path), 'master', {'operation': 'poll'}, sleep=lambda s: None)
+    assert result == {'running': True} and len(calls) == 3
+
+
+def test_remote_does_not_retry_a_remote_command_failure(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return _completed(1, stderr=b'Traceback')
+
+    monkeypatch.setattr(controller.subprocess, 'run', fake_run)
+    with pytest.raises(RuntimeError):
+        controller.remote(config(tmp_path), 'master', {'operation': 'poll'}, sleep=lambda s: None)
+    assert len(calls) == 1
+
+
+def test_remote_gives_up_after_the_attempt_limit(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return _completed(255, stderr=b'Connection closed')
+
+    monkeypatch.setattr(controller.subprocess, 'run', fake_run)
+    with pytest.raises(RuntimeError):
+        controller.remote(config(tmp_path), 'master', {'operation': 'poll'}, sleep=lambda s: None)
+    assert len(calls) == controller.TRANSPORT_ATTEMPTS
+
+
+def test_run_phase_survives_transient_poll_failures_and_still_collects_the_result(tmp_path):
+    import base64
+    result = base64.b64encode(json.dumps({'candidates': []}).encode()).decode()
+    plan = [{'running': True}, RuntimeError('remote transport failed'), RuntimeError('remote transport failed'),
+            {'running': True},
+            {'running': False, 'receipt': {'reason': 'completed', 'exit_code': 0, 'killed': False,
+                                           'elapsed_seconds': 1.0, 'stderr_tail': ''},
+             'files': {'result.json': result}}]
+    calls = []
+
+    def transport(config_value, host, request):
+        calls.append(request['operation'])
+        step = plan[len(calls) - 1]
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    diagnostics = {}
+    local = tmp_path / 'local'
+    local.mkdir()
+    files = controller.run_phase(config(tmp_path), challenge(), 'native', {'input.json': b'{}'},
+                                 time.time() + 2000, Chain(), local, transport=transport,
+                                 sleep=lambda s: None, diagnostics=diagnostics)
+    assert json.loads(files['result.json']) == {'candidates': []}
+    assert diagnostics['poll_failures'] == ['RuntimeError', 'RuntimeError']
+
+
+def test_run_phase_raises_after_sustained_poll_failure(tmp_path):
+    def transport(config_value, host, request):
+        if request['operation'] == 'start':
+            return {'running': True}
+        raise RuntimeError('remote transport failed')
+
+    local = tmp_path / 'local'
+    local.mkdir()
+    with pytest.raises(RuntimeError):
+        controller.run_phase(config(tmp_path), challenge(), 'native', {'input.json': b'{}'},
+                             time.time() + 2000, Chain(), local, transport=transport,
+                             sleep=lambda s: None)

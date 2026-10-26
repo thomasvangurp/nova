@@ -25,6 +25,10 @@ GRACE_SECONDS = 10.0
 POLL_SECONDS = 1.0
 MAXIMUM_CLOCK_AGE = 180.0
 MAXIMUM_CLOCK_SKEW = 30.0
+# A running child is never killed for a clock that merely stopped updating (a brief Pi-to-host
+# ssh outage looks exactly like that). deadline_unix and wall_seconds stay the hard bounds; only a
+# clock that has been unusable for this long is treated as a controller that is gone.
+CLOCK_GRACE_SECONDS = 600.0
 REQUIRED = ('command', 'cwd', 'environment', 'wall_seconds', 'deadline_unix', 'receipt_path',
             'cpu_slots', 'clock_path', 'epoch', 'epoch_length', 'reserve_blocks')
 # Strip anything that looks like a credential before it can leave the host.
@@ -167,6 +171,7 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
                                      preexec_fn=_cpu_preexec(int(spec['cpu_slots'])))
         receipt['pid'] = child.pid
         reason = None
+        clock_lost_since = None
         while child.poll() is None:
             now = time.time()
             if now >= started_wall + float(spec['wall_seconds']):
@@ -176,9 +181,13 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
             else:
                 left = blocks_remaining(spec['clock_path'], epoch, now)
                 if left is None:
-                    reason = 'clock_unavailable'
-                elif left <= reserve:
-                    reason = 'reserve_blocks'
+                    clock_lost_since = clock_lost_since if clock_lost_since is not None else now
+                    if now - clock_lost_since >= CLOCK_GRACE_SECONDS:
+                        reason = 'clock_unavailable'
+                else:
+                    clock_lost_since = None
+                    if left <= reserve:
+                        reason = 'reserve_blocks'
             if reason:
                 receipt['killed'] = True
                 receipt['killed_hard'] = stop_group(child, grace)

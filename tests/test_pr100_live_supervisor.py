@@ -139,3 +139,21 @@ def test_cli_runs_a_command_end_to_end(tmp_path):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode
     assert code == 0
     assert json.loads(Path(spec['receipt_path']).read_text())['reason'] == 'completed'
+
+
+def test_a_clock_that_goes_stale_mid_run_does_not_kill_a_child_within_the_grace(tmp_path, monkeypatch):
+    # A brief controller-to-host outage stops the clock updates; the healthy child must keep running
+    # and only the hard deadline or wall bound may end it.
+    monkeypatch.setattr(sup, 'MAXIMUM_CLOCK_AGE', 1.0)
+    monkeypatch.setattr(sup, 'CLOCK_GRACE_SECONDS', 30.0)
+    spec = spec_for(tmp_path, [sys.executable, '-c', 'import time; time.sleep(3)'])
+    receipt = sup.supervise(spec, poll=0.05, grace=0.3)
+    assert receipt['reason'] == 'completed' and receipt['killed'] is False
+
+
+def test_a_clock_lost_beyond_the_grace_kills_the_child(tmp_path, monkeypatch):
+    monkeypatch.setattr(sup, 'MAXIMUM_CLOCK_AGE', 1.0)
+    monkeypatch.setattr(sup, 'CLOCK_GRACE_SECONDS', 1.0)
+    spec = spec_for(tmp_path, [sys.executable, '-c', 'import time; time.sleep(60)'], wall_seconds=30)
+    receipt = sup.supervise(spec, poll=0.05, grace=0.3)
+    assert receipt['reason'] == 'clock_unavailable' and receipt['killed'] is True
