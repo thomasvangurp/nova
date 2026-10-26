@@ -82,10 +82,10 @@ MIN_PRODUCER_WAIT_BLOCKS = 20
 #     touch /opt/nova-submit/REFUSE_UNEXPECTED_PRODUCER     (off: rm it)
 # It is read every epoch; no restart is needed either way.
 EXPECTED_ARTIFACT_KIND = "nanobody-fleet"
-EXPECTED_PUBLICATION_STAGES = frozenset({"provisional", "qualified"})
+EXPECTED_PUBLICATION_STAGES = frozenset({"provisional", "qualified", "live_trial"})
 # Layer 1 of R4 (an explicit producer name in the artifact) is not deployed
 # yet; once it is, any value outside this set is unexpected too.
-EXPECTED_PRODUCER_NAMES = frozenset({"publish_current_nanobody"})
+EXPECTED_PRODUCER_NAMES = frozenset({"publish_current_nanobody", "pr100_live_collector"})
 REFUSE_TOGGLE_NAME = "REFUSE_UNEXPECTED_PRODUCER"
 LAST_EXPECTED_NAME = "nanobody_result.last_expected.json"
 PI_ALERTS = Path("/opt/nova-submit/producer_alerts.log")

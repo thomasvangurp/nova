@@ -13,6 +13,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HELD_CONSUMER_SHA256 = 'c25d21e2fa8bf62393e4db67f04a47041a274a139eb525ae0542cae5d15a2a3f'
 LIVE_MARKER = '# PR100_CURRENT_RULE_LIVE_V1'
+DEADLINE_LOOP_SHA256 = '098681cb1456bd5b4214f8071d710dcdaf5d0e0d029ebb8f05f88779e5247541'
+
+
+def patch_live_loop(source: bytes) -> bytes:
+    """Register the honest trial producer/stage; preserve deadline behavior."""
+    if hashlib.sha256(source).hexdigest() != DEADLINE_LOOP_SHA256:
+        raise ValueError('installed deadline loop changed')
+    text = source.decode()
+    replacements = {
+        'EXPECTED_PUBLICATION_STAGES = frozenset({"provisional", "qualified"})':
+            'EXPECTED_PUBLICATION_STAGES = frozenset({"provisional", "qualified", "live_trial"})',
+        'EXPECTED_PRODUCER_NAMES = frozenset({"publish_current_nanobody"})':
+            'EXPECTED_PRODUCER_NAMES = frozenset({"publish_current_nanobody", "pr100_live_collector"})',
+    }
+    for old, new in replacements.items():
+        if text.count(old) != 1:
+            raise ValueError('installed provenance policy differs')
+        text = text.replace(old, new, 1)
+    compile(text, '<pr100-live-loop>', 'exec')
+    return text.encode()
 
 
 def live_sequences(path, epoch, network, netuid, allow_stale, crew):

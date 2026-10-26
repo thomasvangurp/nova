@@ -273,6 +273,19 @@ def test_pi_uses_provisional_checkpoint_evidence_floor(count, expected):
     assert bool(rules.verified_fleet(payload, EPOCH, HASH, 361)['sequence_pool']) is expected
 
 
+def test_annotation_identity_is_stable_for_python311_pi_and312_producer():
+    import ast
+    source = 'def measured(sequence):\n    return sequence\n'
+    modern = ast.parse(source)
+    expected = pr100_filter.annotation_ast_dump(modern)
+    older = ast.parse(source)
+    for node in ast.walk(older):
+        if isinstance(node, ast.FunctionDef):
+            node._fields = tuple(k for k in node._fields if k != 'type_params')
+            if hasattr(node, 'type_params'): del node.type_params
+    assert pr100_filter.annotation_ast_dump(older) == expected
+
+
 def live_trial_checkpoint():
     cp = checkpoint()
     cp.update(publication_stage='live_trial', status='live_trial')

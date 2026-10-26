@@ -68,10 +68,19 @@ def atomic(path, value):
 def annotation_identity():
     # Cache identity follows scientific extraction semantics, not unrelated
     # developability/cache edits elsewhere in this adapter.
-    extraction = ast.dump(ast.parse(inspect.getsource(_annotate_uncached)),
-                          include_attributes=False)
+    extraction = annotation_ast_dump(ast.parse(inspect.getsource(_annotate_uncached)))
     return rules.digest({"runtime": ANNOTATION_RUNTIME, "extraction": extraction,
         "source": hashlib.sha256((ROOT / "utils/germline_identity.py").read_bytes()).hexdigest()})
+
+
+def annotation_ast_dump(tree):
+    """Keep the existing Python-3.12 identity when the Pi reads it on 3.11."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if 'type_params' not in node._fields:
+                node._fields = (*node._fields, 'type_params')
+                node.type_params = []
+    return ast.dump(tree, include_attributes=False)
 
 
 @lru_cache(maxsize=1)

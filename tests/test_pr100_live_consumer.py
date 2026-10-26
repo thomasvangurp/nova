@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.pr100_live_consumer import HELD_CONSUMER_SHA256, patch_live_consumer
+from scripts.pr100_live_consumer import HELD_CONSUMER_SHA256, patch_live_consumer, patch_live_loop
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'tests/fixtures/pr100/pi_consumer_held.py'
@@ -42,6 +42,25 @@ def test_live_patch_preserves_all_other_installed_functions():
         patch_live_consumer(candidate)
     with pytest.raises(ValueError):
         patch_live_consumer(source + b'\n')
+
+
+def test_live_loop_patch_only_registers_new_stage_and_producer(tmp_path):
+    source = (ROOT / 'tests/fixtures/pr100/pi_loop_deadline_fixed.py').read_bytes()
+    candidate = patch_live_loop(source)
+    assert functions(candidate) == functions(source)
+    module = types.ModuleType('_live_loop_test')
+    module.__file__ = str(ROOT / 'tools/pi_epoch_loop.py')
+    exec(compile(candidate, module.__file__, 'exec'), module.__dict__)
+    path = tmp_path / 'fleet.json'
+    artifact = {'artifact_kind': 'nanobody-fleet', 'publication_stage': 'live_trial',
+                'status': 'live_trial', 'producer': {'name': 'pr100_live_collector'},
+                'submissions': [{'publication_stage': 'live_trial'}]}
+    path.write_text(json.dumps(artifact))
+    assert module.artifact_provenance(path)[0] is True
+    artifact['producer']['name'] = 'unrecognized'
+    path.write_text(json.dumps(artifact))
+    assert module.artifact_provenance(path)[0] is False
+    with pytest.raises(ValueError): patch_live_loop(candidate)
 
 
 def test_live_allocation_uses_independent_chain_context(monkeypatch, tmp_path):
