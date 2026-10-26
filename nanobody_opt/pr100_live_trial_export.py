@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import math
 import re
+from pathlib import Path
 
 from nanobody_opt import rules
-from nanobody_opt.simulate_round import METRICS
+from config.config_loader import load_boltzgen_metrics
+
+METRICS = load_boltzgen_metrics(str(Path(__file__).resolve().parents[1] / "config/boltzgen_config.yaml"))
 
 
 def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, now):
