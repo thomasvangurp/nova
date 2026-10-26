@@ -151,3 +151,19 @@ def plan(crew, molecules, sequences, value=None):
     rows.sort(key=lambda r: (-float(value.get(r["uid"], 0.0)),
                              -r["has_molecules"], r["uid"]))
     return rows
+
+
+# Exact installed main I/O statements, isolated from signing and CLI setup.
+from pathlib import Path
+
+def main(arguments):
+    if arguments.pull or arguments.pull_only:
+        pull_producer(arguments.vastai, arguments.producer_label,
+                      arguments.producer_path, Path(arguments.nanobody))
+        if arguments.pull_only:
+            return 0
+    crew = [(int(u), str(h)) for u, h in _load(Path(arguments.crew))]
+    sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
+                                 allow_stale=arguments.allow_stale_nanobody,
+                                 crew=crew)
+    return sequences

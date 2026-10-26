@@ -252,3 +252,12 @@ This operational hold is separate from application promotion and must receive
 local CI and independent review before installation. Install signer support
 first, then the consumer hold, with source-hash preconditions and exact backups.
 The proposed change makes no assertion of a qualified PR100 mining strategy.
+
+The follow-up I/O test found a further dependency before allocation: main read
+the nanobody JSON, and optionally fetched it, before the hold could run. The
+bounded patch now skips only that nanobody fetch/read from 25955; molecule
+loading and validation remain intact. Tests cover both missing and malformed
+nanobody JSON, pull-only behavior, and unchanged pre-cutover behavior. This is
+an independent-path repair, not a bypass of molecule validation or deadlines.
+The first round-5 CLI attempt failed before returning a review. It is recorded
+as a failed attempt, not agreement; the same Opus max review was retried.

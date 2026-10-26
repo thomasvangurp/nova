@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,3 +64,28 @@ def test_actual_signer_null_half_preserves_all_molecule_validation(tmp_path):
     for text in invalid:
         with pytest.raises(ValueError):held.validate_plaintext(text)
     assert source.split(b'    molecule_ids =',1)[1]==path.read_bytes().split(b'    molecule_ids =',1)[1]
+
+
+@pytest.mark.parametrize('failure', [FileNotFoundError, ValueError])
+def test_hold_does_not_read_or_fetch_unusable_nanobody_artifacts(tmp_path, monkeypatch, failure):
+    fixture=ROOT/'tests/fixtures/pr100/pi_consumer_plan.py'
+    source=fixture.read_bytes();path=tmp_path/'held.py'
+    path.write_bytes(patch_consumer(source,expected_sha256=hashlib.sha256(source).hexdigest()))
+    held=load(path,'_held_io_test');reads=[];pulls=[]
+    def read(path):
+        reads.append(path.name)
+        if path.name=='crew.json':return [[7,'public-key']]
+        raise failure('unusable nanobody artifact')
+    monkeypatch.setattr(held,'_load',read,raising=False)
+    monkeypatch.setattr(held,'pull_producer',lambda *args:pulls.append(True),raising=False)
+    args=SimpleNamespace(epoch=25955,pull=True,pull_only=False,vastai='unused',
+        producer_label='unused',producer_path='unused',nanobody='nanobody.json',
+        crew='crew.json',allow_stale_nanobody=True)
+    assert held.main(args)=={}
+    assert reads==['crew.json'] and pulls==[]
+    args.pull_only=True
+    assert held.main(args)==0
+    assert reads==['crew.json'] and pulls==[]
+    args.pull_only=False;args.epoch=25954
+    with pytest.raises(failure):held.main(args)
+    assert reads==['crew.json','crew.json','nanobody.json'] and pulls==[True]

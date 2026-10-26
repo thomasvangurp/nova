@@ -12,6 +12,33 @@ import hashlib
 MARKER = '# PR100_QUALIFICATION_HOLD_V1'
 
 
+def _hold_nanobody_artifact_io(text, activation_epoch):
+    """Keep the independent molecule path free of held nanobody I/O."""
+    functions = [n for n in ast.parse(text).body
+                 if isinstance(n, ast.FunctionDef) and n.name == 'main']
+    if not functions:
+        return text
+    function = functions[0]
+    original = ast.get_source_segment(text, function)
+    pulls = [n for n in ast.walk(function) if isinstance(n, ast.Expr)
+             and isinstance(n.value, ast.Call)
+             and isinstance(n.value.func, ast.Name)
+             and n.value.func.id == 'pull_producer']
+    load = '_load(Path(arguments.nanobody))'
+    if len(pulls) != 1 or original.count(load) != 1:
+        raise ValueError('unsupported nanobody artifact I/O')
+    node = pulls[0]
+    lines = original.splitlines(keepends=True)
+    start, end = node.lineno-function.lineno, node.end_lineno-function.lineno+1
+    indent = ' ' * node.col_offset
+    replacement = (indent + f'if arguments.epoch < {activation_epoch}:\n'
+                   + ''.join('    ' + line for line in lines[start:end]))
+    updated = ''.join(lines[:start]) + replacement + ''.join(lines[end:])
+    updated = updated.replace(load,
+        f'(None if arguments.epoch >= {activation_epoch} else {load})', 1)
+    return text.replace(original, updated, 1)
+
+
 def _allow_molecule_only_plan(text):
     tree = ast.parse(text)
     plans = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'plan']
@@ -44,6 +71,7 @@ def patch_consumer(source: bytes, *, expected_sha256: str, activation_epoch=2595
     if MARKER in text:
         raise ValueError('hold already present')
     text = _allow_molecule_only_plan(text)
+    text = _hold_nanobody_artifact_io(text, activation_epoch)
     tree = ast.parse(text)
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
                  and n.name == 'sequences_by_uid']
