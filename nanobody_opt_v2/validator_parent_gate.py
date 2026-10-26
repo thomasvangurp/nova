@@ -52,7 +52,13 @@ def main() -> None:
 
     silent_log = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     namespace = dict(os=os, pd=pd, bt=SimpleNamespace(logging=silent_log))
+    from nanobody_opt import rules
+    all_archive = target == rules.TARGET
     if args.fetch_archive:
+        if all_archive:
+            from nanobody_opt.fetch_hf_archive import fetch
+            fetch(args.output, target)
+            return
         # huggingface_hub is available in bgen; metanano carries the search stack.
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError
@@ -86,20 +92,20 @@ def main() -> None:
             timeout=180, check=True,
         )
         archive = pd.read_csv(archive_path, float_precision='round_trip')
-    if archive is None or archive.empty:
+    if archive is None or (archive.empty and not all_archive):
         raise ValueError('archive unavailable')
-    top = _rank_binders(archive, 50, 50)[['sequence', 'sequence_hash']]
-    if len(top) != 50:
+    top = _rank_binders(archive, 0 if all_archive else 50, 50)[['sequence', 'sequence_hash']]
+    if not all_archive and len(top) != 50:
         raise ValueError('incomplete top 50')
     # The shared builder normalizes strings and skips missing annotations. Require
     # canonical archive rows and successful AbNumber annotation so neither behavior
     # can silently diverge from index_top_sequences (including its IgBLAST fallback).
     if any(not isinstance(seq, str) or seq != seq.strip().upper()
-           or extract_cdrs(seq) is None for seq in top.sequence):
+           or (not all_archive and extract_cdrs(seq) is None) for seq in top.sequence):
         raise ValueError('top 50 cannot be indexed exactly')
     if any(not isinstance(seq_id, str) or not seq_id for seq_id in top.sequence_hash):
         raise ValueError('invalid top 50 IDs')
-    engine = _build_search_engine(top)
+    engine = (_build_search_engine(top, all_archive=True) if all_archive else _build_search_engine(top))
     results = {}
     for sequence in sequences:
         search = engine.search(
@@ -109,7 +115,7 @@ def main() -> None:
             coarse_min_shared=None,
             coarse_jaccard=None,
         )
-        if search.total_indexed != 50:
+        if search.total_indexed != len(set(top.sequence_hash)):
             raise ValueError('incomplete index')
         cdrs = extract_cdrs(sequence)
         flags = [is_duplicate(m)[0] for m in search.matches]

@@ -21,10 +21,11 @@ SOURCE_PATHS = (
     'utils', 'config', 'combinatorial_db/reactions.py', 'tests', 'scripts',
     'deploy', 'ansible', '.github/workflows', 'requirements',
     'pixi.toml', 'pixi.lock', 'go_live_v2.sh', 'restart_v2.sh', 'deploy_gate.sh',
+    'NOVA-nanobody-filter', 'data/structures/8AOK.cif',
 )
 RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons',
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
-                'tests', 'scripts', 'deploy')
+                'tests', 'scripts', 'deploy', 'NOVA-nanobody-filter', 'data')
 LIVE_CONFIG = {'config/config.yaml', 'config/boltzgen_config.yaml'}
 CONTROL_FILES = frozenset({
     'deploy_gate.sh', 'scripts/release_manifest.py', 'scripts/shipping_checks.py',
@@ -75,6 +76,19 @@ def stage(root: Path, destination: Path, *, profile: str = 'application') -> dic
     if git(root, 'status', '--porcelain', '--untracked-files=all', '--', *SOURCE_PATHS).strip():
         raise ValueError('commit all release-source changes before building')
     names = git(root, 'ls-files', '-z', '--', *SOURCE_PATHS).split('\0')
+    submodules = {}
+    if 'NOVA-nanobody-filter' in names:
+        name = 'NOVA-nanobody-filter'
+        entry = git(root, 'ls-tree', 'HEAD', '--', name).split()
+        if len(entry) != 4 or entry[:2] != ['160000', 'commit']:
+            raise ValueError('filter backend must be a pinned submodule')
+        source = safe_path(root, name)
+        if (git(source, 'rev-parse', 'HEAD').strip() != entry[2]
+                or git(source, 'status', '--porcelain', '--untracked-files=normal').strip()):
+            raise ValueError('filter submodule differs from its committed pin')
+        submodules[name] = entry[2]
+        names.remove(name)
+        names.extend(name + '/' + p for p in git(source, 'ls-files', '-z').split('\0') if p)
     if destination.exists():
         raise ValueError('release destination already exists')
     destination.mkdir(parents=True)
@@ -91,6 +105,8 @@ def stage(root: Path, destination: Path, *, profile: str = 'application') -> dic
         raise ValueError('release is missing the shipping producer or lockfile')
     manifest = {'schema': 1, 'git_sha': revision, 'pixi_lock_hash': files['pixi.lock'],
                 'files': files, 'runtime_files': [p for p in files if runtime_file(p)]}
+    if submodules:
+        manifest['submodules'] = submodules
     if profile == 'release-controls':
         if not CONTROL_FILES <= set(files):
             raise ValueError('release control package is incomplete')

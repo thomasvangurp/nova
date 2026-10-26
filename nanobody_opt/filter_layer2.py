@@ -273,6 +273,8 @@ def main() -> None:
         action="store_true",
         help="stop after the sequence-only nativeness/humanness/VHH gate",
     )
+    parser.add_argument("--all-challenges", action="store_true",
+                        help="offline PR100 annotation only; never a publication pass")
     args = parser.parse_args()
 
     rows = _load_candidates(args.input)
@@ -283,7 +285,15 @@ def main() -> None:
     if not rows:
         raise SystemExit("no candidate sequences found")
 
-    requirements = yaml.safe_load(args.config.read_text())["nanobody_requirements"]
+    config = yaml.safe_load(args.config.read_text())
+    requirements = config["nanobody_requirements"]
+    from nanobody_opt import rules
+    if rules.is_pr100(requirements):
+        from nanobody_opt.pr100_filter import run
+        if config.get("nova_preparation_all_challenges"):
+            args.all_challenges = True
+        run(rows, config, args)
+        return
     min_nativeness = float(requirements["min_nativeness_score"])
     min_humanness = float(requirements["min_human_framework_score"])
     enforce_vhh = bool(requirements.get("enforce_vhh_hallmarks", True))

@@ -510,6 +510,13 @@ def _chain_state(path: Path, maximum_age: float) -> dict[str, Any]:
     epoch = int(payload["epoch"])
     if epoch_length < 1 or epoch != block // epoch_length:
         raise ValueError("chain state epoch is internally inconsistent")
+    from nanobody_opt import rules
+    if epoch >= rules.ACTIVATION_EPOCH:
+        info = payload.get("epoch_challenge") or {}
+        expected = rules.challenge(rules.pinned_config(epoch), epoch,
+                                   info.get("epoch_start_block_hash"), epoch_length)
+        if info != expected or payload.get("nanobody_target") != expected["target"]:
+            raise ValueError("chain state lacks the verified PR100 challenge")
     return {
         **payload,
         "block": block,
@@ -535,19 +542,35 @@ def _run(command: list[str]) -> None:
 
 
 def _prepare_epoch(
-    *, root: Path, epoch: int, expected_target: str, live_subtree: str = "live"
+    *, root: Path, epoch: int, expected_target: str, live_subtree: str = "live",
+    chain_state: Path | None = None
 ) -> tuple[Path, Path, str]:
     epoch_root = root / live_subtree / f"epoch{epoch}" / "producer"
     config = epoch_root / "config.yaml"
     _download(CONFIG_URL, config)
-    challenge = yaml.safe_load(config.read_text())["protein_selection"]["nanobody"]
+    from nanobody_opt import rules
+    parsed = rules.for_epoch(yaml.safe_load(config.read_text()), epoch)
+    if epoch >= rules.ACTIVATION_EPOCH:
+        state = json.loads((chain_state or root / "artifacts/chain_state.json").read_text())
+        if int(state["epoch"]) == epoch:
+            info = state.get("epoch_challenge") or {}
+            parsed = rules.bind(parsed, epoch, info.get("epoch_start_block_hash"),
+                                int(state["epoch_length"]))
+        else:
+            parsed["nova_preparation_all_challenges"] = True
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+    challenge = parsed["protein_selection"]["nanobody"]
     target = str(challenge["target"])
     if target != expected_target:
         raise ValueError(
             f"chain miner target {expected_target!r} disagrees with live config {target!r}"
         )
     archive = epoch_root / "archive.csv"
-    _download(ARCHIVE_URL.format(target=target), archive)
+    if target == rules.TARGET:
+        from nanobody_opt.fetch_hf_archive import fetch
+        fetch(archive, target)
+    else:
+        _download(ARCHIVE_URL.format(target=target), archive)
     return config, archive, target
 
 
@@ -840,7 +863,7 @@ def _run_iteration(
         root=args.runtime_root,
         epoch=epoch,
         expected_target=target,
-        live_subtree=_producer_subtree(args),
+        live_subtree=_producer_subtree(args), chain_state=args.chain_state,
     )
     producer_root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
     iteration_root = iteration_root_override or producer_root / f"iteration_{iteration:02d}"
@@ -927,7 +950,7 @@ def _run_iteration(
     # archive once here; the layer-2 novelty gate below reuses the same file.
     hf_archive = iteration_root / "hf_archive.csv"
     if not hf_archive.is_file():
-        _run([sys.executable, "-m", "nanobody_opt.fetch_hf_archive", str(hf_archive)])
+        _run([sys.executable, "-m", "nanobody_opt.fetch_hf_archive", str(hf_archive), "--target", target])
     if not top50.is_file():
         _run([
             "/usr/local/bin/pixi", "run",
@@ -1362,7 +1385,7 @@ def _run_iteration(
         _run([
             sys.executable,
             "-m", "nanobody_opt.fetch_hf_archive",
-            str(hf_archive),
+            str(hf_archive), "--target", target,
         ])
     layer2_dedup = iteration_root / "layer2_dedup.json"
     if not layer2_dedup.is_file() or _artifact_policy_stale(layer2_dedup):
@@ -2362,6 +2385,10 @@ def _prepare_epoch_pool(args, state, epoch: int) -> Path:
     No GPU work uses the synthetic state. The real epoch refreshes the archive
     and novelty gate before screening, and ranks against its own current field.
     """
+    from nanobody_opt import rules
+    if epoch >= rules.ACTIVATION_EPOCH:
+        from nanobody_opt_v2.pr100_epoch import prepare
+        return prepare(args, state, epoch, _producer_subtree(args))
     root = args.runtime_root / _producer_subtree(args) / f"epoch{epoch}" / "producer"
     manifest = root / "epoch_candidate_pool.json"
     budget = args.epoch_candidate_budget
@@ -2573,7 +2600,7 @@ def _run_complete_screen_pool(args, state) -> str:
     _atomic_json(root / "pooled_roots.json", {"roots": [str(p) for p in prior_roots]})
     config, archive, target = _prepare_epoch(
         root=args.runtime_root, epoch=epoch, expected_target=source["target"],
-        live_subtree=_producer_subtree(args))
+        live_subtree=_producer_subtree(args), chain_state=args.chain_state)
     if source.get("screen_budget_policy") == "unseen-candidates-v2":
         from nanobody_opt_v2.cached_confirmation import start
         start(args=args, state=state, archive=archive, config=config, producer_root=root)
@@ -2583,6 +2610,13 @@ def _run_complete_screen_pool(args, state) -> str:
             runtime_root=args.runtime_root, hf_archive=archive,
             target=target, input_path=args.complete_screen_pool)
         candidates = [c for c in source["candidates"] if c["sequence"] in novel]
+        from nanobody_opt import rules
+        if epoch >= rules.ACTIVATION_EPOCH:
+            settings = yaml.safe_load(config.read_text())
+            expected = rules.context(settings)
+            candidates = [c for c in candidates if not rules.annotation_reason(
+                c.get("pr100_annotation"), settings["nanobody_requirements"],
+                sequence=c["sequence"], epoch_challenge=expected)]
         eligible_count = len(candidates)
         previously_evaluated = 0
         if source.get("screen_budget_policy") == "unseen-candidates-v2":

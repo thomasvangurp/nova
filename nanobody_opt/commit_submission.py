@@ -120,11 +120,13 @@ def validate_plaintext(plaintext: str) -> str:
     if plaintext.count(SUBMISSION_DELIMITER) != 1:
         raise ValueError("a submission must contain exactly one section delimiter")
     molecule_section, sequence_section = plaintext.split(SUBMISSION_DELIMITER, 1)
-    if sequence_section in ("", NULL_TOKEN):
-        raise ValueError("a submission must carry a sequence section")
-    if set(sequence_section) - set("ACDEFGHIKLMNPQRSTVWY"):
+    if sequence_section == "":
+        raise ValueError("a submission must carry a sequence section or null marker")
+    if sequence_section != NULL_TOKEN and set(sequence_section) - set("ACDEFGHIKLMNPQRSTVWY"):
         raise ValueError("sequence must be nonempty canonical amino acids")
     if molecule_section == NULL_TOKEN:
+        if sequence_section == NULL_TOKEN:
+            raise ValueError("refusing to commit two empty competition halves")
         return plaintext
     molecule_ids = [part for part in molecule_section.split(",") if part]
     if len(molecule_ids) != 20 or len(set(molecule_ids)) != 20:

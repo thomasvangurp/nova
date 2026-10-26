@@ -1,0 +1,142 @@
+{
+  "protein_selection": {
+    "small_molecule": {
+      "target": "O15427",
+      "clip_interval": [
+        [
+          1,
+          465
+        ]
+      ]
+    },
+    "nanobody": {
+      "target": "Q9NZQ7",
+      "clip_interval": [
+        [
+          17,
+          132
+        ]
+      ],
+      "structure": "8AOK",
+      "structure_chain": "A",
+      "structure_res_index": "1..115",
+      "structure_binding_site": "37,39,41..44,46,49,51,56,59,94..96,98,100,104..108"
+    }
+  },
+  "competition": {
+    "no_submission_blocks": 10,
+    "nanobody_weight": 0.4
+  },
+  "payout": {
+    "enabled": true,
+    "override_uid": 42
+  },
+  "molecule_requirements": {
+    "num_molecules": 20,
+    "min_entropy": 0.25,
+    "max_similarity_to_historical": 0.5,
+    "filters": {
+      "max_heavy_atoms": 50,
+      "min_heavy_atoms": 10,
+      "max_molecular_weight": 700,
+      "min_molecular_weight": 100,
+      "max_hbd": 5,
+      "max_hba": 10,
+      "max_logp": 7.0,
+      "min_rotatable_bonds": 1,
+      "max_rotatable_bonds": 10,
+      "min_rings": 1,
+      "max_ring_size": 12,
+      "max_spiro_atoms": 2,
+      "max_aromatic_rings": 5,
+      "max_aliphatic_rings": 5,
+      "max_fsp3": 0.8,
+      "max_triple_bonds": 1,
+      "max_amide_bonds": 5,
+      "max_stereocenters": 6,
+      "max_halogens": 6,
+      "max_iodine": 1,
+      "max_bromine": 2,
+      "max_fluorine": 9,
+      "max_phosphorus": 2,
+      "max_nitrogen": 9,
+      "max_oxygen": 9,
+      "max_sulfur": 2,
+      "max_aromatic_nitrogen": 6,
+      "max_aromatic_carbon": 28,
+      "max_aromatic_fraction": 0.92,
+      "min_heteroatom_fraction": 0.05,
+      "max_heteroatom_fraction": 0.65,
+      "max_bertz_ct": 1950,
+      "max_kappa1": 35,
+      "max_kappa2": 17,
+      "max_kappa3": 12,
+      "max_nitrile": 2,
+      "max_hydroxyl": 5
+    }
+  },
+  "reaction_filtering": {
+    "random_valid_reaction": true,
+    "allowed_reactions": [
+      "rxn:1",
+      "rxn:2",
+      "rxn:3",
+      "rxn:4",
+      "rxn:5"
+    ]
+  },
+  "boltz2_config": {
+    "boltz_metric": [
+      "affinity_probability_binary",
+      "affinity_pred_value"
+    ],
+    "combination_strategy": "heavy_atom_normalization",
+    "boltz_mode": "max"
+  },
+  "nanobody_requirements": {
+    "num_sequences": 1,
+    "min_sequence_length": 90,
+    "max_sequence_length": 150,
+    "max_homopolymer_run": 6,
+    "max_di_repeat_pairs": 4,
+    "reject_signal_peptides": true,
+    "sp_window": 12,
+    "sp_hydro_min_in_window": 8,
+    "sp_scan_prefix": 30,
+    "max_similarity_score": 0.95,
+    "num_top_sequences": null,
+    "enforce_vhh_hallmarks": true,
+    "psh_strict_rejection_threshold": 89,
+    "min_human_v_identity": 82,
+    "min_human_j_identity": 86
+  },
+  "germline_filtering": {
+    "v_neighborhood_categories": {
+      "V1": [
+        "IGHV3-23"
+      ],
+      "V2": [
+        "IGHV3-66"
+      ],
+      "V3": [
+        "IGHV3-74"
+      ],
+      "V4": [
+        "IGHV3-7",
+        "IGHV3-11",
+        "IGHV3-43",
+        "IGHV3-48",
+        "IGHV3-53",
+        "IGHV3-64"
+      ]
+    },
+    "cdr3_length_range": {
+      "min": 5,
+      "max": 23
+    }
+  },
+  "boltzgen_config": {
+    "boltzgen_rank_mode": "min",
+    "boltzgen_rank_by": "rank_sum"
+  }
+}

@@ -110,9 +110,10 @@ def check_sequence(seq: str, cfg: dict) -> list[str]:
         fails.append(f"homopolymer={max_run_length(s)}")
     if max_di_repeat_pairs(s) > cfg["max_di_repeat_pairs"]:
         fails.append(f"di_repeat={max_di_repeat_pairs(s)}")
-    if s.count("C") < cfg["min_cysteines"]:
+    # PR100 checks canonical IMGT positions in the annotation stage instead.
+    if "min_cysteines" in cfg and s.count("C") < cfg["min_cysteines"]:
         fails.append(f"cysteines={s.count('C')}")
-    if cfg["min_cysteines"] > 1 and not has_plausible_cys_pair(
+    if cfg.get("min_cysteines", 0) > 1 and not has_plausible_cys_pair(
             s, cfg["cys_pair_min_separation"], cfg["cys_pair_max_separation"]):
         fails.append("no_plausible_cys_pair")
     if cfg.get("reject_signal_peptides", True) and looks_like_signal_peptide(

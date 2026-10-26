@@ -1,53 +1,89 @@
-#!/usr/bin/env python3
-"""Fetch the validator's exact HF archive (P20809_nanobodies.csv).
-
-The validator builds its dedup top-50 from Metanova/Submission-Archive's
-P20809_nanobodies.csv (all history, refreshed every epoch), NOT the live
-leaderboard. Our builder was ranking only the last 15 API epochs, so it indexed
-a different (current-basin) fifty sequences and over-filtered. This fetches the
-real archive with the read-only token at /root/.hftoken, retries, falls back to
-the last cached copy on failure, and refuses an empty result.
-"""
+"""Fetch the public target archive; network errors never mean zero history."""
 from __future__ import annotations
 
-import sys
+import argparse
+import csv
+import io
+import json
+import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 
-URL = "https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/P20809_nanobodies.csv"
-TOKEN_PATH = Path("/root/.hftoken")
+BASE = 'https://huggingface.co/datasets/Metanova/Submission-Archive/resolve/main/'
+INVENTORY = 'https://huggingface.co/api/datasets/Metanova/Submission-Archive/tree/main'
+EMPTY = b'sequence,sequence_hash,epoch\n'
+
+
+def fetch(path: Path, target: str, *, allow_cached=False) -> dict:
+    from nanobody_opt import rules
+    if not re.fullmatch(r'[A-Z0-9]{6,10}', target):
+        raise ValueError('invalid archive target')
+    filename = target + '_nanobodies.csv'
+    payload = None
+    absent = False
+    cached = False
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(BASE + filename, timeout=90) as response:
+                payload = response.read()
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 404 and target == rules.TARGET:
+                with urllib.request.urlopen(INVENTORY, timeout=30) as response:
+                    inventory = json.load(response)
+                    paginated = bool(response.headers.get('Link'))
+                if (not paginated and isinstance(inventory, list) and inventory
+                        and all(isinstance(row, dict) and isinstance(row.get('path'), str)
+                                for row in inventory)
+                        and filename not in {row['path'] for row in inventory}):
+                    payload, absent = EMPTY, True
+                    break
+                raise ValueError('archive absence could not be verified') from None
+        except (OSError, TimeoutError):
+            pass
+    if payload is None:
+        receipt_path = Path(str(path) + '.target.json')
+        if (allow_cached and target != rules.TARGET and path.is_file()
+                and receipt_path.is_file()
+                and json.loads(receipt_path.read_text()).get('target') == target):
+            payload, cached = path.read_bytes(), True
+        else:
+            raise ValueError('current target archive unavailable')
+    reader = csv.DictReader(io.StringIO(payload.decode('utf-8')))
+    if not reader.fieldnames or 'sequence' not in reader.fieldnames:
+        raise ValueError('invalid target archive schema')
+    count = sum(1 for _ in reader)
+    if not count and target != rules.TARGET:
+        raise ValueError('unexpected empty legacy archive')
+    from nanobody_opt.pr100_filter import atomic
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import os
+    import tempfile
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(payload)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    receipt = {'target': target, 'rows': count, 'confirmed_absent': absent, 'cached': cached}
+    atomic(Path(str(path) + '.target.json'), receipt)
+    return receipt
 
 
 def main() -> int:
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/root/P20809_nanobodies.csv")
-    # The archive is a public dataset; the token is optional and only sent when
-    # a /root/.hftoken exists. A gated dataset would need a real read token, but
-    # Submission-Archive resolves anonymously (user_id=public).
-    token = None
-    if TOKEN_PATH.is_file():
-        token = TOKEN_PATH.read_text().strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-
-    data: bytes | None = None
-    for attempt in range(1, 4):
-        try:
-            req = urllib.request.Request(URL, headers=headers)
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                data = resp.read()
-            break
-        except Exception as exc:  # noqa: BLE001
-            print(f"attempt {attempt} failed: {type(exc).__name__}", flush=True)
-
-    if data is None or not data.strip():
-        if out.exists() and out.stat().st_size > 0:
-            print(f"using cached {out} ({out.stat().st_size} bytes)", flush=True)
-            return 0
-        raise SystemExit("HF archive fetch failed and no cached copy")
-
-    out.write_bytes(data)
-    print(f"HF_ARCHIVE_OK bytes={len(data)} -> {out}", flush=True)
-    return 0
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('output', type=Path)
+    parser.add_argument('--target', default='P20809')
+    args = parser.parse_args()
+    try:
+        print(json.dumps({'status': 'archive_ready', **fetch(args.output, args.target, allow_cached=True)}))
+        return 0
+    except (OSError, ValueError):
+        print(json.dumps({'status': 'archive_unavailable', 'target': args.target}))
+        return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

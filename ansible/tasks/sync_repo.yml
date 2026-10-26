@@ -40,6 +40,8 @@
     - {name: tests}
     - {name: scripts}
     - {name: deploy}
+    - {name: NOVA-nanobody-filter}
+    - {name: data}
   loop_control:
     label: "{{ item.name }}"
   changed_when: true

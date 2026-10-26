@@ -267,6 +267,10 @@ def checkpoint_is_better(
         return True
     if previous.get("epoch") != candidate.get("epoch"):
         return True
+    if (previous.get("target") != candidate.get("target") or
+            (previous.get("pr100_evidence") or {}).get("challenge") !=
+            (candidate.get("pr100_evidence") or {}).get("challenge")):
+        return True
     if assigned_sequence:
         previous_sequences = previous.get("sequences")
         held = (
@@ -348,6 +352,20 @@ def main() -> None:
             f"live config targets {configured_target!r}, not {args.target!r}"
         )
     requirements = config["nanobody_requirements"]
+    from nanobody_opt import rules
+    current_challenge = rules.context(config) if rules.is_pr100(requirements) else None
+    evidence_by_sequence = {}
+    if current_challenge:
+        if current_challenge["epoch"] != args.epoch:
+            raise ValueError("publication config belongs to a different epoch")
+        for source in args.layer2:
+            for row in json.loads(source.read_text()).get("candidates", []):
+                try:
+                    rules.validate_evidence(row.get("pr100_evidence"), row["sequence"],
+                                            current_challenge, config)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                evidence_by_sequence[row["sequence"]] = row["pr100_evidence"]
     if int(requirements["num_sequences"]) != 1:
         raise SystemExit("publisher currently supports exactly one nanobody")
 
@@ -404,6 +422,9 @@ def main() -> None:
             continue
         if seq not in _layer2_passes(args.layer2):
             print(f"PUBLISH_SKIP {seq[:16]}: lacks a current Layer-2 pass", flush=True)
+            continue
+        if current_challenge and seq not in evidence_by_sequence:
+            print("PUBLISH_SKIP: missing PR100 current-challenge evidence", flush=True)
             continue
         if seq in archive_sequences:
             print(f"PUBLISH_SKIP {seq[:16]}: already in the current archive", flush=True)
@@ -542,6 +563,8 @@ def main() -> None:
         from nanobody_opt.confirmation_depth import decision
         payload["confirmation_depth"] = decision(epoch=args.epoch, target=args.target,
                                                 minimum=args.minimum_observations, schedule=[])
+    if current_challenge:
+        payload["pr100_evidence"] = evidence_by_sequence[sequence]
     try:
         previous = json.loads(args.output.read_text())
     except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):

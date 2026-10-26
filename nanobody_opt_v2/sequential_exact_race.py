@@ -849,7 +849,12 @@ def _prepare_broad_confirmation(*, args, ranking, exclude, metadata, gpus, timin
                  if "--cache-dir" in command else None)
 
     def cached(sequence):
-        result = cached_developability_result(sequence, cache_dir) if cache_dir else None
+        from nanobody_opt import rules
+        if args.target == rules.TARGET:
+            from nanobody_opt.pr100_filter import cached_result
+            result = cached_result(sequence, cache_dir) if cache_dir else None
+        else:
+            result = cached_developability_result(sequence, cache_dir) if cache_dir else None
         return result["passed"] if result is not None else None
 
     known_failed = {s for s in ordered if cached(s) is False}

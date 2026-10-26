@@ -32,7 +32,7 @@ at import time or during argument parsing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import argparse
 import csv
@@ -148,6 +148,15 @@ class ChainView(NamedTuple):
     block: int
     epoch_length: int
     neurons: list[dict[str, Any]]
+
+
+def _target_archive(target: str, destination: Path) -> None:
+    from nanobody_opt import rules
+    if target == rules.TARGET:
+        from nanobody_opt.fetch_hf_archive import fetch
+        fetch(destination, target)
+    else:
+        _atomic_download(ARCHIVE_URL.format(target=target), destination)
 
 
 def _atomic_download(url: str, destination: Path) -> None:
@@ -760,6 +769,7 @@ def _is_current_qualified(
             expected_epoch=epoch,
             min_sequence_length=int(requirements["min_sequence_length"]),
             max_sequence_length=int(requirements["max_sequence_length"]),
+            epoch_start_block_hash=((payload.get("pr100_evidence") or {}).get("challenge") or {}).get("epoch_start_block_hash"),
         )
     except (KeyError, TypeError, ValueError, NanobodyCheckpointError):
         return False
@@ -1223,6 +1233,10 @@ def _prechecked_comparison_scope(
             "check_validator_novelty.py", "filter_layer2.py",
         )},
     }
+    from nanobody_opt import rules
+    if target == rules.TARGET:
+        proof_key["pr100_code"] = {name: _file_digest(args.nanobody_opt_root / name)
+                                   for name in ("rules.py", "pr100_filter.py")}
     if cheap_only:
         proof_key.update(confirmation_only=True, minimum_observations=minimum)
     if getattr(args, "adaptive_confirmation_depth", False):
@@ -1564,7 +1578,15 @@ def _publish_fleet(
     # exactly what the shortfall path already means.
     published: list[fleet_module.Assignment] = []
     rejected: list[tuple[int, str]] = []
-    for assignment in assignments:
+    from nanobody_opt import rules
+    checkpoint_assignments = list(assignments)
+    if epoch >= rules.ACTIVATION_EPOCH and assignments:
+        # Spares also need complete independent evidence before Pi may bind
+        # them to a newly acquired slot. Negative IDs are local staging only.
+        checkpoint_assignments.extend(replace(assignments[0], uid=-(i + 1), sequence=s)
+                                      for i, s in enumerate(sequence_pool)
+                                      if s not in assigned_sequences)
+    for assignment in checkpoint_assignments:
         destination = staging_root / stage / f"uid{assignment.uid}.json"
         command = [
             str(bgen_python), str(nanobody_opt_root / "publish_checkpoint.py"),
@@ -1604,13 +1626,15 @@ def _publish_fleet(
             )
             continue
         checkpoints[assignment.sequence] = checkpoint
-        published.append(assignment)
+        if assignment.uid >= 0:
+            published.append(assignment)
 
-    if rejected:
+    rejected_uids = [(uid, reason) for uid, reason in rejected if uid >= 0]
+    if rejected_uids:
         print(
-            f"{PUBLISH_FLEET_REJECTED} {len(rejected)} of {len(assignments)} "
+            f"{PUBLISH_FLEET_REJECTED} {len(rejected_uids)} of {len(assignments)} "
             "uid(s) could not be published this epoch: "
-            + ", ".join(f"uid {uid} ({why})" for uid, why in rejected),
+            + ", ".join(f"uid {uid} ({why})" for uid, why in rejected_uids),
             file=sys.stderr,
             flush=True,
         )
@@ -1629,6 +1653,10 @@ def _publish_fleet(
         unassigned=fleet_module.uncovered(crew, published),
         sequence_pool=sequence_pool,
     )
+    if epoch >= rules.ACTIVATION_EPOCH:
+        artifact["sequence_pool_checkpoints"] = checkpoints
+        artifact["sequence_pool"] = [s for s in sequence_pool if s in checkpoints]
+        artifact["sequence_pool_size"] = len(artifact["sequence_pool"])
     if getattr(args, "_confirmation_depth", None) is not None:
         artifact["confirmation_depth"] = args._confirmation_depth
     if getattr(args, "_submission_timing", None) is not None:
@@ -2375,7 +2403,16 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
         novelty_path = epoch_root / "provisional_novelty.json"
         cdr_path = epoch_root / "provisional_cdrs.json"
         _atomic_download(CONFIG_URL, config_path)
-        config = yaml.safe_load(config_path.read_text())
+        from nanobody_opt import rules
+        config = rules.for_epoch(yaml.safe_load(config_path.read_text()), epoch)
+        if epoch >= rules.ACTIVATION_EPOCH:
+            raw_state = json.loads(args.chain_state.read_text())
+            if int(raw_state["epoch"]) != epoch:
+                raise ValueError("publication challenge epoch changed")
+            config = rules.bind(config, epoch,
+                                (raw_state.get("epoch_challenge") or {}).get("epoch_start_block_hash"),
+                                int(raw_state["epoch_length"]))
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False))
         configured_target = str(config["protein_selection"]["nanobody"]["target"])
         if args.target is not None and configured_target != args.target:
             raise SystemExit(
@@ -2442,7 +2479,7 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
                 )
             ]
             if unsealed:
-                _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
+                _target_archive(target, archive_path)
                 archive_ready = True
                 _run(_import_exact_command(
                     bgen_python=bgen_python,
@@ -2525,7 +2562,7 @@ def _publish_once_current_epoch(args: argparse.Namespace) -> None:
             _live_publication_pool(previous, epoch),
         )
         if not archive_ready:
-            _atomic_download(ARCHIVE_URL.format(target=target), archive_path)
+            _target_archive(target, archive_path)
         # A bank/crew match alone cannot reuse eligibility under changed rules.
         gate_fingerprint = [_file_digest(config_path), _file_digest(archive_path),
                             _file_digest(exclusion_path)]

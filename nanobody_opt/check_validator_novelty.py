@@ -29,6 +29,8 @@ def _rank_binders(archive: pd.DataFrame, top: int, max_violations: int):
     our fleet sat at 0.95+ identity to the live rank-1 sequence. Replaying a
     gate with a lookalike of its inputs proves nothing.
     """
+    if top == 0:
+        return archive.copy()
     # Loaded by path, not as utils.minmax_weighted_rank: utils/__init__.py
     # pulls in rdkit, which the metanano environment does not carry. This is
     # still the validator's own source file, not a copy of it.
@@ -79,7 +81,10 @@ def duplicate_reason(
     return None
 
 
-def _build_search_engine(top: pd.DataFrame):
+def _build_search_engine(top: pd.DataFrame, *, all_archive: bool = False):
+    if all_archive:
+        from nanobody_opt.pr100_filter import activate_filter
+        activate_filter()
     from metanano.config import SearchConfig
     from metanano.search import IndexManager, SearchEngine
     from metanano.utils.alignment import AlignmentEngine
@@ -89,10 +94,25 @@ def _build_search_engine(top: pd.DataFrame):
     config = SearchConfig()
     index = IndexManager(config)
     engine = SearchEngine(config, index, AlignmentEngine(config.fine_alignment))
+    numbered = {}
+    if all_archive and len(top):
+        from abnumber import Chain
+        # Match PR100's archive-side AbNumber batch annotation, retaining rows
+        # with missing CDR data for its whole-sequence fallback check.
+        items = {str(i): str(s).strip().upper() for i, s in enumerate(top.sequence)}
+        for start in range(0, len(items), 512):
+            batch = {str(i): items[str(i)] for i in range(start, min(start + 512, len(items)))}
+            chains, _ = Chain.batch(batch, scheme="imgt")
+            numbered.update(chains)
     for selection_rank, row in enumerate(top.itertuples(index=False), start=1):
         sequence = str(row.sequence).strip().upper()
-        cdrs = extract_cdrs(sequence)
-        if cdrs is None:
+        if all_archive:
+            chain = numbered.get(str(selection_rank - 1))
+            cdrs = ({key: str(getattr(chain, key + "_seq") or "")
+                     for key in ("cdr1", "cdr2", "cdr3")} if chain is not None else None)
+        else:
+            cdrs = extract_cdrs(sequence)
+        if cdrs is None and not all_archive:
             # Match index_top_sequences: a top-50 sequence whose CDRs cannot be
             # annotated is skipped (its igblast fallback is broken upstream --
             # called with a path against a Dict[str, str] signature), so it is
@@ -117,9 +137,10 @@ _WORKER_NO_CDR_GATE = False
 
 def _init_worker(top: pd.DataFrame, historical: set[str],
                  identity_threshold: float = 0.95,
-                 no_cdr_gate: bool = False) -> None:
+                 no_cdr_gate: bool = False, all_archive: bool = False) -> None:
     global _WORKER_ENGINE, _WORKER_HISTORICAL, _WORKER_IDENTITY_THRESHOLD, _WORKER_NO_CDR_GATE
-    _WORKER_ENGINE = _build_search_engine(top)
+    _WORKER_ENGINE = (_build_search_engine(top, all_archive=True) if all_archive
+                      else _build_search_engine(top))
     _WORKER_HISTORICAL = historical
     _WORKER_IDENTITY_THRESHOLD = identity_threshold
     _WORKER_NO_CDR_GATE = no_cdr_gate
@@ -225,6 +246,10 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    from nanobody_opt import rules
+    all_archive = args.target == rules.TARGET
+    if all_archive:
+        args.top = 0
 
     candidates = _load_candidates(args.input)
     if not candidates:
@@ -250,7 +275,7 @@ def main() -> None:
     # No pre-filter of our own: rank_binders applies the liability filter
     # itself, exactly as index_top_sequences hands it the raw frame.
     top = _rank_binders(archive, args.top, args.max_liability_violations)
-    if len(top) != args.top:
+    if args.top and len(top) != args.top:
         # Degrade instead of aborting: a thin archive must not kill the gate.
         # A partial/empty top index simply yields fewer duplicate matches (an
         # empty index passes everything as novel, matching the validator's own
@@ -278,7 +303,7 @@ def main() -> None:
     # per candidate), amortizing its cost across however many candidates
     # that worker handles.
     if args.concurrency <= 1:
-        _init_worker(top, historical, args.identity_threshold, args.no_cdr_gate)
+        _init_worker(top, historical, args.identity_threshold, args.no_cdr_gate, all_archive)
         results = [_search_one(candidate) for candidate in candidates]
     else:
         import concurrent.futures
@@ -286,7 +311,7 @@ def main() -> None:
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=min(args.concurrency, len(candidates)),
             initializer=_init_worker,
-            initargs=(top, historical, args.identity_threshold, args.no_cdr_gate),
+            initargs=(top, historical, args.identity_threshold, args.no_cdr_gate, all_archive),
         ) as pool:
             results = list(pool.map(_search_one, candidates))
 

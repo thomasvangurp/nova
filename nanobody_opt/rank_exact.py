@@ -49,6 +49,29 @@ LEADERBOARD_API_ROOT = "https://compound-api.metanova-labs.ai"
 VALIDATOR_DUPLICATE_IDENTITY = 0.95
 
 
+def cold_start_reference(archive, observations, *, target, epoch, minimum_rows):
+    """Use measured new-target folds only while the public field is being born.
+
+    This is an internal selection reference, never evidence of competitive
+    performance against rivals or a comparable old-target rank-sum.
+    """
+    from nanobody_opt import rules
+    if (target != rules.TARGET or epoch is None
+            or not rules.ACTIVATION_EPOCH <= epoch < rules.ACTIVATION_EPOCH + 3
+            or len(archive) >= minimum_rows):
+        return None
+    records = []
+    for sequence, folds in observations.items():
+        if (not folds or any(any(k not in fold or not math.isfinite(float(fold[k]))
+                                 for k in METRICS) for fold in folds)):
+            continue
+        records.append({"sequence": sequence, **{
+            key: statistics.mean(float(fold[key]) for fold in folds) for key in METRICS}})
+    if len(records) < 2:
+        raise ValueError("new-target ranking needs at least two complete measured candidates")
+    return pd.DataFrame(records)
+
+
 def _exact_run_ids(paths: list[Path]) -> set[str]:
     result = set()
     for path in paths:
@@ -1395,6 +1418,13 @@ def main() -> None:
     historical_sequences = set(
         full_archive.sequence.dropna().astype(str).str.strip().str.upper()
     )
+    observations_by_sequence = _observations(args.exact, args.target)
+    cold_reference = cold_start_reference(full_archive, observations_by_sequence,
+        target=args.target, epoch=args.before_epoch, minimum_rows=args.field_size)
+    if cold_reference is not None:
+        full_archive = cold_reference
+        args.field_size = min(args.field_size, len(full_archive))
+        args.db_field_count = args.api_field_count = 0
     excluded_sequences = _excluded_sequences(args.exclude_file)
     archive = full_archive.tail(args.recent).reset_index(drop=True)
     if len(archive) < args.field_size:
@@ -1432,7 +1462,10 @@ def main() -> None:
                 count=args.db_field_count,
             )
             field_reference_source = "db_cache_public_validator_api"
-            if len(api_fields) < args.minimum_api_fields:
+            from nanobody_opt import rules
+            early_target = (args.target == rules.TARGET and args.before_epoch is not None
+                            and rules.ACTIVATION_EPOCH <= args.before_epoch < rules.ACTIVATION_EPOCH + 3)
+            if len(api_fields) < args.minimum_api_fields and not early_target:
                 raise SystemExit(
                     f"only {len(api_fields)} complete {args.target} cached "
                     f"fields were available; require {args.minimum_api_fields}"
@@ -1447,7 +1480,10 @@ def main() -> None:
                 count=args.api_field_count,
                 scan_limit=args.api_scan_limit,
             )
-            if len(api_fields) < args.minimum_api_fields:
+            from nanobody_opt import rules
+            early_target = (args.target == rules.TARGET and args.before_epoch is not None
+                            and rules.ACTIVATION_EPOCH <= args.before_epoch < rules.ACTIVATION_EPOCH + 3)
+            if len(api_fields) < args.minimum_api_fields and not early_target:
                 raise SystemExit(
                     f"only {len(api_fields)} complete {args.target} leaderboard "
                     f"fields were available; require {args.minimum_api_fields}"
@@ -1474,6 +1510,10 @@ def main() -> None:
                 "random_seed": args.random_seed,
             }
         compiled_fields = [_compile_validator_field(field) for field in fields]
+    if cold_reference is not None:
+        reference.update(source="new_target_local_cohort", target=args.target,
+                         competitive_history_available=False,
+                         comparable_to_prior_target=False)
     # The field the ranker already replays is also the field whose consensus
     # decides which positions are settled, so it costs one pass over sequences
     # we have loaded anyway.
@@ -1640,7 +1680,9 @@ def main() -> None:
     # cached field would rank against a stale cohort).
     multipass_field = None
     if args.selection_order == "multipass":
-        if args.observation_history is not None and args.before_epoch is not None:
+        if cold_reference is not None:
+            multipass_field = cold_reference
+        elif args.observation_history is not None and args.before_epoch is not None:
             multipass_field = pool_recent_fields(fetch_recent_fields_from_db(
                 args.observation_history, target=args.target,
                 before_epoch=args.before_epoch, count=10))

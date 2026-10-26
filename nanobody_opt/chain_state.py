@@ -84,6 +84,7 @@ def build_payload(
     neurons: Sequence[Mapping[str, Any]],
     now: float,
     roster_block: int | None = None,
+    epoch_challenge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the exported view, or refuse if the roster is empty.
 
@@ -104,7 +105,7 @@ def build_payload(
     rows = [dict(row) for row in neurons]
     if not rows:
         raise EmptyRosterError("metagraph exposed no neurons; keeping the last good file")
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "netuid": int(netuid),
         "block": int(block),
@@ -116,6 +117,13 @@ def build_payload(
         "roster_block": int(block if roster_block is None else roster_block),
         "updated_at_unix": float(now),
     }
+    if epoch_challenge is not None:
+        if (epoch_challenge.get("epoch") != payload["epoch"]
+                or epoch_challenge.get("target") != payload["nanobody_target"]
+                or epoch_challenge.get("epoch_length") != payload["epoch_length"]):
+            raise ValueError("chain snapshot and epoch challenge disagree")
+        payload["epoch_challenge"] = dict(epoch_challenge)
+    return payload
 
 
 def write_atomic(path: Path | str, payload: Mapping[str, Any]) -> None:

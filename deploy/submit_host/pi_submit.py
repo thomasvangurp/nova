@@ -141,7 +141,7 @@ def _load(path: Path) -> dict:
 
 def sequences_by_uid(artifact: dict, epoch: int,
                      allow_stale: bool = False,
-                     crew=None) -> dict[int, str]:
+                     crew=None, epoch_start_block_hash=None) -> dict[int, str]:
     """The nanobody half. A stale artifact is refused, not silently reused.
 
     Its epoch is checked because the producer rewrites it every epoch and a
@@ -154,6 +154,12 @@ def sequences_by_uid(artifact: dict, epoch: int,
     epoch's sequence is a worse submission than this epoch's, and a far better
     one than nothing.
     """
+    from nanobody_opt import rules
+    if epoch >= rules.ACTIVATION_EPOCH:
+        artifact = rules.verified_fleet(artifact, epoch, epoch_start_block_hash)
+        allow_stale = False
+        if not artifact["sequence_pool"]:
+            return {}
     stale = int(artifact.get("epoch", -1)) != epoch
     artifact_epoch = int(artifact.get("epoch", -1))
     # Freshness (bug 4, format-robust): prefer the writer's updated_at_unix
@@ -539,18 +545,9 @@ def plan(crew, molecules, sequences, value=None):
         seq = sequences.get(uid, "")
         if not mols and not seq:
             continue
-        if not seq:
-            # The VALIDATOR accepts "molecules|~" -- its parser returns 20
-            # molecules and 0 sequences -- but commit_submission's own
-            # validate_plaintext demands a real sequence and rejects it. Until
-            # that over-strictness is relaxed on the signing path (deliberately,
-            # not under time pressure), such a uid is skipped and said so,
-            # rather than sent to a driver that will refuse it.
-            print(json.dumps(dict(event="skipped_no_sequence", uid=uid)), flush=True)
-            continue
         rows.append(dict(uid=uid, hotkey=hotkey,
-                         plaintext=f"{mols or NULL}|{seq}",
-                         has_molecules=bool(mols), has_sequence=True))
+                         plaintext=f"{mols or NULL}|{seq or NULL}",
+                         has_molecules=bool(mols), has_sequence=bool(seq)))
     # Best first. Commits are serial and the epoch can run out before the list
     # does, so crew order decides which uids get dropped -- and crew order is
     # arbitrary. If anything is going to be lost to the blackout, it must be
@@ -624,9 +621,26 @@ def main(argv=None) -> int:
         if arguments.pull_only:
             return 0
     crew = [(int(u), str(h)) for u, h in _load(Path(arguments.crew))]
-    sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
-                                 allow_stale=arguments.allow_stale_nanobody,
-                                 crew=crew)
+    from nanobody_opt import rules
+    epoch_hash = None
+    if arguments.epoch >= rules.ACTIVATION_EPOCH:
+        import bittensor as bt
+        chain = bt.Subtensor(network=arguments.network)
+        current_block = chain.get_current_block()
+        epoch_length = chain.tempo(arguments.netuid) + 1
+        if current_block // epoch_length != arguments.epoch:
+            raise ValueError("Pi chain epoch changed before PR100 preflight")
+        epoch_hash = chain.determine_block_hash(arguments.epoch * epoch_length)
+    try:
+        sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
+                                     allow_stale=arguments.allow_stale_nanobody,
+                                     crew=crew, epoch_start_block_hash=epoch_hash)
+    except (ValueError, TypeError, KeyError, OSError) as error:
+        if arguments.epoch < rules.ACTIVATION_EPOCH:
+            raise
+        sequences = {}
+        print(json.dumps(dict(event="pr100_nanobody_rejected", error_type=type(error).__name__,
+                              action="retain independently valid molecule submissions")), flush=True)
     fleet_path = Path(arguments.fleet)
     molecules = molecules_by_uid(
         _load(fleet_path) if fleet_path.is_file() else None,
@@ -653,17 +667,8 @@ def main(argv=None) -> int:
     # Validate every plaintext BEFORE committing any of them: a malformed
     # message discovered at uid 9 has already spent eight commitment slots.
     from nanobody_opt.commit_submission import validate_plaintext
-    # validate_plaintext insists on a real sequence, but the VALIDATOR does not:
-    # its own parse_decrypted_submission accepts "molecules|~" and returns 20
-    # molecules with 0 sequences. A uid holding molecules but no qualifying
-    # nanobody -- a freshly registered slot, say -- should still compete on the
-    # compound track. So the molecule half is validated against the local guard
-    # using a placeholder sequence, and the real "molecules|~" is what commits.
-    PLACEHOLDER = "K" * 120
     for row in rows:
         probe = row["plaintext"]
-        if not row["has_sequence"]:
-            probe = f'{probe.split("|", 1)[0]}|{PLACEHOLDER}'
         try:
             validate_plaintext(probe)
         except Exception as error:

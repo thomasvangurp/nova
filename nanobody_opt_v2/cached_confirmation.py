@@ -22,6 +22,10 @@ def read_scope(root: Path, *, epoch: int, target: str, archive: Path,
         from tools.publish_current_nanobody import PUBLISHER_STATE_SCHEMA_VERSION
         proof = json.loads((root / "comparison_precheck.json").read_text())
         key = proof["key"]
+        from nanobody_opt import rules
+        if (target == rules.TARGET and key.get("pr100_code") !=
+                {name: digest(opt_root / name) for name in ("rules.py", "pr100_filter.py")}):
+            return set(), {"ready": False, "reason": "pr100_scope_changed"}
         if (key.get("schema_version") != PUBLISHER_STATE_SCHEMA_VERSION
                 or key.get("policy") != "incremental-layer2-v1"
                 or key.get("epoch") != epoch or key.get("target") != target

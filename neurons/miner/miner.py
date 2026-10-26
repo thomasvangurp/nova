@@ -55,12 +55,24 @@ def _publish_chain_state(state: Dict[str, Any], block: int) -> None:
     if not path_value or state.get("last_chain_state_block") == int(block):
         return
     metagraph = state.get("metagraph")
+    from nanobody_opt import rules
+    epoch = int(block) // int(state["epoch_length"])
+    epoch_challenge = None
+    target = state["config"].nanobody_target
+    if epoch >= rules.ACTIVATION_EPOCH:
+        if state.get("last_challenge_epoch") != epoch:
+            return
+        profile = rules.pinned_config(epoch)
+        epoch_challenge = rules.challenge(profile, epoch, state.get("epoch_start_block_hash"),
+                                          int(state["epoch_length"]))
+        target = epoch_challenge["target"]
     try:
         payload = chain_state.build_payload(
             netuid=int(state["config"].netuid),
             block=int(block),
             epoch_length=int(state["epoch_length"]),
-            nanobody_target=state["config"].nanobody_target,
+            nanobody_target=target,
+            epoch_challenge=epoch_challenge,
             miner_uid=int(state["miner_uid"]),
             # The block the NEURON ROWS were synced at, not the block being
             # written. Without it build_payload falls back to `block`, so the
@@ -98,6 +110,16 @@ def get_challenge_params_from_blockhash(
     }
     if include_reaction:
         result["allowed_reaction"] = f"rxn:{seed % 5 + 1}"
+    return result
+
+
+def bind_nanobody_challenge(params, epoch, block_hash, epoch_length):
+    from nanobody_opt import rules
+    result = {**params, "epoch": epoch, "epoch_start_block_hash": block_hash}
+    if epoch >= rules.ACTIVATION_EPOCH:
+        context = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, epoch_length)
+        result.update(nanobody_target=context["target"], allowed_v=context["allowed_v"],
+                      allowed_cdr3_length=context["allowed_cdr3_length"])
     return result
 
 '''
@@ -640,10 +662,12 @@ async def run_miner(config: argparse.Namespace) -> None:
         nanobody_target=config.nanobody_target,
         include_reaction=config.random_valid_reaction
     )
-    challenge_params["epoch"] = block_to_check // epoch_length
+    challenge_params = bind_nanobody_challenge(challenge_params, block_to_check // epoch_length,
+                                               block_hash, epoch_length)
     # The challenge for this epoch is now in hand; the loop below refreshes it
     # only when the EPOCH NUMBER moves past this one.
     state["last_challenge_epoch"] = challenge_params["epoch"]
+    state["epoch_start_block_hash"] = block_hash
     bt.logging.info(f"Challenge params: {challenge_params}")
     _publish_chain_state(state, current_block)
     # A hot code reload may leave the already-running epoch search in its own
@@ -725,13 +749,16 @@ async def run_miner(config: argparse.Namespace) -> None:
                     nanobody_target=config.nanobody_target,
                     include_reaction=config.random_valid_reaction
                 )
-                challenge_params["epoch"] = epoch_now
+                challenge_params = bind_nanobody_challenge(challenge_params, epoch_now,
+                                                           block_hash, epoch_length)
                 # Mark the epoch handled before anything below can raise: a
                 # failure in the search launch or the submit must not re-run
                 # this branch (and relaunch the search) on the next poll.  A
                 # failure ABOVE (block hash / challenge) leaves it unset, so
                 # the challenge fetch is retried next iteration.
                 state["last_challenge_epoch"] = epoch_now
+                state["epoch_start_block_hash"] = block_hash
+                _publish_chain_state(state, current_block)
                 await schedule_compound_search(
                     state,
                     challenge_params,

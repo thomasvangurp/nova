@@ -457,20 +457,20 @@ def test_pi_receipt_uses_installed_allocation_without_main_or_commits(tmp_path, 
                         None if reason == 'receipt_requires_pi' else original_require(condition, reason))
     monkeypatch.setattr(pi.time, 'time', lambda: NOW)
     artifact = tmp_path / 'trial.json'
-    payload = {'target': 'TEST', 'epoch': 26000, 'sequence_pool': [f'trial-{i}' for i in range(13)]}
+    payload = {'target': 'TEST', 'epoch': 25954, 'sequence_pool': [f'trial-{i}' for i in range(13)]}
     if embedded_stamp: payload['updated_at_unix'] = NOW
     write(artifact, payload)
-    receipt = pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+    receipt = pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=25954,
                          uids=list(range(13)), publication_mtime=NOW)
     assert receipt['accepted_entries'] == 13 and receipt['submission_attempts'] == 0
     assert receipt['consumer_sha256'] == gate.digest(consumer_root / 'pi_submit.py')
     assert receipt['artifact_sha256'] == gate.digest(artifact)
     if not embedded_stamp:
         with pytest.raises(ValueError, match='stale_trial_artifact'):
-            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=25954,
                        uids=list(range(13)), publication_mtime=NOW-901)
         with pytest.raises(ValueError, match='missing_publication_clock'):
-            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=26000,
+            pi.collect(artifact, consumer_root, revision=NEW, target='TEST', epoch=25954,
                        uids=list(range(13)))
 
 

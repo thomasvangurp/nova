@@ -29,12 +29,12 @@ def load_config(path: str = "config/config.yaml"):
     emission_override_enabled = payout_config.get("enabled", False)
 
     molecule_config = config["molecule_requirements"]
-    min_heavy_atoms = molecule_config["min_heavy_atoms"]
-    min_rotatable_bonds = molecule_config["min_rotatable_bonds"]
-    max_rotatable_bonds = molecule_config["max_rotatable_bonds"]
+    min_heavy_atoms = molecule_config.get("min_heavy_atoms")
+    min_rotatable_bonds = molecule_config.get("min_rotatable_bonds")
+    max_rotatable_bonds = molecule_config.get("max_rotatable_bonds")
     num_molecules = molecule_config["num_molecules"]
     min_entropy = molecule_config["min_entropy"]
-    banned_atom_types = molecule_config["banned_atom_types"]
+    banned_atom_types = molecule_config.get("banned_atom_types")
     max_similarity_to_historical = molecule_config["max_similarity_to_historical"]
 
     boltz_config = config["boltz2_config"]
@@ -50,20 +50,25 @@ def load_config(path: str = "config/config.yaml"):
     num_sequences = nanobody_config["num_sequences"]
     min_sequence_length = nanobody_config["min_sequence_length"]
     max_sequence_length = nanobody_config["max_sequence_length"]
-    min_cysteines = nanobody_config["min_cysteines"]
-    cys_pair_min_separation = nanobody_config["cys_pair_min_separation"]
-    cys_pair_max_separation = nanobody_config["cys_pair_max_separation"]
+    min_cysteines = nanobody_config.get("min_cysteines")
+    cys_pair_min_separation = nanobody_config.get("cys_pair_min_separation")
+    cys_pair_max_separation = nanobody_config.get("cys_pair_max_separation")
     max_homopolymer_run = nanobody_config["max_homopolymer_run"]
     max_di_repeat_pairs = nanobody_config["max_di_repeat_pairs"]
     reject_signal_peptides = nanobody_config["reject_signal_peptides"]
     sp_window = nanobody_config["sp_window"]
     sp_hydro_min_in_window = nanobody_config["sp_hydro_min_in_window"]
     sp_scan_prefix = nanobody_config["sp_scan_prefix"]
-    min_nativeness_score = nanobody_config["min_nativeness_score"]
-    min_human_framework_score = nanobody_config["min_human_framework_score"]
+    min_nativeness_score = nanobody_config.get("min_nativeness_score")
+    min_human_framework_score = nanobody_config.get("min_human_framework_score")
     max_similarity_score = nanobody_config["max_similarity_score"]
     num_top_sequences = nanobody_config["num_top_sequences"]
     enforce_vhh_hallmarks = nanobody_config["enforce_vhh_hallmarks"]
+
+    germline_config = config.get("germline_filtering", {})
+    v_neighborhood_categories = germline_config.get("v_neighborhood_categories")
+    length_config = germline_config.get("cdr3_length_range")
+    cdr3_length_range = range(length_config["min"], length_config["max"] + 1) if length_config else None
 
     # Load reaction filtering configuration
     reaction_config = config["reaction_filtering"]
@@ -87,6 +92,7 @@ def load_config(path: str = "config/config.yaml"):
         'min_rotatable_bonds': min_rotatable_bonds,
         'max_rotatable_bonds': max_rotatable_bonds,
         'banned_atom_types': banned_atom_types,
+        'filters': molecule_config.get('filters'),
         'num_molecules': num_molecules,
         'min_entropy': min_entropy,
         'random_valid_reaction': random_valid_reaction,
@@ -111,6 +117,11 @@ def load_config(path: str = "config/config.yaml"):
         'max_similarity_score': max_similarity_score,
         'num_top_sequences': num_top_sequences,
         'enforce_vhh_hallmarks': enforce_vhh_hallmarks,
+        'psh_strict_rejection_threshold': nanobody_config.get('psh_strict_rejection_threshold'),
+        'min_human_v_identity': nanobody_config.get("min_human_v_identity"),
+        'min_human_j_identity': nanobody_config.get("min_human_j_identity"),
+        'v_neighborhood_categories': v_neighborhood_categories,
+        'cdr3_length_range': cdr3_length_range,
         'boltzgen_rank_mode': boltzgen_rank_mode,
         'boltzgen_rank_by': boltzgen_rank_by,
         'max_similarity_to_historical': max_similarity_to_historical,
