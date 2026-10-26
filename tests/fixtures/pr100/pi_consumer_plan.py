@@ -179,3 +179,8 @@ def _identity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
     return sum(1 for a, b in zip(left, right) if a == b) / max(len(left), len(right))
+
+
+def commit_batch(rows, arguments, environment):
+    """External publishing is deliberately absent from this pure fixture."""
+    raise AssertionError('unexpected external publish operation')

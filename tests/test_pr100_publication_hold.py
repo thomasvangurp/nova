@@ -65,6 +65,74 @@ def test_hold_refuses_partial_repair_and_unguarded_routes(before,after,message):
         patch_consumer(changed,expected_sha256=hashlib.sha256(changed).hexdigest())
 
 
+@pytest.mark.parametrize('before,after,message',[
+    ('pull_producer(arguments.vastai, arguments.producer_label,',
+     'different_pull(arguments.vastai, arguments.producer_label,', 'artifact I/O'),
+    ('_load(Path(arguments.nanobody))', 'different_load(Path(arguments.nanobody))', 'artifact I/O'),
+    ('def main(', 'def other_main(', 'main function'),
+    ('def commit_batch(', 'def other_batch(', 'parallel commit function'),
+])
+def test_hold_refuses_missing_io_and_parallel_entrypoint(before,after,message):
+    source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_text()
+    assert before in source
+    changed=source.replace(before,after).encode()
+    with pytest.raises(ValueError,match=message):
+        patch_consumer(changed,expected_sha256=hashlib.sha256(changed).hexdigest())
+
+
+@pytest.mark.parametrize('mode',['normal','one_retry','push_failure','empty'])
+def test_actual_parallel_batch_preserves_wire_and_empty_is_external_noop(monkeypatch,mode):
+    import base64
+    import json
+    import os
+    import sys
+    import nanobody_opt
+    source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_text()
+    old_batch=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='commit_batch')
+    source=source.replace(ast.get_source_segment(source,old_batch),'')
+    source+='\n'+(ROOT/'tests/fixtures/pr100/pi_consumer_batch.py').read_text()
+    raw=source.encode();patched=patch_consumer(raw,expected_sha256=hashlib.sha256(raw).hexdigest())
+    namespace={'json':json,'sys':sys,'base64':base64,'hashlib':hashlib,'blocks_left':lambda *a:100}
+    exec(compile(patched,'patched_actual_batch','exec'),namespace)
+    monkeypatch.setattr(os,'environ',{})
+    if mode=='empty':
+        # Import itself is forbidden: the guard precedes all SDK imports,
+        # chain reads, wallet inspection, encryption and upload.
+        monkeypatch.setitem(sys.modules,'bittensor',None)
+        assert namespace['commit_batch']([],None,None)==(0,0,[])
+        return
+    encrypted=[];pushes=[];attempts={};calls=[]
+    molecules=','.join(f'rxn:1:{i}:2' for i in range(20))
+    rows=namespace['plan']([(i,'public-'+str(i)) for i in range(13)],{i:molecules for i in range(13)},{})
+    def encrypt(uid,message,block):
+        encrypted.append((uid,message,block));return json.dumps([uid,message,block])
+    class Subtensor:
+        def __init__(self,**kwargs):calls.append('chain')
+        def metagraph(self,netuid):return SimpleNamespace(hotkeys=['public-'+str(i) for i in range(13)])
+        def get_current_block(self):return 1234
+        def set_commitment(self,**kwargs):
+            uid=kwargs['wallet'].uid;attempts[uid]=attempts.get(uid,0)+1
+            return not (mode=='one_retry' and uid==1 and attempts[uid]==1)
+    def push(payload):pushes.append(payload);return mode!='push_failure'
+    fake_fleet=SimpleNamespace(local_hotkey_addresses=lambda *a:{})
+    monkeypatch.setattr(nanobody_opt,'fleet',fake_fleet,raising=False)
+    monkeypatch.setitem(sys.modules,'nanobody_opt.fleet',fake_fleet)
+    monkeypatch.setitem(sys.modules,'bittensor',SimpleNamespace(Subtensor=Subtensor,
+        Wallet=lambda **kw:SimpleNamespace(uid=int(kw['hotkey'].split('-')[1]))))
+    monkeypatch.setitem(sys.modules,'bittensor.core.errors',SimpleNamespace(MetadataError=type('MetadataError',(Exception,),{})))
+    monkeypatch.setitem(sys.modules,'btdr',SimpleNamespace(QuicknetBittensorDrandTimelock=lambda:SimpleNamespace(encrypt=encrypt)))
+    monkeypatch.setitem(sys.modules,'files',SimpleNamespace(load_github_path=lambda:'test/repo/main/results',push_submissions=push))
+    monkeypatch.setitem(sys.modules,'nanobody_opt.commit_submission',SimpleNamespace(encoded_payload=namespace['encoded_payload']))
+    args=SimpleNamespace(network='test',netuid=68,wallet_path='unused',wallet_name='unused',
+                         rehearse=False,epoch=25955,blackout_blocks=16)
+    result=namespace['commit_batch'](rows,args,{})
+    assert result==((0,13,[]) if mode=='push_failure' else (13,0,[]))
+    assert len(encrypted)==13 and all(message==molecules+'|~' for _,message,_ in encrypted)
+    assert len(pushes)==1 and len(pushes[0])==13
+    assert all(json.loads(base64.b64decode(encoded))[1]==molecules+'|~' for _,encoded in pushes[0])
+    assert attempts==({} if mode=='push_failure' else {i:2 if mode=='one_retry' and i==1 else 1 for i in range(13)})
+
+
 def test_hold_routes_and_verified_restore_rehearsal():
     source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_bytes()
     original_sha=hashlib.sha256(source).hexdigest()

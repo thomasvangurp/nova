@@ -335,3 +335,42 @@ available. It protects the independent molecule track and avoids automatically
 publishing unqualified nanobodies. A changed activation/pin requires review,
 not an automatic unhold. No additional hardware purchase is authorized by a
 capacity projection.
+
+## Focused hold review 2 and measured feasibility follow-up
+
+Opus max returned CONDITIONAL_GO after 870.6 seconds, with no code blockers
+and explicit installation evidence still required. Both CI profiles for
+feff308 subsequently passed 935 tests, without failures or skips. A Pi-native
+preflight bound the actual installed allocation, planning, identity, main and
+signer functions to the tested fixtures; thirteen-row dry runs at 25954/55/56
+passed with no wallet, signing, upload or network operation. The first two
+preflight attempts failed in the harness because the installed package is a
+namespace package; those attempts are retained and were not install attempts.
+
+The actual parallel branch revealed a real edge case: commit_batch([]) read
+the chain and inspected wallet addresses before returning. Under the hold an
+empty molecule plan becomes routine. The bounded patch now returns before
+all external imports and operations when the batch is empty. Additional tests
+execute the exact installed parallel publisher and payload encoder with fake
+external boundaries: thirteen molecule-only rows, a failed upload, a retry,
+and the empty plan. This is control-flow evidence, not live signing proof.
+The tested fixture contains that actual implementation; every external call
+is replaced before execution. A negative transformation test also caught an
+identifier suffix matching the literal `_load(...)`; the transformer now
+requires the exact AST call, not just its text as a substring.
+
+The oracle now retains twenty upstream files, including ranking.py. New
+tests execute the actual epoch routing/scoring slice through molecule ranking
+with an empty nanobody result, and the actual commitment-window function at
+both strict boundaries. They establish track independence and exclusion of
+old commitments with synthetic model/chain inputs, not live validator results.
+
+The conditional native pilot completed 351 distinct profiles with five passes
+in 1,298.824 seconds. The frozen 32-per-arm samples have shared members; their
+counts are not independent trials. The full proposal corpus audit numbered
+all 2,764 distinct sequences without errors. All 564 repeat emissions occur
+across arms at the same ordinal, consistent with the declared shared framework
+draws. Those contrasts are CDR3-conditional. Pairwise diversity certificates
+are being computed on the retained corpus without GPU calls. No new target
+quality, production readiness or near-optimality claim follows from these
+results. The throughput gap recorded in PR100_PIPELINE_DESIGN remains open.

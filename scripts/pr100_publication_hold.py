@@ -12,6 +12,23 @@ import hashlib
 MARKER = '# PR100_QUALIFICATION_HOLD_V1'
 
 
+def _empty_batch_noop(text):
+    """An empty molecule plan must not access chain, wallets or upload APIs."""
+    functions = [n for n in ast.parse(text).body
+                 if isinstance(n, ast.FunctionDef) and n.name == 'commit_batch']
+    if len(functions) != 1:
+        raise ValueError('exactly one parallel commit function is required')
+    function = functions[0]
+    if [a.arg for a in function.args.args] != ['rows', 'arguments', 'environment']:
+        raise ValueError('unsupported parallel commit interface')
+    first = function.body[0]
+    has_docstring = (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                     and isinstance(first.value.value, str))
+    line = first.end_lineno if has_docstring else first.lineno - 1
+    lines = text.splitlines(keepends=True)
+    return ''.join(lines[:line]) + '    if not rows:\n        return 0, 0, []\n' + ''.join(lines[line:])
+
+
 def _hold_nanobody_artifact_io(text, activation_epoch):
     """Keep the independent molecule path free of held nanobody I/O."""
     functions = [n for n in ast.parse(text).body
@@ -25,7 +42,10 @@ def _hold_nanobody_artifact_io(text, activation_epoch):
              and isinstance(n.value.func, ast.Name)
              and n.value.func.id == 'pull_producer']
     load = '_load(Path(arguments.nanobody))'
-    if len(pulls) != 1 or original.count(load) != 1:
+    loads = [n for n in ast.walk(function) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == '_load'
+             and ast.unparse(n) == load]
+    if len(pulls) != 1 or len(loads) != 1 or original.count(load) != 1:
         raise ValueError('unsupported nanobody artifact I/O')
     node = pulls[0]
     lines = original.splitlines(keepends=True)
@@ -104,6 +124,7 @@ def patch_consumer(source: bytes, *, expected_sha256: str, activation_epoch=2595
     publication_routes(source)
     text = _allow_molecule_only_plan(text)
     text = _hold_nanobody_artifact_io(text, activation_epoch)
+    text = _empty_batch_noop(text)
     tree = ast.parse(text)
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
                  and n.name == 'sequences_by_uid']
@@ -121,10 +142,8 @@ def patch_consumer(source: bytes, *, expected_sha256: str, activation_epoch=2595
              '        return {}\n')
     result = ''.join(lines[:line]) + guard + ''.join(lines[line:])
     compile(result, '<held-pi-consumer>', 'exec')
-    # Apart from the bounded molecule-only planning repair above, this is one
-    # insertion; allocation and all other statements are preserved bytewise.
-    if result.replace(guard, '', 1) != text:
-        raise ValueError('unexpected change outside publication guard')
+    # The installer additionally pins and reviews the complete transformed
+    # bytes: planning, guarded artifact I/O, empty-batch no-op and this guard.
     return result.encode('utf-8')
 
 

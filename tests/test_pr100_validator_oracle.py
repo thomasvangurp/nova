@@ -46,6 +46,60 @@ def test_oracle_bytes_match_the_recorded_upstream_pin():
     assert yaml.safe_load((ORACLE/'config/config.yaml').read_text()) == rules.pinned_config(25955)
 
 
+def test_current_epoch_window_excludes_old_and_cutoff_commitments():
+    start=25955*361;maximum=start+361-16
+    blocks=[start-1,start,start+1,maximum-1,maximum,maximum+1]
+    async def query(**kwargs):
+        index=int(kwargs['params'][1])
+        return SimpleNamespace(value={'block':blocks[index]})
+    async def call(callback,**kwargs):
+        return await callback(SimpleNamespace(substrate=SimpleNamespace(query=query)))
+    namespace={'asyncio':asyncio,'SimpleNamespace':SimpleNamespace,
+               'decode_metadata':lambda value:'opaque-public-commitment'}
+    load_functions(ORACLE/'neurons/validator/commitments.py',['get_commitments'],namespace)
+    commits=asyncio.run(namespace['get_commitments'](SimpleNamespace(call=call),
+        SimpleNamespace(hotkeys=[str(i) for i in range(len(blocks))]),'public-block-hash',68,start,maximum))
+    assert set(commits)=={'2','3'}
+
+
+def test_pinned_epoch_glue_keeps_molecule_ranking_when_no_nanobodies():
+    """Execute the upstream routing/scoring slice; model outputs are fixtures."""
+    import datetime
+    from contextlib import nullcontext
+    logger=SimpleNamespace(info=lambda *a:None,warning=lambda *a:None,error=lambda *a:None,debug=lambda *a:None)
+    namespace={'math':math,'datetime':datetime,'bt':SimpleNamespace(logging=logger)}
+    load_functions(ORACLE/'neurons/validator/ranking.py',
+        ['calculate_scores_for_type','rank_uids','_config_get','_block_or_inf','_parse_timestamp'],namespace)
+    class Config(dict):
+        test_mode=True
+    config=Config(num_molecules=20,num_sequences=1,boltz_mode='max',boltzgen_rank_mode='min')
+    def molecules(**kwargs):
+        assert kwargs['uid_to_data'][7]['sequences']==[]
+        return {7:{'names':['fixture']*20,'smiles':['fixture']*20}}
+    async def nanobodies(**kwargs):return {}
+    def infer(mols,nanos,scores,config):
+        assert set(mols)=={7} and nanos=={}
+        scores[7]['molecule_scores']=[[1.5]*20]
+        return SimpleNamespace(boltz=SimpleNamespace(),boltzgen=None)
+    namespace.update(stage=lambda *a,**kw:nullcontext(),
+        os=SimpleNamespace(environ={}),inference=SimpleNamespace(main=infer),
+        validate_molecules_and_calculate_entropy=molecules,validate_nanobodies=nanobodies,
+        config=config,uid_to_data={7:{'molecules':['fixture']*20,'sequences':[],'block_submitted':25955*361+1}},
+        small_molecule_target=['fixture-target'],nanobody_target=['fixture-target'],allowed_reaction=1,
+        allowed_v='IGHV3-23',allowed_cdr3_length=16)
+    source=ast.parse((ORACLE/'neurons/validator/validator.py').read_text())
+    process=next(n for n in source.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='process_epoch')
+    body=next(n for n in process.body if isinstance(n,ast.Try)).body
+    def assigns(node,name):return isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in node.targets)
+    first=next(i for i,n in enumerate(body) if assigns(n,'score_dict'))
+    last=next(i for i,n in enumerate(body) if assigns(n,'winner_nanobodies'))
+    selected=body[first:last+1]+[ast.Return(value=ast.Tuple(elts=[ast.Name(id=n,ctx=ast.Load()) for n in ['score_dict','molecule_ranks','nanobody_ranks']],ctx=ast.Load()))]
+    wrapper=ast.AsyncFunctionDef(name='run_glue',args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),body=selected,decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper],type_ignores=[])),'pinned_epoch_routing_slice','exec'),namespace)
+    scores,molecule_ranks,nanobody_ranks=asyncio.run(namespace['run_glue']())
+    assert scores[7]['final_molecule_score']==30 and molecule_ranks=={7:1} and nanobody_ranks=={}
+
+
 def oracle_constants():
     source = ORACLE/'utils/constants.py'
     manifest = json.loads((ORACLE/'manifest.json').read_text())
