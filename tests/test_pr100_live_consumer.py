@@ -1,5 +1,6 @@
 """Control tests only: synthetic checkpoint checks are not native proof."""
 import ast
+import builtins
 import hashlib
 import json
 import sys
@@ -60,7 +61,7 @@ def test_live_allocation_uses_independent_chain_context(monkeypatch, tmp_path):
     assert calls[0][2] == {'allow_stale': False, 'crew': [(4, 'owner')], **context}
 
 
-@pytest.mark.parametrize('failure', ['missing', 'malformed', 'chain', 'evidence'])
+@pytest.mark.parametrize('failure', ['missing', 'malformed', 'chain', 'evidence', 'import'])
 def test_live_failure_retains_independent_molecule_path(monkeypatch, tmp_path, failure):
     module = load_candidate()
     path = tmp_path / 'artifact.json'
@@ -73,5 +74,12 @@ def test_live_failure_retains_independent_molecule_path(monkeypatch, tmp_path, f
         return {'epoch_start_block_hash': '0x' + 'a' * 64, 'epoch_length': 361}
     monkeypatch.setattr(module, 'attest_epoch', attest)
     monkeypatch.setattr(module, 'sequences_by_uid', lambda *a, **k: (_ for _ in ()).throw(ValueError('bad evidence')))
+    if failure == 'import':
+        original = builtins.__import__
+        def broken(name, *args, **kwargs):
+            if name == 'nanobody_opt':
+                raise ImportError('rules unavailable')
+            return original(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, '__import__', broken)
     assert module.live_sequences(path, 25956, 'finney', 68, True, []) == {}
     assert module.commit_batch([], None, None) == (0, 0, [])

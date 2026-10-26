@@ -17,10 +17,10 @@ LIVE_MARKER = '# PR100_CURRENT_RULE_LIVE_V1'
 
 def live_sequences(path, epoch, network, netuid, allow_stale, crew):
     """Reject a bad nanobody artifact without discarding the molecule half."""
-    from nanobody_opt import rules
-    if epoch < rules.ACTIVATION_EPOCH:
-        return sequences_by_uid(_load(path), epoch, allow_stale=allow_stale, crew=crew)
     try:
+        from nanobody_opt import rules
+        if epoch < rules.ACTIVATION_EPOCH:
+            return sequences_by_uid(_load(path), epoch, allow_stale=allow_stale, crew=crew)
         artifact = _load(path)
         import bittensor as bt
         attestation = attest_epoch(bt.Subtensor(network=network), epoch, netuid)
@@ -29,6 +29,8 @@ def live_sequences(path, epoch, network, netuid, allow_stale, crew):
             epoch_start_block_hash=attestation['epoch_start_block_hash'],
             epoch_length=attestation['epoch_length'])
     except Exception as error:
+        if epoch < 25955:
+            raise
         print(json.dumps(dict(event='pr100_nanobody_rejected',
             error_type=type(error).__name__,
             action='retain independently valid molecule submissions')), flush=True)
