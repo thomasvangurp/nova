@@ -1,0 +1,43 @@
+[Unit]
+# The Pi-owned PR100 per-epoch nanobody controller.
+#
+# It owns the whole per-epoch path (challenge, archive, sequence, native, score,
+# publication) and runs on the Pi, not on a laptop: the 25956 trial was driven by hand
+# from a Mac session, which is not a writer. The controller never signs anything; the
+# submission loop keeps ownership of the commit.
+#
+# Placeholders: <RELEASE_DIR> is the stamped release tree (it must contain
+# build_stamp.json matching the config's source_sha) and <CONFIG_PATH> the controller
+# config. The installer prints the exact substitutions; nothing here is installed
+# automatically.
+Description=Nova SN68 PR100 per-epoch nanobody controller
+After=network-online.target tailscaled.service nova-submit-loop.service
+Wants=network-online.target
+ConditionPathExists=<RELEASE_DIR>/nanobody_opt/pr100_live_controller.py
+ConditionPathExists=<RELEASE_DIR>/build_stamp.json
+ConditionPathExists=<CONFIG_PATH>
+
+[Service]
+Type=simple
+User=thomasg
+Group=thomasg
+WorkingDirectory=<RELEASE_DIR>
+Environment=HOME=/home/thomasg
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=<CONTROLLER_PYTHON> -B -m nanobody_opt.pr100_live_controller --config <CONFIG_PATH>
+
+# An epoch is 361 blocks (~72 min) and publication must land before the reserve. A
+# crash has to come back inside the same window, not next epoch.
+Restart=always
+RestartSec=20
+
+# Never let a stuck phase wedge the controller past its own publication cutoff.
+TimeoutStopSec=90
+KillMode=mixed
+
+StandardOutput=append:<RELEASE_DIR>/pr100-controller.log
+StandardError=append:<RELEASE_DIR>/pr100-controller.log
+
+[Install]
+WantedBy=multi-user.target
