@@ -834,6 +834,8 @@ def run_preparation(command, *, cutoff_at, timeout, capture_output=True, text=Tr
         return bounded_run(command, deadline=Cutoff(), timeout=timeout, check=False,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except EpochDeadlineExceeded:
+        say(event='preparation_deadline_exceeded', cutoff_at=cutoff_at)
+        pi_alert('ERROR', 'Epoch preparation exceeded its cutoff; process tree stopped and molecules withheld')
         return subprocess.CompletedProcess(command, 124, '', 'preparation_deadline_exceeded')
 
 
