@@ -149,3 +149,19 @@ executable/library-bound CPU query, requiring captured output, no shell/custom
 environment/stdin, clean exit, exact counts and existing owned-tree limits. No
 raw output, argv or environment enters receipts. The native OSError fallback is
 not forced. No other process exception, scientific method, input or budget changes.
+
+
+# Actual loaded-identity result (protocol revision 7)
+
+bc803c0 completed all declared imports and ForceField/loopback/CPU-query checks,
+then failed the loaded identity audit safely. Its 224 unresolved observations
+contained 164 distinct public files and two virtual module metadata labels.
+An explicit readonly inventory now pins those 164 paths; no special mappings
+or unknown executable code are exempted. Both defining Torch sources and their
+bytecodes were already frozen and observed correctly.
+
+The two source-proven ModuleType subclasses are now recognized by actual class
+identity, exact literal label, owner origin and pinned source hash. Separate
+receipt metadata records their provenance. Ordinary relative files and all
+other virtual modules still fail; tests include impostors and actual source-byte
+drift. All prior source commits, failures and diagnostic receipts remain retained.

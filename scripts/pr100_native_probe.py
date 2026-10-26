@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import types
 
 ROOT = Path(__file__).resolve().parents[1]
 if __name__ == '__main__' and not sys.dont_write_bytecode:
@@ -44,6 +45,18 @@ N0_IMPORTS = (
     'metanano.utils.aggrescan3d_wrapper', 'metanano.utils.tnp_wrapper',
     'nanobody_opt.tnp_daemon', 'nanobody_opt.rules', 'openmm.app',
 )
+VIRTUAL_MODULES = {
+    'torch.ops': {
+        'class_module':'torch._ops', 'class_name':'_Ops', 'literal_file':'_ops.py',
+        'source_path':'/root/.pixi/envs/metanano/lib/python3.12/site-packages/torch/_ops.py',
+        'source_sha256':'7e88a7ec282d5d445969d0d00afc7b3ce23ceacc88935a96d52e952f3719e8a4',
+    },
+    'torch.classes': {
+        'class_module':'torch._classes', 'class_name':'_Classes', 'literal_file':'_classes.py',
+        'source_path':'/root/.pixi/envs/metanano/lib/python3.12/site-packages/torch/_classes.py',
+        'source_sha256':'2a3dd93d72e9f19450670b89f3a57b5b5adf245709f6a49a551bbfad33c434bf',
+    },
+}
 
 def diagnostic_roots(stage):
     return [str(stage), '/root/.pixi/envs/metanano/lib', '/root/metanano_shim',
@@ -96,6 +109,8 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
     verify(ROOT, stage, expected_sha=runtime['source_stage_git_sha'], deadline=deadline)
     if runtime.get('diagnostic_origin_roots') != diagnostic_roots(ROOT):
         raise ValueError('unregistered diagnostic roots')
+    if runtime.get('virtual_module_registrations') != VIRTUAL_MODULES:
+        raise ValueError('unregistered virtual module policies')
     if runtime.get('cuda_visible_devices') != '' or runtime.get('refinement_threads') != 1:
         raise ValueError('only the frozen CPU/thread1 comparison is permitted')
     if runtime.get('cpu_thread_settings') != THREADS:
@@ -162,6 +177,11 @@ def verify_n0_receipt(runtime, *, deadline=None):
             child.get('cpu_query_import', {}).get('shell') is not False or
             any(row.get('scope') != 'unused_CPU_only' for row in child.get('plugin_failure_categories', []))):
         raise ValueError('N0 receipt lacks required import evidence')
+    wanted_virtual = [dict(module=name, class_module=r['class_module'], class_name=r['class_name'],
+        literal_file=r['literal_file'], defining_source_path=r['source_path'], defining_source_sha256=r['source_sha256'],
+        scope='source_bound_virtual_module_metadata') for name,r in sorted(VIRTUAL_MODULES.items())]
+    if sorted(identity.get('registered_virtual_module_origins', []), key=lambda row:row.get('module','')) != wanted_virtual:
+        raise ValueError('N0 receipt lacks exact virtual module evidence')
     outer_path = path.parent.parent/'supervisor-receipt.json'
     containment_path = path.parent.parent/'containment.json'
     for key, evidence_path in (('n0_supervisor_receipt_sha256', outer_path), ('n0_containment_sha256', containment_path)):
@@ -304,18 +324,44 @@ def safe_profile(profile):
     return result
 
 
+def registered_virtual_origin(name, module, field, value, runtime, modules=None):
+    """Resolve only two source-proven ModuleType metadata labels to their class source."""
+    if name not in VIRTUAL_MODULES or field != '__file__':
+        return None
+    r = VIRTUAL_MODULES[name]
+    modules = sys.modules if modules is None else modules
+    owner = modules.get(r['class_module'])
+    if (runtime.get('virtual_module_registrations') != VIRTUAL_MODULES or
+            value != r['literal_file'] or not isinstance(module, types.ModuleType) or
+            not isinstance(owner, types.ModuleType) or
+            type(module) is not vars(owner).get(r['class_name']) or
+            type(module).__module__ != r['class_module'] or type(module).__qualname__ != r['class_name'] or
+            vars(module).get('__name__') != name or vars(module).get('__spec__') is not None or
+            vars(owner).get('__file__') != r['source_path'] or
+            runtime['files'].get(r['source_path']) != r['source_sha256']):
+        raise ValueError('virtual module identity differs from registration')
+    return {'module':name, 'class_module':r['class_module'], 'class_name':r['class_name'],
+            'literal_file':value, 'defining_source_path':r['source_path'],
+            'defining_source_sha256':r['source_sha256'], 'scope':'source_bound_virtual_module_metadata'}
+
+
 def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_diagnostics=False):
     """Compare actual import/bytecode/library origins to pre-frozen file hashes."""
     expected = dict(runtime['files'])
     stage = json.loads((ROOT / 'build_stamp.json').read_text())
     expected.update({str((ROOT / name).resolve()): value for name, value in stage['files'].items()})
-    origins, candidates, unresolved = {}, set(), []
+    origins, candidates, unresolved, virtual = {}, set(), [], []
     for name, module in list(sys.modules.items()):
         for field in ('__file__', '__cached__'):
             value = getattr(module, field, None)
             if not isinstance(value, str):
                 continue
-            path = Path(value).resolve()
+            registered = registered_virtual_origin(name, module, field, value, runtime)
+            if registered:
+                virtual.append(registered)
+                path = Path(registered['defining_source_path'])
+            else:
+                path = Path(value).resolve()
             if field == '__cached__' and not path.is_file():
                 continue
             key = str(path)
@@ -349,6 +395,7 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_d
     receipt = {'identity_audit_scope': 'worker_address_space_only',
                'cli_child_loaded_identity_observed': False,
                'module_origins': origins, 'mapped_files': sorted(mapped), 'registered_data_mappings': special,
+               'registered_virtual_module_origins': virtual,
                'unregistered_origins': unresolved, 'checked_file_count': len(checked),
                'unregistered_mapping_class_counts': {kind: sum(kind in x['mapping_classes'] for x in unresolved)
                    for kind in ('deleted', 'memfd', 'dev_shm', 'sysv', 'locale', 'private_tmp')}}

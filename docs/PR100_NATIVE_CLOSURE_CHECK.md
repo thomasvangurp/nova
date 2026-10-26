@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 6, not execution permission. Review before staging or running
+Executable protocol revision 7, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 The sole constructor exception is one exact native import-time XML parameter
@@ -111,6 +111,21 @@ forbidden. Both prior failed N0 receipts remain preserved.
 The inventory now includes the 14 required NumPy testing source/bytecode files.
 Their directory name did not make them optional: SciPy imports them at runtime.
 This is an explicit closure correction, not scientific execution evidence.
+
+Revision 7 freezes the 164 public source/bytecode/library/data files actually
+reported missing by the prior N0 audit (104,672,343 bytes). No wildcard trust or
+special mapping exemption is added. All original runtime hashes stay fixed.
+
+The same audit exposed two PyTorch virtual modules. Native `_Ops` and `_Classes`
+are ModuleType subclasses with literal `__file__` labels `_ops.py` and `_classes.py`;
+resolving those labels against the private CWD invents nonexistent paths. Register
+only `torch.ops` and `torch.classes`, their exact native class object identity,
+class module/name, literal label, module name and absent import spec, plus the
+absolute defining module origin and source hash. Record this interpretation in
+`registered_virtual_module_origins`; hash the defining source and existing
+bytecode normally. Any other relative origin, impostor class, changed label,
+source origin/digest or virtual module remains a failure. This changes provenance
+interpretation only, not native code or scientific behavior.
 
 The interpreter and other entrypoints come from a separate readonly resolved-path
 inventory. The two Aggrescan/FreeSASA binaries may reside only under the explicitly

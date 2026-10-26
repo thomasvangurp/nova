@@ -446,6 +446,64 @@ def test_cpu_query_registration_binds_source_binary_libraries_and_resolution(mon
     with pytest.raises(ValueError):n0.validate_cpu_query_registration(runtime)
 
 
+def virtual_module_fixture(name):
+    import types
+    from scripts import pr100_native_probe as probe
+    r=probe.VIRTUAL_MODULES[name]
+    owner=types.ModuleType(r['class_module']);owner.__file__=r['source_path']
+    cls=type(r['class_name'],(types.ModuleType,),{'__module__':r['class_module'],'__file__':r['literal_file']})
+    setattr(owner,r['class_name'],cls)
+    runtime={'virtual_module_registrations':probe.VIRTUAL_MODULES,'files':{r['source_path']:r['source_sha256']}}
+    return probe,r,cls(name),owner,runtime
+
+
+@pytest.mark.parametrize('name',['torch.ops','torch.classes'])
+def test_exact_torch_virtual_metadata_resolves_to_hashed_defining_source(name):
+    probe,r,module,owner,runtime=virtual_module_fixture(name)
+    row=probe.registered_virtual_origin(name,module,'__file__',r['literal_file'],runtime,{r['class_module']:owner})
+    assert row['defining_source_path']==r['source_path'] and row['defining_source_sha256']==r['source_sha256']
+    assert probe.registered_virtual_origin('other',module,'__file__',r['literal_file'],runtime,{}) is None
+    assert probe.registered_virtual_origin(name,module,'__cached__',r['literal_file'],runtime,{}) is None
+
+
+@pytest.mark.parametrize('failure',['literal','class_impostor','owner_missing','owner_path','owner_class',
+    'class_module','class_qualname','module_name','spec','source_digest','policy'])
+def test_virtual_metadata_rejects_impostors_unregistered_literals_and_source_drift(failure):
+    import types
+    probe,r,module,owner,runtime=virtual_module_fixture('torch.ops');value=r['literal_file']
+    if failure=='literal':value='/tmp/_ops.py'
+    elif failure=='class_impostor':module=types.ModuleType('torch.ops')
+    elif failure=='owner_missing':owner=None
+    elif failure=='owner_path':owner.__file__='/tmp/_ops.py'
+    elif failure=='owner_class':setattr(owner,r['class_name'],object)
+    elif failure=='class_module':type(module).__module__='other'
+    elif failure=='class_qualname':type(module).__qualname__='other'
+    elif failure=='module_name':module.__name__='other'
+    elif failure=='spec':module.__spec__=object()
+    elif failure=='source_digest':runtime['files']={r['source_path']:'0'*64}
+    else:runtime['virtual_module_registrations']={}
+    with pytest.raises(ValueError):
+        probe.registered_virtual_origin('torch.ops',module,'__file__',value,runtime,{r['class_module']:owner})
+
+
+def test_virtual_source_bytes_are_hashed_normally_and_drift_blocks_audit(tmp_path,monkeypatch):
+    probe,r,module,owner,runtime=virtual_module_fixture('torch.ops')
+    monkeypatch.setattr(probe.sys,'modules',{'torch.ops':module,r['class_module']:owner})
+    original=probe.Path.read_text
+    def read(path,*args,**kwargs):
+        if path==probe.ROOT/'build_stamp.json':return json.dumps({'files':{}})
+        if str(path)=='/proc/self/maps':return ''
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(probe.Path,'read_text',read)
+    seen=[]
+    monkeypatch.setattr(probe,'sha_file',lambda path,**kwargs:seen.append(path) or r['source_sha256'])
+    receipt=probe.verify_loaded_identity(runtime,tmp_path/'identity.json',set())
+    assert seen==[r['source_path']] and receipt['registered_virtual_module_origins'][0]['module']=='torch.ops'
+    monkeypatch.setattr(probe,'sha_file',lambda *a,**k:'0'*64)
+    with pytest.raises(ValueError,match='drift'):
+        probe.verify_loaded_identity(runtime,tmp_path/'identity.json',set())
+
+
 def test_research_helpers_do_not_shadow_regular_scientific_scripts_package(tmp_path):
     # Reproduce the actual native package collision in a fresh interpreter.
     package = tmp_path/'scripts'; package.mkdir()
@@ -520,6 +578,10 @@ def test_n1_verifies_receipt_bytes_status_measurements_and_runtime_binding(tmp_p
                'loopback_import':{'bind_count':1,'socket_closed':True,'external_network_operations_permitted':0},
                'cpu_query_import':{'run_count':1,'popen_count':1,'exec_count':1,'return_count':1,'exit_code':0,'shell':False}})
     (tmp_path/'n0').mkdir()
+    receipt['child']['loaded_identity']['registered_virtual_module_origins']=[dict(module=name,
+        class_module=r['class_module'],class_name=r['class_name'],literal_file=r['literal_file'],
+        defining_source_path=r['source_path'],defining_source_sha256=r['source_sha256'],
+        scope='source_bound_virtual_module_metadata') for name,r in probe.VIRTUAL_MODULES.items()]
     path = tmp_path/'n0/receipt.json';path.write_text(json.dumps(receipt))
     outer={'receipt_sha256':probe.sha_file(path),'child_exit_code':0,
            'outer_cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}
