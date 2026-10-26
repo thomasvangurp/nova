@@ -21,9 +21,9 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
         raise ValueError("invalid current challenge")
     if scored.get("target") != target or validity.get("target") != target:
         raise ValueError("scoring target mismatch")
-    for value in (scorer_sha256, settings_file_sha256):
+    for value in (scorer_sha256, settings_file_sha256, validity.get("archive_sha256")):
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-            raise ValueError("missing source or settings file identity")
+            raise ValueError("missing source, settings or archive identity")
     if not isinstance(settings, dict) or not settings:
         raise ValueError("actual scoring settings are required")
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):
@@ -48,19 +48,27 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
         if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                for v in metrics.values()):
             raise ValueError("non-finite measured metrics")
-        joined.append((sequence, metrics, row["pr100_evidence"]))
+        novelty = {key: row["novelty"][key] for key in
+                   ("validator_novel", "exact_historical", "coarse_candidates", "maximum_identity")
+                   if key in row["novelty"]}
+        novelty.update(sequence_hash=rules.sequence_hash(sequence), target=target,
+                       archive_sha256=validity["archive_sha256"])
+        reason = rules.novelty_reason(novelty, sequence, target)
+        if reason:
+            raise ValueError(reason)
+        joined.append((sequence, metrics, row["pr100_evidence"], novelty))
     if not joined:
         raise ValueError("no measured valid candidate")
     checkpoints = {}
-    for sequence, metrics, evidence in joined:
+    for sequence, metrics, evidence, novelty in joined:
         score = float(sum(1 + sum(value > metrics[key] if direction == "max" else value < metrics[key]
-                                 for value in {other[key] for _, other, _ in joined})
+                                 for value in {other[key] for _, other, _, _ in joined})
                           for key, direction in METRICS.items()))
         checkpoints[sequence] = {
             "schema_version": 3, "status": "live_trial", "publication_stage": "live_trial",
             "target": target, "epoch": epoch, "sequences": [sequence], "pr100_evidence": evidence,
             "validation": {"layer_1": {"passed": True, "historically_unique": True,
-                "duplicate_gate_passed": True}, "layer_2": {"passed": True},
+                "duplicate_gate_passed": True, "novelty": novelty}, "layer_2": {"passed": True},
                 "boltzgen": {"exact": False, "runtime_matched": False, "validator_matched": False,
                     "scoring_equivalence_qualified": False, "mode": "live_fast_baseline", "metrics": metrics,
                     "provenance": {"scorer_sha256": scorer_sha256, "settings_sha256": rules.digest(settings),

@@ -289,6 +289,10 @@ def test_annotation_identity_is_stable_for_python311_pi_and312_producer():
 def live_trial_checkpoint():
     cp = checkpoint()
     cp.update(publication_stage='live_trial', status='live_trial')
+    cp['validation']['layer_1'].update(historically_unique=True, duplicate_gate_passed=True,
+        novelty={'validator_novel': True, 'exact_historical': False,
+                 'sequence_hash': rules.sequence_hash(SEQ), 'target': rules.TARGET,
+                 'archive_sha256': 'c' * 64})
     cp['exact'] = {'observation_count': 1}
     cp['selection'] = {'score': 12., 'score_p90': 12.}
     bg = cp['validation']['boltzgen']
@@ -315,6 +319,7 @@ def test_live_trial_relaxes_quality_only(defect):
     if defect == 'no_observation': cp['exact']['observation_count'] = 0
     payload = {'epoch': EPOCH, 'target': rules.TARGET, 'sequence_pool': [SEQ],
                'submissions': [], 'sequence_pool_checkpoints': {SEQ: cp}}
+    payload['archive_sha256'] = 'c' * 64
     assert bool(rules.verified_fleet(payload, EPOCH, HASH, 361)['sequence_pool']) is (defect is None)
 
 

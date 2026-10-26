@@ -25,6 +25,10 @@ ALLOWED_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 class NanobodyCheckpointError(ValueError):
     """Raised when a checkpoint cannot safely be included in a commitment."""
 
+    def __init__(self, message="", *, reason_code="checkpoint_invalid"):
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 def _config_value(config: Any, name: str) -> Any:
     if isinstance(config, Mapping):
@@ -200,6 +204,14 @@ def _validate_live_trial_evidence(payload: Mapping[str, Any], boltzgen: Mapping[
     from nanobody_opt import rules
     if payload['epoch'] < rules.ACTIVATION_EPOCH:
         raise NanobodyCheckpointError('live trials require current PR100 eligibility')
+    layer_one = payload['validation']['layer_1']
+    for flag, code in (("historically_unique", "layer_1_historically_unique_failed"),
+                       ("duplicate_gate_passed", "layer_1_duplicate_gate_failed")):
+        if layer_one.get(flag) is not True:
+            raise NanobodyCheckpointError("live trial novelty gate did not pass", reason_code=code)
+    reason = rules.novelty_reason(layer_one.get("novelty"), payload['sequences'][0], payload['target'])
+    if reason:
+        raise NanobodyCheckpointError("live trial novelty evidence is invalid", reason_code=reason)
     if (boltzgen.get('mode') != 'live_fast_baseline'
             or any(boltzgen.get(k) is not False for k in
                    ('exact', 'runtime_matched', 'validator_matched', 'scoring_equivalence_qualified'))):
@@ -276,7 +288,12 @@ def validate_nanobody_checkpoint(
                 raise ValueError("PR100 target mismatch")
             rules.validate_evidence(payload.get("pr100_evidence"), sequence, expected, config)
         except (ValueError, TypeError, KeyError) as error:
-            raise NanobodyCheckpointError("PR100 validation: " + str(error)) from error
+            message = str(error)
+            code = {"missing or mismatched current-challenge evidence": "pr100_challenge_mismatch",
+                    "filter version mismatch": "pr100_filter_mismatch"}.get(message, message)
+            if code not in rules.HANDOFF_REJECTION_CODES:
+                code = "pr100_evidence_invalid"
+            raise NanobodyCheckpointError("PR100 validation: " + message, reason_code=code) from error
 
     validation = payload.get("validation")
     if not isinstance(validation, dict):

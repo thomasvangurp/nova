@@ -133,12 +133,16 @@ def annotate(sequence, cache_dir):
 
 
 async def develop(sequences, concurrency):
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        raise ValueError("developability concurrency must be a positive integer")
     activate_filter()
     from metanano.services.async_manager import AsyncServiceManager
     from metanano.services.developability_service import DevelopabilityService
     config = helper("aggrescan3d").developability_config()
     config.async_config.max_concurrent_tnp = concurrency
-    config.async_config.batch_size = max(1, len(sequences))
+    # ProfileExecution starts its timeout before semaphore acquisition. Never
+    # enqueue more profiles than can start, or waiting consumes science time.
+    config.async_config.batch_size = max(1, min(concurrency, len(sequences)))
     manager = AsyncServiceManager(config.async_config)
     try:
         result = await DevelopabilityService(config.developability, manager).analyze_batch_async(sequences)

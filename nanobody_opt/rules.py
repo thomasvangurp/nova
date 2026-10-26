@@ -242,6 +242,51 @@ def validate_evidence(evidence, sequence, expected, config):
         raise ValueError(reason)
 
 
+# Only these fixed codes may enter handoff logs. Exception text never does.
+HANDOFF_REJECTION_CODES = frozenset({
+    "checkpoint_invalid", "checkpoint_missing", "checkpoint_sequence_mismatch",
+    "invalid_sequence", "pr100_evidence_invalid", "pr100_challenge_mismatch",
+    "pr100_filter_mismatch", "layer_1_historically_unique_failed",
+    "layer_1_duplicate_gate_failed", "novelty_missing", "novelty_not_passed",
+    "novelty_sequence_mismatch", "novelty_target_mismatch",
+    "novelty_archive_invalid", "novelty_archive_mismatch",
+    "annotation_unavailable", "annotation_policy_mismatch", "annotation_sequence_mismatch",
+    "not_single_heavy_domain", "not_vhh", "canonical_cysteines", "human_v_identity",
+    "human_j_identity", "annotation_reference_missing", "annotation_reference_mismatch",
+    "cdr3_length_unavailable", "wrong_epoch_v_gene", "wrong_epoch_cdr3_length",
+    "developability_unavailable", "developability_red_flags", "psh_unavailable",
+    "psh_threshold", "aggrescan_unavailable_or_failed", "aggrescan_sequence_mismatch",
+    "aggrescan_provenance_mismatch", "aggrescan_threshold", "developability_failed",
+})
+
+
+def novelty_reason(novelty, sequence, target, *, archive_sha256=None):
+    """Check carried search evidence and its bindings; never search an archive."""
+    if not isinstance(novelty, dict):
+        return "novelty_missing"
+    if novelty.get("validator_novel") is not True or novelty.get("exact_historical") is True:
+        return "novelty_not_passed"
+    if novelty.get("sequence_hash") != sequence_hash(sequence):
+        return "novelty_sequence_mismatch"
+    if novelty.get("target") != target:
+        return "novelty_target_mismatch"
+    digest_value = novelty.get("archive_sha256")
+    if not isinstance(digest_value, str) or not re.fullmatch(r"[0-9a-f]{64}", digest_value):
+        return "novelty_archive_invalid"
+    if archive_sha256 is not None and digest_value != archive_sha256:
+        return "novelty_archive_mismatch"
+    return ""
+
+
+def _diagnostic_sequence_hash(sequence):
+    if not isinstance(sequence, str):
+        return None
+    try:
+        return sequence_hash(sequence)
+    except (UnicodeError, ValueError):
+        return None
+
+
 def verified_fleet(payload, epoch, block_hash, epoch_length=None):
     """Filter to independently checked current-challenge checkpointed entries."""
     from compound_miner.nanobody_provider import validate_nanobody_checkpoint
@@ -260,27 +305,64 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
     checkpoints = dict(payload.get("sequence_pool_checkpoints") or {})
     for entry in payload.get("submissions") or []:
         checkpoints[entry.get("sequence")] = entry.get("checkpoint")
+    # Include pool entries without checkpoints in the refusal accounting too.
+    for sequence in payload.get("sequence_pool", []):
+        if isinstance(sequence, str):
+            checkpoints.setdefault(sequence, None)
     valid = {}
+    rejections = []
+    def rejected(sequence, reason_code):
+        rejections.append({"sequence_hash": _diagnostic_sequence_hash(sequence),
+                           "reason_code": reason_code})
     for sequence, checkpoint in checkpoints.items():
+        if checkpoint is None:
+            rejected(sequence, "checkpoint_missing")
+            continue
         try:
             found = validate_nanobody_checkpoint(
                 checkpoint, expected_target=expected["target"], expected_epoch=epoch,
                 min_sequence_length=config["nanobody_requirements"]["min_sequence_length"],
                 max_sequence_length=config["nanobody_requirements"]["max_sequence_length"],
                 epoch_start_block_hash=block_hash, epoch_length=epoch_length)
-            # The checkpoint validator owns the evidence floor. In particular,
-            # schema-3 provisional entries permit a measured first observation;
-            # a second, unconditional ten-pass gate silently disabled that path.
+            # The checkpoint validator owns the observation floor, including
+            # the measured one-observation live-trial path.
             if found != sequence:
+                rejected(sequence, "checkpoint_sequence_mismatch")
                 continue
-        except (ValueError, TypeError, KeyError, AttributeError):
+            if checkpoint.get("publication_stage") == "live_trial":
+                archive = payload.get("archive_sha256")
+                reason = ("novelty_archive_invalid" if not isinstance(archive, str)
+                          or not re.fullmatch(r"[0-9a-f]{64}", archive)
+                          else novelty_reason(checkpoint["validation"]["layer_1"].get("novelty"),
+                                              sequence, expected["target"], archive_sha256=archive))
+                if reason:
+                    rejected(sequence, reason)
+                    continue
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            code = getattr(error, "reason_code", "checkpoint_invalid")
+            rejected(sequence, code if isinstance(code, str) and code in HANDOFF_REJECTION_CODES
+                     else "checkpoint_invalid")
             continue
         valid[sequence] = checkpoint
+    for sequence in payload.get("sequence_pool", []):
+        if not isinstance(sequence, str):
+            rejected(sequence, "invalid_sequence")
     pool = [s for s in payload.get("sequence_pool", []) if isinstance(s, str) and s in valid]
     entries = [e for e in payload.get("submissions", []) if e.get("sequence") in valid]
     for entry in entries:
         if entry["sequence"] not in pool:
             pool.append(entry["sequence"])
+    reason_counts = {}
+    for item in rejections:
+        code = item["reason_code"]
+        reason_counts[code] = reason_counts.get(code, 0) + 1
+    diagnostics = {
+        "status": ("all_rejected" if rejections and not valid else
+                   "partial" if rejections else "accepted" if valid else "empty"),
+        "checked_count": len(valid) + len(rejections), "accepted_count": len(valid),
+        "rejected_count": len(rejections), "usable_sequence_count": len(pool),
+        "reason_counts": reason_counts, "rejections": rejections,
+    }
     return {**payload, "sequence_pool": pool, "sequence_pool_size": len(pool),
             "submissions": entries, "submission_count": len(entries),
-            "sequence_pool_checkpoints": valid}
+            "sequence_pool_checkpoints": valid, "handoff_diagnostics": diagnostics}
