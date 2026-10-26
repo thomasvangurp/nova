@@ -20,6 +20,7 @@ TEST_FILES = (
     'tests/test_pr100_probe.py',
     'tests/test_pr100_native_benchmark.py',
     'tests/test_pr100_resources.py',
+    'tests/test_molecule_conformer_gate.py',
     'tests/test_parent_merit.py',
     'tests/test_epoch_screen_budget.py',
     'tests/test_cached_confirmation.py',
