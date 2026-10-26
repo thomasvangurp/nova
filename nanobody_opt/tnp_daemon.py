@@ -181,7 +181,10 @@ def _strip_hydrogens(input_pdb: str) -> None:
 class _TNPProfiler:
     """Holds a loaded model + metric functions, profiles one sequence."""
 
-    def __init__(self, tmp_root: str | None = None):
+    def __init__(self, tmp_root: str | None = None, *, structure_scorer=None):
+        # Optional research hook runs while the exact refined heavy-atom model
+        # still exists. The socket daemon does not enable it.
+        self._structure_scorer = structure_scorer
         import torch
         # The subprocess path runs NanoBodyBuilder2 --n_threads 1, which is
         # torch.set_num_threads(1).  Match it: the forward must be the same
@@ -202,6 +205,7 @@ class _TNPProfiler:
         import tempfile
 
         name = "seq_%08d" % index
+        aggregation = None
         with tempfile.TemporaryDirectory(dir=self._tmp_root) as tmpdir:
             # 1. ANARCI CDR numbering -> L, L3 (pure sequence, no structure).
             try:
@@ -245,6 +249,9 @@ class _TNPProfiler:
                 return {"passed": False,
                         "reason": "Error: surface patch calc failed: %s" % error}
 
+            if self._structure_scorer is not None:
+                aggregation = self._structure_scorer(sequence, pdb_path)
+
         flags = {
             "L": _assign_flag("L", total_cdr),
             "L3": _assign_flag("L3", cdr3_len),
@@ -266,6 +273,8 @@ class _TNPProfiler:
             "negative_charge_patches": pnc,
             "flags": flags,
         }
+        if aggregation is not None:
+            result["aggrescan3d"] = aggregation
         if red_flags:
             result["red_flags"] = red_flags
             result["reason"] = "; ".join(red_flags)
