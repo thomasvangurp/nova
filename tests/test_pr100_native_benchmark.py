@@ -340,3 +340,99 @@ print(json.dumps({'research_helper_loaded':True,'scientific_package_preserved':T
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0
     assert json.loads(result.stdout) == {'research_helper_loaded': True, 'scientific_package_preserved': True}
+
+
+def test_n0_environment_failure_has_a_specific_safe_stage(tmp_path):
+    from scripts import pr100_runtime_preflight as n0
+    spec = tmp_path/'spec.json'
+    spec.write_text(json.dumps({'private':str(tmp_path),'runtime':{'path':'/unregistered', 'library_path':''}}))
+    assert n0.import_child(spec) == 1
+    receipt = json.loads((tmp_path/'child.json').read_text())
+    assert receipt['stage'] == 'environment' and receipt['error_class'] == 'ValueError'
+    assert set(receipt) == {'status', 'stage', 'error_class'}
+
+
+def test_unresolved_origin_paths_are_actionable_only_inside_public_roots(tmp_path):
+    from scripts.pr100_native_probe import origin_diagnostic
+    root = tmp_path/'public'
+    inside = origin_diagnostic(str(root/'module.so'), [str(root)])
+    assert inside['public_origin_path'] == str(root/'module.so')
+    for path in (str(tmp_path/'private/secret.json'),str(root/'.env'),str(root/'credentials'),'/memfd:private (deleted)'):
+        row = origin_diagnostic(path, [str(root)])
+        assert 'public_origin_path' not in row and len(row['origin_locator_sha256']) == 64
+    assert origin_diagnostic('/memfd:private (deleted)', [])['mapping_classes'] == ['deleted','memfd']
+
+
+def test_staged_namespace_and_filter_origins_reject_prior_qualification_source():
+    from types import SimpleNamespace
+    from scripts.pr100_native_probe import assert_stage_origins, ROOT
+    modules = {'metanano':SimpleNamespace(__file__=str(ROOT/'NOVA-nanobody-filter/metanano/__init__.py')),
+               'nanobody_opt':SimpleNamespace(__file__=None,__path__=[str(ROOT/'nanobody_opt')])}
+    assert set(assert_stage_origins(modules)) == set(modules)
+    modules['metanano.filters.developability'] = SimpleNamespace(__file__='/root/pr100-qualification-20261026/NOVA-nanobody-filter/metanano/filters/developability.py')
+    with pytest.raises(ValueError, match='outside staged'):
+        assert_stage_origins(modules)
+
+
+def test_n1_verifies_receipt_bytes_status_measurements_and_runtime_binding(tmp_path):
+    from scripts import pr100_native_probe as probe
+    base = {'closure_reviewed':False, 'marker':'frozen-runtime'}
+    receipt = dict(status='complete_for_independent_review', conditions=[], child_exitcode=0,
+        runtime_input_sha256=digest(base), harness_sha256=probe.sha_file(probe.ROOT/'scripts/pr100_runtime_preflight.py'),
+        verification={'seconds':2,'hashed_bytes':10}, post_verification={'seconds':1,'hashed_bytes':10},
+        cleanup={'remaining_descendants':0,'fixed_point_reached':True},
+        child={'status':'complete','cpu_platform':'CPU','cpu_threads_property':True,
+               'first_loaded_audit_seconds':1,'loaded_identity':{'unregistered_origins':[],'registered_data_mappings':[]},
+               'staged_module_origins':{'fixture':['registered-source']},
+               'forcefield_import':{'constructor_count':1,'xml_open_count':1}})
+    path = tmp_path/'receipt.json';path.write_text(json.dumps(receipt))
+    runtime = dict(base, closure_reviewed=True, closure_reviewer='test-fixture-reviewer',
+        n0_receipt_path=str(path),n0_receipt_sha256=probe.sha_file(path),
+        n0_measurements=probe.n0_measurements_from_receipt(receipt))
+    assert probe.verify_n0_receipt(runtime)['status'] == receipt['status']
+    bad = dict(runtime,n0_measurements={'verification':{'seconds':.1},'first_loaded_audit_seconds':.1})
+    with pytest.raises(ValueError, match='timing evidence'):
+        probe.verify_n0_receipt(bad)
+    with pytest.raises(ValueError, match='another runtime'):
+        probe.verify_n0_receipt(dict(runtime,marker='changed'))
+    with pytest.raises(ValueError, match='digest'):
+        probe.verify_n0_receipt(dict(runtime,n0_receipt_sha256='not-a-digest'))
+    receipt['status']='NO_GO';path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match='identity mismatch'):
+        probe.verify_n0_receipt(runtime)
+    runtime['n0_receipt_sha256']=probe.sha_file(path)
+    with pytest.raises(ValueError, match='not complete'):
+        probe.verify_n0_receipt(runtime)
+
+
+def test_n0_wall_revision_is_explicit_and_older_contract_rejected():
+    from scripts.pr100_runtime_preflight import N0_WALL_SECONDS, validate_forcefield_registration, FORCEFIELD_IMPORT
+    assert N0_WALL_SECONDS == 120
+    with pytest.raises(ValueError, match='unregistered'):
+        validate_forcefield_registration({'n0_protocol_revision':4,'n0_wall_seconds':60,'n0_forcefield_import':FORCEFIELD_IMPORT})
+
+
+@pytest.mark.parametrize('failure, expected', [('crash','child_receipt_missing'),('rss','sampled_rss_abort')])
+def test_n0_child_crash_and_resource_abort_are_distinct(tmp_path,monkeypatch,failure,expected):
+    # Controller boundary fixtures; no actual subprocess/native calls.
+    from scripts import pr100_runtime_preflight as n0
+    monkeypatch.setattr(n0.probe,'assert_bytecode_disabled',lambda:None)
+    monkeypatch.setattr(n0.sys,'platform','linux')
+    monkeypatch.setattr(n0.probe,'dedicated_controller',lambda:None)
+    monkeypatch.setattr(n0.os,'sched_getaffinity',lambda _:set(range(4)),raising=False)
+    monkeypatch.setattr(n0.os,'sched_setaffinity',lambda *_:None,raising=False)
+    monkeypatch.setattr(n0.probe,'available_memory',lambda:{'cgroup_resolution':'resolved_visible_ancestors','available_bytes':200*1024**3})
+    monkeypatch.setattr(n0.probe,'verify_runtime',lambda *a,**k:{'seconds':1,'hashed_bytes':10})
+    monkeypatch.setattr(n0.probe,'stop_descendants',lambda *a,**k:{'remaining_descendants':0,'fixed_point_reached':True})
+    monkeypatch.setattr(n0.probe,'descendants',lambda:set())
+    monkeypatch.setattr(n0.probe,'process_rss',lambda _:5*1024**3)
+    class Child:
+        returncode=-11 if failure=='crash' else None
+        def poll(self):return self.returncode
+    monkeypatch.setattr(n0.subprocess,'Popen',lambda *a,**k:Child())
+    out=tmp_path/'n0'
+    runtime={'source_stage_root':str(n0.ROOT),'path':'/registered','entrypoints':{'logging_shim':'/registered/shim.py'}}
+    result=n0.check(runtime,out)
+    report=json.loads((out/'receipt.json').read_text())
+    assert expected in result['conditions'] and result['status']=='NO_GO'
+    if failure=='crash':assert report['child_exitcode']==-11

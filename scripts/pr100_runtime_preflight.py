@@ -48,16 +48,19 @@ FORCEFIELD_IMPORT = {
     'xml_sha256': 'd9f9779c09d67cd5f8bc657692f174ffab14c469dfd06d560ac1899fa7e976b8',
     'expected_constructor_count': 1, 'expected_xml_open_count': 1,
 }
+N0_WALL_SECONDS = 120
 
 
 def assemble(inventories, stage_path, remote_stage, output):
     """Local assembly from explicit, already captured public runtime inventories."""
     stage = json.loads(stage_path.read_text())
-    files, distributions, evidence = {}, {}, []
+    files, distributions, evidence, resolved_entrypoints = {}, {}, [], {}
     for path in inventories:
         inventory = json.loads(path.read_text())
         evidence.append({'file_sha256': probe.sha_file(path), 'schema': inventory['schema']})
         distributions.update(inventory.get('distributions', {}))
+        if inventory.get('schema') == 'pr100-entrypoint-resolution-v1':
+            resolved_entrypoints = inventory['entrypoints']
         for name, row in inventory['files'].items():
             sha = row['sha256'] if isinstance(row, dict) else row
             if name in files and files[name] != sha:
@@ -72,6 +75,13 @@ def assemble(inventories, stage_path, remote_stage, output):
         hmm=str(prefix/'lib/python3.12/site-packages/anarci/dat/HMMs/ALL.hmm'),
         germline_reference=str(prefix/'lib/python3.12/site-packages/anarci/germlines.py'),
         logging_shim='/root/metanano_shim/bittensor.py')
+    if set(resolved_entrypoints) != set(entrypoints):
+        raise ValueError('resolved native entrypoint evidence required')
+    for name, locator in entrypoints.items():
+        record = resolved_entrypoints[name]
+        if record['locator'] != locator or files.get(record['resolved_path']) != record['sha256']:
+            raise ValueError('native entrypoint resolution evidence mismatch')
+        entrypoints[name] = record['resolved_path']
     weights = [str(prefix/'lib/python3.12/site-packages/ImmuneBuilder/trained_model'/f'nanobody_model_{i}')
                for i in range(1, 5)]
     if any(p not in files for p in list(entrypoints.values()) + weights):
@@ -82,7 +92,10 @@ def assemble(inventories, stage_path, remote_stage, output):
         entrypoints=entrypoints, model_weights=weights, inventory_evidence=evidence,
         path=str(prefix/'bin')+':/usr/local/bin:/usr/bin:/bin', library_path='',
         cuda_visible_devices='', refinement_threads=1, cpu_thread_settings=probe.THREADS,
-        n0_protocol_revision=3, n0_forcefield_import=FORCEFIELD_IMPORT,
+        n0_protocol_revision=4, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
+        external_tool_roots=[probe.EXTERNAL_TOOL_ROOT],
+        diagnostic_origin_roots=probe.diagnostic_roots(remote_stage),
+        entrypoint_resolution_evidence=resolved_entrypoints,
         special_mapping_policies=[], identity_audit_scope='worker_address_space_only',
         cli_child_loaded_identity_observed=False,
         cli_closure_basis='frozen files, N0 imports, and identical PATH/LD_LIBRARY_PATH inheritance',
@@ -114,7 +127,8 @@ def forbidden_call(module, function, class_name=''):
 
 def validate_forcefield_registration(runtime):
     import xml.etree.ElementTree as etree
-    if runtime.get('n0_protocol_revision') != 3 or runtime.get('n0_forcefield_import') != FORCEFIELD_IMPORT:
+    if (runtime.get('n0_protocol_revision') != 4 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
+            runtime.get('n0_forcefield_import') != FORCEFIELD_IMPORT):
         raise ValueError('unregistered N0 ForceField exception')
     for key in ('caller', 'constructor', 'xml'):
         path, sha = FORCEFIELD_IMPORT[key+'_path'], FORCEFIELD_IMPORT[key+'_sha256']
@@ -169,20 +183,32 @@ def plugin_categories(messages):
 def import_child(spec_path):
     spec = json.loads(Path(spec_path).read_text())
     private = Path(spec['private']); runtime = spec['runtime']
-    probe.assert_bytecode_disabled()
-    os.chdir(private)
-    validate_forcefield_registration(runtime)
+    startup_stage = 'environment'
+    try:
+        probe.assert_bytecode_disabled()
+        if os.environ.get('PATH') != runtime['path'] or os.environ.get('LD_LIBRARY_PATH', '') != runtime.get('library_path', ''):
+            raise ValueError('native inherited paths differ from registration')
+        os.chdir(private)
+        startup_stage = 'forcefield_registration'
+        validate_forcefield_registration(runtime)
+    except BaseException as error:
+        probe.atomic_json(private/'child.json', {'status': 'failed', 'stage': startup_stage,
+                                               'error_class': type(error).__name__})
+        return 1
     forcefield = ForceFieldImportGuard()
     def stop(category):
         probe.atomic_json(private/'child.json', {'status': 'forbidden_call', 'category': category})
         os._exit(71)
     def profile(frame, event, arg):
         if event == 'call':
-            obj = frame.f_locals.get('self')
-            if frame.f_globals.get('__name__') == 'openmm.app.forcefield' and frame.f_code.co_qualname == 'ForceField.loadFile':
+            module = frame.f_globals.get('__name__', '')
+            function = frame.f_code.co_name
+            if not module.startswith(('openmm', 'ImmuneBuilder', 'theraprofnano', 'torch.cuda', 'importlib.metadata', 'importlib_metadata')):
+                return
+            if module == 'openmm.app.forcefield' and frame.f_code.co_qualname == 'ForceField.loadFile':
                 if not forcefield.active or frame.f_locals.get('files') != (FORCEFIELD_IMPORT['xml_argument'],):
                     stop('unexpected_forcefield_load')
-            if frame.f_globals.get('__name__') == 'openmm.app.forcefield' and frame.f_code.co_qualname == 'ForceField.__init__':
+            if module == 'openmm.app.forcefield' and frame.f_code.co_qualname == 'ForceField.__init__':
                 caller = frame.f_back
                 try:
                     forcefield.enter(caller.f_globals.get('__name__'), caller.f_code.co_name,
@@ -191,8 +217,9 @@ def import_child(spec_path):
                 except ValueError:
                     stop('unexpected_forcefield_constructor')
                 return
-            category = forbidden_call(frame.f_globals.get('__name__', ''), frame.f_code.co_name,
-                                      type(obj).__name__ if obj is not None else '')
+            # Inspect locals only on the relevant constructor/entrypoint sites.
+            obj = frame.f_locals.get('self') if function in {'__init__', 'load'} else None
+            category = forbidden_call(module, function, type(obj).__name__ if obj is not None else '')
             if category:
                 stop(category)
         elif event == 'return' and frame.f_globals.get('__name__') == 'openmm.app.forcefield' and frame.f_code.co_qualname == 'ForceField.__init__':
@@ -211,31 +238,44 @@ def import_child(spec_path):
     sys.addaudithook(audit)
     sys.setprofile(profile)
     started, cpu = time.monotonic(), probe.cpu_seconds()
+    stage, current_import = 'filter_activation', None
     try:
         from nanobody_opt.pr100_filter import activate_filter
         activate_filter()
+        stage = 'declared_imports'
         for module in IMPORTS:
+            current_import = module
             importlib.import_module(module)
+        import_seconds = time.monotonic()-started
+        stage = 'stage_locality'
+        staged_origins = probe.assert_stage_origins()
+        stage = 'cpu_platform'
         from openmm import Platform
         platform = Platform.getPlatformByName('CPU')
         name, properties = platform.getName(), list(platform.getPropertyNames())
         if name != 'CPU' or 'Threads' not in properties:
             raise ValueError('CPU Threads platform unavailable')
+        stage = 'plugin_classification'
         failures = plugin_categories(Platform.getPluginLoadFailures())
+        stage = 'forcefield_counts'
         forcefield_receipt = forcefield.finish()
+        stage = 'loaded_identity'
         audit_start = time.monotonic()
         identity = probe.verify_loaded_identity(runtime, private/'loaded_identity.json', set(),
-                                                deadline=spec['deadline'])
+                                                deadline=spec['deadline'], n0_diagnostics=True)
         receipt = dict(status='complete', declared_imports=list(IMPORTS), cpu_platform=name,
                        cpu_threads_property=True, plugin_failure_categories=failures,
                        first_loaded_audit_seconds=time.monotonic()-audit_start,
                        loaded_identity=identity, actual_cpu_seconds=probe.cpu_seconds()-cpu,
                        forcefield_import=forcefield_receipt,
+                       staged_module_origins=staged_origins, import_seconds=import_seconds,
                        elapsed_seconds=time.monotonic()-started,
                        model_constructions_permitted=0, native_profiles_permitted=0,
-                       gpu_discovery_calls_permitted=0, registered_guard_hits=[])
+                       gpu_discovery_calls_permitted=0, registered_guard_hits_permitted=0)
     except BaseException as error:
-        receipt = {'status': 'failed', 'stage': 'guarded_import_or_identity', 'error_class': type(error).__name__}
+        receipt = {'status': 'failed', 'stage': stage, 'error_class': type(error).__name__}
+        if stage == 'declared_imports':
+            receipt['declared_import'] = current_import
     finally:
         sys.setprofile(None)
     probe.atomic_json(private/'child.json', receipt)
@@ -250,7 +290,7 @@ def check(runtime, output):
     conditions, children = [], []
     report = dict(scope='N0_CPU_import_identity_only', conditions=conditions, native_profiles_permitted=0,
                   gpu_calls_permitted=0, kernel_enforced_aggregate_memory_limit=False,
-                  limits=dict(wall_seconds=60, cpu_affinity_count=2, sampled_rss_abort_bytes=4*1024**3),
+                  limits=dict(wall_seconds=N0_WALL_SECONDS, cpu_affinity_count=2, sampled_rss_abort_bytes=4*1024**3),
                   runtime_input_sha256=probe.digest(runtime), closure_reviewed=False,
                   harness_sha256=probe.sha_file(Path(__file__)))
     owned, verified, peak = False, False, 0
@@ -271,10 +311,12 @@ def check(runtime, output):
         probe.require_headroom(report['start_memory'], 96*1024**3)
         if runtime['source_stage_root'] != str(ROOT):
             raise ValueError('wrong staged research source')
-        report['verification'] = probe.verify_runtime(runtime, deadline=started+30, preflight_only=True)
+        report['verification'] = probe.verify_runtime(runtime, deadline=started+60, preflight_only=True)
         verified = True
         reserve = report['verification']['seconds'] + 5
-        child_deadline = started+60-reserve
+        report['post_verification_reserve_seconds'] = report['verification']['seconds']
+        report['cleanup_and_receipt_reserve_seconds'] = 5
+        child_deadline = started+N0_WALL_SECONDS-reserve
         if child_deadline-time.monotonic() < 5:
             raise TimeoutError('no remaining import budget')
         spec = output/'spec.json'
@@ -292,39 +334,53 @@ def check(runtime, output):
         while child.poll() is None:
             rss = sum(probe.process_rss(p) for p in probe.descendants() | {os.getpid()})
             peak = max(peak, rss)
-            probe.require_headroom(probe.available_memory(), 64*1024**3)
+            memory = probe.available_memory()
+            report['last_memory'] = memory
+            if memory['cgroup_resolution'] != 'resolved_visible_ancestors':
+                conditions.append('cgroup_resolution_lost')
+            elif memory['available_bytes'] < 64*1024**3:
+                conditions.append('available_memory_abort')
             if rss > 4*1024**3:
-                raise MemoryError('sampled RSS abort threshold')
+                conditions.append('sampled_rss_abort')
             if time.monotonic() >= child_deadline:
-                raise TimeoutError('N0 import deadline')
+                conditions.append('import_deadline')
+            if conditions:
+                break
             time.sleep(.05)
         report['child_exitcode'] = child.returncode
-        report['child'] = json.loads((output/'child.json').read_text())
-        if child.returncode or report['child']['status'] != 'complete':
-            conditions.append('import_or_identity_failed')
+        if not conditions:
+            if (output/'child.json').is_file():
+                report['child'] = json.loads((output/'child.json').read_text())
+                if child.returncode or report['child']['status'] != 'complete':
+                    conditions.append('import_or_identity_failed')
+            else:
+                conditions.append('child_receipt_missing')
     except BaseException as error:
         conditions.append('preflight_or_import_failed')
         report['error_class'] = type(error).__name__
     finally:
         if owned:
-            report['cleanup'] = probe.stop_descendants(children, timeout=max(.1, min(3, started+57-time.monotonic())))
+            report['cleanup'] = probe.stop_descendants(children, timeout=max(.1, min(3, started+N0_WALL_SECONDS-3-time.monotonic())))
+            if children:
+                report['child_exitcode_after_cleanup'] = children[0].poll()
             if report['cleanup']['remaining_descendants'] or not report['cleanup']['fixed_point_reached']:
                 conditions.append('containment_failure')
         if verified:
             try:
-                report['post_verification'] = probe.verify_runtime(runtime, deadline=started+59, preflight_only=True)
+                post_deadline = min(started+N0_WALL_SECONDS-1,
+                                    time.monotonic()+report['verification']['seconds']+1)
+                report['post_verification'] = probe.verify_runtime(runtime, deadline=post_deadline, preflight_only=True)
             except BaseException as error:
                 conditions.append('post_verification_failed'); report['post_error_class'] = type(error).__name__
     report.update(elapsed_seconds=time.monotonic()-started, actual_cpu_seconds=probe.cpu_seconds()-cpu,
                   allocated_cpu_seconds=2*(time.monotonic()-started), sampled_tree_rss_sum_peak_bytes=peak)
-    if report['elapsed_seconds'] > 60:
+    if report['elapsed_seconds'] > N0_WALL_SECONDS:
         conditions.append('wall_cap_failure')
     report['status'] = 'complete_for_independent_review' if not conditions else 'NO_GO'
     probe.atomic_json(output/'receipt.json', report)
     if not conditions:
         candidate = dict(runtime, n0_receipt_sha256=probe.sha_file(output/'receipt.json'),
-            n0_measurements={'verification': max([report['verification'], report['post_verification']], key=lambda r:r['seconds']),
-                             'first_loaded_audit_seconds': report['child']['first_loaded_audit_seconds']})
+            n0_receipt_path=str(output/'receipt.json'), n0_measurements=probe.n0_measurements_from_receipt(report))
         probe.atomic_json(output/'runtime-candidate.json', candidate)
     if old_handler is not None:
         signal.signal(signal.SIGTERM, old_handler)

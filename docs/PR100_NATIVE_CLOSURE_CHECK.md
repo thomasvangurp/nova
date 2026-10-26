@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 3, not execution permission. Review before staging or running
+Executable protocol revision 4, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 The sole constructor exception is one exact native import-time XML parameter
@@ -8,7 +8,7 @@ parser described below; System/Context/Simulation/Integrator construction and
 physics execution remain forbidden.
 
 Run one private child through Pi on master, under the inventoried native Python.
-Cap the complete check at 60 seconds, two affinity CPU slots and 4 GiB sampled
+Cap the complete check at 120 seconds, two affinity CPU slots and 4 GiB sampled
 RSS abort threshold (not a kernel-enforced ceiling), zero GPUs. Require the
 same 96 GiB starting/64 GiB abort headroom as N1. First run the separately bounded 10-second detached-grandchild
 containment rehearsal as a dedicated session using interpreter `-S` (no site
@@ -24,6 +24,16 @@ and import child refuse bytecode-enabled startup. The import child has guards
 against model/physics construction, native metric entry points, CUDA discovery,
 subprocess launch and network connection. A guard hit exits that child and makes
 the receipt NO_GO; native logs and exception text are never returned.
+
+The 120-second N0 cap is a preregistration change before any runtime measurement;
+CPU slots, sampled memory threshold, scientific permissions and the N1 1200-second
+cap are unchanged. N0 reserves measured pre-verification time for its post-check
+plus five seconds for cleanup/receipt handling. The profile hook checks module
+and function first; it inspects frame locals only at relevant guard sites.
+Import, first loaded-origin audit, and both verification timings are separate.
+The post-check gets at most the measured pre-check time plus one second within
+the total cap. Backend load can make hashing slower and conservatively produce
+NO_GO; that allowance must not be relaxed after observing a measurement.
 
 Stage the reviewed candidate commit into a new directory through Pi and verify
 the committed source manifest before and after. It must include research code,
@@ -66,6 +76,15 @@ receipt reports observed allowed-constructor/XML counts separately from the
 zero model/profile/GPU permissions. This exception is N0 only, not a change to
 N1 physics or a qualification claim.
 
+The interpreter and other entrypoints come from a separate readonly resolved-path
+inventory. The two Aggrescan/FreeSASA binaries may reside only under the explicitly
+declared external tool root
+`/root/pr100-qualification-20261026/NOVA-nanobody-filter/.tools/bin`; their contents
+remain hash-pinned. That exception supplies binaries, never candidate Python
+source. Imported `metanano` and `nanobody_opt` modules/namespaces must resolve to
+the staged candidate; all those origins are recorded. Filter activation already
+checked the top-level metanano origin before this additional recorded audit.
+
 Native TNP requires a regular `scripts` package containing region definitions.
 Research helpers are therefore loaded from exact staged file paths under unique
 module names; they never replace that scientific package. The two scientific
@@ -96,6 +115,11 @@ Retain this finite evidence:
    and offsets. Permissions are used only to reject executable special mappings.
    Hash only registered roots, compare with the frozen
    inventory, and retain every newly discovered required dependency.
+   N0 may report a literal unresolved path only within the fixed staged source,
+   native library, logging shim and system-library/locale roots; credential-shaped
+   names and all other locations remain hashed. Unknown files are never read to
+   diagnose them. Counts classify deleted/memfd/shared-memory/private-temp/locale
+   mappings without granting exemptions. A diagnostic does not imply acceptance.
    The initial `special_mapping_policies` list is empty. Only an exact reviewed
    path plus exact permissions tagged `non_executable_data` can later exempt a
    data mapping from hashing; executable mappings cannot receive an exemption.
@@ -132,6 +156,14 @@ are labelled `worker_address_space_only`; N0 does not observe TNP or builder CLI
 child maps. CLI closure evidence consists of the frozen files, this import
 check, and asserted identical PATH/LD_LIBRARY_PATH inheritance. Refinement and
 all scientific parameters remain unchanged.
+
+N1 re-hashes the actual N0 receipt and checks its complete/clean status, zero
+unresolved origins, zero descendants, CPU/Threads and registered constructor
+evidence. Manifest timing values must equal the receipt-derived values. Removing
+only the review/receipt fields must recover the exact input manifest digest in
+the receipt, so an approval cannot silently alter its runtime configuration.
+Only `closure_reviewed` and `closure_reviewer` may be changed to approve the
+generated runtime candidate. The receipt path remains its actual private artifact.
 
 Record delayed imports/data/libraries as an explicit completeness limitation.
 If these cannot be bounded by prehashed source/data/library manifests, freeze

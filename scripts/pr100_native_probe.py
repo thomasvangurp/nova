@@ -33,6 +33,12 @@ from nanobody_opt.pr100_resources import available_memory
 FROZEN_POPULATION = '1fe6a4bab9b41a055268036e89f088c998f4fe1046d56e68a2b75c20e3dd638d'
 THREADS = {key: '1' for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
                                'MKL_NUM_THREADS', 'OPENMM_CPU_THREADS')}
+EXTERNAL_TOOL_ROOT = '/root/pr100-qualification-20261026/NOVA-nanobody-filter/.tools/bin'
+
+
+def diagnostic_roots(stage):
+    return [str(stage), '/root/.pixi/envs/metanano/lib', '/root/metanano_shim',
+            '/usr/lib/x86_64-linux-gnu', '/usr/lib/locale', '/lib/x86_64-linux-gnu']
 
 
 def atomic_json(path, value):
@@ -62,8 +68,11 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
     if runtime.get('schema') != 'pr100-native-runtime-manifest-v1':
         raise ValueError('native manifest schema')
     if not preflight_only and (runtime.get('closure_reviewed') is not True or
-                              not runtime.get('closure_reviewer') or not runtime.get('n0_receipt_sha256')):
+                              not isinstance(runtime.get('closure_reviewer'), str) or
+                              not runtime['closure_reviewer'].strip() or not runtime.get('n0_receipt_sha256')):
         raise ValueError('dependency closure not independently reviewed')
+    if not preflight_only:
+        verify_n0_receipt(runtime, deadline=deadline)
     spec = importlib.util.spec_from_file_location('_pr100_release_manifest', ROOT/'scripts/release_manifest.py')
     release = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = release
@@ -76,6 +85,8 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
     if stage.get('research_files') != sorted(RESEARCH_FILES):
         raise ValueError('research source not included in reviewed stage')
     verify(ROOT, stage, expected_sha=runtime['source_stage_git_sha'], deadline=deadline)
+    if runtime.get('diagnostic_origin_roots') != diagnostic_roots(ROOT):
+        raise ValueError('unregistered diagnostic roots')
     if runtime.get('cuda_visible_devices') != '' or runtime.get('refinement_threads') != 1:
         raise ValueError('only the frozen CPU/thread1 comparison is permitted')
     if runtime.get('cpu_thread_settings') != THREADS:
@@ -89,6 +100,10 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
         raise ValueError('all four model checkpoints must be pinned')
     if runtime['entrypoints']['python'] != str(Path(sys.executable).resolve()):
         raise ValueError('wrong interpreter')
+    if runtime.get('external_tool_roots') != [EXTERNAL_TOOL_ROOT] or any(
+            not Path(runtime['entrypoints'][name]).is_relative_to(EXTERNAL_TOOL_ROOT)
+            for name in ('aggrescan', 'freesasa')):
+        raise ValueError('unregistered external native tool root')
     for path, expected in runtime['files'].items():
         if not re.fullmatch('[0-9a-f]{64}', expected) or sha_file(path, deadline=deadline) != expected:
             raise ValueError('native file drift')
@@ -103,6 +118,84 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
             'hashed_bytes': sum(Path(p).stat().st_size for p in runtime['files']) +
                             sum((ROOT/p).stat().st_size for p in stage['files']),
             'runtime_file_count': len(runtime['files']), 'stage_file_count': len(stage['files'])}
+
+
+def n0_measurements_from_receipt(receipt):
+    return {'verification': max([receipt['verification'], receipt['post_verification']], key=lambda r:r['seconds']),
+            'first_loaded_audit_seconds': receipt['child']['first_loaded_audit_seconds']}
+
+
+def verify_n0_receipt(runtime, *, deadline=None):
+    sha = runtime.get('n0_receipt_sha256')
+    if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha):
+        raise ValueError('invalid N0 receipt digest')
+    path = Path(runtime['n0_receipt_path'])
+    if path.name != 'receipt.json' or not path.is_absolute() or sha_file(path, deadline=deadline) != sha:
+        raise ValueError('N0 receipt identity mismatch')
+    receipt = json.loads(path.read_text())
+    child, cleanup = receipt.get('child', {}), receipt.get('cleanup', {})
+    identity = child.get('loaded_identity', {})
+    if (receipt.get('status') != 'complete_for_independent_review' or receipt.get('conditions') != [] or
+            child.get('status') != 'complete' or child.get('cpu_platform') != 'CPU' or
+            child.get('cpu_threads_property') is not True or identity.get('unregistered_origins') != [] or
+            identity.get('registered_data_mappings') != [] or cleanup.get('remaining_descendants') != 0 or
+            cleanup.get('fixed_point_reached') is not True):
+        raise ValueError('N0 receipt is not complete clean evidence')
+    if (receipt.get('child_exitcode') != 0 or not child.get('staged_module_origins') or
+            child.get('forcefield_import', {}).get('constructor_count') != 1 or
+            child.get('forcefield_import', {}).get('xml_open_count') != 1 or
+            any(row.get('scope') != 'unused_CPU_only' for row in child.get('plugin_failure_categories', []))):
+        raise ValueError('N0 receipt lacks required import evidence')
+    if runtime['n0_measurements'] != n0_measurements_from_receipt(receipt):
+        raise ValueError('N0 timing evidence differs from receipt')
+    original = {k:v for k,v in runtime.items() if k not in {
+        'n0_receipt_sha256', 'n0_receipt_path', 'n0_measurements', 'closure_reviewer'}}
+    original['closure_reviewed'] = False
+    if digest(original) != receipt.get('runtime_input_sha256'):
+        raise ValueError('N0 receipt belongs to another runtime manifest')
+    if receipt.get('harness_sha256') != sha_file(ROOT/'scripts/pr100_runtime_preflight.py', deadline=deadline):
+        raise ValueError('N0 receipt belongs to another harness')
+    return receipt
+
+
+def assert_stage_origins(modules=None):
+    origins = {}
+    for name, module in list((sys.modules if modules is None else modules).items()):
+        if name == 'metanano' or name.startswith('metanano.'):
+            expected = ROOT/'NOVA-nanobody-filter'
+        elif name == 'nanobody_opt' or name.startswith('nanobody_opt.'):
+            expected = ROOT
+        else:
+            continue
+        value = getattr(module, '__file__', None)
+        paths = [value] if value else list(getattr(module, '__path__', []))
+        if not paths or any(not Path(p).resolve().is_relative_to(expected) for p in paths):
+            raise ValueError('research module resolves outside staged source')
+        origins[name] = sorted({str(Path(p).resolve()) for p in paths})
+    if not all(name in origins for name in ('metanano', 'nanobody_opt')):
+        raise ValueError('required staged packages missing')
+    return origins
+
+
+def origin_diagnostic(path, roots, *, private_root=None):
+    """Literal paths only under explicit public roots; never open unknown files."""
+    row = {'origin_locator_sha256': hashlib.sha256(path.encode()).hexdigest()}
+    classes = []
+    for label, matched in (
+        ('deleted', path.endswith(' (deleted)')), ('memfd', path.startswith('/memfd:')),
+        ('dev_shm', path.startswith('/dev/shm/')), ('sysv', path.startswith('/SYSV')),
+        ('locale', path.startswith('/usr/lib/locale/')),
+        ('private_tmp', private_root is not None and Path(path).is_relative_to(private_root))):
+        if matched:
+            classes.append(label)
+    row['mapping_classes'] = classes
+    forbidden = {'.env', '.npmrc', '.aws', '.ssh', 'credentials', 'cookies', 'cookiejar', 'keychain'}
+    parts = Path(path).parts
+    safe_name = not any(p.lower() in forbidden or p.lower().startswith('.env.') or
+                        p.lower().endswith(('.pem', '.key')) for p in parts)
+    if safe_name and any(Path(path).is_relative_to(root) for root in roots):
+        row['public_origin_path'] = path
+    return row
 
 
 def mapping_classification(path, permissions, policies):
@@ -181,7 +274,7 @@ def safe_profile(profile):
     return result
 
 
-def verify_loaded_identity(runtime, destination, checked, *, deadline=None):
+def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_diagnostics=False):
     """Compare actual import/bytecode/library origins to pre-frozen file hashes."""
     expected = dict(runtime['files'])
     stage = json.loads((ROOT / 'build_stamp.json').read_text())
@@ -197,8 +290,9 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None):
                 continue
             key = str(path)
             if key not in expected:
-                unresolved.append({'kind': field, 'module': name,
-                                   'origin_locator_sha256': hashlib.sha256(key.encode()).hexdigest()})
+                unresolved.append(dict(kind=field, module=name, **origin_diagnostic(key,
+                    runtime.get('diagnostic_origin_roots', []) if n0_diagnostics else [],
+                    private_root=destination.parent)))
                 continue
             origins[name + ':' + field] = key
             candidates.add(key)
@@ -213,7 +307,9 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None):
             continue
         key = str(Path(parts[5]).resolve())
         if key not in expected:
-            unresolved.append({'kind': 'mapped_file', 'origin_locator_sha256': hashlib.sha256(key.encode()).hexdigest()})
+            unresolved.append(dict(kind='mapped_file', **origin_diagnostic(key,
+                runtime.get('diagnostic_origin_roots', []) if n0_diagnostics else [],
+                private_root=destination.parent)))
         else:
             mapped.add(key); candidates.add(key)
     for key in candidates - checked:
@@ -223,7 +319,9 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None):
     receipt = {'identity_audit_scope': 'worker_address_space_only',
                'cli_child_loaded_identity_observed': False,
                'module_origins': origins, 'mapped_files': sorted(mapped), 'registered_data_mappings': special,
-               'unregistered_origins': unresolved, 'checked_file_count': len(checked)}
+               'unregistered_origins': unresolved, 'checked_file_count': len(checked),
+               'unregistered_mapping_class_counts': {kind: sum(kind in x['mapping_classes'] for x in unresolved)
+                   for kind in ('deleted', 'memfd', 'dev_shm', 'sysv', 'locale', 'private_tmp')}}
     atomic_json(destination, receipt)
     if unresolved:
         raise ValueError('loaded runtime origin is not frozen')
@@ -263,6 +361,7 @@ def worker(index, tasks, runtime, workdir, events):
     native._tnp.tnp_executable = runtime['entrypoints']['tnp']
     scorer = Aggrescan3DWrapper(cfg.aggrescan3d.executable, cfg.aggrescan3d.freesasa_executable)
     requirements = rules.pinned_config(rules.ACTIVATION_EPOCH)['nanobody_requirements']
+    atomic_json(workdir/'staged_module_origins.json', assert_stage_origins())
     checked_origins = set()
     verify_loaded_identity(runtime, workdir / 'loaded_identity.json', checked_origins)
     warm = None

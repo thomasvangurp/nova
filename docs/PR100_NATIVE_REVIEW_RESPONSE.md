@@ -80,3 +80,34 @@ that needs exemption. Unknown file-backed origins still fail. No exemption is
 invented from a hypothetical mapping, and the policy has not been broadened.
 No N0/N1 profiles, native imports, model construction or remote mutations were
 performed during this source audit. Tests exercise guards, not native parity.
+
+# Review 3 N0 follow-up (protocol revision 4)
+
+- N0-1: fixed allowlisted stages distinguish environment, ForceField registration,
+  filter activation, the declared import, stage locality, CPU platform, plugin
+  classification, constructor counts and loaded identity. No raw backend text.
+- N0-2: unresolved origins are actionable only within explicit public runtime,
+  candidate source, shim and system-library roots. Everything else stays hashed;
+  credential-shaped paths remain hidden. Class counts do not grant exemptions.
+- N0-3: `activate_filter()` already checked metanano's top-level staged origin;
+  the review's claim that it did not was incorrect. Added recorded checks for all
+  loaded metanano/nanobody_opt modules and namespace paths in N0 and N1 workers.
+- N0-4: N0 is now registered for 120 seconds, still two CPU slots/4 GiB sampled
+  abort/zero GPU. Locals inspection is restricted to relevant guard sites. The
+  prior post-check did not fail by construction: reserving `v+5` and spending at
+  most three seconds cleanup left at least `v+1` before the old deadline. The
+  genuine concern was total feasibility under 60 seconds, not that arithmetic.
+  Import, verification and first loaded-audit times are recorded separately.
+- N0-5: N1 verifies actual receipt SHA, clean complete status, source/runtime
+  binding, import evidence and exact receipt-derived timing values. Truthy
+  strings or edited timing values cannot substitute for the receipt.
+- N0-6: entrypoints use readonly resolved-path evidence. Prior qualification
+  content is restricted to two pinned binaries in the explicit external tool
+  root; it cannot supply candidate source.
+- N0-7..10: guard permissions are labelled as permissions, missing child receipts
+  preserve signed exit codes, memory/time abort conditions are distinct, and
+  N0 asserts the same PATH/LD_LIBRARY_PATH inheritance as N1.
+
+The resource helper's fail-closed behavior is unchanged. No narrower cgroup
+mount is substituted when the broadest bound cannot be established. All old
+review/CI artifacts remain evidence for their own immutable revisions.
