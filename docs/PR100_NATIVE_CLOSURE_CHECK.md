@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 7, not execution permission. Review before staging or running
+Executable protocol revision 8, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 The sole constructor exception is one exact native import-time XML parameter
@@ -126,6 +126,31 @@ absolute defining module origin and source hash. Record this interpretation in
 bytecode normally. Any other relative origin, impostor class, changed label,
 source origin/digest or virtual module remains a failure. This changes provenance
 interpretation only, not native code or scientific behavior.
+
+Revision 8 records a separate follow-up after the first frozen N1 stopped on a
+post-profile identity gap. It adds 87 exact receipt-matched public files
+(504,037,536 bytes), including delayed Triton/GMP imports and three GMP libraries.
+It does not exempt unknown files or repeat only the successful observations.
+
+PyTorch also imports `_remote_module_non_scriptable`, generated from two already
+pinned public sources. Literal-only AST extraction of the native template prefix,
+enabled native variant and exact non-scriptable substitution dictionary yields
+2,355 UTF-8 bytes with SHA
+`8205b16956fb264841ecd8644784a0d157f87df79b17c16825dc1163433ce5d8`.
+Only that module name, filename and content are registered. Require an ordinary
+ModuleType with the exact source loader/spec, its pinned instantiator's declared
+temporary directory inside this worker's private root, no file symlink, and the
+pinned instantiator/template source origins and bytes. Hash generated content and
+both sources on every audit. Record separate generated-code identity evidence.
+No arbitrary temporary module, changed payload, RPC operation or GPU execution
+is authorized. N0 must still contain no generated module observations.
+
+The original N1 remains NO_GO_EXECUTION: 39.317188 seconds wall, 115.123812 actual
+CPU seconds, two recorded observations (one verified CLI result and one computed
+warm result rejected by identity), 70 missing and no complete comparison pairs.
+These costs and observations remain separate. Any approved follow-up repeats the
+same entire 24-identity/72-profile population, mode order, scientific code,
+1200-second budget and acceptance criteria in a new private trial directory.
 
 The interpreter and other entrypoints come from a separate readonly resolved-path
 inventory. The two Aggrescan/FreeSASA binaries may reside only under the explicitly

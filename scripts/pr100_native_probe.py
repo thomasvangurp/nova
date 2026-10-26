@@ -9,6 +9,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib.metadata
+import importlib.machinery
 import importlib.util
 import json
 import math
@@ -55,6 +56,19 @@ VIRTUAL_MODULES = {
         'class_module':'torch._classes', 'class_name':'_Classes', 'literal_file':'_classes.py',
         'source_path':'/root/.pixi/envs/metanano/lib/python3.12/site-packages/torch/_classes.py',
         'source_sha256':'2a3dd93d72e9f19450670b89f3a57b5b5adf245709f6a49a551bbfad33c434bf',
+    },
+}
+GENERATED_MODULES = {
+    '_remote_module_non_scriptable': {
+        'filename':'_remote_module_non_scriptable.py',
+        'content_sha256':'8205b16956fb264841ecd8644784a0d157f87df79b17c16825dc1163433ce5d8',
+        'content_bytes':2355,
+        'owner_module':'torch.distributed.nn.jit.instantiator',
+        'owner_path':'/root/.pixi/envs/metanano/lib/python3.12/site-packages/torch/distributed/nn/jit/instantiator.py',
+        'owner_sha256':'567d1314ee27ff0b3bd22e7c4d1157246469de25e7a3183d96debe167b193615',
+        'template_module':'torch.distributed.nn.jit.templates.remote_module_template',
+        'template_path':'/root/.pixi/envs/metanano/lib/python3.12/site-packages/torch/distributed/nn/jit/templates/remote_module_template.py',
+        'template_sha256':'0ff1856bbd031b5298d46c06c0502abc20bd804f42c1949ed4127e8c773660cc',
     },
 }
 
@@ -111,6 +125,8 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
         raise ValueError('unregistered diagnostic roots')
     if runtime.get('virtual_module_registrations') != VIRTUAL_MODULES:
         raise ValueError('unregistered virtual module policies')
+    if runtime.get('generated_module_registrations') != GENERATED_MODULES:
+        raise ValueError('unregistered generated module policies')
     if runtime.get('cuda_visible_devices') != '' or runtime.get('refinement_threads') != 1:
         raise ValueError('only the frozen CPU/thread1 comparison is permitted')
     if runtime.get('cpu_thread_settings') != THREADS:
@@ -162,6 +178,7 @@ def verify_n0_receipt(runtime, *, deadline=None):
     if (receipt.get('status') != 'complete_for_independent_review' or receipt.get('conditions') != [] or
             child.get('status') != 'complete' or child.get('cpu_platform') != 'CPU' or
             child.get('cpu_threads_property') is not True or identity.get('unregistered_origins') != [] or
+            identity.get('registered_generated_module_origins') != [] or
             identity.get('registered_data_mappings') != [] or cleanup.get('remaining_descendants') != 0 or
             cleanup.get('fixed_point_reached') is not True):
         raise ValueError('N0 receipt is not complete clean evidence')
@@ -345,12 +362,47 @@ def registered_virtual_origin(name, module, field, value, runtime, modules=None)
             'defining_source_sha256':r['source_sha256'], 'scope':'source_bound_virtual_module_metadata'}
 
 
+def registered_generated_origin(name, module, field, value, runtime, private_root, *, modules=None, deadline=None):
+    """One deterministic native template payload, never a generic temporary-path exemption."""
+    if name not in GENERATED_MODULES or field != '__file__':
+        return None
+    r = GENERATED_MODULES[name]
+    modules = sys.modules if modules is None else modules
+    owner, template = modules.get(r['owner_module']), modules.get(r['template_module'])
+    if (runtime.get('generated_module_registrations') != GENERATED_MODULES or type(module) is not types.ModuleType or
+            not isinstance(owner, types.ModuleType) or not isinstance(template, types.ModuleType) or
+            vars(module).get('__name__') != name or not isinstance(value,str) or not Path(value).is_absolute()):
+        raise ValueError('generated module identity differs from registration')
+    path = Path(value).resolve()
+    private_root = Path(private_root).resolve()
+    directory = vars(owner).get('INSTANTIATED_TEMPLATE_DIR_PATH')
+    spec = vars(module).get('__spec__')
+    if (path.name != r['filename'] or Path(value).is_symlink() or not path.is_relative_to(private_root) or
+            not isinstance(directory,str) or not Path(directory).is_absolute() or Path(directory).resolve() != path.parent or
+            type(spec) is not importlib.machinery.ModuleSpec or spec.name != name or spec.origin != str(path) or
+            spec.has_location is not True or
+            type(spec.loader) is not importlib.machinery.SourceFileLoader or vars(module).get('__loader__') is not spec.loader or
+            vars(module).get('__file__') != str(path) or vars(module).get('__package__') != ''):
+        raise ValueError('generated module path or loader differs from registration')
+    for key, source_module in (('owner',owner),('template',template)):
+        source = r[key+'_path']; expected = r[key+'_sha256']
+        if (vars(source_module).get('__file__') != source or runtime['files'].get(source) != expected or
+                sha_file(source,deadline=deadline) != expected):
+            raise ValueError('generated module source identity mismatch')
+    if path.stat().st_size != r['content_bytes'] or sha_file(path,deadline=deadline) != r['content_sha256']:
+        raise ValueError('generated module content identity mismatch')
+    return {'module':name,'filename':r['filename'],'content_sha256':r['content_sha256'],'content_bytes':r['content_bytes'],
+            'owner_sha256':r['owner_sha256'],'template_sha256':r['template_sha256'],
+            'origin_locator_sha256':hashlib.sha256(str(path).encode()).hexdigest(),
+            'scope':'exact_native_template_code_identity_only'}
+
+
 def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_diagnostics=False):
     """Compare actual import/bytecode/library origins to pre-frozen file hashes."""
     expected = dict(runtime['files'])
     stage = json.loads((ROOT / 'build_stamp.json').read_text())
     expected.update({str((ROOT / name).resolve()): value for name, value in stage['files'].items()})
-    origins, candidates, unresolved, virtual = {}, set(), [], []
+    origins, candidates, unresolved, virtual, generated = {}, set(), [], [], []
     for name, module in list(sys.modules.items()):
         for field in ('__file__', '__cached__'):
             value = getattr(module, field, None)
@@ -362,6 +414,11 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_d
                 path = Path(registered['defining_source_path'])
             else:
                 path = Path(value).resolve()
+            generated_origin = registered_generated_origin(name, module, field, value, runtime,
+                destination.parent, deadline=deadline)
+            if generated_origin:
+                generated.append(generated_origin)
+                expected[str(path)] = generated_origin['content_sha256']
             if field == '__cached__' and not path.is_file():
                 continue
             key = str(path)
@@ -396,6 +453,7 @@ def verify_loaded_identity(runtime, destination, checked, *, deadline=None, n0_d
                'cli_child_loaded_identity_observed': False,
                'module_origins': origins, 'mapped_files': sorted(mapped), 'registered_data_mappings': special,
                'registered_virtual_module_origins': virtual,
+               'registered_generated_module_origins': generated,
                'unregistered_origins': unresolved, 'checked_file_count': len(checked),
                'unregistered_mapping_class_counts': {kind: sum(kind in x['mapping_classes'] for x in unresolved)
                    for kind in ('deleted', 'memfd', 'dev_shm', 'sysv', 'locale', 'private_tmp')}}

@@ -165,3 +165,27 @@ identity, exact literal label, owner origin and pinned source hash. Separate
 receipt metadata records their provenance. Ordinary relative files and all
 other virtual modules still fail; tests include impostors and actual source-byte
 drift. All prior source commits, failures and diagnostic receipts remain retained.
+
+
+# First frozen N1 result and separate follow-up (protocol revision 8)
+
+Actual N1 on 65b503f stopped after 39.317188 wall seconds and 115.123812 CPU seconds.
+One CLI observation passed identity; one warm profile completed computation but
+failed its post-profile identity audit. Seventy observations are missing, zero
+comparison pairs are complete, and no parity/speedup conclusion is available.
+This is an infrastructure closure failure, not evidence against CPU model reuse.
+All partial measurements and clean fixed-point cleanup receipts remain retained.
+
+The failed receipt identifies 87 exact public paths via their locator hashes,
+plus one generated module. No broad scan or inferred wildcard is used. The
+pinned Torch instantiator and template deterministically produce one 2355-byte
+non-scriptable module. Its exact content/name/owner/source/private-directory and
+loader registration requires fresh content/source hashes at every audit; the
+unchanged unknown-file checks cover everything else. Tests reject changed source,
+payload, module identity, loader, owner directory, path escape and symlinks.
+
+A separate reviewed follow-up must preserve all 24 identities, mode order,
+72-profile completeness, scientific methods and cost/parity endpoints. It starts
+fresh rather than filling only the missing rows. The failed trial is not relabelled
+or combined with the follow-up. No production/full-validator qualification follows
+from either CI or the import preflight.

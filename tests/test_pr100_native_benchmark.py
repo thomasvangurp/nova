@@ -504,6 +504,71 @@ def test_virtual_source_bytes_are_hashed_normally_and_drift_blocks_audit(tmp_pat
         probe.verify_loaded_identity(runtime,tmp_path/'identity.json',set())
 
 
+def generated_module_fixture(tmp_path,monkeypatch):
+    import types,hashlib,importlib.util
+    from scripts import pr100_native_probe as probe
+    name='_remote_module_non_scriptable';r=copy.deepcopy(probe.GENERATED_MODULES[name])
+    root=(tmp_path/'worker').resolve();directory=root/'tmpnative';directory.mkdir(parents=True)
+    source=directory/r['filename'];source.write_text('pass\n')
+    r.update(content_bytes=5,content_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    modules={};files={}
+    for key in ('owner','template'):
+        p=(tmp_path/(key+'.py')).resolve();p.write_text(key+'\n');r[key+'_path']=str(p)
+        r[key+'_sha256']=hashlib.sha256(p.read_bytes()).hexdigest();files[str(p)]=r[key+'_sha256']
+        obj=types.ModuleType(r[key+'_module']);obj.__file__=str(p);modules[r[key+'_module']]=obj
+    modules[r['owner_module']].INSTANTIATED_TEMPLATE_DIR_PATH=str(directory)
+    module=types.ModuleType(name);module.__file__=str(source);module.__package__=''
+    module.__spec__=importlib.util.spec_from_file_location(name,source);module.__loader__=module.__spec__.loader
+    monkeypatch.setattr(probe,'GENERATED_MODULES',{name:r})
+    runtime={'generated_module_registrations':probe.GENERATED_MODULES,'files':files}
+    return probe,name,r,module,modules,runtime,root,source
+
+
+def test_generated_module_is_exact_content_and_source_bound_without_general_temp_permission(tmp_path,monkeypatch):
+    probe,name,r,module,modules,runtime,root,source=generated_module_fixture(tmp_path,monkeypatch)
+    result=probe.registered_generated_origin(name,module,'__file__',str(source),runtime,root,modules=modules)
+    assert result['content_sha256']==r['content_sha256'] and result['scope']=='exact_native_template_code_identity_only'
+    assert probe.registered_generated_origin('_remote_module_other',module,'__file__',str(source),runtime,root,modules=modules) is None
+    assert probe.registered_generated_origin(name,module,'__cached__',str(source),runtime,root,modules=modules) is None
+    source.write_text('pAss\n')  # Same size; every audit must detect changed executable bytes.
+    with pytest.raises(ValueError,match='content identity'):
+        probe.registered_generated_origin(name,module,'__file__',str(source),runtime,root,modules=modules)
+
+
+@pytest.mark.parametrize('failure',['policy','impostor','name','relative','outside','filename','symlink','directory',
+    'spec','spec_name','spec_origin','loader','module_loader','module_file','package','owner_path','template_path',
+    'owner_digest','template_digest','owner_bytes','template_bytes','content_size'])
+def test_generated_module_refuses_unregistered_provenance_and_bytes(tmp_path,monkeypatch,failure):
+    from types import SimpleNamespace
+    probe,name,r,module,modules,runtime,root,source=generated_module_fixture(tmp_path,monkeypatch)
+    value=str(source)
+    if failure=='policy':runtime['generated_module_registrations']={}
+    elif failure=='impostor':module=SimpleNamespace()
+    elif failure=='name':module.__name__='other'
+    elif failure=='relative':value=source.name
+    elif failure=='outside':root=root/'different'
+    elif failure=='filename':value=str(source.with_name('other.py'))
+    elif failure=='symlink':
+        real=source.with_name('payload.py');source.rename(real);source.symlink_to(real)
+    elif failure=='directory':modules[r['owner_module']].INSTANTIATED_TEMPLATE_DIR_PATH=str(root/'other')
+    elif failure=='spec':module.__spec__=None
+    elif failure=='spec_name':module.__spec__.name='other'
+    elif failure=='spec_origin':module.__spec__.origin='/other'
+    elif failure=='loader':module.__spec__.loader=object()
+    elif failure=='module_loader':module.__loader__=object()
+    elif failure=='module_file':module.__file__='/other'
+    elif failure=='package':module.__package__='other'
+    elif failure.endswith('_path'):
+        key=failure.split('_')[0];modules[r[key+'_module']].__file__='/other'
+    elif failure.endswith('_digest'):
+        key=failure.split('_')[0];runtime['files'][r[key+'_path']]='0'*64
+    elif failure.endswith('_bytes'):
+        key=failure.split('_')[0];Path(r[key+'_path']).write_text('changed source')
+    else:source.write_text('pass\npass\n')
+    with pytest.raises(ValueError):
+        probe.registered_generated_origin(name,module,'__file__',value,runtime,root,modules=modules)
+
+
 def test_research_helpers_do_not_shadow_regular_scientific_scripts_package(tmp_path):
     # Reproduce the actual native package collision in a fresh interpreter.
     package = tmp_path/'scripts'; package.mkdir()
@@ -582,6 +647,7 @@ def test_n1_verifies_receipt_bytes_status_measurements_and_runtime_binding(tmp_p
         class_module=r['class_module'],class_name=r['class_name'],literal_file=r['literal_file'],
         defining_source_path=r['source_path'],defining_source_sha256=r['source_sha256'],
         scope='source_bound_virtual_module_metadata') for name,r in probe.VIRTUAL_MODULES.items()]
+    receipt['child']['loaded_identity']['registered_generated_module_origins']=[]
     path = tmp_path/'n0/receipt.json';path.write_text(json.dumps(receipt))
     outer={'receipt_sha256':probe.sha_file(path),'child_exit_code':0,
            'outer_cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}

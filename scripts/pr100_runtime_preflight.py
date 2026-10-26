@@ -114,12 +114,13 @@ def assemble(inventories, stage_path, remote_stage, output):
         entrypoints=entrypoints, model_weights=weights, inventory_evidence=evidence,
         path=str(prefix/'bin')+':/usr/local/bin:/usr/bin:/bin', library_path='',
         cuda_visible_devices='', refinement_threads=1, cpu_thread_settings=probe.THREADS,
-        n0_protocol_revision=7, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
+        n0_protocol_revision=8, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
         n0_loopback_import=LOOPBACK_IMPORT, n0_cpu_query_import=CPU_QUERY_IMPORT,
         external_tool_roots=[probe.EXTERNAL_TOOL_ROOT],
         diagnostic_origin_roots=probe.diagnostic_roots(remote_stage),
         entrypoint_resolution_evidence=resolved_entrypoints,
         virtual_module_registrations=probe.VIRTUAL_MODULES,
+        generated_module_registrations=probe.GENERATED_MODULES,
         special_mapping_policies=[], identity_audit_scope='worker_address_space_only',
         cli_child_loaded_identity_observed=False,
         cli_closure_basis='frozen files, N0 imports, and identical PATH/LD_LIBRARY_PATH inheritance',
@@ -151,7 +152,7 @@ def forbidden_call(module, function, class_name=''):
 
 def validate_forcefield_registration(runtime):
     import xml.etree.ElementTree as etree
-    if (runtime.get('n0_protocol_revision') != 7 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
+    if (runtime.get('n0_protocol_revision') != 8 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
             runtime.get('n0_forcefield_import') != FORCEFIELD_IMPORT):
         raise ValueError('unregistered N0 ForceField exception')
     for key in ('caller', 'constructor', 'xml'):
