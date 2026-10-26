@@ -1,0 +1,57 @@
+{
+  "_comment": "Example PR100 live controller config. Every value is a placeholder: replace each <PLACEHOLDER> before use. No real address, port, path, key or revision belongs in this file.",
+  "start_epoch": 25957,
+  "source_sha": "<PLACEHOLDER_40_HEX_GIT_SHA>",
+  "state_root": "/<PLACEHOLDER_ABSOLUTE_PI_STATE_ROOT>",
+  "publication_path": "/<PLACEHOLDER_ABSOLUTE_PI_PUBLICATION_FILE>.json",
+  "remote_root": "/<PLACEHOLDER_ABSOLUTE_REMOTE_WORK_ROOT>",
+  "reserve_blocks": 46,
+  "transport_timeout_seconds": 120,
+  "gpu": [0, 1],
+  "worker": {
+    "native_tools": "/<PLACEHOLDER_ABSOLUTE_NATIVE_TOOLS_DIR>",
+    "proposals": 600,
+    "reference_slots": 16,
+    "workers": 48,
+    "max_workers": 64,
+    "candidate_budget_seconds": 300,
+    "repeats": 3,
+    "allow_marginal": true,
+    "margin": {
+      "cap": 89,
+      "z": 1.3,
+      "sigma": 4.4,
+      "min_repeats": 2,
+      "hard_margin": {"2": 80, "3": 82}
+    }
+  },
+  "hosts": {
+    "master": {
+      "address": "<PLACEHOLDER_MASTER_HOST>",
+      "port": 22,
+      "release": "/<PLACEHOLDER_ABSOLUTE_MASTER_RELEASE_DIR>",
+      "annotation_python": "/<PLACEHOLDER_ABSOLUTE_ANNOTATION_PYTHON>",
+      "native_python": "/<PLACEHOLDER_ABSOLUTE_NATIVE_PYTHON>",
+      "scoring_python": "/<PLACEHOLDER_ABSOLUTE_SCORING_PYTHON>",
+      "python_path": "/<PLACEHOLDER_ABSOLUTE_EXTRA_PYTHONPATH>",
+      "path": "/<PLACEHOLDER_ABSOLUTE_BIN_DIR>:/usr/bin:/bin",
+      "ld_library_path": "/<PLACEHOLDER_ABSOLUTE_LD_LIBRARY_PATH_OR_OMIT>",
+      "references": "/<PLACEHOLDER_ABSOLUTE_REFERENCE_BANK_JSON>",
+      "scorer": "<PLACEHOLDER_REGISTERED_SCORER_NAME>",
+      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>"
+    },
+    "slave": {
+      "address": "<PLACEHOLDER_SLAVE_HOST>",
+      "port": 22,
+      "release": "/<PLACEHOLDER_ABSOLUTE_SLAVE_RELEASE_DIR>",
+      "annotation_python": "/<PLACEHOLDER_ABSOLUTE_ANNOTATION_PYTHON>",
+      "native_python": "/<PLACEHOLDER_ABSOLUTE_NATIVE_PYTHON>",
+      "scoring_python": "/<PLACEHOLDER_ABSOLUTE_SCORING_PYTHON>",
+      "python_path": "/<PLACEHOLDER_ABSOLUTE_EXTRA_PYTHONPATH>",
+      "path": "/<PLACEHOLDER_ABSOLUTE_BIN_DIR>:/usr/bin:/bin",
+      "references": "/<PLACEHOLDER_ABSOLUTE_REFERENCE_BANK_JSON>",
+      "scorer": "<PLACEHOLDER_REGISTERED_SCORER_NAME>",
+      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>"
+    }
+  }
+}
