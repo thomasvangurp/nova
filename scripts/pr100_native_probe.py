@@ -157,6 +157,9 @@ def verify_n0_receipt(runtime, *, deadline=None):
             child.get('loopback_import', {}).get('bind_count') != 1 or
             child.get('loopback_import', {}).get('socket_closed') is not True or
             child.get('loopback_import', {}).get('external_network_operations_permitted') != 0 or
+            any(child.get('cpu_query_import', {}).get(k) != 1 for k in ('run_count','popen_count','exec_count','return_count')) or
+            child.get('cpu_query_import', {}).get('exit_code') != 0 or
+            child.get('cpu_query_import', {}).get('shell') is not False or
             any(row.get('scope') != 'unused_CPU_only' for row in child.get('plugin_failure_categories', []))):
         raise ValueError('N0 receipt lacks required import evidence')
     outer_path = path.parent.parent/'supervisor-receipt.json'

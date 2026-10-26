@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -49,6 +50,25 @@ LOOPBACK_IMPORT = {
     'parent_function': '<module>', 'parent_line': 137,
     'address': ['::1', 0], 'socket_family': 'AF_INET6', 'socket_type': 'SOCK_STREAM',
     'protocol': 0, 'expected_bind_count': 1, 'requires_closed_socket': True,
+}
+CPU_QUERY_IMPORT = {
+    'caller_module': 'numpy.testing._private.utils', 'caller_function': 'check_support_sve',
+    'caller_line': 1247, 'parent_function': '<module>', 'parent_line': 1253,
+    'caller_path': NATIVE_SITE+'numpy/testing/_private/utils.py',
+    'caller_sha256': 'dc5ad24cc8b439da43383043a27720883433768e4d280e9855f437b8a4524277',
+    'executable': '/usr/bin/lscpu',
+    'executable_sha256': '250c7ec85ceec9f50101f555704b79ed3a8a917efa14fa455d85136f27182daa',
+    'command': 'lscpu', 'expected_query_count': 1,
+    'libraries': {
+        '/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.1.0': 'cb0d1893c1cef53fda04eb64644e2dd1841c5f879efa491d984eb082d053ec5a',
+        '/usr/lib/x86_64-linux-gnu/libc.so.6': '5955dead1a55f545cf9cf34a40b2eb65deb84ea503ac467a266d061073315fa7',
+        '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2': '595bcdc306999711a5a9c787e5d01618f94eb92c4c09a178e875a324f1072d89',
+    },
+    'library_resolution': {
+        '/usr/lib/x86_64-linux-gnu/libsmartcols.so.1': '/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.1.0',
+        '/usr/lib/x86_64-linux-gnu/libc.so.6': '/usr/lib/x86_64-linux-gnu/libc.so.6',
+        '/lib64/ld-linux-x86-64.so.2': '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2',
+    },
 }
 N0_WALL_SECONDS = 120
 
@@ -94,8 +114,8 @@ def assemble(inventories, stage_path, remote_stage, output):
         entrypoints=entrypoints, model_weights=weights, inventory_evidence=evidence,
         path=str(prefix/'bin')+':/usr/local/bin:/usr/bin:/bin', library_path='',
         cuda_visible_devices='', refinement_threads=1, cpu_thread_settings=probe.THREADS,
-        n0_protocol_revision=5, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
-        n0_loopback_import=LOOPBACK_IMPORT,
+        n0_protocol_revision=6, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
+        n0_loopback_import=LOOPBACK_IMPORT, n0_cpu_query_import=CPU_QUERY_IMPORT,
         external_tool_roots=[probe.EXTERNAL_TOOL_ROOT],
         diagnostic_origin_roots=probe.diagnostic_roots(remote_stage),
         entrypoint_resolution_evidence=resolved_entrypoints,
@@ -130,7 +150,7 @@ def forbidden_call(module, function, class_name=''):
 
 def validate_forcefield_registration(runtime):
     import xml.etree.ElementTree as etree
-    if (runtime.get('n0_protocol_revision') != 5 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
+    if (runtime.get('n0_protocol_revision') != 6 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
             runtime.get('n0_forcefield_import') != FORCEFIELD_IMPORT):
         raise ValueError('unregistered N0 ForceField exception')
     for key in ('caller', 'constructor', 'xml'):
@@ -206,6 +226,79 @@ class LoopbackImportGuard:
                 'external_network_operations_permitted': 0}
 
 
+def validate_cpu_query_registration(runtime):
+    r = CPU_QUERY_IMPORT
+    if runtime.get('n0_cpu_query_import') != r or runtime.get('library_path', ''):
+        raise ValueError('unregistered N0 CPU query exception')
+    executable = shutil.which(r['command'], path=runtime['path'])
+    if executable != r['executable'] or str(Path(executable).resolve()) != r['executable']:
+        raise ValueError('N0 CPU query executable resolution mismatch')
+    for locator, resolved in r['library_resolution'].items():
+        if str(Path(locator).resolve()) != resolved:
+            raise ValueError('N0 CPU query library resolution mismatch')
+    files = dict(r['libraries'], **{r['caller_path']:r['caller_sha256'], r['executable']:r['executable_sha256']})
+    for path, sha in files.items():
+        if runtime['files'].get(path) != sha or probe.sha_file(path) != sha:
+            raise ValueError('N0 CPU query source or executable identity mismatch')
+
+
+def frame_site(frame):
+    return ((frame.f_globals.get('__name__'), frame.f_code.co_name,
+             frame.f_code.co_filename, frame.f_lineno) if frame is not None else None)
+
+
+class CPUQueryImportGuard:
+    """One native NumPy read-only CPU metadata query; no output leaves the child."""
+    def __init__(self):
+        self.run_count = self.popen_count = self.exec_count = self.return_count = 0
+        self.active = False
+        self.process = None
+
+    def enter(self, caller, parent, popenargs, capture_output, input_value, timeout, check, kwargs):
+        r = CPU_QUERY_IMPORT
+        if (self.run_count or self.active or
+                caller != (r['caller_module'], r['caller_function'], r['caller_path'], r['caller_line']) or
+                parent != (r['caller_module'], r['parent_function'], r['caller_path'], r['parent_line']) or
+                popenargs != (r['command'],) or capture_output is not True or input_value is not None or
+                timeout is not None or check is not False or kwargs != {'text':True}):
+            raise ValueError('unregistered N0 CPU query call')
+        self.run_count += 1
+        self.active = True
+
+    def popen(self, values):
+        if (not self.active or self.popen_count or values.get('args') != CPU_QUERY_IMPORT['command'] or
+                values.get('shell') is not False or values.get('env') is not None or
+                values.get('stdin') is not None or values.get('cwd') is not None or
+                values.get('executable') is not None or values.get('stdout') != subprocess.PIPE or
+                values.get('stderr') != subprocess.PIPE or values.get('text') is not True):
+            raise ValueError('unregistered N0 CPU query constructor')
+        self.popen_count += 1
+        self.process = values['self']
+
+    def execute(self, executable, argv, cwd, env):
+        if (not self.active or self.popen_count != 1 or self.exec_count or
+                executable != CPU_QUERY_IMPORT['command'] or argv != [CPU_QUERY_IMPORT['command']] or
+                cwd is not None or env is not None):
+            raise ValueError('unregistered N0 CPU query execution')
+        self.exec_count += 1
+
+    def returned(self, result):
+        if (not self.active or self.exec_count != 1 or self.return_count or
+                not isinstance(result, subprocess.CompletedProcess) or result.returncode != 0 or
+                result.args != CPU_QUERY_IMPORT['command']):
+            raise ValueError('N0 CPU query did not complete cleanly')
+        self.return_count += 1
+        self.active = False
+
+    def finish(self):
+        if (self.active or (self.run_count, self.popen_count, self.exec_count, self.return_count) != (1,1,1,1) or
+                self.process is None or self.process.poll() != 0):
+            raise ValueError('N0 CPU query counts or completion incomplete')
+        return {'run_count':1, 'popen_count':1, 'exec_count':1, 'return_count':1, 'exit_code':0,
+                'scope':'registered_readonly_CPU_capability_query_only', 'shell':False,
+                'child_address_space_observed':False}
+
+
 def plugin_categories(messages):
     rows = []
     for message in messages:
@@ -230,16 +323,33 @@ def import_child(spec_path):
         validate_forcefield_registration(runtime)
         startup_stage = 'loopback_registration'
         validate_loopback_registration(runtime)
+        startup_stage = 'cpu_query_registration'
+        validate_cpu_query_registration(runtime)
     except BaseException as error:
         probe.atomic_json(private/'child.json', {'status': 'failed', 'stage': startup_stage,
                                                'error_class': type(error).__name__})
         return 1
     forcefield = ForceFieldImportGuard()
     loopback = LoopbackImportGuard()
+    cpu_query = CPUQueryImportGuard()
     def stop(category):
         probe.atomic_json(private/'child.json', {'status': 'forbidden_call', 'category': category})
         os._exit(71)
     def profile(frame, event, arg):
+        if frame.f_globals.get('__name__') == 'subprocess':
+            try:
+                if event == 'call' and frame.f_code.co_name == 'run':
+                    values = frame.f_locals
+                    cpu_query.enter(frame_site(frame.f_back), frame_site(frame.f_back.f_back),
+                        values.get('popenargs'), values.get('capture_output'), values.get('input'),
+                        values.get('timeout'), values.get('check'), values.get('kwargs'))
+                elif event == 'call' and frame.f_code.co_qualname == 'Popen.__init__':
+                    cpu_query.popen(frame.f_locals)
+                elif event == 'return' and frame.f_code.co_name == 'run':
+                    cpu_query.returned(arg)
+            except ValueError:
+                stop('unregistered_cpu_query')
+            return
         if event == 'call':
             module = frame.f_globals.get('__name__', '')
             function = frame.f_code.co_name
@@ -271,14 +381,16 @@ def import_child(spec_path):
         if event == 'socket.bind':
             caller = sys._getframe(1)
             parent = caller.f_back
-            def site(frame):
-                return (frame.f_globals.get('__name__'), frame.f_code.co_name,
-                        frame.f_code.co_filename, frame.f_lineno) if frame is not None else None
             try:
-                loopback.bind(args[0], args[1], current_import, site(caller), site(parent))
+                loopback.bind(args[0], args[1], current_import, frame_site(caller), frame_site(parent))
             except ValueError:
                 stop('unregistered_loopback_bind')
-        if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'socket.connect'}:
+        if event == 'subprocess.Popen':
+            try:
+                cpu_query.execute(*args)
+            except ValueError:
+                stop('unregistered_cpu_query_execution')
+        if event in {'os.system', 'os.posix_spawn', 'os.fork', 'socket.connect'}:
             stop('subprocess_or_network')
         if event == 'open' and forcefield.active and isinstance(args[0], (str, bytes)) and os.fsdecode(args[0]).endswith('.xml'):
             try:
@@ -311,6 +423,8 @@ def import_child(spec_path):
         forcefield_receipt = forcefield.finish()
         stage = 'loopback_counts'
         loopback_receipt = loopback.finish()
+        stage = 'cpu_query_counts'
+        cpu_query_receipt = cpu_query.finish()
         stage = 'loaded_identity'
         audit_start = time.monotonic()
         identity = probe.verify_loaded_identity(runtime, private/'loaded_identity.json', set(),
@@ -321,6 +435,7 @@ def import_child(spec_path):
                        loaded_identity=identity, actual_cpu_seconds=probe.cpu_seconds()-cpu,
                        forcefield_import=forcefield_receipt,
                        loopback_import=loopback_receipt,
+                       cpu_query_import=cpu_query_receipt,
                        staged_module_origins=staged_origins, import_seconds=import_seconds,
                        elapsed_seconds=time.monotonic()-started,
                        model_constructions_permitted=0, native_profiles_permitted=0,

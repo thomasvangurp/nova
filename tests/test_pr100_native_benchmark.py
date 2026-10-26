@@ -375,6 +375,77 @@ def test_loopback_registration_requires_exact_frozen_source_and_policy(monkeypat
     with pytest.raises(ValueError):n0.validate_loopback_registration(runtime)
 
 
+def cpu_query_fixture():
+    from types import SimpleNamespace
+    from scripts import pr100_runtime_preflight as n0
+    r=n0.CPU_QUERY_IMPORT
+    enter=[(r['caller_module'],r['caller_function'],r['caller_path'],r['caller_line']),
+           (r['caller_module'],r['parent_function'],r['caller_path'],r['parent_line']),
+           ('lscpu',),True,None,None,False,{'text':True}]
+    values=dict(self=SimpleNamespace(poll=lambda:0),args='lscpu',shell=False,env=None,stdin=None,
+                cwd=None,executable=None,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    return n0,enter,values
+
+
+def test_cpu_query_requires_exact_ordered_single_native_execution():
+    n0,enter,values=cpu_query_fixture();guard=n0.CPUQueryImportGuard()
+    with pytest.raises(ValueError):guard.finish()
+    with pytest.raises(ValueError):guard.execute('lscpu',['lscpu'],None,None)
+    guard.enter(*enter)
+    with pytest.raises(ValueError):guard.enter(*enter)
+    guard.popen(values)
+    with pytest.raises(ValueError):guard.popen(values)
+    guard.execute('lscpu',['lscpu'],None,None)
+    with pytest.raises(ValueError):guard.execute('lscpu',['lscpu'],None,None)
+    with pytest.raises(ValueError):guard.finish()
+    guard.returned(subprocess.CompletedProcess('lscpu',0))
+    with pytest.raises(ValueError):guard.returned(subprocess.CompletedProcess('lscpu',0))
+    assert guard.finish()['exec_count']==1 and guard.finish()['exit_code']==0
+
+
+@pytest.mark.parametrize('index,replacement',[(0,('other',)),(1,('other',)),(2,('lscpu','--help')),
+    (3,False),(4,'input'),(5,30),(6,True),(7,{'text':True,'shell':True}),(7,{'text':True,'env':{}})])
+def test_cpu_query_rejects_other_callers_and_run_arguments(index,replacement):
+    n0,enter,_=cpu_query_fixture();enter[index]=replacement
+    with pytest.raises(ValueError):n0.CPUQueryImportGuard().enter(*enter)
+
+
+@pytest.mark.parametrize('key,value',[('args',['lscpu']),('shell',True),('env',{}),('stdin',subprocess.PIPE),
+    ('cwd','/tmp'),('executable','/tmp/lscpu'),('stdout',None),('stderr',None),('text',False)])
+def test_cpu_query_rejects_shell_environment_or_stream_mutation(key,value):
+    n0,enter,values=cpu_query_fixture();guard=n0.CPUQueryImportGuard();guard.enter(*enter);values[key]=value
+    with pytest.raises(ValueError):guard.popen(values)
+
+
+@pytest.mark.parametrize('args',[('sh',['lscpu'],None,None),('lscpu',['lscpu','--help'],None,None),
+    ('lscpu',['lscpu'],'/tmp',None),('lscpu',['lscpu'],None,{})])
+def test_cpu_query_audit_rejects_changed_execution(args):
+    n0,enter,values=cpu_query_fixture();guard=n0.CPUQueryImportGuard();guard.enter(*enter);guard.popen(values)
+    with pytest.raises(ValueError):guard.execute(*args)
+
+
+@pytest.mark.parametrize('result',[None,subprocess.CompletedProcess('lscpu',1),subprocess.CompletedProcess('other',0)])
+def test_cpu_query_failed_process_cannot_qualify(result):
+    n0,enter,values=cpu_query_fixture();guard=n0.CPUQueryImportGuard();guard.enter(*enter);guard.popen(values)
+    guard.execute('lscpu',['lscpu'],None,None)
+    with pytest.raises(ValueError):guard.returned(result)
+
+
+def test_cpu_query_registration_binds_source_binary_libraries_and_resolution(monkeypatch):
+    from scripts import pr100_runtime_preflight as n0
+    r=n0.CPU_QUERY_IMPORT
+    files=dict(r['libraries'],**{r['caller_path']:r['caller_sha256'],r['executable']:r['executable_sha256']})
+    runtime={'n0_cpu_query_import':r,'path':'/registered','files':files}
+    monkeypatch.setattr(n0.shutil,'which',lambda *a,**k:r['executable'])
+    monkeypatch.setattr(n0.Path,'resolve',lambda p:n0.Path(r['library_resolution'].get(str(p),str(p))))
+    monkeypatch.setattr(n0.probe,'sha_file',lambda p:files[p])
+    n0.validate_cpu_query_registration(runtime)
+    for bad in [dict(runtime,n0_cpu_query_import={}),dict(runtime,library_path='/other'),dict(runtime,files={})]:
+        with pytest.raises(ValueError):n0.validate_cpu_query_registration(bad)
+    monkeypatch.setattr(n0.shutil,'which',lambda *a,**k:'/tmp/lscpu')
+    with pytest.raises(ValueError):n0.validate_cpu_query_registration(runtime)
+
+
 def test_research_helpers_do_not_shadow_regular_scientific_scripts_package(tmp_path):
     # Reproduce the actual native package collision in a fresh interpreter.
     package = tmp_path/'scripts'; package.mkdir()
@@ -446,7 +517,8 @@ def test_n1_verifies_receipt_bytes_status_measurements_and_runtime_binding(tmp_p
                'first_loaded_audit_seconds':1,'loaded_identity':{'unregistered_origins':[],'registered_data_mappings':[]},
                'staged_module_origins':{'fixture':['registered-source']},
                'forcefield_import':{'constructor_count':1,'xml_open_count':1},
-               'loopback_import':{'bind_count':1,'socket_closed':True,'external_network_operations_permitted':0}})
+               'loopback_import':{'bind_count':1,'socket_closed':True,'external_network_operations_permitted':0},
+               'cpu_query_import':{'run_count':1,'popen_count':1,'exec_count':1,'return_count':1,'exit_code':0,'shell':False}})
     (tmp_path/'n0').mkdir()
     path = tmp_path/'n0/receipt.json';path.write_text(json.dumps(receipt))
     outer={'receipt_sha256':probe.sha_file(path),'child_exit_code':0,

@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 5, not execution permission. Review before staging or running
+Executable protocol revision 6, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 The sole constructor exception is one exact native import-time XML parameter
@@ -22,7 +22,7 @@ closure reviewed. The `check` action runs as a dedicated Linux session through
 Pi, with interpreter `-B` and the native registered interpreter. Both controller
 and import child refuse bytecode-enabled startup. The import child has guards
 against model/physics construction, native metric entry points, CUDA discovery,
-subprocess launch and network connection. A guard hit exits that child and makes
+unregistered subprocess launch and network connection. A guard hit exits that child and makes
 the receipt NO_GO; native logs and exception text are never returned.
 
 The 120-second N0 cap is a preregistration change before any runtime measurement;
@@ -88,9 +88,29 @@ while importing the declared ImmuneBuilder module. The source SHA is
 `2633bbdb69731e5ccb5cf4e4afd65605d86c7979cc5633126f50c92d5ad74a74`.
 The actual socket must be AF_INET6/SOCK_STREAM/protocol 0 with address `('::1', 0)`;
 retain its reference and require closed `fileno()` after imports. Count one bind.
-No subprocess, connection, other bind or external networking exception exists.
+No connection, other bind or external networking exception exists.
 This permits a loopback-only capability probe, not blanket zero networking.
 Both failed d766 receipts remain evidence; neither qualifies a runtime.
+
+Revision 6 additionally permits one faithful read-only `lscpu` invocation from
+NumPy's installed `check_support_sve`, reached through SciPy's normal array API
+imports. The utils.py SHA is
+`dc5ad24cc8b439da43383043a27720883433768e4d280e9855f437b8a4524277`;
+caller line 1247 and parent module line 1253 are bound. Require the literal
+command, capture_output=True/text=True, shell=False, no custom env/stdin/cwd or
+executable, one Popen audit event and a successful CompletedProcess plus reaped
+Popen. No output is returned in receipts. PATH must resolve `/usr/bin/lscpu` with
+SHA `250c7ec85ceec9f50101f555704b79ed3a8a917efa14fa455d85136f27182daa`.
+Its explicit public dependency inventory binds libsmartcols, libc and the loader,
+including resolved symlinks. The normal imports and native fallback behavior are
+unchanged; no OSError substitution or probe emulation is used. The process stays
+inside the same owned tree, 120 seconds, two CPU slots and 4 GiB sampled abort.
+Its address space is not separately observed. Every other subprocess remains
+forbidden. Both prior failed N0 receipts remain preserved.
+
+The inventory now includes the 14 required NumPy testing source/bytecode files.
+Their directory name did not make them optional: SciPy imports them at runtime.
+This is an explicit closure correction, not scientific execution evidence.
 
 The interpreter and other entrypoints come from a separate readonly resolved-path
 inventory. The two Aggrescan/FreeSASA binaries may reside only under the explicitly

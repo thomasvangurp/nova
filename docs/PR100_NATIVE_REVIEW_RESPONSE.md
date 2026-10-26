@@ -134,3 +134,18 @@ The N1 gate now binds the supervisor and containment receipts and validates the
 exact declared imports. Source/CI evidence, actual N0 closure, and actual N1
 parity/cost remain distinct. Inputs, scientific methods, budgets, performance
 thresholds and all prior failed evidence are unchanged.
+
+
+# Second actual import refusal (protocol revision 6)
+
+The corrected 80b27fa N0 passed the loopback gate, then stopped safely at NumPy's
+`check_support_sve` read-only `lscpu` subprocess. A bounded diagnostic preserved
+the original guard and identified the exact public source site. The old runtime
+inventory omitted all 14 NumPy testing source/bytecode files even though SciPy
+imports them. They are captured in a new explicit readonly inventory.
+
+Revision 6 preserves native behavior with one source/caller/argv/constructor/
+executable/library-bound CPU query, requiring captured output, no shell/custom
+environment/stdin, clean exit, exact counts and existing owned-tree limits. No
+raw output, argv or environment enters receipts. The native OSError fallback is
+not forced. No other process exception, scientific method, input or budget changes.
