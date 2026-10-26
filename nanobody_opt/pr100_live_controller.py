@@ -377,6 +377,88 @@ def publication_sequence(ordered, *, allow_marginal=True):
     return attempts or [list(ordered)]
 
 
+def bank_settings(config):
+    """Cell-bank settings; the feature is off unless the config turns it on."""
+    settings = config.get('bank') or {}
+    if not isinstance(settings, dict):
+        raise ValueError('bank must be an object')
+    unknown = set(settings) - {'enabled', 'root', 'limit', 'runtime_identity',
+                               'max_measurement_age_seconds'}
+    if unknown:
+        raise ValueError('unknown bank keys: ' + ', '.join(sorted(unknown)))
+    enabled = settings.get('enabled', False)
+    if not isinstance(enabled, bool):
+        raise ValueError('bank.enabled must be a boolean')
+    if not enabled:
+        return {'enabled': False}
+    root = settings.get('root')
+    if not isinstance(root, str) or not Path(root).is_absolute():
+        raise ValueError('bank.root must be an absolute path when the bank is enabled')
+    limit = settings.get('limit', 13)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError('bank.limit must be a positive integer')
+    identity = settings.get('runtime_identity')
+    if identity is not None and not isinstance(identity, dict):
+        raise ValueError('bank.runtime_identity must be an object')
+    age = settings.get('max_measurement_age_seconds')
+    if age is not None and (isinstance(age, bool) or not isinstance(age, (int, float)) or age <= 0):
+        raise ValueError('bank.max_measurement_age_seconds must be a positive number')
+    return {'enabled': True, 'root': root, 'limit': limit, 'runtime_identity': identity,
+            'max_measurement_age_seconds': age}
+
+
+def bank_scores(candidates, target):
+    """``merge_scores``-shaped payload from the stored score observations.
+
+    Every published candidate must carry a score from the *same* scorer identity,
+    so the fleet's provenance is a single scorer and settings file exactly as the
+    live score phase produces.
+    """
+    rows = [row for row in candidates if row.get('bank_score')]
+    if not rows:
+        raise ValueError('no bank candidate carries a score observation')
+    first = rows[0]['bank_score']
+    scorer_sha, settings_sha = first['scorer_sha256'], first['settings_file_sha256']
+    usable = [r for r in rows if r['bank_score']['scorer_sha256'] == scorer_sha
+              and r['bank_score']['settings_file_sha256'] == settings_sha]
+    scores = {'target': target, 'structures': {}, 'source_batches': [],
+              'per_nanobody_components': {'0': {r['sequence']: {target: r['bank_score']['metrics']}
+                                                for r in usable}}}
+    scores['n'] = len(usable)
+    return usable, scores, first['settings'], scorer_sha, settings_sha
+
+
+def bank_publication(config, chain, challenge, archive, local, *, dry_run=False):
+    """Publish an early tiered fleet from the bank; returns None when it cannot.
+
+    This only *supplies* candidates. They still pass ``rules.verified_fleet`` and
+    the monotone-quality rule inside :func:`publish`, and the normal generation
+    run then upgrades the fleet through the same path.
+    """
+    settings = bank_settings(config)
+    if not settings['enabled']:
+        return None
+    from nanobody_opt.pr100_cell_bank import CellBank
+    allow_marginal = bool(config['worker'].get('allow_marginal', True))
+    validity = CellBank(settings['root']).select_for_epoch(
+        challenge, archive, limit=settings['limit'],
+        runtime_identity=settings['runtime_identity'],
+        max_measurement_age_seconds=settings['max_measurement_age_seconds'],
+        allow_marginal=allow_marginal)
+    summary = {'bucket_id': validity['bucket_id'], 'available': len(validity['candidates']),
+               'tier_counts': validity['tier_counts'],
+               'downgraded_count': validity['downgraded_count'],
+               'rejected': len(validity['rejected'])}
+    if not validity['candidates']:
+        return {**summary, 'status': 'empty', 'published': False}
+    scored, scores, scorer_settings, scorer_sha, settings_sha = bank_scores(
+        validity['candidates'], challenge['target'])
+    attempt = dict(validity, candidates=scored)
+    outcome = publish(config, chain, challenge, attempt, scores, scorer_settings, scorer_sha,
+                      settings_sha, local, tiers=candidate_tiers(scored), dry_run=dry_run)
+    return {**summary, **outcome, 'source': 'cell_bank'}
+
+
 def run_epoch(config, chain, clock, *, dry_run=False):
     epoch, length = clock['epoch'], clock['epoch_length']
     local = Path(config['state_root']) / str(epoch)
@@ -397,6 +479,20 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                                      if k in challenge}
         phase = 'archive'
         archive = fetch_archive(challenge['target'])
+        # Early fleet from the challenge-indexed bank (off unless config.bank.enabled).
+        # Everything expensive was already paid for; only the cheap re-checks run now,
+        # and the fleet still goes through publish()'s validation and monotone rule.
+        if bank_settings(config)['enabled']:
+            try:
+                outcome = bank_publication(config, chain, challenge, archive, local,
+                                           dry_run=dry_run)
+            except Exception as error:  # an unusable bank never costs the epoch
+                receipt['bank'] = {'status': 'failed', 'error_type': type(error).__name__,
+                                   'error': sanitize(str(error))}
+            else:
+                receipt['bank'] = outcome
+                if outcome and outcome.get('status') in ('published', 'dry_run'):
+                    receipt['publications'].append(outcome)
         phase = 'sequence'
         files = run_phase(config, challenge, phase, {'archive.csv': archive}, stop_at, chain, local,
                           diagnostics=diagnostics)
@@ -560,6 +656,7 @@ def validate_config(config):
     reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve <= MINIMUM_RESERVE_BLOCKS:
         raise ValueError(f'reserve_blocks must be an integer greater than {MINIMUM_RESERVE_BLOCKS}')
+    bank_settings(config)
     verify_build_stamp(config)
     return config
 

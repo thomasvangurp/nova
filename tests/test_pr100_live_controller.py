@@ -484,3 +484,143 @@ def test_sanitize_bounds_and_redacts_diagnostic_text():
     assert 'zzzz' not in cleaned and '<redacted>' in cleaned
     assert 'plain line' in cleaned
     assert len(controller.sanitize('y' * 9000)) <= controller.TAIL_BYTES
+
+
+# --- cell bank integration (config flag, default off) ------------------------------
+
+def bank_row(sequence, tier, mean, *, scorer='b' * 64, settings='c' * 64):
+    return {**candidate(sequence, tier, mean), 'source': 'cell_bank',
+            'bank_score': {'target': rules.TARGET, 'metrics': {'affinity': 1.0},
+                           'scorer_sha256': scorer, 'settings': {'steps': 35},
+                           'settings_file_sha256': settings}}
+
+
+def stub_bank(monkeypatch, rows, **over):
+    from nanobody_opt import pr100_cell_bank
+
+    class Bank:
+        def __init__(self, root):
+            self.root = root
+
+        def select_for_epoch(self, value, archive, **kwargs):
+            Bank.kwargs = kwargs
+            return {'challenge': value, 'target': rules.TARGET, 'epoch': value['epoch'],
+                    'bucket_id': 'IGHV3-66:12', 'candidates': list(rows), 'rejected': [],
+                    'archive_sha256': __import__('hashlib').sha256(b'archive').hexdigest(),
+                    'archive_checked_at_unix': 0.0, 'novelty_checked': True,
+                    'tier_counts': {'A': sum(1 for r in rows if r['tier'] == 'A'),
+                                    'B': sum(1 for r in rows if r['tier'] == 'B')},
+                    'downgraded_count': 0, **over}
+
+    monkeypatch.setattr(pr100_cell_bank, 'CellBank', Bank)
+    return Bank
+
+
+def test_the_bank_is_off_unless_the_config_enables_it(tmp_path, monkeypatch):
+    value = config(tmp_path)
+    assert controller.bank_settings(value) == {'enabled': False}
+    assert controller.bank_settings({**value, 'bank': {'enabled': False, 'root': 'x'}}) == {
+        'enabled': False}
+    stub_bank(monkeypatch, [bank_row('AAA', 'A', 78.0)])
+    assert controller.bank_publication(value, Chain(), challenge(), b'archive',
+                                       tmp_path) is None
+
+
+@pytest.mark.parametrize('mutation, message', [
+    ({'enabled': 'yes'}, 'enabled'),
+    ({'enabled': True}, 'bank.root'),
+    ({'enabled': True, 'root': 'relative'}, 'bank.root'),
+    ({'enabled': True, 'root': '/bank', 'limit': 0}, 'bank.limit'),
+    ({'enabled': True, 'root': '/bank', 'runtime_identity': 'x'}, 'runtime_identity'),
+    ({'enabled': True, 'root': '/bank', 'max_measurement_age_seconds': 0}, 'age'),
+    ({'enabled': True, 'root': '/bank', 'nonsense': 1}, 'unknown bank keys'),
+])
+def test_bad_bank_settings_are_rejected_by_config_validation(tmp_path, monkeypatch, mutation,
+                                                             message):
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda c, root=None: {})
+    with pytest.raises(ValueError, match=message):
+        controller.validate_config(config(tmp_path, bank=mutation))
+
+
+def test_an_enabled_bank_publishes_an_early_tiered_fleet(tmp_path, publishable, monkeypatch):
+    value = config(tmp_path, bank={'enabled': True, 'root': '/bank', 'limit': 5,
+                                   'runtime_identity': {'native_runtime': 'tnp-1'}})
+    local = tmp_path / 'local'
+    local.mkdir()
+    rows = [bank_row('AAA', 'A', 78.0), bank_row('BBB', 'B', 86.0)]
+    bank = stub_bank(monkeypatch, rows)
+    outcome = controller.bank_publication(value, Chain(), challenge(), b'archive', local)
+    assert outcome['status'] == 'published' and outcome['count'] == 2
+    assert outcome['tier_a_count'] == 1 and outcome['source'] == 'cell_bank'
+    assert outcome['bucket_id'] == 'IGHV3-66:12' and outcome['available'] == 2
+    assert bank.kwargs['limit'] == 5
+    assert bank.kwargs['runtime_identity'] == {'native_runtime': 'tnp-1'}
+    # The published fleet went through publish(), so its quality is recorded and the
+    # normal generation run can only upgrade it.
+    assert controller.published_quality(local, EPOCH)['tier_a'] == 1
+    assert json.loads(Path(value['publication_path']).read_text())['sequence_pool'] == ['AAA', 'BBB']
+
+
+def test_an_empty_bucket_publishes_nothing_and_says_so(tmp_path, publishable, monkeypatch):
+    value = config(tmp_path, bank={'enabled': True, 'root': '/bank'})
+    stub_bank(monkeypatch, [])
+    outcome = controller.bank_publication(value, Chain(), challenge(), b'archive', tmp_path)
+    assert outcome == {'bucket_id': 'IGHV3-66:12', 'available': 0, 'rejected': 0,
+                       'tier_counts': {'A': 0, 'B': 0}, 'downgraded_count': 0,
+                       'status': 'empty', 'published': False}
+    assert not Path(value['publication_path']).exists()
+
+
+def test_bank_scores_keep_one_scorer_identity_and_refuse_an_unscored_fleet():
+    rows = [bank_row('AAA', 'A', 78.0), bank_row('BBB', 'A', 79.0, scorer='e' * 64)]
+    usable, scores, settings, scorer, settings_sha = controller.bank_scores(rows, rules.TARGET)
+    assert [r['sequence'] for r in usable] == ['AAA']
+    assert scores['n'] == 1 and scorer == 'b' * 64 and settings_sha == 'c' * 64
+    assert scores['per_nanobody_components']['0']['AAA'][rules.TARGET] == {'affinity': 1.0}
+    assert settings == {'steps': 35}
+    with pytest.raises(ValueError, match='score observation'):
+        controller.bank_scores([candidate('AAA', 'A', 78.0)], rules.TARGET)
+
+
+def test_an_unusable_bank_never_costs_the_epoch(tmp_path, publishable, monkeypatch):
+    value = config(tmp_path, bank={'enabled': True, 'root': '/bank'})
+    local = tmp_path / 'local'
+    local.mkdir()
+    stub_bank(monkeypatch, [candidate('AAA', 'A', 78.0)])  # no score observation
+    with pytest.raises(ValueError):
+        controller.bank_publication(value, Chain(), challenge(), b'archive', local)
+    # run_epoch swallows that failure: the receipt records it and generation continues.
+    monkeypatch.setattr(rules, 'challenge', lambda *a, **k: challenge())
+    monkeypatch.setattr(controller, 'run_phase',
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
+    receipt = controller.run_epoch(value, Chain(), clock())
+    assert receipt['bank']['status'] == 'failed' and receipt['status'] == 'failed'
+    assert receipt['publications'] == []
+
+
+def test_run_epoch_publishes_from_the_bank_before_generating(tmp_path, publishable, monkeypatch):
+    value = config(tmp_path, bank={'enabled': True, 'root': '/bank'})
+    stub_bank(monkeypatch, [bank_row('AAA', 'A', 78.0)])
+    monkeypatch.setattr(rules, 'challenge', lambda *a, **k: challenge())
+    order = []
+    monkeypatch.setattr(controller, 'run_phase',
+                        lambda *a, **k: order.append('generation') or
+                        (_ for _ in ()).throw(RuntimeError('generation stopped')))
+    receipt = controller.run_epoch(value, Chain(), clock())
+    assert receipt['bank']['status'] == 'published'
+    assert [p['status'] for p in receipt['publications']] == ['published']
+    # The early fleet exists before any generation phase ran, and survives its failure.
+    assert order == ['generation'] and receipt['status'] == 'failed'
+    assert json.loads(Path(value['publication_path']).read_text())['sequence_pool'] == ['AAA']
+
+
+def test_run_epoch_leaves_the_bank_alone_when_the_flag_is_off(tmp_path, publishable, monkeypatch):
+    value = config(tmp_path)
+    opened = []
+    from nanobody_opt import pr100_cell_bank
+    monkeypatch.setattr(pr100_cell_bank, 'CellBank', lambda root: opened.append(root))
+    monkeypatch.setattr(rules, 'challenge', lambda *a, **k: challenge())
+    monkeypatch.setattr(controller, 'run_phase',
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
+    receipt = controller.run_epoch(value, Chain(), clock())
+    assert 'bank' not in receipt and opened == []
