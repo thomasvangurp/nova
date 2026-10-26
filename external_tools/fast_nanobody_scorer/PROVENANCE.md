@@ -28,3 +28,28 @@ them, and the numbers derived from them are in `VALIDATION.md`. A local archive
 of the full 415 MB working tree is at
 `~/nova-nanobody-box-backup-20260912/fastscore-src.tgz` alongside the complete
 pinned package; neither belongs in git.
+
+## PR100 qualification candidate, 2026-10-26
+
+The historical snapshot above is no longer the current source. An audit of
+the slave registration found scorer digest
+`0fccc5d630ef2ea98aad456e76ee65170383a6302f7eb92ac636565d2bfd98ef`,
+with independent-replica support absent from the repository copy. Its
+`resident.py` digest was
+`5d722e836519326969e733b0a130f0fd0a0e4432ed2a3d060141c6468e1d95e0`
+and wrapper digest was
+`dd5f6225562191d8dccff5672887f7300b5cc320da94eb3ebd9d4c229d30f518`.
+Those reviewed replica changes are retained here. The other 129 tracked
+BoltzGen package files matched the registered runtime byte for byte.
+
+The candidate also restores input regeneration on every ordinary-design chunk
+and namespaces replica seeds by observation ID. A later job must not repeat
+the same fixed `42 + ordinal` draws merely because its input order matches.
+The candidate scorer pin is maintained in `ansible/nanobody.yml` and checked
+against these bytes by CI. The complete package is included in release source
+evidence; it requires separate runtime qualification and installation.
+
+Passing unit tests or the old registered scorer's small new-target GPU probe
+does not establish candidate throughput, validator equivalence on the new
+target, or production approval. See the PR100 qualification workflow and the
+release promotion contract. No active runtime pin is changed by this commit.

@@ -233,6 +233,60 @@ def test_preparation_never_guesses_a_future_block_hash(tmp_path):
     assert not (tmp_path/f'live/epoch{EPOCH}/producer/epoch_candidate_pool.json').exists()
 
 
+@pytest.mark.parametrize('has_cached', [False, True])
+def test_empty_fresh_pool_preserves_cached_precheck_and_next_epoch(tmp_path, monkeypatch, has_cached):
+    from nanobody_opt_v2 import pr100_epoch, sequential_exact_race
+    from nanobody_opt.prepare_pr100_bank import bucket_key
+    args = SimpleNamespace(runtime_root=tmp_path, epoch_candidate_budget=4800,
+                           epoch_proposal_budget=8000, mutation_database=tmp_path/'observations.sqlite')
+    annotation = evidence()['annotation']
+    expected = evidence()['challenge']
+    rows = [{'sequence': SEQ, 'pr100_annotation': annotation}] if has_cached else []
+    bank = {'target': rules.TARGET, 'ruleset_sha256': rules.fingerprint(rules.pinned_config(EPOCH)),
+            'target_scores_transferred': 0, 'buckets': {
+                bucket_key(expected['allowed_v'], expected['allowed_cdr3_length']): rows}}
+    path = tmp_path/'artifacts/pr100_candidate_bank.json';path.parent.mkdir()
+    path.write_text(json.dumps(bank))
+    lookups = []
+    def prior(database, target, *, sequences):
+        lookups.append((target, list(sequences)))
+        return set(sequences)
+    monkeypatch.setattr(sequential_exact_race, '_prior_evaluation_sequences', prior)
+    outputs = []
+    for epoch in [EPOCH, EPOCH+1]:
+        state = {'epoch': epoch, 'epoch_length': 361, 'nanobody_target': rules.TARGET,
+                 'epoch_challenge': rules.challenge(rules.pinned_config(epoch), epoch, HASH)}
+        output = pr100_epoch.prepare(args, state, epoch, 'live')
+        pool = json.loads(output.read_text())
+        assert pool['screen_budget_policy'] == 'unseen-candidates-v2'
+        assert pool['candidates'] == [] and pool['sequences'] == []
+        assert pool['challenge'] == state['epoch_challenge']
+        coverage = json.loads((output.parent/'pr100_coverage.json').read_text())
+        assert coverage['shortfall_before_novelty'] == 4800
+        assert coverage['previously_evaluated'] == len(rows)
+        assert pr100_epoch.prepare(args, state, epoch, 'live') == output
+        outputs.append(output)
+    assert outputs[0] != outputs[1]
+    assert lookups == [(rules.TARGET, [r['sequence'] for r in rows])]*2
+    from nanobody_opt_v2 import run_live_producer as producer, cached_confirmation
+    starts = []
+    args.complete_screen_pool = outputs[0]
+    args.complete_screen_until_epoch = EPOCH+1
+    args.chain_state = tmp_path/'chain_state.json'
+    state = {'epoch': EPOCH, 'nanobody_target': rules.TARGET}
+    monkeypatch.setattr(producer, '_producer_subtree', lambda a: 'live')
+    monkeypatch.setattr(producer, '_prepare_epoch', lambda **k: (
+        tmp_path/'config.yaml', tmp_path/'archive.json', rules.TARGET))
+    monkeypatch.setattr(cached_confirmation, 'start', lambda **k: starts.append(k))
+    monkeypatch.setattr(producer, '_validator_novel_sequences', lambda **k: set())
+    monkeypatch.setattr(producer, '_complete_pool_coverage', lambda **k: {'complete': True})
+    monkeypatch.setattr(producer, '_stamp_artifact_policy', lambda *a: None)
+    (tmp_path/'config.yaml').write_text(__import__('yaml').safe_dump(
+        rules.bind(rules.pinned_config(EPOCH), EPOCH, HASH)))
+    assert producer._run_complete_screen_pool(args, state) == producer.PRODUCER_WAIT
+    assert len(starts) == 1 and starts[0]['state']['epoch'] == EPOCH
+
+
 @pytest.mark.parametrize('key',['total_cdr_length','cdr3_compactness','positive_charge_patches'])
 def test_pass_flag_cannot_replace_missing_developability_measurements(key):
     e=evidence();e['developability'].pop(key)

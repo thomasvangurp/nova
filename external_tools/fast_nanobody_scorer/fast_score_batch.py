@@ -70,6 +70,16 @@ REQUIRED_SUBNET_KEYS = (
 )
 
 
+def replicate_seed(observation_id: str, ordinal: int) -> int:
+    """Independent jobs use distinct seed namespaces; retries retain theirs.
+
+    Fixed 42+ordinal seeds repeat the same draws when a later wave reuses its
+    input positions. Within one observation, consecutive ordinals stay unique.
+    """
+    base = int.from_bytes(hashlib.sha256(observation_id.encode()).digest()[:4], 'big')
+    return (base + ordinal) % 2**32
+
+
 def _flatten_config(cfg: dict, target: str) -> dict:
     """Flatten upstream config.yaml into the flat keys BoltzgenWrapper reads.
 
@@ -106,8 +116,8 @@ def _sha256(path) -> str:
     return h.hexdigest()
 
 
-def _capture_structures(designs_dir, sequences, targets, structure_dir,
-                        observation_id):
+def _capture_structures(designs_dir, seq_record_ids, targets, structure_dir,
+                        observation_id, allow_replicates=False):
     """Retain both validator-selected refolded poses and their provenance.
 
     A port of score_boltzgen_batch.py's capture, reusing nanobody_opt's
@@ -138,10 +148,9 @@ def _capture_structures(designs_dir, sequences, targets, structure_dir,
     copied = {}
     destination = Path(structure_dir) / observation_id
     destination.mkdir(parents=True, exist_ok=True)
-    for sequence in sequences:
-        sequence_hash = hashlib.sha256(sequence.encode("ascii")).hexdigest()
+    for sequence, record_id_base in seq_record_ids:
         for target in targets:
-            record_id = f"{sequence_hash}_{target}_input"
+            record_id = f"{record_id_base}_{target}_input"
             row = by_id.get(record_id)
             if row is None:
                 continue
@@ -172,11 +181,14 @@ def _capture_structures(designs_dir, sequences, targets, structure_dir,
                             f"analyze sample "
                             f"{selection.analyze_sample_index}={selected}"
                         )
-            confidence_path = destination / f"{sequence_hash}_{target}.cif"
-            writer_path = destination / f"{sequence_hash}_{target}_writer.cif"
+            confidence_path = destination / f"{record_id_base}_{target}.cif"
+            writer_path = destination / f"{record_id_base}_{target}_writer.cif"
             shutil.copyfile(analyze_source, confidence_path)
             shutil.copyfile(writer_source, writer_path)
-            copied.setdefault(sequence, {})[target] = {
+            # Default keys by the bare sequence; replicate mode keys by the
+            # distinct record id so N identical sequences keep N structures.
+            struct_key = record_id_base if allow_replicates else sequence
+            copied.setdefault(struct_key, {})[target] = {
                 # "path" deliberately means the pose analyze_utils selected for
                 # the reported confidence metrics, matching production.
                 "path": str(confidence_path),
@@ -258,7 +270,8 @@ class _AnalysisPool:
 def _worker(args):
     (shard_id, gpu, seqs, subnet_config, out_path, batch_size, keep_work_dir,
      shard_root, fold_matmul, fold_steps, fold_samples, design_steps,
-     synth_ref, synth_lib, structure_dir, observation_id) = args
+     synth_ref, synth_lib, structure_dir, observation_id,
+     allow_replicates, replicate_indices) = args
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
@@ -282,7 +295,6 @@ def _worker(args):
     from boltzgen.task.task import Task
 
     from resident import ResidentStage
-    from utils import seq_hash
 
     stages: dict[str, ResidentStage] = {}
 
@@ -303,7 +315,7 @@ def _worker(args):
         print(f"  shard {shard_id}: rotamer library from {len(synth_lib)} designs",
               flush=True)
 
-    def run_chunk(chunk_dir: Path, chunk_seqs: list[str]) -> dict:
+    def run_chunk(chunk_dir: Path, chunk_seqs: list[str], indices: list[int]) -> dict:
         bw.BOLTZGEN_TMP_FILES_DIR = str(chunk_dir)
         shutil.rmtree(chunk_dir, ignore_errors=True)
         (chunk_dir / "inputs").mkdir(parents=True, exist_ok=True)
@@ -314,18 +326,21 @@ def _worker(args):
         w.input_dir = str(chunk_dir / "inputs")
         w.output_dir = str(chunk_dir / "outputs")
         w.subnet_config = subnet_config
-        w.unique_sequences = w._deduplicate_nanobodies({0: {"sequences": chunk_seqs}})
-
-        # Every chunk has a newly emptied input directory. Cached model/config
-        # state cannot stand in for the current chunk's design inputs.
-        if synth is None and "cfg_dir" in cached:
-            w._write_yaml_files()
+        w.allow_replicates = allow_replicates
+        w.unique_sequences = w._deduplicate_nanobodies(
+            {0: {"sequences": chunk_seqs}},
+            replicate_indices=indices if allow_replicates else None,
+        )
 
         # configure once per worker. The YAML it emits differs between chunks
         # only in paths, and run_batch overrides those at instantiate time. The
         # input YAMLs feed the design stage only, which synthesis replaces.
-        if "cfg_dir" not in cached:
+        # Every ordinary-design chunk needs its own inputs after cleanup.
+        # Reusing model configuration must never reuse a previous chunk's
+        # candidate YAMLs (nor leave the next input directory empty).
+        if synth is None or allow_replicates or "cfg_dir" not in cached:
             w._write_yaml_files()
+        if "cfg_dir" not in cached:
             parser = build_parser()
             argv = ["configure", w.input_dir, "--output", w.output_dir,
                     "--protocol", w.boltzgen_config["protocol"],
@@ -348,13 +363,18 @@ def _worker(args):
             ref_cif, lib, synthesize = synth
             ref_npz = ref_cif.with_suffix(".npz")
             t0 = time.time()
-            for seq in chunk_seqs:
-                for target in subnet_config["nanobody_target"]:
-                    stem = f"{seq_hash(seq)}_{target}_input"
-                    synthesize(ref_cif, seq, designs_dir / f"{stem}.cif", lib)
-                    # folding reads only ss_type/binding_type out of the npz and
-                    # the model consumes neither, so the reference's serves
-                    shutil.copyfile(ref_npz, designs_dir / f"{stem}.npz")
+            # Iterate w.unique_sequences (not chunk_seqs) so the stem is the
+            # wrapper's seq_idx: in replicate mode that is the distinct
+            # "<seq_hash><index>" record id, in default mode it is seq_hash(seq)
+            # -- identical to the previous behavior.
+            for seq, ids in w.unique_sequences.items():
+                for uid, seq_idx in ids:
+                    for target in subnet_config["nanobody_target"]:
+                        stem = f"{seq_idx}_{target}_input"
+                        synthesize(ref_cif, seq, designs_dir / f"{stem}.cif", lib)
+                        # folding reads only ss_type/binding_type out of the npz and
+                        # the model consumes neither, so the reference's serves
+                        shutil.copyfile(ref_npz, designs_dir / f"{stem}.npz")
             print(f"  shard {shard_id}: synthesized {len(chunk_seqs)} designs in "
                   f"{time.time() - t0:.2f}s", flush=True)
         else:
@@ -367,6 +387,7 @@ def _worker(args):
             stages["design"].run_batch(
                 {"data.cfg.yaml_path": yaml_paths, "output": str(designs_dir)},
                 predict_args=({"sampling_steps": design_steps} if design_steps else None),
+                seed=replicate_seed(observation_id, indices[0]) if allow_replicates else None,
             )
 
         # ---- folding (resident) ------------------------------------------
@@ -389,6 +410,7 @@ def _worker(args):
         stages["folding"].run_batch(
             {"data.design_dir": str(designs_dir), "output": str(designs_dir)},
             predict_args=predict_args or None,
+            seed=replicate_seed(observation_id, indices[0]) if allow_replicates else None,
         )
 
         # ---- analysis: dispatched to a persistent child, not run here -----
@@ -410,11 +432,14 @@ def _worker(args):
     analysis = _AnalysisPool(mp.get_context("spawn"))
     deferred = []
 
+    # A replicate owns an entire predict call, including data featurization.
+    if allow_replicates:
+        batch_size = 1
     for start in range(0, len(seqs), batch_size):
         chunk = seqs[start:start + batch_size]
         chunk_dir = Path(shard_root) / f"shard{shard_id}" / f"chunk{start // batch_size}"
         try:
-            w, designs_dir, chunk_seqs = run_chunk(chunk_dir, chunk)
+            w, designs_dir, chunk_seqs = run_chunk(chunk_dir, chunk, replicate_indices[start:start + batch_size])
             deferred.append((chunk_dir, w, designs_dir, chunk_seqs))
         except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
             import traceback
@@ -439,8 +464,10 @@ def _worker(args):
                 for uid, by_seq in (w.per_nanobody_components or {}).items():
                     components.setdefault(uid, {}).update(by_seq)
                 structures.update(_capture_structures(
-                    designs_dir, chunk_seqs, subnet_config["nanobody_target"],
-                    structure_dir, observation_id,
+                    designs_dir,
+                    [(seq, str(seq_idx)) for seq, ids in w.unique_sequences.items() for uid, seq_idx in ids],
+                    subnet_config["nanobody_target"],
+                    structure_dir, observation_id, allow_replicates,
                 ) or {})
             except Exception as exc:  # noqa: BLE001
                 import traceback
@@ -519,6 +546,12 @@ def main():
                          "NOTE the score is a MAX over samples, so lowering this "
                          "biases scores downward, it does not merely add noise.")
     ap.add_argument("--keep-work-dir", action="store_true")
+    ap.add_argument("--allow-replicates", action="store_true",
+                    help="score N identical sequences as N independent "
+                         "replicates. Each replicate is keyed by a distinct "
+                         "record id <seq_hash><index>, so the same sequence no "
+                         "longer collapses at dedup or at merge. Default "
+                         "(off) preserves upstream dedup behavior.")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -538,8 +571,10 @@ def main():
     gpus = [g.strip() for g in a.gpus.split(",") if g.strip()]
     n_shards = max(1, len(gpus) * a.shards_per_gpu)
     buckets = [[] for _ in range(n_shards)]
+    index_buckets = [[] for _ in range(n_shards)]
     for i, s in enumerate(seqs):
         buckets[i % n_shards].append(s)
+        index_buckets[i % n_shards].append(i)
 
     observation_id = a.observation_id or uuid.uuid4().hex
 
@@ -558,7 +593,7 @@ def main():
              a.keep_work_dir, a.shard_root, a.fold_matmul_precision,
              a.fold_sampling_steps, a.fold_diffusion_samples,
              a.design_sampling_steps, a.synth_reference, synth_lib,
-             a.capture_structures, observation_id)
+             a.capture_structures, observation_id, a.allow_replicates, index_buckets[i])
             for i, b in enumerate(buckets) if b]
     print(f"{len(seqs)} sequences over {len(jobs)} shards on GPUs {gpus}", flush=True)
 
@@ -614,7 +649,8 @@ def main():
                    "scorer_protocol": SCORER_PROTOCOL,
                    "observation_id": observation_id,
                    "diagnostic_seed": None,
-                   "predict_batch_size": a.batch_size,
+                   "replicate_seed_base": replicate_seed(observation_id, 0) if a.allow_replicates else None,
+                   "predict_batch_size": 1 if a.allow_replicates else a.batch_size,
                    "per_nanobody_components": merged,
                    "structures": merged_structures},
                   handle, indent=2, default=str)

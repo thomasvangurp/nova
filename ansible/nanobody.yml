@@ -110,7 +110,7 @@
     # differently pinned build cannot quietly occupy the same path, and the
     # adapter's own sha256 check refuses anything but these bytes.
     nanobody_fast_scorer_sha256: >-
-      530f5dcbc54d4a012571f4f9a7ddb6c016552291606652766d02c91643a7d531
+      f593e19e716cae1f4cb24bed9aabd070c5e04b63cb1dd5211905f6ab564b65dc
     nanobody_fast_scorer_root: /root/fastscore
     nanobody_fast_scorer_reference: >-
       0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif
@@ -427,6 +427,7 @@
               'python': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/release_python.sh',
               'scorer': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/fast_score_batch.py',
               'scorer_sha256': nanobody_fast_scorer_sha256,
+              'worker_argument_schema': 'replicates-v1',
               'synth_reference': nanobody_fast_scorer_root ~ '/pinned-' ~ nanobody_fast_scorer_sha256[:12] ~ '/refdesign/' ~ nanobody_fast_scorer_reference,
             } | combine(nanobody_fast_scorer_tuning) | to_nice_json
           }}

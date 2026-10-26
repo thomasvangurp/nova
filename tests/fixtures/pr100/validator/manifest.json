@@ -1,0 +1,9 @@
+{
+  "revision": "ce19ea8cbe656671c3440ba58b4093ff80798d4f",
+  "files": {
+    "neurons/validator/nanobody_validity.py": "e70664a6f0962524394d623a991ae9679fee0e553d35aef6a1da5324663e23d4",
+    "config/config.yaml": "b649659d00e75cd5c853c0480e2598e1dd9d4274b0639edf6ec4e1b02738f653",
+    "utils/aggrescan3d.py": "ecd3f23a1238b2262777cc1cd28bbcce260c9d52a83c215711641b329d36430e",
+    "utils/nanobodies.py": "4315ba7cb631f68717dc00fa7690ca3cf44621fa15d256c11913fbcff58e03ab"
+  }
+}

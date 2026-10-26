@@ -62,11 +62,15 @@ class ResidentStage:
         self.load_seconds = time.time() - t0
 
     def run_batch(self, overrides: dict[str, Any],
-                  predict_args: Optional[dict] = None) -> float:
+                  predict_args: Optional[dict] = None,
+                  seed: Optional[int] = None) -> float:
         """Predict one batch. `overrides` are dotted config keys.
 
         Returns wall seconds for the predict call only (model load excluded).
         """
+        # Seed before constructing data: featurization may consume RNG too.
+        if seed is not None:
+            seed_all(seed)
         cfg = self.base_cfg.copy()
         for k, v in overrides.items():
             OmegaConf.update(cfg, k, v, merge=False)
@@ -95,6 +99,9 @@ def seed_all(seed: int) -> None:
     import numpy as np
     import torch
 
+    from pytorch_lightning import seed_everything
+
+    seed_everything(seed, workers=True, verbose=False)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

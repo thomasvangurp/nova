@@ -36,6 +36,12 @@ class BoltzgenWrapper:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.per_nanobody_components = {}
+        # When True, identical sequences are NOT collapsed: every occurrence is
+        # scored as an independent replicate with a distinct record id of the
+        # form "<seq_hash><index>" (index = input ordinal). Default False
+        # preserves upstream dedup exactly. Set by fast_score_batch.py's
+        # --allow-replicates flag.
+        self.allow_replicates = False
         bt.logging.info("BoltzgenWrapper initialized")
 
     def _flatten_metrics(self):
@@ -90,17 +96,52 @@ class BoltzgenWrapper:
         self.run_nanobody_inference(valid_nanobodies_by_uid, subnet_config)
         return self.finalize_ranking_from_components(valid_nanobodies_by_uid, subnet_config)
 
-    def _deduplicate_nanobodies(self, valid_nanobodies_by_uid: dict):
-        """Collect all unique nanobody sequences across all UIDs."""
+    def _deduplicate_nanobodies(self, valid_nanobodies_by_uid: dict, allow_replicates: bool = None,
+                                replicate_indices=None):
+        """Collect nanobody sequences across all UIDs.
+
+        Default (allow_replicates=False/None): identical sequences collapse to a
+        single key, matching upstream behavior; every occurrence of a sequence
+        maps to the same seq_idx = seq_hash(seq).
+
+        allow_replicates=True: the dict key is still the bare sequence (so the
+        amino-acid sequence itself stays intact for scoring), but each
+        occurrence is assigned a distinct record id "<seq_hash><index>" where
+        <index> is the global input ordinal supplied by the scorer. Direct
+        unsharded callers default to traversal ordinals. This record id becomes
+        the file stem / CSV id / nanobody_id, so N copies of one molecule
+        survive design, folding, analysis and the merge as N independent
+        metric sets.
+
+        NOTE: replicate mode is scoped to the direct scoring path
+        (run_nanobody_inference / _populate_per_nanobody_components and
+        fast_score_batch.py). The ranking path (finalize_ranking_from_components)
+        keys by the bare sequence and is not replicate-aware.
+        """
         unique_sequences = {}
+        ordinal = 0
+        indices = list(replicate_indices) if replicate_indices is not None else None
+        if indices is not None and (
+            len(indices) != sum(len(v["sequences"]) for v in valid_nanobodies_by_uid.values())
+            or len(set(indices)) != len(indices)
+        ):
+            raise ValueError("replicate_indices must contain one unique index per input")
+
+        if allow_replicates is None:
+            allow_replicates = self.allow_replicates
 
         for uid, nanobodies in valid_nanobodies_by_uid.items():
             sequences = nanobodies['sequences']
             for seq in sequences:
                 if seq not in unique_sequences:
                     unique_sequences[seq] = []
-                seq_idx = seq_hash(seq)
+                if allow_replicates:
+                    k = indices[ordinal] if indices is not None else ordinal
+                    seq_idx = f"{seq_hash(seq)}{k}"
+                else:
+                    seq_idx = seq_hash(seq)
                 unique_sequences[seq].append((uid, seq_idx))
+                ordinal += 1
 
         bt.logging.debug(f"Unique sequences: {unique_sequences}")
         return unique_sequences
@@ -126,15 +167,25 @@ class BoltzgenWrapper:
 """
 
     def _write_yaml_files(self):
-        """Write YAML input files for each unique sequence and target."""
+        """Write YAML input files for each unique sequence (or replicate) and target."""
         for target, clip_interval in zip(self.subnet_config['nanobody_target'], self.subnet_config['nanobody_target_clip_interval']):
             protein_sequence = get_sequence_from_protein_code(target, clip_interval)
             for seq, ids in self.unique_sequences.items():
-                yaml_content = self._create_yaml_content(seq, protein_sequence, target)
-                record_id = seq_hash(seq)
-                yaml_path = os.path.join(self.input_dir, f"{record_id}_{target}_input.yaml")
-                with open(yaml_path, "w") as f:
-                    f.write(yaml_content)
+                if self.allow_replicates:
+                    # One YAML per replicate, named by its distinct record id;
+                    # the sequence written inside the YAML is the real sequence.
+                    for uid, seq_idx in ids:
+                        yaml_content = self._create_yaml_content(seq, protein_sequence, target)
+                        record_id = str(seq_idx)
+                        yaml_path = os.path.join(self.input_dir, f"{record_id}_{target}_input.yaml")
+                        with open(yaml_path, "w") as f:
+                            f.write(yaml_content)
+                else:
+                    yaml_content = self._create_yaml_content(seq, protein_sequence, target)
+                    record_id = seq_hash(seq)
+                    yaml_path = os.path.join(self.input_dir, f"{record_id}_{target}_input.yaml")
+                    with open(yaml_path, "w") as f:
+                        f.write(yaml_content)
 
     def _run_configure_then_execute(self):
         """Run configure and execute commands for Boltzgen."""
@@ -191,8 +242,11 @@ class BoltzgenWrapper:
             for uid, seq_idx in ids:
                 if uid not in self.per_nanobody_components:
                     self.per_nanobody_components[uid] = {}
-                if seq not in self.per_nanobody_components[uid]:
-                    self.per_nanobody_components[uid][seq] = {}
+                # Replicate mode keys each observation by its distinct record id
+                # (str(seq_idx)); default mode keys by the bare sequence.
+                key = str(seq_idx) if self.allow_replicates else seq
+                if key not in self.per_nanobody_components[uid]:
+                    self.per_nanobody_components[uid][key] = {}
 
                 for target in self.subnet_config['nanobody_target']:
                     sid = str(seq_idx)
@@ -210,7 +264,7 @@ class BoltzgenWrapper:
                         )
                         metrics = {}
 
-                    self.per_nanobody_components[uid][seq][target] = metrics
+                    self.per_nanobody_components[uid][key][target] = metrics
 
     def _per_nanobody_components_to_dataframe(self) -> pd.DataFrame:
         """Rebuild a metric table from per_nanobody_components for ranking."""

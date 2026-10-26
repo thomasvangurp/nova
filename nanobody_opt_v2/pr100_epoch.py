@@ -42,8 +42,9 @@ def prepare(args, state, epoch, subtree):
            'unseen': len(unseen), 'proposals': len(candidates),
            'fresh_evaluation_budget': args.epoch_candidate_budget,
            'shortfall_before_novelty': max(0, args.epoch_candidate_budget-len(candidates))})
-    if not candidates:
-        raise ValueError('no unseen PR100 candidates for the current challenge')
+    # An exhausted (or empty) challenge bank is a fresh-work shortfall, not a
+    # reason to suppress the separate cached-candidate eligibility precheck.
+    # Emit the empty pool so the normal epoch path can still start that work.
     atomic(output, {'target': rules.TARGET, 'challenge': expected,
            'origin_epoch': epoch, 'target_epoch': epoch, 'prepared_during_epoch': state['epoch'],
            'candidate_budget': args.epoch_candidate_budget, 'proposal_budget': args.epoch_proposal_budget,
