@@ -111,3 +111,26 @@ performed during this source audit. Tests exercise guards, not native parity.
 The resource helper's fail-closed behavior is unchanged. No narrower cgroup
 mount is substituted when the broadest bound cannot be established. All old
 review/CI artifacts remain evidence for their own immutable revisions.
+
+
+# Actual N0 and review 4 corrections (protocol revision 5)
+
+Actual d766 N0 failed safely before identity collection; a separately bounded
+diagnostic pinpointed urllib3's local IPv6 bind. No scientific profile ran.
+Pinned source proves a single `::1` ephemeral capability probe and socket close.
+The narrow caller/source/address/socket/count/closure exception permits only
+that operation; subprocess and external connection restrictions stay intact.
+
+Actual Opus review 4 proposed two XML opens, but direct inspection of the pinned
+`openmm/app/forcefield.py` (SHA `7c909edd1bbb8c48ac0070e5ea19b6bf0817be2aeccfbd23e7ebb1302c0da432`)
+refutes that premise. Lines 249–254 resolve the file using `isfile` checks before
+line 256 parses it. No relative parse/IOError retry exists in this version. The
+one-absolute-open guard remains correct and unchanged. The review's proposed
+two-open contract would itself cause an import failure. The source evidence and
+actual failed diagnostic are retained; tests cover every loopback constraint.
+The full native N0 remains required.
+
+The N1 gate now binds the supervisor and containment receipts and validates the
+exact declared imports. Source/CI evidence, actual N0 closure, and actual N1
+parity/cost remain distinct. Inputs, scientific methods, budgets, performance
+thresholds and all prior failed evidence are unchanged.

@@ -314,6 +314,67 @@ def test_forcefield_exception_binds_caller_argument_and_observed_counts():
     assert forbidden_call('openmm.openmm', '__init__', 'Context') == 'physics_constructor'
 
 
+def loopback_fixture(monkeypatch):
+    from scripts import pr100_runtime_preflight as n0
+    class Socket:
+        family=n0.socket.AF_INET6
+        type=n0.socket.SOCK_STREAM
+        proto=0
+        fd=9
+        def fileno(self):return self.fd
+    monkeypatch.setattr(n0.socket, 'socket', Socket)
+    r=n0.LOOPBACK_IMPORT
+    args=[Socket(), ('::1',0), r['declared_import'],
+          (r['caller_module'],r['caller_function'],r['caller_path'],r['caller_line']),
+          (r['caller_module'],r['parent_function'],r['caller_path'],r['parent_line'])]
+    return n0, args
+
+
+def test_loopback_exception_requires_one_bind_and_closed_retained_socket(monkeypatch):
+    n0,args=loopback_fixture(monkeypatch)
+    guard=n0.LoopbackImportGuard()
+    with pytest.raises(ValueError,match='incomplete'):guard.finish()
+    guard.bind(*args)
+    with pytest.raises(ValueError,match='incomplete'):guard.finish()
+    with pytest.raises(ValueError,match='unregistered'):guard.bind(*args)
+    args[0].fd=-1
+    assert guard.finish()=={'bind_count':1,'socket_closed':True,
+        'scope':'registered_IPv6_loopback_capability_probe_only','external_network_operations_permitted':0}
+
+
+@pytest.mark.parametrize('failure', ['address', 'port', 'bool_port', 'list', 'family', 'type', 'protocol',
+    'closed', 'object', 'declared_import', 'caller_module', 'caller_function', 'caller_path',
+    'caller_line', 'parent_module', 'parent_function', 'parent_path', 'parent_line'])
+def test_loopback_exception_rejects_every_unregistered_site_or_socket(monkeypatch,failure):
+    n0,args=loopback_fixture(monkeypatch)
+    if failure in {'address','port','bool_port','list'}:
+        args[1]={'address':('::',0),'port':('::1',1),'bool_port':('::1',False),'list':['::1',0]}[failure]
+    elif failure in {'family','type','protocol','closed'}:
+        name,value={'family':('family',n0.socket.AF_INET),'type':('type',n0.socket.SOCK_DGRAM),
+                    'protocol':('proto',6),'closed':('fd',-1)}[failure]
+        setattr(args[0],name,value)
+    elif failure=='object':args[0]=object()
+    elif failure=='declared_import':args[2]='other'
+    else:
+        prefix,field=failure.split('_',1)
+        at=3 if prefix=='caller' else 4
+        fields=list(args[at]);fields[{'module':0,'function':1,'path':2,'line':3}[field]]='unregistered'
+        args[at]=tuple(fields)
+    with pytest.raises(ValueError,match='unregistered'):n0.LoopbackImportGuard().bind(*args)
+
+
+def test_loopback_registration_requires_exact_frozen_source_and_policy(monkeypatch):
+    from scripts import pr100_runtime_preflight as n0
+    r=n0.LOOPBACK_IMPORT
+    runtime={'n0_loopback_import':r,'files':{r['caller_path']:r['caller_sha256']}}
+    monkeypatch.setattr(n0.probe,'sha_file',lambda _:r['caller_sha256'])
+    n0.validate_loopback_registration(runtime)
+    with pytest.raises(ValueError):n0.validate_loopback_registration(dict(runtime,n0_loopback_import={}))
+    with pytest.raises(ValueError):n0.validate_loopback_registration(dict(runtime,files={}))
+    monkeypatch.setattr(n0.probe,'sha_file',lambda _:'0'*64)
+    with pytest.raises(ValueError):n0.validate_loopback_registration(runtime)
+
+
 def test_research_helpers_do_not_shadow_regular_scientific_scripts_package(tmp_path):
     # Reproduce the actual native package collision in a fresh interpreter.
     package = tmp_path/'scripts'; package.mkdir()
@@ -381,15 +442,37 @@ def test_n1_verifies_receipt_bytes_status_measurements_and_runtime_binding(tmp_p
         runtime_input_sha256=digest(base), harness_sha256=probe.sha_file(probe.ROOT/'scripts/pr100_runtime_preflight.py'),
         verification={'seconds':2,'hashed_bytes':10}, post_verification={'seconds':1,'hashed_bytes':10},
         cleanup={'remaining_descendants':0,'fixed_point_reached':True},
-        child={'status':'complete','cpu_platform':'CPU','cpu_threads_property':True,
+        child={'status':'complete','cpu_platform':'CPU','cpu_threads_property':True,'declared_imports':list(probe.N0_IMPORTS),
                'first_loaded_audit_seconds':1,'loaded_identity':{'unregistered_origins':[],'registered_data_mappings':[]},
                'staged_module_origins':{'fixture':['registered-source']},
-               'forcefield_import':{'constructor_count':1,'xml_open_count':1}})
-    path = tmp_path/'receipt.json';path.write_text(json.dumps(receipt))
+               'forcefield_import':{'constructor_count':1,'xml_open_count':1},
+               'loopback_import':{'bind_count':1,'socket_closed':True,'external_network_operations_permitted':0}})
+    (tmp_path/'n0').mkdir()
+    path = tmp_path/'n0/receipt.json';path.write_text(json.dumps(receipt))
+    outer={'receipt_sha256':probe.sha_file(path),'child_exit_code':0,
+           'outer_cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}
+    (tmp_path/'supervisor-receipt.json').write_text(json.dumps(outer))
+    (tmp_path/'containment.json').write_text(json.dumps({'passed':True,'remaining_descendants':0}))
     runtime = dict(base, closure_reviewed=True, closure_reviewer='test-fixture-reviewer',
         n0_receipt_path=str(path),n0_receipt_sha256=probe.sha_file(path),
-        n0_measurements=probe.n0_measurements_from_receipt(receipt))
+        n0_measurements=probe.n0_measurements_from_receipt(receipt),
+        n0_supervisor_receipt_sha256=probe.sha_file(tmp_path/'supervisor-receipt.json'),
+        n0_containment_sha256=probe.sha_file(tmp_path/'containment.json'))
     assert probe.verify_n0_receipt(runtime)['status'] == receipt['status']
+    for key in ('n0_supervisor_receipt_sha256','n0_containment_sha256'):
+        with pytest.raises(ValueError,match='outer receipt identity'):
+            probe.verify_n0_receipt(dict(runtime,**{key:'0'*64}))
+    for failure in ('timeout','exit','descendants','fixedpoint','receipt'):
+        bad_outer=copy.deepcopy(outer)
+        if failure=='timeout':bad_outer['supervisor_timeout']=True
+        elif failure=='exit':bad_outer['child_exit_code']=1
+        elif failure=='descendants':bad_outer['outer_cleanup']['remaining_descendants']=1
+        elif failure=='fixedpoint':bad_outer['outer_cleanup']['fixed_point_reached']=False
+        else:bad_outer['receipt_sha256']='0'*64
+        (tmp_path/'supervisor-receipt.json').write_text(json.dumps(bad_outer))
+        with pytest.raises(ValueError,match='clean containment'):
+            probe.verify_n0_receipt(dict(runtime,n0_supervisor_receipt_sha256=probe.sha_file(tmp_path/'supervisor-receipt.json')))
+    (tmp_path/'supervisor-receipt.json').write_text(json.dumps(outer))
     bad = dict(runtime,n0_measurements={'verification':{'seconds':.1},'first_loaded_audit_seconds':.1})
     with pytest.raises(ValueError, match='timing evidence'):
         probe.verify_n0_receipt(bad)

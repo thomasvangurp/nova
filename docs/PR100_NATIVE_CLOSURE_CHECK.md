@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 4, not execution permission. Review before staging or running
+Executable protocol revision 5, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 The sole constructor exception is one exact native import-time XML parameter
@@ -69,12 +69,28 @@ that exact caller line, using that one argument. It binds these observed files:
 
 The import guard requires exactly one read-only open of that absolute XML during
 the constructor, no subsequent loadFile call, no duplicate constructor, and no
-other caller/argument/source. XML includes or scripts fail preflight. Execution
+other caller/argument/source. XML includes or scripts fail preflight. Pinned
+`forcefield.py` lines 249–254 first check `isfile` and resolve the data path;
+line 256 performs the only `etree.parse`. Review 4's suggested relative parse
+followed by a fallback describes a different source version. Requiring a relative
+open would incorrectly reject this pinned installation. A planted relative XML
+would still fail the guard before it could be read. Execution
 of package entrypoint callbacks is forbidden (the inspected installation has
 no `openmm.forcefielddir` entrypoint group). No native source is patched. The
 receipt reports observed allowed-constructor/XML counts separately from the
 zero model/profile/GPU permissions. This exception is N0 only, not a change to
 N1 physics or a qualification claim.
+
+The failed d766 N0 and a separate diagnostic observed urllib3's import-time IPv6
+capability check. Revision 5 allows exactly one `socket.bind` from the pinned
+`urllib3.util.connection._has_ipv6` line 127, invoked at module scope line 137,
+while importing the declared ImmuneBuilder module. The source SHA is
+`2633bbdb69731e5ccb5cf4e4afd65605d86c7979cc5633126f50c92d5ad74a74`.
+The actual socket must be AF_INET6/SOCK_STREAM/protocol 0 with address `('::1', 0)`;
+retain its reference and require closed `fileno()` after imports. Count one bind.
+No subprocess, connection, other bind or external networking exception exists.
+This permits a loopback-only capability probe, not blanket zero networking.
+Both failed d766 receipts remain evidence; neither qualifies a runtime.
 
 The interpreter and other entrypoints come from a separate readonly resolved-path
 inventory. The two Aggrescan/FreeSASA binaries may reside only under the explicitly
@@ -171,3 +187,7 @@ the missing dependency before N1; do not discover it during measurement and
 retroactively declare identity complete. N0 is scoped preflight evidence, not
 permission to reuse old caches or proof of full validator acceptance. Production
 still needs loaded-worker evidence under its actual pinned runtime.
+
+Revision 5 N1 verification also binds the outer supervisor and containment receipt
+bytes, requires zero exit/timeout/descendants, fixed-point cleanup and the exact
+declared import list. A complete child alone cannot authorize the experiment.

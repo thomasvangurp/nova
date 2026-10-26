@@ -35,6 +35,15 @@ THREADS = {key: '1' for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
                                'MKL_NUM_THREADS', 'OPENMM_CPU_THREADS')}
 EXTERNAL_TOOL_ROOT = '/root/pr100-qualification-20261026/NOVA-nanobody-filter/.tools/bin'
 
+N0_IMPORTS = (
+    'torch', 'ImmuneBuilder.NanoBodyBuilder2', 'ImmuneBuilder.refine',
+    'theraprofnano.CDR_Profiler.CDR_Assigner',
+    'theraprofnano.CDR_Profiler.CDR3_Conf_Assigner',
+    'theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner',
+    'metanano.config', 'metanano.filters.developability',
+    'metanano.utils.aggrescan3d_wrapper', 'metanano.utils.tnp_wrapper',
+    'nanobody_opt.tnp_daemon', 'nanobody_opt.rules', 'openmm.app',
+)
 
 def diagnostic_roots(stage):
     return [str(stage), '/root/.pixi/envs/metanano/lib', '/root/metanano_shim',
@@ -141,15 +150,33 @@ def verify_n0_receipt(runtime, *, deadline=None):
             identity.get('registered_data_mappings') != [] or cleanup.get('remaining_descendants') != 0 or
             cleanup.get('fixed_point_reached') is not True):
         raise ValueError('N0 receipt is not complete clean evidence')
-    if (receipt.get('child_exitcode') != 0 or not child.get('staged_module_origins') or
+    if (receipt.get('child_exitcode') != 0 or child.get('declared_imports') != list(N0_IMPORTS) or
+            not child.get('staged_module_origins') or
             child.get('forcefield_import', {}).get('constructor_count') != 1 or
             child.get('forcefield_import', {}).get('xml_open_count') != 1 or
+            child.get('loopback_import', {}).get('bind_count') != 1 or
+            child.get('loopback_import', {}).get('socket_closed') is not True or
+            child.get('loopback_import', {}).get('external_network_operations_permitted') != 0 or
             any(row.get('scope') != 'unused_CPU_only' for row in child.get('plugin_failure_categories', []))):
         raise ValueError('N0 receipt lacks required import evidence')
+    outer_path = path.parent.parent/'supervisor-receipt.json'
+    containment_path = path.parent.parent/'containment.json'
+    for key, evidence_path in (('n0_supervisor_receipt_sha256', outer_path), ('n0_containment_sha256', containment_path)):
+        expected = runtime.get(key)
+        if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected) or sha_file(evidence_path, deadline=deadline) != expected:
+            raise ValueError('N0 outer receipt identity mismatch')
+    outer = json.loads(outer_path.read_text())
+    containment = json.loads(containment_path.read_text())
+    if (outer.get('receipt_sha256') != sha or outer.get('supervisor_timeout', False) is not False or
+            outer.get('child_exit_code') != 0 or outer.get('outer_cleanup', {}).get('remaining_descendants') != 0 or
+            outer.get('outer_cleanup', {}).get('fixed_point_reached') is not True or
+            containment.get('passed') is not True or containment.get('remaining_descendants') != 0):
+        raise ValueError('N0 outer receipt lacks clean containment evidence')
     if runtime['n0_measurements'] != n0_measurements_from_receipt(receipt):
         raise ValueError('N0 timing evidence differs from receipt')
     original = {k:v for k,v in runtime.items() if k not in {
-        'n0_receipt_sha256', 'n0_receipt_path', 'n0_measurements', 'closure_reviewer'}}
+        'n0_receipt_sha256', 'n0_receipt_path', 'n0_measurements', 'closure_reviewer',
+        'n0_supervisor_receipt_sha256', 'n0_containment_sha256'}}
     original['closure_reviewed'] = False
     if digest(original) != receipt.get('runtime_input_sha256'):
         raise ValueError('N0 receipt belongs to another runtime manifest')

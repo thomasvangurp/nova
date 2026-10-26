@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -24,15 +25,7 @@ probe = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = probe
 _spec.loader.exec_module(probe)
 
-IMPORTS = (
-    'torch', 'ImmuneBuilder.NanoBodyBuilder2', 'ImmuneBuilder.refine',
-    'theraprofnano.CDR_Profiler.CDR_Assigner',
-    'theraprofnano.CDR_Profiler.CDR3_Conf_Assigner',
-    'theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner',
-    'metanano.config', 'metanano.filters.developability',
-    'metanano.utils.aggrescan3d_wrapper', 'metanano.utils.tnp_wrapper',
-    'nanobody_opt.tnp_daemon', 'nanobody_opt.rules', 'openmm.app',
-)
+IMPORTS = probe.N0_IMPORTS
 HIP_PLUGINS = ('libOpenMMAmoebaHIP.so', 'libOpenMMDrudeHIP.so',
                'libOpenMMHIP.so', 'libOpenMMRPMDHIP.so')
 HIP_LIBRARIES = ('libhiprtc.so.6', 'libamdhip64.so.6')
@@ -47,6 +40,15 @@ FORCEFIELD_IMPORT = {
     'xml_path': NATIVE_SITE+'openmm/app/data/amber14/protein.ff14SB.xml',
     'xml_sha256': 'd9f9779c09d67cd5f8bc657692f174ffab14c469dfd06d560ac1899fa7e976b8',
     'expected_constructor_count': 1, 'expected_xml_open_count': 1,
+}
+LOOPBACK_IMPORT = {
+    'declared_import': 'ImmuneBuilder.NanoBodyBuilder2',
+    'caller_module': 'urllib3.util.connection', 'caller_function': '_has_ipv6', 'caller_line': 127,
+    'caller_path': NATIVE_SITE+'urllib3/util/connection.py',
+    'caller_sha256': '2633bbdb69731e5ccb5cf4e4afd65605d86c7979cc5633126f50c92d5ad74a74',
+    'parent_function': '<module>', 'parent_line': 137,
+    'address': ['::1', 0], 'socket_family': 'AF_INET6', 'socket_type': 'SOCK_STREAM',
+    'protocol': 0, 'expected_bind_count': 1, 'requires_closed_socket': True,
 }
 N0_WALL_SECONDS = 120
 
@@ -92,7 +94,8 @@ def assemble(inventories, stage_path, remote_stage, output):
         entrypoints=entrypoints, model_weights=weights, inventory_evidence=evidence,
         path=str(prefix/'bin')+':/usr/local/bin:/usr/bin:/bin', library_path='',
         cuda_visible_devices='', refinement_threads=1, cpu_thread_settings=probe.THREADS,
-        n0_protocol_revision=4, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
+        n0_protocol_revision=5, n0_wall_seconds=N0_WALL_SECONDS, n0_forcefield_import=FORCEFIELD_IMPORT,
+        n0_loopback_import=LOOPBACK_IMPORT,
         external_tool_roots=[probe.EXTERNAL_TOOL_ROOT],
         diagnostic_origin_roots=probe.diagnostic_roots(remote_stage),
         entrypoint_resolution_evidence=resolved_entrypoints,
@@ -127,7 +130,7 @@ def forbidden_call(module, function, class_name=''):
 
 def validate_forcefield_registration(runtime):
     import xml.etree.ElementTree as etree
-    if (runtime.get('n0_protocol_revision') != 4 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
+    if (runtime.get('n0_protocol_revision') != 5 or runtime.get('n0_wall_seconds') != N0_WALL_SECONDS or
             runtime.get('n0_forcefield_import') != FORCEFIELD_IMPORT):
         raise ValueError('unregistered N0 ForceField exception')
     for key in ('caller', 'constructor', 'xml'):
@@ -169,6 +172,40 @@ class ForceFieldImportGuard:
                 'scope': 'registered_XML_parameter_parser_only'}
 
 
+def validate_loopback_registration(runtime):
+    r = LOOPBACK_IMPORT
+    if runtime.get('n0_loopback_import') != r:
+        raise ValueError('unregistered N0 loopback exception')
+    if runtime['files'].get(r['caller_path']) != r['caller_sha256'] or probe.sha_file(r['caller_path']) != r['caller_sha256']:
+        raise ValueError('N0 loopback source identity mismatch')
+
+
+class LoopbackImportGuard:
+    """One source-pinned IPv6 capability bind; no connection or external networking."""
+    def __init__(self):
+        self.bind_count = 0
+        self.socket = None
+
+    def bind(self, sock, address, declared_import, caller, parent):
+        r = LOOPBACK_IMPORT
+        if (self.bind_count or declared_import != r['declared_import'] or
+                caller != (r['caller_module'], r['caller_function'], r['caller_path'], r['caller_line']) or
+                parent != (r['caller_module'], r['parent_function'], r['caller_path'], r['parent_line']) or
+                type(address) is not tuple or address != tuple(r['address']) or type(address[1]) is not int or
+                not isinstance(sock, socket.socket) or sock.family != socket.AF_INET6 or
+                sock.type != socket.SOCK_STREAM or sock.proto != 0 or sock.fileno() < 0):
+            raise ValueError('unregistered N0 loopback bind')
+        self.socket = sock
+        self.bind_count += 1
+
+    def finish(self):
+        if self.bind_count != 1 or self.socket is None or self.socket.fileno() != -1:
+            raise ValueError('N0 loopback import count or socket closure incomplete')
+        return {'bind_count': self.bind_count, 'socket_closed': True,
+                'scope': 'registered_IPv6_loopback_capability_probe_only',
+                'external_network_operations_permitted': 0}
+
+
 def plugin_categories(messages):
     rows = []
     for message in messages:
@@ -191,11 +228,14 @@ def import_child(spec_path):
         os.chdir(private)
         startup_stage = 'forcefield_registration'
         validate_forcefield_registration(runtime)
+        startup_stage = 'loopback_registration'
+        validate_loopback_registration(runtime)
     except BaseException as error:
         probe.atomic_json(private/'child.json', {'status': 'failed', 'stage': startup_stage,
                                                'error_class': type(error).__name__})
         return 1
     forcefield = ForceFieldImportGuard()
+    loopback = LoopbackImportGuard()
     def stop(category):
         probe.atomic_json(private/'child.json', {'status': 'forbidden_call', 'category': category})
         os._exit(71)
@@ -228,7 +268,17 @@ def import_child(spec_path):
                 '_cuda_init', '_cuda_getDeviceCount', '_cuda_getDeviceProperties', '_cuda_setDevice'}:
             stop('gpu_native_call')
     def audit(event, args):
-        if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'socket.connect', 'socket.bind'}:
+        if event == 'socket.bind':
+            caller = sys._getframe(1)
+            parent = caller.f_back
+            def site(frame):
+                return (frame.f_globals.get('__name__'), frame.f_code.co_name,
+                        frame.f_code.co_filename, frame.f_lineno) if frame is not None else None
+            try:
+                loopback.bind(args[0], args[1], current_import, site(caller), site(parent))
+            except ValueError:
+                stop('unregistered_loopback_bind')
+        if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'socket.connect'}:
             stop('subprocess_or_network')
         if event == 'open' and forcefield.active and isinstance(args[0], (str, bytes)) and os.fsdecode(args[0]).endswith('.xml'):
             try:
@@ -259,6 +309,8 @@ def import_child(spec_path):
         failures = plugin_categories(Platform.getPluginLoadFailures())
         stage = 'forcefield_counts'
         forcefield_receipt = forcefield.finish()
+        stage = 'loopback_counts'
+        loopback_receipt = loopback.finish()
         stage = 'loaded_identity'
         audit_start = time.monotonic()
         identity = probe.verify_loaded_identity(runtime, private/'loaded_identity.json', set(),
@@ -268,6 +320,7 @@ def import_child(spec_path):
                        first_loaded_audit_seconds=time.monotonic()-audit_start,
                        loaded_identity=identity, actual_cpu_seconds=probe.cpu_seconds()-cpu,
                        forcefield_import=forcefield_receipt,
+                       loopback_import=loopback_receipt,
                        staged_module_origins=staged_origins, import_seconds=import_seconds,
                        elapsed_seconds=time.monotonic()-started,
                        model_constructions_permitted=0, native_profiles_permitted=0,
