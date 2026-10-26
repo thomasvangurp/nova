@@ -41,6 +41,15 @@ def test_frozen_real_population_covers_failures_lengths_thresholds_and_balances_
     assert not p['cache_reads'] and not p['publication_enabled']
 
 
+def test_research_artifacts_and_regressions_are_mandatory_shipping_inputs():
+    from scripts.shipping_checks import TEST_FILES
+    from scripts.release_manifest import SOURCE_PATHS, RESEARCH_FILES
+    assert 'tests/test_pr100_native_benchmark.py' in TEST_FILES
+    for name in ('docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
+                 'docs/experiments/pr100-native-reuse-v1.population.json'):
+        assert name in SOURCE_PATHS and name in RESEARCH_FILES
+
+
 def test_population_freeze_is_order_invariant_and_rejects_overlapping_sources():
     p = population()
     rows = [dict(r, buckets=r['cells']) for r in p['records']]

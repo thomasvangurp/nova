@@ -44,6 +44,14 @@ def verify_runtime(runtime, *, deadline=None):
         raise ValueError('native manifest schema')
     if runtime.get('closure_reviewed') is not True:
         raise ValueError('dependency closure not independently reviewed')
+    from scripts.release_manifest import RESEARCH_FILES, verify
+    stage_manifest = ROOT / 'build_stamp.json'
+    if sha_file(stage_manifest, deadline=deadline) != runtime['source_stage_manifest_sha256']:
+        raise ValueError('staged source manifest drift')
+    stage = json.loads(stage_manifest.read_text())
+    if stage.get('research_files') != sorted(RESEARCH_FILES):
+        raise ValueError('research source not included in reviewed stage')
+    verify(ROOT, stage, expected_sha=runtime['source_stage_git_sha'])
     if runtime.get('cuda_visible_devices') != '' or runtime.get('refinement_threads') != 1:
         raise ValueError('only the frozen CPU/thread1 comparison is permitted')
     for required in ('python', 'tnp', 'nanobody_builder_cli', 'aggrescan', 'freesasa',

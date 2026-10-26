@@ -20,7 +20,16 @@ SOURCE_PATHS = (
     'deploy', 'ansible', '.github/workflows', 'requirements',
     'pixi.toml', 'pixi.lock', 'go_live_v2.sh', 'restart_v2.sh', 'deploy_gate.sh',
     'NOVA-nanobody-filter', 'data/structures/8AOK.cif',
+    'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
+    'docs/experiments/pr100-native-reuse-v1.population.json',
 )
+RESEARCH_FILES = frozenset({
+    'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
+    'docs/experiments/pr100-native-reuse-v1.population.json',
+    'scripts/pr100_native_probe.py', 'nanobody_opt/pr100_native_benchmark.py',
+    'nanobody_opt/tnp_daemon.py', 'nanobody_opt/pr100_filter.py', 'nanobody_opt/rules.py',
+    'utils/aggrescan3d.py', 'config/nanobody_pr100.json', 'tests/test_pr100_native_benchmark.py',
+})
 RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons',
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
                 'tests', 'scripts', 'deploy', 'NOVA-nanobody-filter', 'data')
@@ -103,6 +112,9 @@ def stage(root: Path, destination: Path, *, profile: str = 'application') -> dic
         raise ValueError('release is missing the shipping producer or lockfile')
     manifest = {'schema': 1, 'git_sha': revision, 'pixi_lock_hash': files['pixi.lock'],
                 'files': files, 'runtime_files': [p for p in files if runtime_file(p)]}
+    if not RESEARCH_FILES <= set(files):
+        raise ValueError('research staging package is incomplete')
+    manifest['research_files'] = sorted(RESEARCH_FILES)
     if submodules:
         manifest['submodules'] = submodules
     if profile == 'release-controls':
@@ -134,6 +146,9 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
         raise ValueError('unknown deployment profile')
     if profile == 'release-controls' and not CONTROL_FILES <= set(files):
         raise ValueError('release control package is incomplete')
+    if 'research_files' in manifest and (manifest['research_files'] != sorted(RESEARCH_FILES)
+                                        or not RESEARCH_FILES <= set(files)):
+        raise ValueError('research staging inventory is incomplete')
     expected_runtime = (sorted(CONTROL_FILES) if profile == 'release-controls' else
                         sorted(p for p in files if runtime_file(p)))
     if sorted(manifest.get('runtime_files', [])) != expected_runtime:
