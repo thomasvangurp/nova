@@ -21,13 +21,46 @@ predicate or fabricated passing profile cannot substitute for this run.
 
 ## Test populations
 
+### Feasibility before expensive qualification
+
+Run these stages in order. Stop an infeasible branch and retain its result;
+do not run full-volume GPU trials merely to satisfy a checklist.
+
+1. Complete native developability profiling of all 4,080 distinct sequences
+   from the recorded census. Retain full PSH measurements, counts in the
+   admissible interval [73.4, 89], every rejection stage, backend failures,
+   per-bucket counts, concurrency, wall time and native binary digests. This
+   population retains its recorded annotation identity; it is not silently
+   certified under a different annotation runtime.
+2. Measure the corrected scorer in its intended warm production configuration:
+   actual GPU count, batch size, fresh non-replicate chunks, target, sampler,
+   dependency closure and loaded-worker identity. Compare missing-reference
+   behavior with a separately validated new-target reference, if available.
+   Include startup and handoff costs. A cold five-candidate probe is not a
+   throughput estimate and an old-target reference is not a valid substitute.
+3. Measure conditional generation yield in four fixed challenge cells:
+   IGHV3-23:16, IGHV3-23:18, IGHV3-7:16 and IGHV3-23:5. The latter two test
+   the V4 sampling category and a currently absent CDR3 length. V4 is a
+   category name in the pinned config, not the IGHV4 gene family. Record
+   rejection at annotation, native developability and archive novelty, plus
+   elapsed time and compute per accepted distinct candidate. Test historical
+   references and generation without historical references separately.
+4. Use measured yield and throughput to decide whether any architecture can
+   meet the existing contract. If not, report the gap. Changing the contract,
+   sampler or hardware requires an explicit new version and review; it does
+   not retroactively turn a failed experiment into a pass.
+
+The full integration populations below follow feasibility, not the reverse.
+
+### Integration populations
+
 1. Preserve a deterministic sequence-only census by every challenge bucket;
    distinguish distinct sequences from tied-gene bucket membership. Report
    probability-weighted coverage, eligible fleet capacity and fresh-work
    shortfall. Empty buckets and exhausted banks are normal test cases.
 2. Include real measured passers and rejecters, all observed sequence lengths,
    tied V genes, threshold boundary cases, exact archive duplicates and close
-   neighbours. Freeze the archive snapshot and its provenance. Use all 171
+   neighbours. Freeze the initial archive snapshot and its provenance. Use all 171
    possible challenges, plus at least 10,000 block-hash parity checks.
 3. Boundary fixtures probe inclusive thresholds, wrong/missing/NaN fields,
    incomplete batches and provenance, ambiguous annotations, target changes,
@@ -40,7 +73,7 @@ predicate or fabricated passing profile cannot substitute for this run.
 
 ## Runtime and incident trials
 
-Run isolated, bounded trials on spare slave capacity, initiated by the Pi.
+Run isolated, bounded trials on the slave reserved for testing, initiated by the Pi.
 Keep production daemons, sockets, databases, submission files and wallets out
 of trial writes. Capture backend logs privately in memory and emit allowlisted
 diagnostics only. A timeout must kill every descendant of that trial.
@@ -64,15 +97,50 @@ comparison. Report reserved, dispatched, completed and failed counts separately.
 Cached candidates still receive the current challenge/novelty/developability
 precheck when there are zero NEW candidates. Do not relabel repeated work NEW.
 
+For each candidate retain timestamps for generation, annotation, native
+measurement, inventory admission, challenge binding, dispatch, scoring,
+publication and handoff, together with epoch start and cutoff. Distinguish
+individual completion times from batch-level bounds. Report the fraction of
+work completed before the challenge and all work charged inside its window.
+
+### Archive consumption, lag and cold start
+
+Use K=20 consecutive epochs per sustained-capacity trial. Advance the archive
+with each accepted fleet before the next decision, retaining both revisions.
+Run every starting bucket and a repeated-same-bucket depletion stress case;
+also run fixed probability-weighted schedules. Require pairwise fleet novelty
+under the pinned duplicate predicate, in addition to archive novelty. This is
+an intentional extra diversity constraint, not a claim about upstream's
+within-fleet handling. Report its cost and minimum residual capacity after
+each step, not only the first fleet's size.
+
+The local novelty snapshot A and the validator-time snapshot B can differ.
+Record revision and read time for both. Replay a real observed A-to-B delta,
+and synthetic deterministic contention cases separately. Report acceptance
+under A, acceptance under B, and loss attributable to the delta. Recheck
+novelty as late as the handoff window permits; this reduces lag and cannot
+guarantee that no competing submission arrives later. Do not describe A as
+necessarily strictly older when no archive update occurred.
+
+The current production contract has no cold-target exception. With no
+completed same-target comparison field at epoch 25955, it must abstain.
+At 25956 and 25957, require an actual completed field meeting the existing
+support threshold and disjoint observations; a fabricated field or a two-row
+internal reference does not qualify. Exercise missing, insufficient, stale
+and sufficient fields at those epochs and the temporary-reference expiry.
+An alternative independent-replicate cold-start policy would be a separately
+reviewed contract, not an implied waiver in this workflow.
+
 ## Release decisions
 
 The full-production acceptance bars are fixed before the trials:
 
 - All 171 challenge combinations must have at least 13 distinct candidates
-  accepted by the actual pinned validator against the frozen current archive.
+  accepted by the actual pinned validator against the current trial archive.
   Report the minimum, every bucket count and probability-weighted expectation.
   Sequence-only counts and a sampled acceptance-rate extrapolation do not
-  satisfy this bar. Replenishment must preserve it across the trial schedule.
+  satisfy this bar. Replenishment must preserve it throughout the K=20
+  consumption-and-lag trial above; record every intermediate archive.
 - The three normal trials must each complete 4,800 NEW evaluations from at
   least 8,000 real proposals and produce 13 eligible entries before the existing
   handoff cutoff. The remaining incident cases may abstain or complete less,
@@ -157,8 +225,11 @@ Before production approval, execute and retain receipts for:
    including positive fixtures, all threshold boundaries and incomplete input.
 3. Annotation/cache identity freshness, native binary and model closure, loaded
    daemon/scorer identity, immutable worker rollout and rollback.
-4. Real non-replicate multi-chunk scoring and replica jobs with non-overlapping
-   seed namespaces; retained structure hashes and all ten finite metrics.
+4. Real non-replicate multi-chunk scoring and separately identified replica
+   observations with documented RNG collision risk; retained structure hashes
+   and all ten finite metrics. Hashing to 32 bits does not guarantee disjoint
+   namespaces. Reject reused observation identities between selection and
+   held-out sets; a zero-collision sample is not a proof of independence.
 5. Crash/resume/rollback accounting, empty-bank cached comparison, stale proof
    refusal, next-epoch isolation, deadline exhaustion and actual Pi handoff.
 6. A realistic capacity/replenishment sweep and the full-volume paired trials

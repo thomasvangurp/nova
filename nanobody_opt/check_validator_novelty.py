@@ -17,6 +17,16 @@ import pandas as pd
 
 from nanobody_opt.filter_layer2 import _load_candidates
 
+RANK_BINDERS_SHA256 = "836efe33b5deb2a4c4bac37f7db23c467df26e84d82a9b3fb594ec186aa438dd"
+
+
+def _verified_rank_source(source: Path):
+    """Check the exact pinned validator source before executing it by path."""
+    value = source.read_bytes()
+    if hashlib.sha256(value).hexdigest() != RANK_BINDERS_SHA256:
+        raise ValueError("validator ranking source does not match the upstream pin")
+    return value
+
 
 def _rank_binders(archive: pd.DataFrame, top: int, max_violations: int):
     """The validator's own top-k selection, not our reimplementation of it.
@@ -37,11 +47,13 @@ def _rank_binders(archive: pd.DataFrame, top: int, max_violations: int):
     import importlib.util
 
     source = Path(__file__).resolve().parent.parent / "utils" / "minmax_weighted_rank.py"
+    verified_source = _verified_rank_source(source)
     spec = importlib.util.spec_from_file_location("_nova_minmax_weighted_rank", source)
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot load the validator's ranking from {source}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Execute the bytes just verified, avoiding a second read after the check.
+    exec(compile(verified_source, str(source), "exec"), module.__dict__)
     rank_binders = module.rank_binders
 
     return rank_binders(

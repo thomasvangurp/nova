@@ -53,3 +53,66 @@ PR100_PIPELINE_DESIGN.md: compare a compatibility adaptation, entirely online
 generation, and a prequalified challenge bank with asynchronous replenishment.
 Parent reuse as a generation reference is distinct from archived sequence
 resubmission; benchmark it against generation without historical parents.
+
+## Round 2 and response for round 3
+
+Round 2 took 606 seconds using Claude Code Opus at max effort. Its workflow,
+redesign experiment and production verdicts were all NO_GO. The original
+response remains unchanged in the report. Root retains production NO_GO.
+
+- R01–R07: the workflow now starts with the full native census and warm
+  throughput feasibility, then fixed conditional-yield cells. No architecture
+  is preferred in advance. The design preregisters source strata, compute/time
+  caps, K=20 archive-advancing epochs, matched schedules, primary endpoint,
+  meaningful effect, uncertainty analysis, multiplicity and futility rules.
+  Timestamp capture distinguishes individual times from batch bounds. These
+  are a revised plan, not completed experiment evidence.
+- R03: the current contract abstains at 25955 without a completed new-target
+  field. Later epochs require actual sufficient support. No own-two-row or
+  fabricated-history waiver is accepted.
+- R06 correction: the measured inventory occupies eight buckets, with most
+  entries in two. It does not occupy at most two. Parent usefulness across
+  different lengths or genes is an empirical comparison, not logically zero.
+- R08: independent Pi/RPC attestation of the epoch-start hash, including a
+  self-consistent but externally wrong artifact, remains an implementation
+  and integration blocker.
+- R09–R10: annotation identity checking, dependency-version parity and exact
+  novelty batch failure semantics remain blockers. The installed AbNumber
+  0.2.7 differs from upstream requirements' 0.4.4; ANARCI pins also differ.
+  The old census must keep its provenance and cannot certify that new runtime.
+- R11: added actual archive-lag trials, both snapshot revisions/read times,
+  late rechecks and explicit residual contention risk. An unchanged archive
+  need not be strictly older at validation time; the important case is drift.
+- R12: loaded worker identity, patch set and schema must be bound and a
+  mismatch refused without silent fallback. Current production daemon parity
+  remains unqualified; no source-only hot patch has been activated.
+- R13: sixteen byte-exact upstream files now include constants, ranking,
+  timing and re-exports. Oracle constants are loaded from verified source;
+  ranking's path loader verifies and executes the same checked bytes. The
+  complete transitive dependency closure still needs runtime qualification.
+- R14: the current 32-bit contiguous-window derivation is not an adequate
+  structural independence claim. Hashing the pair to 32 bits also cannot make
+  namespaces structurally disjoint. A sampled no-collision test is not proof.
+  The RNG redesign remains open; retries and held-out identity separation
+  need explicit tests. Do not implement the reviewer's false guarantee.
+- R15–R16: submodule/native enforcement, separate NEW state accounting,
+  directory fsync and real crash/rollback tests remain execution gates.
+  SIGKILL alone cannot prove host-power-loss durability.
+- R17: subsequent actual-filter differential execution found zero differences
+  on 14 recorded real profiles and 42 explicitly synthetic boundary cases,
+  including PSH 73.4/89 and A3D caps. All 14 real profiles reject; this is not
+  positive acceptance coverage. Retain source and native binary digests.
+- R18: stricter completeness checks require population-level capacity cost
+  measurement; the full census is feasibility evidence, not a synthetic pass.
+
+The slave is reserved for qualification through a Pi-initiated controller.
+All three master-side slave dispatchers are parked after the active replay
+batch drained and imported. The controller holds the shared GPU dispatch lock;
+the master miner and publisher remain running. The corrected five-candidate
+fresh probe completed across three lengths. Replica and census results are
+reported from their receipts, never assumed from launch success.
+
+Round 3 is asked to judge whether the revised methodology is sound to execute,
+separately from production approval. Open code defects remain production
+blockers even if the test design receives GO. Neither reviewer may label an
+untested architecture near optimal or use agreement as a substitute for data.

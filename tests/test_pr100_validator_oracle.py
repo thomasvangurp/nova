@@ -37,9 +37,30 @@ def load_functions(path, names, namespace):
 def test_oracle_bytes_match_the_recorded_upstream_pin():
     manifest = json.loads((ORACLE/'manifest.json').read_text())
     assert manifest['revision'] == rules.UPSTREAM_SHA
+    assert {'utils/constants.py', 'utils/minmax_weighted_rank.py',
+            'utils/stage_timer.py', 'utils/__init__.py'} <= manifest['files'].keys()
     for name, digest in manifest['files'].items():
         assert hashlib.sha256((ORACLE/name).read_bytes()).hexdigest() == digest
     assert yaml.safe_load((ORACLE/'config/config.yaml').read_text()) == rules.pinned_config(25955)
+
+
+def oracle_constants():
+    source = ORACLE/'utils/constants.py'
+    manifest = json.loads((ORACLE/'manifest.json').read_text())
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == manifest['files']['utils/constants.py']
+    namespace = {'__file__': str(source)}
+    exec(compile(source.read_text(), str(source), 'exec'), namespace)
+    return {name: namespace[name] for name in ('ALLOWED_AAS', 'HYDROPHOBIC')}
+
+
+def test_rank_source_mutation_is_rejected_before_execution(tmp_path):
+    from nanobody_opt.check_validator_novelty import _verified_rank_source
+    source = ORACLE/'utils/minmax_weighted_rank.py'
+    assert _verified_rank_source(source) == source.read_bytes()
+    changed = tmp_path/'minmax_weighted_rank.py'
+    changed.write_bytes(source.read_bytes() + b'\nraise RuntimeError("must not execute")\n')
+    with pytest.raises(ValueError, match='upstream pin'):
+        _verified_rank_source(changed)
 
 
 def oracle_case(monkeypatch, change):
@@ -83,7 +104,7 @@ def oracle_case(monkeypatch, change):
         return SimpleNamespace(matches=[SimpleNamespace(duplicate=change == 'similar')])
     log = SimpleNamespace(debug=lambda *a: None, warning=lambda *a: None)
     namespace = {'os': os, 'bt': SimpleNamespace(logging=log),
-        'ALLOWED_AAS': set('ACDEFGHIKLMNPQRSTVWY'), 'HYDROPHOBIC': set('AILMFWV'),
+        **oracle_constants(),
         'seq_hash': lambda s: hashlib.sha256(s.encode()).hexdigest(),
         'index_top_sequences': lambda *a: SimpleNamespace(search=search),
         'entry_unique_for_protein_hf': lambda *a: change != 'archived',
