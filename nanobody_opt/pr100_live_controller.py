@@ -28,8 +28,9 @@ BLOCK_SECONDS = 12.0
 RESERVE_BLOCKS = 46
 MINIMUM_RESERVE_BLOCKS = 40
 # Start whenever more than this many blocks remain: a late partial fleet beats skipping the
-# epoch. The old reserve=180 rule allowed starts only in the first ~36 minutes of an epoch.
-START_MINIMUM_BLOCKS = 90
+# epoch, but the native phase needs its per-candidate budget plus the novelty pass (~600 s),
+# so a start with fewer than ~190 blocks left publishes nothing.
+START_MINIMUM_BLOCKS = 190
 # Time held back from the phase budget for building, validating and publishing the fleet.
 PUBLISH_RESERVE_SECONDS = 150.0
 # Share of the remaining window a phase may consume; the last phase gets what is left.

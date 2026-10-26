@@ -80,10 +80,12 @@ def test_admissible_uses_the_reserve_and_rejects_other_epochs():
     assert controller.admissible(clock(), EPOCH)
     assert not controller.admissible(late, EPOCH)
     assert not controller.admissible(clock(), EPOCH + 1)
-    # The start window is no longer the reserve=180 rule that skipped most of the epoch.
-    middle = clock(block=EPOCH * LENGTH + 200)
+    # A start needs enough time left for the native budget and the novelty pass.
+    middle = clock(block=EPOCH * LENGTH + 100)
     assert controller.admissible(middle, EPOCH, reserve=controller.START_MINIMUM_BLOCKS)
-    assert not controller.admissible(middle, EPOCH, reserve=180)
+    assert not controller.admissible(middle, EPOCH, reserve=300)
+    too_late = clock(block=EPOCH * LENGTH + 200)
+    assert not controller.admissible(too_late, EPOCH, reserve=controller.START_MINIMUM_BLOCKS)
 
 
 def test_publication_cutoff_matches_the_block_reserve():

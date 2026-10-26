@@ -46,18 +46,23 @@ Score phase:
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
-| `gpus` | list[int] | required | candidates are sharded round-robin across these |
-| `command_template` | list[str] | required | public command; `{gpu}` and `{shard}` are substituted per shard |
-| `shard_directory` | path | required | where per-GPU shard input files are written |
-| `receipt_directory` | path | `shard_directory` | per-GPU receipts, `gpu-<id>.json` |
-| `summary_receipt` | path | optional | sharded-run summary |
+| `gpus` | list[int] | required | candidates are sharded round-robin across these (list only idle GPUs; a GPU with a resident daemon refuses its lease) |
+| `release` | path | required | release directory on the host (holds `scripts/pr100_gpu_probe.py` and `build_stamp.json`) |
+| `source_sha` | str | required | expected git sha, checked by the probe against the release stamp |
+| `scorer` | str | required | registered scorer identity passed to the GPU lease |
+| `scorer_settings` | path | required | scorer settings file passed to the probe |
+| `gpu_lock_directory` | path | required | where per-GPU reservation locks live |
+| `output_directory` | path | required | per-GPU results and receipts are written under here |
+| `wall_seconds` | number | required | wall ceiling for the whole score phase |
 
-The 8-candidate handoff cap is removed; the controller no longer truncates.
-`pr100_live_gpu.shard_jobs` builds one job per GPU in the exact shape
-`run_reserved` already validates, so reservation, lock and receipt semantics
-are unchanged per shard. `run_sharded` returns
-`{gpus_attempted, gpus_finished, scored_candidates, status: complete|partial}`;
-a GPU that was never admitted makes the run `partial`, never a silent success.
+Per GPU the worker runs one reserved lease, all GPUs in parallel. Each GPU
+writes `gpu-<g>/length<L>/exact_all.json` and a receipt `gpu-receipt-<g>.json`
+under `output_directory`; `score/report.json` lists the produced
+`exact_all.json` paths, and the transport and `merge_scores` use only listed
+paths (validated against that pattern; a missing file is skipped). Stopping the
+worker also stops the GPU runners. A GPU that was never admitted, or a shard
+that timed out, keeps the finished shards and makes the run `partial`, never a
+silent success. The 8-candidate handoff cap is removed.
 
 ## 2. Margin parameters
 
