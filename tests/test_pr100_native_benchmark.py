@@ -17,7 +17,7 @@ def population():
 
 
 def profile():
-    return dict(total_cdr_length=32, cdr3_length=16, cdr3_compactness=1.0,
+    return dict(passed=True, red_flags=[], total_cdr_length=32, cdr3_length=16, cdr3_compactness=1.0,
                 surface_hydrophobic_patches=88.0, positive_charge_patches=.2,
                 negative_charge_patches=.3, aggrescan3d=dict(
                     status='ok', passed=True, a3d_average=-.8, a3d_maximum=1.2,
@@ -138,11 +138,65 @@ def test_linux_containment_rehearsal_or_explicit_platform_refusal():
     else:
         # Give the rehearsal its own ancestry: never stop pytest's other children.
         script = Path(__file__).resolve().parents[1] / 'scripts/pr100_native_probe.py'
-        process = subprocess.run([sys.executable, str(script), '--self-test-containment'],
+        process = subprocess.run([sys.executable, '-S', str(script), '--self-test-containment'], start_new_session=True,
                                  capture_output=True, text=True, timeout=12)
         assert process.returncode == 0
         result = json.loads(process.stdout)
         assert result['passed'] and result['remaining_descendants'] == 0
+
+
+def test_type_reason_and_subgate_mismatches_are_not_hidden_by_equal_deltas():
+    p = population()
+    key = p['records'][0]['sequence_hash']
+    rows = [dict(sequence_hash=key, mode=m, status='ok', profile=profile(), eligible=True,
+                 reason='passed', wall_seconds=10, cpu_seconds=8) for m in MODES]
+    rows[1]['profile']['cdr3_length'] = 16.0
+    rows[2]['profile']['aggrescan3d']['passed'] = False
+    rows[2]['reason'] = 'aggrescan_unavailable_or_failed'
+    result = compare_results(p, rows)
+    assert result['numeric_mismatches'] == 2
+    assert result['reason_mismatches'] == 2 and result['gate_flips'] == 2
+    assert all(p['numeric_deltas']['cdr3_length'] == 0 for p in result['pairs'] if p['complete'])
+
+
+def test_fixed_point_cleanup_and_durable_preflight_receipt(tmp_path, monkeypatch):
+    from scripts import pr100_native_probe as probe
+    states = iter([{1001}, {1001, 1002}, {1001, 1002}, {1001, 1002}, {1001, 1002}, set()])
+    monkeypatch.setattr(probe, 'descendants', lambda: next(states))
+    signals = []
+    monkeypatch.setattr(probe.os, 'kill', lambda pid, sig: signals.append((pid, sig)))
+    def no_children(*_):
+        raise ChildProcessError
+    monkeypatch.setattr(probe.os, 'waitpid', no_children)
+    cleanup = probe.stop_descendants(timeout=2)
+    assert cleanup['fixed_point_reached'] and cleanup['freeze_scan_count'] == 4
+    assert cleanup['remaining_descendants'] == 0
+    def refuse_controller():
+        raise ValueError('unrelated children')
+    monkeypatch.setattr(probe, 'dedicated_controller', refuse_controller)
+    out = tmp_path / 'receipt'
+    result = probe.run(population(), {}, {}, out)
+    assert result['decision'] == 'NO_GO_EXECUTION'
+    assert 'preflight_error' in result['conditions']
+    assert json.loads((out / 'report.json').read_text()) == result
+
+
+def test_atomic_event_results_survive_and_initialization_diagnostics_keep_primary(tmp_path):
+    from scripts.pr100_native_probe import FileEvents
+    from nanobody_opt.pr100_native_benchmark import timing_diagnostics
+    (tmp_path / 'results').mkdir()
+    sink = FileEvents(tmp_path)
+    sink.put(dict(event='begin', worker=0, sequence_hash='a'*64, mode='warm', started=1))
+    sink.put(dict(event='result', worker=0, sequence_hash='a'*64, mode='warm', status='failed'))
+    assert not (tmp_path / 'active.json').exists()
+    assert json.loads(next((tmp_path / 'results').iterdir()).read_text())['status'] == 'failed'
+    rows = [dict(sequence_hash=str(i), mode=m, wall_seconds=10, cpu_seconds=8,
+                 mode_position=1, initialization_seconds=3 if m == 'warm' and i == 0 else 0)
+            for i in range(2) for m in MODES]
+    report = timing_diagnostics(rows)
+    assert report['primary_includes_all_initialization']
+    assert report['by_mode']['warm']['summed_profile_wall_seconds'] == 20
+    assert report['without_initialization_diagnostic_only']['warm']['profiles'] == 1
 
 
 def test_structure_callback_runs_before_cleanup_and_legacy_profile_unchanged(tmp_path, monkeypatch):

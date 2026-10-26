@@ -181,10 +181,11 @@ def _strip_hydrogens(input_pdb: str) -> None:
 class _TNPProfiler:
     """Holds a loaded model + metric functions, profiles one sequence."""
 
-    def __init__(self, tmp_root: str | None = None, *, structure_scorer=None):
+    def __init__(self, tmp_root: str | None = None, *, structure_scorer=None, stage_observer=None):
         # Optional research hook runs while the exact refined heavy-atom model
         # still exists. The socket daemon does not enable it.
         self._structure_scorer = structure_scorer
+        self._stage_observer = stage_observer
         import torch
         # The subprocess path runs NanoBodyBuilder2 --n_threads 1, which is
         # torch.set_num_threads(1).  Match it: the forward must be the same
@@ -204,11 +205,17 @@ class _TNPProfiler:
     def profile_one(self, sequence: str, index: int) -> dict:
         import tempfile
 
+        def stage(name):
+            callback = getattr(self, '_stage_observer', None)
+            if callback is not None:
+                callback(name)
+
         name = "seq_%08d" % index
         aggregation = None
         with tempfile.TemporaryDirectory(dir=self._tmp_root) as tmpdir:
             # 1. ANARCI CDR numbering -> L, L3 (pure sequence, no structure).
             try:
+                stage('anarci')
                 _primary, length_dict = self._region(name, sequence, "H",
                                                      tmpdir, verbose=False)
             except Exception as error:
@@ -222,10 +229,13 @@ class _TNPProfiler:
             # 2. NanoBodyBuilder2 structure: predict + the SAME n_threads=1
             #    OpenMM refinement the TNP CLI runs.
             try:
+                stage('predict')
                 nanobody = self.builder.predict({"H": sequence})
                 pdb_path = os.path.join(tmpdir, "model.pdb")
+                stage('refine')
                 nanobody.save(pdb_path, check_for_strained_bonds=True,
                               n_threads=1)
+                stage('strip')
                 _strip_hydrogens(pdb_path)
             except Exception as error:
                 return {"passed": False,
@@ -233,6 +243,7 @@ class _TNPProfiler:
 
             # 3. CDR3 compactness -> C = L3 / rho.
             try:
+                stage('compactness')
                 rho = self._compactness(pdb_path, "imgt", verbose=False)
                 compactness = float(cdr3_len / rho) if rho is not None else float("nan")
             except Exception:
@@ -240,6 +251,7 @@ class _TNPProfiler:
 
             # 4. PSH / PPC / PNC from the refined, de-hydrogenated model.
             try:
+                stage('hydrophob')
                 hc = self._hydrophob(0, 7.4, pdb_path, "IG", "imgt",
                                      verbose=False)
                 psh = float(hc[0]["Patch_Hydrophob_CDR"])
@@ -250,6 +262,7 @@ class _TNPProfiler:
                         "reason": "Error: surface patch calc failed: %s" % error}
 
             if self._structure_scorer is not None:
+                stage('aggrescan')
                 aggregation = self._structure_scorer(sequence, pdb_path)
 
         flags = {

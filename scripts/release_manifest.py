@@ -21,10 +21,12 @@ SOURCE_PATHS = (
     'pixi.toml', 'pixi.lock', 'go_live_v2.sh', 'restart_v2.sh', 'deploy_gate.sh',
     'NOVA-nanobody-filter', 'data/structures/8AOK.cif',
     'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
+    'docs/PR100_NATIVE_REVIEW_RESPONSE.md',
     'docs/experiments/pr100-native-reuse-v1.population.json',
 )
 RESEARCH_FILES = frozenset({
     'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
+    'docs/PR100_NATIVE_REVIEW_RESPONSE.md',
     'docs/experiments/pr100-native-reuse-v1.population.json',
     'scripts/pr100_native_probe.py', 'nanobody_opt/pr100_native_benchmark.py',
     'nanobody_opt/tnp_daemon.py', 'nanobody_opt/pr100_filter.py', 'nanobody_opt/rules.py',

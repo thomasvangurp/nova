@@ -64,19 +64,27 @@ observations. CLI_A/CLI_B variability is separate evidence and never excuses a
 warm-path gate flip. Native output text is discarded before it can reach the
 report. Injected model/metric tests are control-flow tests, not native proof.
 
+Configuration revision 2, before any measurement: OMP, OpenBLAS, MKL and
+OpenMM CPU thread settings are one in every mode. This does not mean the prior
+CLI refinement used two threads: its explicit OpenMM argument was already one.
+
 Resources: 72 profiles, four workers, eight affinity-constrained CPU slots,
-24 GiB aggregate RSS ceiling, 300 seconds per profile, 1,200-second total
+24 GiB sampled RSS abort threshold, 300 seconds per profile, 1,200-second total
 run wall ceiling, zero GPUs. This is at most 2.667 allocated CPU-slot-hours,
 not measured CPU-core time. Record actual self plus reaped-child CPU seconds
 separately. Pin verification/setup before and after and bounded cleanup count
 inside the same wall budget; ten seconds are reserved for cleanup. Prior slot
 times suggest approximately 16–18 minutes of profiling at
 four workers, with uncertain transfer. Stop at the cap and retain every case.
+The cgroup v2 mount is read-only, not delegated. The RSS threshold is not a
+kernel-enforced aggregate ceiling; it overcounts shared pages and can miss
+spikes. Require at least 96 GiB host/cgroup available headroom to start and
+abort below 64 GiB. This does not guarantee against OOM or authorize new infrastructure.
 
-The Linux controller uses a subreaper to retain descendants that start new
-sessions, stops/kills its private tree on a cap, and checks zero descendants.
-Before native work, a bounded Linux rehearsal must demonstrate cleanup of a
-deliberately detached sleeping grandchild. macOS unit tests cannot prove this.
+The dedicated Linux session leader must have no existing descendants. It uses
+a subreaper and a bounded fixed-point SIGSTOP scan (two consecutive unchanged
+sets) before killing/reaping its private tree. Rehearsal covers a detached
+sleeper and a bounded active fork loop; macOS unit tests cannot prove this.
 All remote writes/launches go through Pi into a new private directory. Do not
 stop processes outside controller ancestry or install production packages.
 
@@ -91,7 +99,7 @@ an older closure cannot qualify pinned-validator caches or production.
 
 Preregistered continuation rules:
 
-- Incomplete measurements, any gate flip in any comparison, runtime drift,
+- Incomplete measurements, any gate/flag/reason/type mismatch, runtime drift,
   containment failure or nonfinite evidence mean NO_GO.
 - Require exact numeric equality of recorded TNP/Aggrescan fields and
   normalized structure digests before calling this probe equivalent. Report
@@ -103,44 +111,77 @@ Preregistered continuation rules:
   separately labelled amortization sensitivity. These are continuation rules,
   not a statistical superiority or production approval claim.
 
-## G1: separate reference merit from retained context
+Any mode reaching 300 seconds aborts the whole trial; a timed-out warm process
+is never reused. Atomic per-observation files preserve partial evidence. Earlier
+conditions survive later verification timeouts. Error output is limited to stage
+and exception class; permissions are labelled as configuration, not measured
+call counts. Report initialization-bearing/steady and execution-order diagnostics
+without changing the primary initialization-inclusive aggregate. Actual loaded
+source/bytecode/library origins are checked against the frozen manifest before
+work and after profiles; identity-audit time is separate from profile timing and
+charged to the total trial budget.
 
-Propose a 2×2 factorial: hash-selected versus genuinely native-passing
-references, crossed with germline/CDR3-only baseline versus retained full
-reference context. Match mutation counts and ordinal seeds, preserving every
-annotation, novelty and native failure. A parent's eligibility never certifies
-its child; old-target binding ranks cannot choose new-target parents.
+## G1 revision 2: descriptive prospective joint-eligibility probe
 
-Use three separate IGHV3-23 cells: lengths 16, 18 and 5. The first two use
-same-V/same-length references; length 5 is explicitly same-V/different-length.
-Never pool these strata. A full native-passing reference for IGHV3-7 is
-currently UNRUNNABLE, not a measured zero yield or a disguised different-V arm.
-The parent-free/different-V baseline remains relevant for empty cells.
+The 73 census native passers are exactly two near-copy cliques under the pinned
+predicate: 68 length-18 and five length-16 references. Combining the five pilot
+passers gives 78 references in seven components: [68, 5, 1, 1, 1, 1, 1]. Per cell,
+IGHV3-23:16 has six references/two groups; :18 has 68/one; :5 has two/two;
+IGHV3-7:16 has two/two. These are near-copy groups, not established biological
+lineages. See `native-pass-reference-groups-v2.json` in the readiness report.
 
-Bounded next proposal: 24 emissions per factorial/cell, 288 emissions total,
-deduplicated across arms while retaining every membership; at most 288 fresh
-native profiles, eight workers, 16 CPU-affinity slots, 40 minutes, 24 GiB RSS,
-zero GPUs. This caps timed allocation at 10.667 CPU-slot-hours, with actual CPU
-and setup separately measured. Prior slot times suggest 33–36 minutes; a cap
-hit remains incomplete. G1 needs a separate reviewed registration before
-generation; N1 approval does not authorize it.
+This supersedes the original G1 proposal before any generation or measurement.
+All four cells now have native-proxy-passing full contexts, including IGHV3-7.
+There are only one or two groups per cell: family-held-out comparative merit
+or generalization claims are unsupported. G1 is a descriptive feasibility
+probe capable of finding a very large effect, not an arm-ranking experiment.
+At 1.4–1.8% baseline yield, 16 emissions expect only 0.22–0.29 passers; zero does
+not exclude a modest useful improvement. No production generator is selected.
 
-Freeze reference families using lineage and the pinned family predicate before
-selection. Keep all children of one family in one split; report effective
-family counts. Reserve whole families and leave-cell-out evaluation where
-supply permits. If the 73 passers collapse into too few families, report that
-limitation instead of randomly splitting near-copies. Report native passers
-per emission and distinct candidate, cell, archive/pairwise attrition, wall/CPU
-cost per accepted child and changing failure categories.
+Retain the 2×2 design to separate two mechanisms: hash-ordered references from
+the same frozen annotated population versus measured native-proxy passers;
+CDR3-only/germline construction versus retention of the full reference context.
+Freeze the combined measured reference population, exact annotations and all
+memberships first. Use same-V/same-length references in each of the four cells,
+including the newly available length-5 and IGHV3-7 contexts; this changed stratum
+is explicit. Match mutation counts and ordinal seeds, never inherit parent
+eligibility, and never use old-target binding ranks as new-target merit.
 
-Do not choose a production generator on filter yield alone. After adequate
-supply, price the unchanged C2 new-target quality gate: a real 13-entry fleet,
-ten selection and ten disjoint held-out observations per sequence, common
-frozen field, family-separated comparisons and actual archive novelty. Measure
-repeat cost before committing remaining GPU budget. G1 does not reduce those
-pass counts or promise near-optimality.
+Proposed cap: 16 emissions per factorial/cell, 256 total, retaining cross-arm
+memberships while profiling each distinct sequence once. At most 256 fresh
+native profiles, eight workers, 16 CPU-affinity slots, 40 minutes, zero GPUs.
+Use the same explicit sampled-memory/headroom policy as N1. This is at most
+10.667 allocated CPU-slot-hours, with actual CPU measured separately. Prior
+slot costs suggest 29–32 minutes of profiling; uncertainty and cap exhaustion
+remain explicit. G1 requires its own reviewed input/source registration before
+any generation; N1 approval does not authorize G1.
 
-Cheap annotation/sequence rejection remains first. A TNP-before-Aggrescan
-short circuit could save only measured Aggrescan time for already-rejected
-profiles, not model/refinement work. N1 records Aggrescan time to price that
-upper bound before changing anything. Eligible entries need full evidence.
+The primary endpoint is the joint rate of distinct children passing exact
+annotation, native-proxy thresholds AND the pinned novelty predicate against
+the frozen current archive. Report target-observation-ledger NEW eligibility
+separately; unknown history is not automatically NEW. Report marginal native
+and novelty yields, per-reference/per-cell outcomes, all failing stages and
+wall/CPU cost per jointly admitted distinct child. Neither the older native
+closure nor a small selected sample certifies complete validator acceptance.
+
+Keep all descendants of a reference group together. Report effective reference
+and child-group counts and the absence of independent holdout support. The
+additional pairwise within-fleet diversity policy is ours, not an upstream
+same-epoch requirement; the small group count alone does not imply the validator
+forbids 13 submissions. Actual archive novelty/depletion still matters.
+Retaining an unchanged CDR3 may be informative now, but does not sustain later
+novelty once that group is archived. Future discovery needs genuinely new CDR3
+contexts and joint novelty/developability/target-quality evidence under depletion.
+
+If context retention gives promising joint supply, price the unchanged C2
+quality gate under the actual pinned runtime: a real 13-entry fleet, ten
+selection and ten disjoint held-out new-target observations per sequence,
+common frozen field and actual novelty. New independent contexts must first
+be acquired to support broader family/cell generalization. A separately frozen
+parent-free/different-V discovery probe is an option, not an implied extra
+budget or permission to repeat generations until a favourable result appears.
+
+Cheap annotation/sequence rejection remains first. An optional TNP-before-A3D
+short circuit could save only measured A3D time, not model/refinement work.
+Changing order changes first-failure counts; retain all failing gates to compare
+such a follow-up. Eligible entries always require full native measurements.

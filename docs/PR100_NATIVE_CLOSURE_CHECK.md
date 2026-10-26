@@ -5,9 +5,11 @@ anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 
 Run one private child through Pi on master, under the inventoried native Python.
-Cap the complete check at 60 seconds, two affinity CPU slots and 4 GiB aggregate
-RSS, zero GPUs. First run the separately bounded 10-second detached-grandchild
-containment rehearsal. Stop on a cap or unresolved required identity; no retry
+Cap the complete check at 60 seconds, two affinity CPU slots and 4 GiB sampled
+RSS abort threshold (not a kernel-enforced ceiling), zero GPUs. Require the
+same 96 GiB starting/64 GiB abort headroom as N1. First run the separately bounded 10-second detached-grandchild
+containment rehearsal as a dedicated session using interpreter `-S` (no site
+startup hooks). Its children also use `-S`. Stop on a cap or unresolved required identity; no retry
 or package installation. Record actual CPU, wall time and zero descendants.
 
 Stage the reviewed candidate commit into a new directory through Pi and verify

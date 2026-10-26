@@ -489,20 +489,28 @@
   ],
   "population_sha256": "1fe6a4bab9b41a055268036e89f088c998f4fe1046d56e68a2b75c20e3dd638d",
   "scope": "enriched_runtime_parity_not_yield_or_binding_quality",
-  "source_receipt_sha256": {
-    "conditional-native-pilot-result.json": "4be43785fe4f325ff88abd6afe1315692946c1bb7afdd382cb81e2b58eeb94e1",
-    "full-developability-result.json": "2a786418186cdac42847a8f818e906e13fe76d740d3b6e7aa33ece83a6fda06e"
-  },
   "profile_count": 72,
   "gpu_count": 0,
   "cache_reads": false,
   "limits": {
     "wall_seconds": 1200,
     "cpu_affinity_count": 8,
-    "memory_bytes": 25769803776,
     "workers": 4,
-    "profile_seconds": 300
+    "profile_seconds": 300,
+    "rss_abort_threshold_bytes": 25769803776,
+    "minimum_available_memory_bytes": 103079215104,
+    "available_memory_abort_bytes": 68719476736
   },
   "publication_enabled": false,
-  "runtime_qualified": false
+  "runtime_qualified": false,
+  "source_canonical_json_sha256": {
+    "conditional-native-pilot-result.json": "4be43785fe4f325ff88abd6afe1315692946c1bb7afdd382cb81e2b58eeb94e1",
+    "full-developability-result.json": "2a786418186cdac42847a8f818e906e13fe76d740d3b6e7aa33ece83a6fda06e"
+  },
+  "source_file_sha256": {
+    "conditional-native-pilot-result.json": "e276bdde306fa921e0848384e7fcac72983031b27c99558b3e2e6350a35a6f9f",
+    "full-developability-result.json": "f19ec8475edba03988c20c152a199d3b5b322c19d1bc03675b55fa9407ff4cc0"
+  },
+  "runtime_configuration_revision": 2,
+  "kernel_enforced_aggregate_memory_limit": false
 }
