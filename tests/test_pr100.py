@@ -99,7 +99,7 @@ def test_ten_thousand_hashes_match_the_pinned_validator_function(monkeypatch):
         block_hash = '0x'+hashlib.sha256(str(i).encode()).hexdigest()
         namespace['start_block_hash']=block_hash
         official = eval(call,namespace)
-        ours = rules.challenge(config, EPOCH, block_hash)
+        ours = rules.challenge(config, EPOCH, block_hash, 361)
         for key in ('allowed_v','allowed_cdr3_length'):
             assert ours[key] == official[key]
         pairs.add((ours['allowed_v'],ours['allowed_cdr3_length']))
@@ -110,9 +110,9 @@ def test_tied_gene_and_inclusive_thresholds_pass_but_wrong_epoch_does_not():
     e = evidence(); c = rules.pinned_config(EPOCH)
     rules.validate_evidence(e, SEQ, e['challenge'], c)
     with pytest.raises(ValueError, match='mismatched'):
-        rules.validate_evidence(e, SEQ, rules.challenge(c,EPOCH+1,HASH), c)
+        rules.validate_evidence(e, SEQ, rules.challenge(c,EPOCH+1,HASH,361), c)
     with pytest.raises(ValueError, match='mismatched'):
-        rules.validate_evidence(e, SEQ, rules.challenge(c,EPOCH,'0x'+'b'*64), c)
+        rules.validate_evidence(e, SEQ, rules.challenge(c,EPOCH,'0x'+'b'*64,361), c)
     with pytest.raises(ValueError, match='sequence'):
         rules.validate_evidence(e, SEQ[:-1]+'A', e['challenge'], c)
 
@@ -296,6 +296,52 @@ def test_pi_attestation_refuses_epoch_boundary_crossing():
         module.attest_epoch(chain,EPOCH,68)
 
 
+@pytest.mark.parametrize('length', [361, 362])
+@pytest.mark.parametrize('offset', [0, 1, 17, 360])
+def test_actual_validator_boundary_selection_and_tempo_source(length, offset):
+    import asyncio
+    oracle=ROOT/'tests/fixtures/pr100/validator'
+    manifest=json.loads((oracle/'manifest.json').read_text())
+    for name in ['neurons/validator/validator.py','neurons/validator/setup.py']:
+        assert hashlib.sha256((oracle/name).read_bytes()).hexdigest()==manifest['files'][name]
+    setup=ast.parse((oracle/'neurons/validator/setup.py').read_text())
+    assignment=next(n for n in ast.walk(setup) if isinstance(n,ast.Assign)
+        and any(isinstance(t,ast.Attribute) and t.attr=='epoch_length' for t in n.targets))
+    calls=[];config=SimpleNamespace(netuid=68)
+    node=SimpleNamespace(query=lambda *args:(calls.append(args) or SimpleNamespace(value=length-1)))
+    exec(compile(ast.Module(body=[assignment],type_ignores=[]),'<pinned-setup>','exec'),
+         {'config':config,'node':node})
+    assert config.epoch_length==length and calls==[('SubtensorModule','Tempo',[68])]
+    tree=ast.parse((oracle/'neurons/validator/validator.py').read_text())
+    wait=next(n for n in ast.walk(tree) if isinstance(n,ast.If)
+        and ast.unparse(n.test)=='not local_input')
+    # The actual branch includes a continue for failed waits. Keep it inside a
+    # loop and make the fake chain report success; no source expression changes.
+    wrapper=ast.parse('async def boundary(current_block, config, chain):\n while True:\n  pass\n  return current_block\n')
+    wrapper.body[0].body[0].body[0]=copy.deepcopy(wait)
+    async def call(f, **kwargs):
+        return f(SimpleNamespace(wait_for_block=lambda _:True))
+    namespace={'local_input':False,'bt':SimpleNamespace(logging=SimpleNamespace(
+        info=lambda *a:None,warning=lambda *a:None))}
+    exec(compile(ast.fix_missing_locations(wrapper),'<pinned-loop>','exec'),namespace)
+    read_block=EPOCH*length+offset
+    boundary=asyncio.run(namespace['boundary'](read_block,config,SimpleNamespace(call=call)))
+    assert boundary==(EPOCH if offset==0 else EPOCH+1)*length
+    process=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='process_epoch')
+    assignments=[next(n for n in ast.walk(process) if isinstance(n,ast.Assign)
+        and any(isinstance(t,ast.Name) and t.id==name for t in n.targets))
+        for name in ['start_block','current_epoch']]
+    scope={'config':config,'current_block':boundary}
+    exec(compile(ast.Module(body=assignments,type_ignores=[]),'<pinned-epoch>','exec'),scope)
+    # At an exact boundary the validator processes the just-CLOSED epoch.
+    # At other offsets it waits for the end of the current submission epoch.
+    closed_epoch=EPOCH-1 if offset==0 else EPOCH
+    assert scope['current_epoch']==closed_epoch
+    assert scope['start_block']==closed_epoch*length
+    context=rules.challenge(rules.pinned_config(EPOCH),EPOCH,HASH,length)
+    assert context['epoch_start_block']==EPOCH*length
+
+
 def test_new_target_reference_uses_only_measured_folds_and_expires_after_startup():
     import pandas as pd
     from nanobody_opt.rank_exact import cold_start_reference
@@ -357,7 +403,7 @@ def test_empty_fresh_pool_preserves_cached_precheck_and_next_epoch(tmp_path, mon
     outputs = []
     for epoch in [EPOCH, EPOCH+1]:
         state = {'epoch': epoch, 'epoch_length': 361, 'nanobody_target': rules.TARGET,
-                 'epoch_challenge': rules.challenge(rules.pinned_config(epoch), epoch, HASH)}
+                 'epoch_challenge': rules.challenge(rules.pinned_config(epoch), epoch, HASH, 361)}
         output = pr100_epoch.prepare(args, state, epoch, 'live')
         pool = json.loads(output.read_text())
         assert pool['screen_budget_policy'] == 'unseen-candidates-v2'
@@ -384,7 +430,7 @@ def test_empty_fresh_pool_preserves_cached_precheck_and_next_epoch(tmp_path, mon
     monkeypatch.setattr(producer, '_complete_pool_coverage', lambda **k: {'complete': True})
     monkeypatch.setattr(producer, '_stamp_artifact_policy', lambda *a: None)
     (tmp_path/'config.yaml').write_text(__import__('yaml').safe_dump(
-        rules.bind(rules.pinned_config(EPOCH), EPOCH, HASH)))
+        rules.bind(rules.pinned_config(EPOCH), EPOCH, HASH, 361)))
     assert producer._run_complete_screen_pool(args, state) == producer.PRODUCER_WAIT
     assert len(starts) == 1 and starts[0]['state']['epoch'] == EPOCH
 
@@ -396,10 +442,42 @@ def test_pass_flag_cannot_replace_missing_developability_measurements(key):
         rules.validate_evidence(e,SEQ,e['challenge'],rules.pinned_config(EPOCH))
 
 
+@pytest.mark.parametrize('new_count', [0, 1, 8])
+def test_cached_lane_starts_independently_of_nonzero_new_pool(tmp_path, monkeypatch, new_count):
+    from nanobody_opt_v2 import run_live_producer as producer, cached_confirmation, sequential_exact_race
+    import yaml
+    seqs=[SEQ[:-1]+'ACDEFGHI'[i] for i in range(new_count)]
+    rows=[{'sequence':s,'pr100_annotation':evidence(s)['annotation']} for s in seqs]
+    source={'origin_epoch':EPOCH,'target':rules.TARGET,'screen_budget_policy':'unseen-candidates-v2',
+            'candidates':rows,'sequences':seqs,'exact_admission_limit':4800}
+    pool=tmp_path/'input.json';pool.write_text(json.dumps(source))
+    config=tmp_path/'config.yaml';config.write_text(yaml.safe_dump(
+        rules.bind(rules.pinned_config(EPOCH),EPOCH,HASH,361)))
+    args=SimpleNamespace(runtime_root=tmp_path,complete_screen_pool=pool,
+                         complete_screen_until_epoch=EPOCH+1,chain_state=tmp_path/'state.json',
+                         mutation_database=tmp_path/'unused.sqlite')
+    state={'epoch':EPOCH,'nanobody_target':rules.TARGET}
+    starts=[]
+    monkeypatch.setattr(producer,'_producer_subtree',lambda _: 'live')
+    monkeypatch.setattr(producer,'_prepare_epoch',lambda **_: (config,tmp_path/'archive.csv',rules.TARGET))
+    monkeypatch.setattr(cached_confirmation,'start',lambda **k:starts.append(k))
+    monkeypatch.setattr(producer,'_validator_novel_sequences',lambda **_:set(seqs))
+    monkeypatch.setattr(sequential_exact_race,'_prior_evaluation_sequences',lambda *a,**k:set())
+    monkeypatch.setattr(producer,'_stamp_artifact_policy',lambda *a:None)
+    monkeypatch.setattr(producer,'_complete_pool_coverage',lambda **_: {'complete':True})
+    assert producer._run_complete_screen_pool(args,state)==producer.PRODUCER_WAIT
+    assert len(starts)==1 and starts[0]['state']['epoch']==EPOCH
+    actual=json.loads((tmp_path/f'live/epoch{EPOCH}/producer/full_scan_pool.json').read_text())
+    assert len(actual['candidates'])==new_count
+
+
 def test_new_target_structure_is_packaged_exactly():
     assert hashlib.sha256((ROOT/'data/structures/8AOK.cif').read_bytes()).hexdigest()==(
         'b0633f8925379a9c73b20478b88c7f0a4c81e3f5359b553cb19b4a7ae55a62f9')
     manifest=ROOT/'build_stamp.json'
+    import os
+    if os.environ.get('SN68_DEPLOY_ARTIFACT_ROOT'):
+        assert manifest.is_file(), 'shipping CI must execute this against its staged package'
     if manifest.is_file():
         package=json.loads(manifest.read_text())
         assert package['submodules']['NOVA-nanobody-filter']==rules.FILTER_SHA

@@ -1,15 +1,16 @@
 # PR100 pipeline redesign — hypothesis to benchmark
 
 The compatibility branch is not an optimal new pipeline. Its purpose is to
-avoid invalid submissions during a rule change. The census (eight nonempty
-challenge buckets out of 171) and fourteen failed developability profiles show
-that the old population cannot support reliable operation under PR100.
+avoid invalid submissions during a rule change. The original census occupied eight challenge buckets out of 171. A pinned-runtime
+full census is still running. Fourteen initial profiles all rejected, but the
+larger native census has since found passers; the pilot was not a population
+conclusion. Existing inventory has not demonstrated reliable all-cell supply.
 
 ## Alternatives
 
 | Approach | Benefit | Main risk | Evidence required |
 | --- | --- | --- | --- |
-| Keep old generation and add new gates | Small operational change | Mostly empty or rejected challenge pools | Actual coverage, accepted throughput and deadlines |
+| Frozen inventory bridge with current gates | Small operational change | Mostly empty or rejected challenge pools | Actual coverage, accepted throughput and deadlines |
 | Generate entirely after the challenge arrives | Focuses all generation on the actual challenge | Generation and filtering compete with scoring and handoff | Cold-start end-to-end timing and full fleet completion |
 | Maintain a challenge-indexed eligible bank, replenish asynchronously | Moves target-independent qualification out of the deadline window | Bank diversity, depletion and stale proofs need explicit management | Every bucket's measured eligible capacity, replenishment cost and expiry behavior |
 
@@ -181,13 +182,34 @@ Report every failure; do not drop inconvenient cases or replace them post hoc.
 For feasible policies, held-out new-target score is the primary quality
 endpoint. Freeze one genuinely measured new-target reference field per matched
 case for all arms, and record its provenance. Old-target rank sums are excluded.
-Compare paired fleet mean rank-sums, lower being better. Predeclare a 5% quality
-margin relative to the incumbent feasible policy's mean, plus a 5% cost margin;
-report absolute rank-sums alongside ratios. If no incumbent is feasible, use
-the fully specified online-generation arm as the fixed comparator, and if it
-also fails, report feasibility results without a relative superiority claim.
+The estimand for a fixed ordered pair (A, B) is exp(mean over the ten matched
+cases of log(S_A_case / S_B_case)), where S is the fleet mean of the thirteen
+held-out per-sequence rank sums. Lower is better. Report the absolute fleet
+scores, the per-case ratios and the geometric mean ratio. The ratio of pooled
+means is not this estimand. The fixed family contains all three unordered
+policy pairs, declared before capacity results, with both directional margins
+obtained from each pair's same interval. No comparator is selected by score.
+The compatibility policy is the reporting reference when feasible; otherwise
+the online policy is the reporting reference when feasible. This changes only
+table presentation, not the family of tested pairs.
 
-Use paired schedule-level bootstrap intervals across the ten matched cases,
+There are zero permitted exclusions from a quality comparison. A policy that
+fails capacity in any case remains in the capacity report and is ineligible
+for a ten-case quality or near-optimality claim. Do not substitute another case
+or silently compute a ratio over surviving cases. If fewer than two policies
+clear every case, report insufficient feasible comparators and no relative
+quality verdict. Keep the 5% quality and cost margins.
+
+C2 may use an internal non-competitive reference field of at least 49 distinct
+new-target sequences with all ten finite metrics, measured and frozen before
+policy outcomes. The same field may serve every case if explicitly fixed in
+the execution manifest. Its digest and row count accompany every case. It is
+not a completed-epoch competitive field and cannot satisfy the C1/publication
+reference gate. Its measurement cost is charged once to technical work; an
+already retained technical observation is labelled reused, never NEW again.
+
+Use paired case-level bootstrap intervals of the declared log-ratio statistic
+across the ten matched cases, back-transformed to ratios,
 10,000 resamples, seed 271828. For the three quality contrasts use 98.333%
 intervals (Bonferroni family-wise target 5%). A quality win requires the upper
 bound of candidate/comparator score ratio below 0.95, no capacity failure, and
@@ -210,3 +232,110 @@ open correctness failure. Zero-capacity or degenerate zero-variance comparisons
 cannot support equivalence or near-optimality. Insufficient precision means
 insufficient evidence. This does not establish a global optimum over untested
 models, generators or allocation policies.
+
+## Pilot precision and scheduling addendum — 26 October 2026
+
+Before the conditional pilot, use measured stage costs to derive the actual
+per-arm number n of independent proposal attempts that fit both the 256-proposal
+and 1,800 allocated GPU-second caps. CPU-only rejections still count in the
+attempt denominator and have their CPU cost recorded; do not charge every cheap
+reject the cost of a full GPU evaluation. Correlated siblings are reported by
+reference family and do not justify an independent-binomial precision claim.
+For independent Bernoulli trials and miss probability beta=0.05, zero successes
+bounds the success probability above by 1-beta**(1/n); detecting a chosen
+minimum yield y requires n >= ceil(log(beta)/log(1-y)). The often quoted
+log(1/beta)/y is an approximation, not the exact finite-sample formula.
+
+Predeclare the yield required by the measured 13-entry work/window inequality.
+If the achieved n cannot resolve that yield, a zero is INSUFFICIENT_PRECISION,
+not evidence that the generator is incapable. The resource ceiling can still
+stop further spending, but report RESOURCE_LIMITED with the unresolved interval.
+An actual rare-cell passer remains a positive existence requirement; a failed
+bounded attempt does not establish impossibility for all generators.
+
+The measured cold scenarios are 490.208/5=98.0416 seconds per fresh record and
+672.25/10=67.225 seconds per repeat on one GPU, including repeated process/model
+startup and CPU waits. At that repeat rate, 260 repeats alone cost 17,478.5
+allocated GPU-seconds (4.855 GPU-hours), exceeding the four-hour technical and
+existence allocation. Thus the cold configuration is not an approved execution
+plan. A cold sample is neither a statistical upper bound nor a lower bound on
+warm cost; exceeding it cannot prove that a warm implementation is infeasible.
+A separately bounded technical throughput measurement is allowed to determine
+whether warming changes the decision. No conditional-generation pilot or paired
+comparison starts until the measured cost inequality fits its stated allocation.
+
+Before an existence trial, reserve its full measured repeat, screening and
+handoff cost in the technical allocation, including prior technical spend.
+If it does not fit, report RESOURCE_LIMITED and do not begin a partial trial
+that will be called complete. A budget revision would be a new registration,
+with the old registration and results retained.
+
+Do not hold paid GPUs idle waiting for a particular future challenge. The live
+favourable-cell gate has a seven-calendar-day deadline from epoch 25955; the
+chosen IGHV3-23:16 cell has probability 1/76 per epoch. Offline historical-hash
+or chosen-cell dry runs may execute earlier and remain counterfactual. At the
+calendar deadline, report LIVE_CHALLENGE_NOT_OBSERVED if appropriate; no automatic
+conversion of the dry run into a live qualification occurs. Waiting does not
+extend the six-hour GPU allocation, which counts idle time while allocated.
+
+## Executable conditional-proposal baseline — version 1
+
+`nanobody_opt/pr100_proposal_pilot.py` is a CPU-only experimental baseline,
+not a qualified production design model. Its source digest, exact annotation
+runtime identity and human ANARCI panel digest belong in the immutable pilot
+manifest. The following choices are fixed before measuring proposal outcomes:
+
+- Human V reference: lexicographically first allele of the requested gene in
+  the pinned panel; J reference: first IGHJ4 allele. Assemble V states through
+  104, the requested-length CDR3 and J states from 118. Preserve the J reference
+  tail at states 115–117, canonical cysteines and the required H49/H50 residues.
+  Actual annotation must confirm numbering and the requested cell.
+- Select references by sequence hash, at most 32 in each of the three declared
+  strata. No old-target score participates. The fourth stratum uses no historical
+  sequence reference. Report both total available and selected reference counts.
+- Referenced proposals resize the CDR3 prefix before the fixed J tail by seeded
+  uniform deletion/insertion, then substitute ceil(prefix_length/4) positions,
+  at least one. The no-parent arm draws that prefix uniformly from canonical
+  amino acids excluding cysteine. Six eligible CDR1/2 positions are substituted
+  using the same alphabet to permit diversity even at CDR3 length five.
+- Seeds are SHA-256-derived from protocol, requested cell, seed 1000 and ordinal.
+  This is deterministic proposal construction, not evidence of independent
+  scoring draws. References cycle by ordinal. Duplicate sequences within an
+  arm are not emitted twice. Stop at 256 distinct proposals or 2,560 attempts.
+- Dry runs mask CUDA and allow at most 120 CPU wall seconds for emission, before
+  annotation. Emit all sixteen cell/stratum records, including UNRUNNABLE arms
+  with no reference. Nominal cell labels are never accepted as annotation proof.
+  Annotate every distinct emitted sequence with the pinned runtime and report
+  cell-match and rejection counts. This uses no GPU, native developability or
+  target scoring; no dry-run result may claim a validator acceptance.
+
+This baseline is intentionally simple enough to falsify cheaply. Altering its
+mutation count, alphabet, reference selection or allele after observing its
+results creates a separately versioned arm, with the first result retained.
+It is not evidence that this proposal family is near optimal.
+
+The three policy definitions for the eventual C2 comparison are:
+
+1. Inventory bridge: the committed PR100 `prepare_pr100_bank.select` and
+   `pr100_epoch.prepare` path; hash-ordered current-cell candidates from the
+   frozen inventory, current gates, target-specific NEW exclusion, and the
+   separate cached comparison lane. This is the actual compatibility baseline;
+   it has no implicit unimplemented conditional generator.
+2. Online conditional policy: begin the above generator only after the actual
+   challenge is known. Cycle runnable reference strata in the stated order,
+   with equal proposal allotments. Use current annotation/native/novelty gates,
+   then score genuinely NEW target-specific candidates up to the budget/window.
+3. Bank policy: use exactly the same generator and gates before the challenge,
+   in rounds over the 171 cells, filling thirteen accepted distinct candidates
+   per cell before any surplus. Replenish consumed entries in the same rounds.
+   All preparation cost and unselected cells are charged. A four-cell pilot is
+   not a prebuilt 171-cell bank. If measured preparation cannot fit the declared
+   allocation, this policy is RESOURCE_LIMITED and is not compared as if its
+   preparation were free. A live scheduler implementation is still required.
+
+Reference and scheduler policies are fixed here; their existence does not
+substitute for the CPU dry runs, runtime identities, generator-yield pilot or
+three real policy executions. The bank/online schedulers are implementation
+obligations before a paired comparison can run. The pilot can decisively show
+that this proposal family needs revision without consuming the comparison
+budget. Such a result is not a working-strategy or near-optimality verdict.

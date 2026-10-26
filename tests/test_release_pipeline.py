@@ -37,6 +37,7 @@ def test_release_accepts_verified_bytes_and_rejects_tampering(tmp_path):
 def test_release_refuses_missing_or_substituted_filter_pin(tmp_path, runtime_only, pin):
     manifest = fixture_release(tmp_path)
     from nanobody_opt import rules
+    assert release.PINNED_FILTER_REVISION == rules.FILTER_SHA
     assert manifest['submodules']['NOVA-nanobody-filter'] == rules.FILTER_SHA
     manifest['submodules'] = {} if pin is None else {'NOVA-nanobody-filter': pin}
     with pytest.raises(ValueError, match='filter submodule'):

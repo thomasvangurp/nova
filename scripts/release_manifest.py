@@ -113,6 +113,9 @@ def stage(root: Path, destination: Path, *, profile: str = 'application') -> dic
     return manifest
 
 
+PINNED_FILTER_REVISION = 'fe2d5868126406a0de8953d26ecd8bdccbdbd029'
+
+
 def verify(root: Path, manifest: dict, *, expected_sha: str,
            runtime_only: bool = False, require_tests: bool = True) -> None:
     if not re.fullmatch('[0-9a-f]{40}', expected_sha) or manifest.get('git_sha') != expected_sha:
@@ -124,8 +127,7 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
     # Also enforced for a controls-only install, whose application modules may
     # deliberately remain on the previous release. Do not import those modules
     # to determine the pin for the candidate being verified.
-    if (manifest.get('submodules') or {}).get('NOVA-nanobody-filter') != (
-            'fe2d5868126406a0de8953d26ecd8bdccbdbd029'):
+    if (manifest.get('submodules') or {}).get('NOVA-nanobody-filter') != PINNED_FILTER_REVISION:
         raise ValueError('release filter submodule does not match PR100 pin')
     profile = manifest.get('deployment_profile', 'application')
     if profile not in {'application', 'release-controls'}:

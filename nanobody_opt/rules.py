@@ -82,7 +82,7 @@ def fingerprint(config):
                    "aggrescan_caps": [str(MAX_AVERAGE), str(MAX_PEAK)]})
 
 
-def challenge(config, epoch, block_hash, epoch_length=361):
+def challenge(config, epoch, block_hash, epoch_length):
     if (not isinstance(block_hash, str)
             or not re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash)):
         raise ValueError("missing or invalid epoch-start block hash")
@@ -112,7 +112,7 @@ def challenge(config, epoch, block_hash, epoch_length=361):
     return out
 
 
-def bind(config, epoch, block_hash, epoch_length=361):
+def bind(config, epoch, block_hash, epoch_length):
     out = copy.deepcopy(config)
     out["nova_epoch_challenge"] = challenge(out, epoch, block_hash, epoch_length)
     return out

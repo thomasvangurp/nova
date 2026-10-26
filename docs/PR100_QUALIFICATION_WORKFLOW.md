@@ -104,8 +104,10 @@ observations and NEW-budget reservations survive restarts and rollback.
 The NEW budget counts at most 4,800 previously unmeasured target-specific
 candidates, independently of up to 8,000 proposals and cached-candidate
 comparison. Report reserved, dispatched, completed and failed counts separately.
-Cached candidates still receive the current challenge/novelty/developability
-precheck when there are zero NEW candidates. Do not relabel repeated work NEW.
+Cached candidates receive the current challenge, archive novelty and measurement-identity
+precheck every epoch, independently of the NEW count. Compare both lanes on the
+same frozen field and report each selected fleet's cached and NEW contributions.
+Zero NEW candidates is one required scenario, not the cached-lane trigger. Do not relabel repeated work NEW.
 
 For each candidate retain timestamps for generation, annotation, native
 measurement, inventory admission, challenge binding, dispatch, scoring,

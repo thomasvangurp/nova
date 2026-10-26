@@ -154,7 +154,8 @@ def attest_epoch(chain, epoch: int, netuid: int) -> dict:
         raise ValueError("Pi chain epoch changed during PR100 preflight")
     context = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, epoch_length)
     return {**context, "chain_read_first_block": first_block,
-            "chain_read_last_block": last_block, "source": "pi_rpc"}
+            "chain_read_last_block": last_block, "source": "pi_rpc",
+            "netuid": netuid, "epoch_length_source": "SubtensorModule.Tempo+1"}
 
 
 def sequences_by_uid(artifact: dict, epoch: int,

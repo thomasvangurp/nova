@@ -171,3 +171,59 @@ Native feasibility remains labelled separately from validator equivalence.
 At 1,280 of 4,080 measured candidates, 18 passed; earlier zero-of-fourteen was
 only a stratified pilot, not a population finding. The current source changes
 have focused tests; every new commit still requires both shipping profiles.
+
+
+## Round 4 and response for round 5
+
+Round 4 took 492.9 seconds at Opus max. It gave a conditional GO to feasibility
+measurements, while redesign, production and near optimality remained NO_GO.
+All statements below distinguish measured evidence from future requirements.
+
+- Full shipping CI subsequently passed 870 tests in both profiles at fe4e11d,
+  after four incomplete transaction fixtures were corrected. The exact artifact
+  was staged and verified on the slave through Pi; no application activation.
+- Full pinned-runtime inventory: 391,935 distinct sequences, 4,080 eligible,
+  eight nonempty cells, 728.415 seconds. A first attempt failed immediately:
+  the `-c` child's current directory shadowed staged namespace-package modules
+  with /root/nanobody_opt/gates.py. The restarted harness prepends the release,
+  uses its working directory and asserts actual module origins. Failed attempt
+  and both harness identities are retained. This is a test-runner failure;
+  the full result is from the corrected run, not a partial result relabelled.
+- Batch throughput: 128 distinct sequences, four GPUs, two chunks per shard
+  (24 then eight), all 128 finite records and structures retained, 542.352 seconds.
+  Second-chunk times were 122.135–124.865 seconds per eight records. These are
+  partial warm chunks, not steady full-size production-daemon throughput. The
+  idle legacy daemon retained VRAM. No equivalence or C1-volume claim follows.
+- R08 source correction: pinned validator setup.py initializes epoch_length
+  from SubtensorModule.Tempo + 1, the same source as Pi. Its main loop normalizes
+  off-boundary reads to the next boundary before processing the closed epoch.
+  Added the seventeenth exact oracle file and executable AST tests for both
+  lengths 361/362 at four offsets, including the closed-epoch distinction at
+  an exact boundary. Removed implicit 361 defaults. A validator's private
+  already-running stale configuration cannot be independently observed by Pi;
+  reading the same chain value twice would not prove that process's state.
+- R29 correction: run_live_producer starts cached_confirmation whenever the
+  unseen-candidates policy is active, before looking at NEW pool size. The
+  alleged one-NEW-suppresses-cache defect is absent. Added tests for zero, one
+  and eight NEW candidates; strengthened the workflow wording to every epoch.
+  Live three-epoch lane-composition evidence is still required.
+- R15 correction: shipping_checks stages the package before invoking the tests,
+  so the packaged assertion already ran in shipping CI. It now explicitly
+  refuses a missing stamp when the shipping artifact environment is set, and
+  a named filter pin has a direct equality assertion against rules.FILTER_SHA.
+  Native/transitive-runtime qualification remains open. Native executable
+  digests already exist in census receipts; they are not yet enforced in the
+  release/runtime cache contract. PSH is a TNP result, not produced by A3D.
+- R33–R35: specified the log-ratio estimand, fixed three-pair family, zero allowed
+  case exclusions, internal non-competitive C2 field, exact binomial detection
+  formula and resource-limited outcome. Cold-repeat arithmetic exceeds its
+  allocation, so it is not an executable plan; it is not a proof of warm
+  infeasibility. A seven-day live-cell calendar cap cannot extend GPU allocation.
+- R30: a concrete CPU-only conditional germline/loop baseline and fixed
+  reference/operator rules now replace the unnamed generation hypothesis.
+  Dry-run and annotation evidence remain required. This is not an endorsed
+  molecular design strategy, nor a completed online/bank scheduler.
+
+No design improvement or reviewer agreement qualifies unmeasured runtime
+behavior. R10, R12, R16, R20, R31 and publication cold-start enforcement remain
+open implementation/evidence gates; none was silently waived.
