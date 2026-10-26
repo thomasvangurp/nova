@@ -1,9 +1,11 @@
 # PR100 pipeline redesign — hypothesis to benchmark
 
 The compatibility branch is not an optimal new pipeline. Its purpose is to
-avoid invalid submissions during a rule change. The original census occupied eight challenge buckets out of 171. A pinned-runtime
-full census is still running. Fourteen initial profiles all rejected, but the
-larger native census has since found passers; the pilot was not a population
+avoid invalid submissions during a rule change. The annotated census occupied
+eight challenge buckets out of 171. The completed native-proxy census found
+73 passers among 4,080 profiles, in two buckets. This used the recorded older
+annotation closure and does not establish full pinned-validator acceptance.
+Fourteen initial profiles all rejected, but that pilot was not a population
 conclusion. Existing inventory has not demonstrated reliable all-cell supply.
 
 ## Alternatives
