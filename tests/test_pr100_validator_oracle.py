@@ -10,7 +10,9 @@ import copy
 from contextlib import nullcontext
 import hashlib
 import json
+import math
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -146,3 +148,39 @@ def test_upstream_truncated_developability_gap_is_not_copied_locally(monkeypatch
     assert oracle_case(monkeypatch, 'truncated_developability')
     assert rules.developability_reason({}, rules.pinned_config(25955)['nanobody_requirements'],
                                       sequence=SEQ)
+
+
+@pytest.mark.parametrize('cpu_count', [None, 2, 8, 80])
+@pytest.mark.parametrize('count', [0, 1, 512, 513, 1025, 4097])
+def test_archive_batch_inputs_and_failure_merges_match_exact_validator(monkeypatch, cpu_count, count):
+    """Synthetic backend failures; this is not real annotation-runtime proof."""
+    from nanobody_opt.check_validator_novelty import _pr100_archive_cdrs
+    calls=[]
+    class Chain:
+        @staticmethod
+        def batch(sequences, **kwargs):
+            calls.append((dict(sequences),kwargs))
+            if 'RAISE' in sequences.values():raise ValueError('batch fixture failure')
+            chains={key:SimpleNamespace(cdr1_seq=seq, cdr2_seq='', cdr3_seq=seq[-3:])
+                    for key,seq in sequences.items() if seq!='UNPARSEABLE'}
+            return chains,{key:'fixture' for key in sequences if key not in chains}
+    monkeypatch.setitem(sys.modules,'abnumber',SimpleNamespace(Chain=Chain))
+    monkeypatch.setattr(os,'cpu_count',lambda:cpu_count)
+    class SerialExecutor:
+        def __init__(self, **kwargs):pass
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def map(self,func,batches):return map(func,batches)
+    namespace={'os':os,'math':math,'_CDR_BATCH_SIZE':512,'_MAX_CDR_WORKERS':8,
+        'mp':SimpleNamespace(get_context=lambda method:None),
+        'ProcessPoolExecutor':SerialExecutor,'_stop_worker_log_listener':lambda:None,
+        'bt':SimpleNamespace(logging=SimpleNamespace(warning=lambda *args:None))}
+    load_functions(ORACLE/'utils/nanobodies.py', ['_extract_cdrs_for_records',
+        '_extract_cdrs_worker','extract_cdrs_batch','_chain_to_cdrs'],namespace)
+    records=[('SEQ'+str(i),str(i)) for i in range(count)]
+    if count>=513:
+        records[0]=('EARLY','reused-id');records[-1]=('LATE','reused-id')
+        records[11]=('UNPARSEABLE','11');records[300]=('RAISE','300')
+    expected=namespace['_extract_cdrs_for_records'](records);expected_calls=calls[:];calls.clear()
+    assert _pr100_archive_cdrs(records)==expected
+    assert calls==expected_calls

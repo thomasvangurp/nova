@@ -1,12 +1,13 @@
 import hashlib
 import importlib.util
+import ast
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from scripts.pr100_publication_hold import patch_consumer, patch_signer, MARKER
+from scripts.pr100_publication_hold import patch_consumer, patch_signer, publication_routes, verified_restore, MARKER
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -37,13 +38,43 @@ def test_hold_preserves_legacy_allocation_and_molecule_plan(tmp_path, capsys):
 
 
 def test_hold_refuses_source_drift_and_double_patch():
-    source=b'def sequences_by_uid(artifact, epoch):\n    return {1: "fixture"}\n'
+    source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_bytes()
     sha=hashlib.sha256(source).hexdigest()
     with pytest.raises(ValueError,match='consumer changed'):
         patch_consumer(source+b'\n',expected_sha256=sha)
     held=patch_consumer(source,expected_sha256=sha)
     with pytest.raises(ValueError,match='already present'):
         patch_consumer(held,expected_sha256=hashlib.sha256(held).hexdigest())
+
+
+@pytest.mark.parametrize('before,after,message',[
+    ('def plan(', 'def renamed_plan(', 'planning function'),
+    ('if not seq:', 'if seq is None:', 'planning restriction'),
+    ('plaintext=f"{mols or NULL}|{seq}",', 'plaintext=f"{mols}|{seq}",', 'replacement'),
+    ('has_sequence=True)', 'has_sequence=bool(seq))', 'replacement'),
+    ('import json', 'import json as renamed_json', 'import json'),
+    ('sequences = sequences_by_uid(', 'sequences = different_source(', 'publication route'),
+    ('plan(crew, molecules, sequences, value)', 'plan(crew, molecules, other_sequences, value)', 'publication route'),
+    ('rows = plan(crew, molecules, sequences, value)', 'sequences = {}\n    rows = plan(crew, molecules, sequences, value)', 'publication route'),
+])
+def test_hold_refuses_partial_repair_and_unguarded_routes(before,after,message):
+    source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_text()
+    assert before in source
+    changed=source.replace(before,after).encode()
+    with pytest.raises(ValueError,match=message):
+        patch_consumer(changed,expected_sha256=hashlib.sha256(changed).hexdigest())
+
+
+def test_hold_routes_and_verified_restore_rehearsal():
+    source=(ROOT/'tests/fixtures/pr100/pi_consumer_plan.py').read_bytes()
+    original_sha=hashlib.sha256(source).hexdigest()
+    held=patch_consumer(source,expected_sha256=original_sha);held_sha=hashlib.sha256(held).hexdigest()
+    assert publication_routes(held)['sequence_producer']=='sequences_by_uid'
+    assert verified_restore(held,source,expected_current_sha256=held_sha,
+                            expected_backup_sha256=original_sha)==source
+    with pytest.raises(ValueError,match='rollback'):
+        verified_restore(held+b'\n',source,expected_current_sha256=held_sha,
+                         expected_backup_sha256=original_sha)
 
 
 def test_actual_signer_null_half_preserves_all_molecule_validation(tmp_path):
@@ -89,3 +120,17 @@ def test_hold_does_not_read_or_fetch_unusable_nanobody_artifacts(tmp_path, monke
     args.pull_only=False;args.epoch=25954
     with pytest.raises(failure):held.main(args)
     assert reads==['crew.json','crew.json','nanobody.json'] and pulls==[True]
+
+
+def test_molecule_only_wire_round_trips_through_exact_pinned_validator_parser():
+    source=ROOT/'tests/fixtures/pr100/validator/neurons/validator/commitments.py'
+    assert hashlib.sha256(source.read_bytes()).hexdigest()=='c8daed3d9ef2fd347045f7bd28ea16e00ab83f39932efa51363e5e72b4e57e80'
+    nodes=[n for n in ast.parse(source.read_text()).body if isinstance(n,ast.FunctionDef)
+           and n.name in ('normalize_list','parse_decrypted_submission')]
+    namespace={'NULL_TOKEN':'~','SEPARATOR':',',
+        'bt':SimpleNamespace(logging=SimpleNamespace(warning=lambda *a:None))}
+    module=ast.Module(body=[ast.ImportFrom(module='__future__',
+        names=[ast.alias(name='annotations')],level=0),*nodes],type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module),str(source),'exec'),namespace)
+    molecules=[f'rxn:1:{i}:2' for i in range(20)]
+    assert namespace['parse_decrypted_submission'](7,','.join(molecules)+'|~',20,1)==(molecules,[])

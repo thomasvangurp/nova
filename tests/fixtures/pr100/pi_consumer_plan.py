@@ -166,4 +166,7 @@ def main(arguments):
     sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
                                  allow_stale=arguments.allow_stale_nanobody,
                                  crew=crew)
+    # Empty stand-ins for the independent molecule I/O omitted from this fixture.
+    molecules, value = {}, {}
+    rows = plan(crew, molecules, sequences, value)
     return sequences

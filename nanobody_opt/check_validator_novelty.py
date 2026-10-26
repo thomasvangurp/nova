@@ -93,6 +93,43 @@ def duplicate_reason(
     return None
 
 
+def _pr100_archive_cdrs(records):
+    """Use the pinned validator's batch boundaries, IDs and failure semantics.
+
+    The validator partitions by host CPU count (at most eight batches), not
+    fixed 512-row slices. A duplicate ID overwrites within a batch and later
+    batches overwrite earlier results. A batch exception maps that entire
+    batch to missing CDR data. We execute those batches serially inside each
+    existing search worker to avoid a second nested process pool; this changes
+    scheduling, not inputs or merge order. Cross-host equivalence still needs
+    the runtime differential, particularly when a batch fails.
+    """
+    import math
+    import os
+    from abnumber import Chain
+
+    if not records:
+        return {}
+    workers = min(8, max(1, (os.cpu_count() or 1)//2),
+                  max(1, math.ceil(len(records)/512)))
+    batch_size = math.ceil(len(records)/workers)
+    result = {}
+    for offset in range(0, len(records), batch_size):
+        sequences = {seq_id: sequence for sequence, seq_id
+                     in records[offset:offset+batch_size]}
+        try:
+            chains, _ = Chain.batch(sequences, scheme='imgt')
+        except Exception:
+            result.update({seq_id: None for seq_id in sequences})
+            continue
+        for seq_id in sequences:
+            chain = chains.get(seq_id)
+            result[seq_id] = ({key: str(getattr(chain, key+'_seq') or '')
+                              for key in ('cdr1', 'cdr2', 'cdr3')}
+                             if chain is not None else None)
+    return result
+
+
 def _build_search_engine(top: pd.DataFrame, *, all_archive: bool = False):
     if all_archive:
         from nanobody_opt.pr100_filter import activate_filter
@@ -106,25 +143,20 @@ def _build_search_engine(top: pd.DataFrame, *, all_archive: bool = False):
     config = SearchConfig()
     index = IndexManager(config)
     engine = SearchEngine(config, index, AlignmentEngine(config.fine_alignment))
-    numbered = {}
-    if all_archive and len(top):
-        from abnumber import Chain
-        # Match PR100's archive-side AbNumber batch annotation, retaining rows
-        # with missing CDR data for its whole-sequence fallback check.
-        items = {str(i): str(s).strip().upper() for i, s in enumerate(top.sequence)}
-        for start in range(0, len(items), 512):
-            batch = {str(i): items[str(i)] for i in range(start, min(start + 512, len(items)))}
-            chains, _ = Chain.batch(batch, scheme="imgt")
-            numbered.update(chains)
+    if all_archive:
+        # Keep archive IDs and values exactly as handed to the upstream index.
+        # Do not substitute row positions or normalize only one side of a
+        # duplicate ID: either would change the CDR mapping used by the index.
+        records = list(top[['sequence', 'sequence_hash']].itertuples(index=False, name=None))
+        cdrs_by_id = _pr100_archive_cdrs(records)
+        for sequence, sequence_id in records:
+            index.add_sequence(sequence_id, sequence, cdrs_by_id.get(sequence_id),
+                               generate_kmers(sequence, k=config.k))
+        return engine
     for selection_rank, row in enumerate(top.itertuples(index=False), start=1):
         sequence = str(row.sequence).strip().upper()
-        if all_archive:
-            chain = numbered.get(str(selection_rank - 1))
-            cdrs = ({key: str(getattr(chain, key + "_seq") or "")
-                     for key in ("cdr1", "cdr2", "cdr3")} if chain is not None else None)
-        else:
-            cdrs = extract_cdrs(sequence)
-        if cdrs is None and not all_archive:
+        cdrs = extract_cdrs(sequence)
+        if cdrs is None:
             # Match index_top_sequences: a top-50 sequence whose CDRs cannot be
             # annotated is skipped (its igblast fallback is broken upstream --
             # called with a path against a Dict[str, str] signature), so it is

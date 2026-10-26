@@ -261,3 +261,46 @@ nanobody JSON, pull-only behavior, and unchanged pre-cutover behavior. This is
 an independent-path repair, not a bypass of molecule validation or deadlines.
 The first round-5 CLI attempt failed before returning a review. It is recorded
 as a failed attempt, not agreement; the same Opus max review was retried.
+
+## Round 5 and response in progress
+
+The retry returned after 730.3 seconds at Opus max. Workflow design is now
+GO_TO_EXECUTE for the stated feasibility stages. Experimental execution remains
+conditional; production and near optimality remain NO_GO. The original review
+is retained, including all retractions. Agreement does not close execution gates.
+
+- R08, R19 and the design portions of R30/R33/R34/R35 were accepted. R29 and
+  the packaged-test objection in R15 were withdrawn against source evidence.
+- R10: the candidate now uses upstream's CPU-dependent batch partition, actual
+  archive IDs, duplicate-ID overwrite order and whole-batch failure behavior.
+  Twenty-four differential fixtures execute the unchanged validator functions
+  over empty/512/513/1,025/4,097-row cases and four CPU counts. Serial execution
+  inside existing search workers avoids nested pools while preserving inputs
+  and merge order. Actual pinned-runtime/archive differential remains open.
+  An omitted legacy novelty test still expected the previously rejected zero
+  coarse thresholds and inspected an obsolete main call site; it now exercises
+  the worker call and requires the validator's None/None arguments. Its suite
+  is added to mandatory shipping CI.
+- R40/R41/R42: the hold patch now refuses every missing planning substitution,
+  requires the module's json import, uses explicit invariant errors, and checks
+  the known consumer's sole guarded sequence assignment and sole plan call.
+  This is a check of the pinned installed consumer, not arbitrary external
+  callers. No-op repair and alternate-route mutation tests were added.
+- R44: verified pure restore is rehearsed against source and patched digests.
+  A post-activation live restore of the old unqualified publisher is NOT an
+  authorized automatic fallback; removal requires a qualified Pi replacement.
+- The full installed Pi loop re-execs pi_submit.py for pull-only and final
+  publication. Its final stream bounds the process group before blackout.
+  No service or GPU producer restart is needed for this two-file hold. Actual
+  Pi preflight used Python 3.11.16, correcting the earlier assumed 3.10 label.
+- Native feasibility census completed: 4,080 measured, 73 predicate passers
+  (5 in IGHV3-23:16 and 68 in :18), 7,040.49 seconds. This remains the explicitly
+  older native measurement closure and is not pinned full-validator acceptance.
+  No GPU work or production database writes occurred in this census.
+
+R36/R39/R47 require additional analysis of the retained proposal corpus, not
+another generation run: pairwise diversity, shared-framework pairing, full
+annotation reasons and real IMGT/length distributions. The ongoing 351-profile
+native pilot is CPU-only and cannot certify target quality or a qualified bank.
+R38 requires explicit capacity arithmetic before a GPU strategy comparison;
+R37 requires achievable endpoint precision. Neither requirement is waived.
