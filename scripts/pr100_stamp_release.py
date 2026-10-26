@@ -43,6 +43,19 @@ def stamp(release, *, git_sha=None, names=CONTROLLER_FILES, extra=()):
     git_sha = git_sha or revision(release)
     if not isinstance(git_sha, str) or len(git_sha) != 40:
         raise ValueError('a 40-character git revision is required')
+    target = release / 'build_stamp.json'
+    if target.exists():
+        # A tested release already carries the full release manifest, which
+        # pr100_gpu_probe verifies (pixi.lock, submodules, runtime inventory). Never
+        # replace it with this minimal stamp: accept it only if it already covers us.
+        existing = json.loads(target.read_text())
+        if existing.get('git_sha') != git_sha:
+            raise ValueError('existing release manifest is for a different revision')
+        recorded = existing.get('files', {})
+        for name in sorted(set(names) | set(extra)):
+            if recorded.get(name) != digest(release / name):
+                raise ValueError(f'existing release manifest does not cover {name}')
+        return existing
     files = {}
     for name in sorted(set(names) | set(extra)):
         source = release / name

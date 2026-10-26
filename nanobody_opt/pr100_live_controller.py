@@ -36,6 +36,8 @@ PUBLISH_RESERVE_SECONDS = 150.0
 PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'score': 1.0}
 PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'score': 90.0}
 TAIL_BYTES = 2048
+# Wall reserved at the end of the native phase for the archive novelty pass (234 s in 25956).
+NOVELTY_RESERVE_SECONDS = 300.0
 ACTIVATION_EPOCH = 25957
 TIER_RANK = {'A': 0, 'B': 1}
 HOST_KEYS = ('address', 'port', 'release', 'annotation_python', 'native_python',
@@ -45,7 +47,7 @@ _SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?k
 _LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
 
 TRANSPORT = r'''
-import base64,hashlib,json,os,pathlib,subprocess,sys,time
+import base64,hashlib,json,os,pathlib,re,subprocess,sys,time
 r=json.load(sys.stdin);d=pathlib.Path(r['directory']);d.mkdir(parents=True,exist_ok=True)
 def atom(p,v):
  t=p.with_name('.'+p.name+'.tmp');t.write_text(json.dumps(v,allow_nan=False));os.replace(t,p)
@@ -55,7 +57,7 @@ if r['operation']=='start':
  if stamp['git_sha']!=r['source_sha']:raise ValueError('source revision')
  for name,expected in stamp['files'].items():
   if hashlib.sha256((release/name).read_bytes()).hexdigest()!=expected:raise ValueError('source identity')
- identity=hashlib.sha256(json.dumps(r['spec'],sort_keys=True).encode()).hexdigest()
+ identity=hashlib.sha256(json.dumps({k:v for k,v in r['spec'].items() if k not in('wall_seconds','deadline_unix')},sort_keys=True).encode()).hexdigest()
  if (d/'launch.json').exists():
   old=json.loads((d/'launch.json').read_text())
   if old['identity']!=identity:raise ValueError('different existing job')
@@ -78,9 +80,9 @@ if not out['running']:
  report=d/'score/report.json'
  if report.is_file():
   for group in json.loads(report.read_text()).get('groups',[]):
-   if group.get('valid') is True:
-    name='score/length'+str(int(group['length']))+'/exact_all.json'
-    out['files'][name]=base64.b64encode((d/name).read_bytes()).decode()
+   f=str(group.get('file',''))
+   if group.get('valid') is True and re.fullmatch(r'gpu-[0-9]+/length[0-9]+/exact_all[.]json',f) and (d/'score'/f).is_file():
+    out['files']['score/'+f]=base64.b64encode((d/'score'/f).read_bytes()).decode()
 else:
  for name in ('supervisor-stderr.log','transport-launch.log'):
   p=d/name
@@ -154,8 +156,10 @@ def remote(config, host, request):
                              'stderr_tail': sanitize(result.stderr)}
         raise error
     try:
-        return json.loads(result.stdout)
-    except ValueError as cause:
+        # A login banner or rc-file echo may precede the reply; the reply is the last line.
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        return json.loads(lines[-1])
+    except (ValueError, IndexError) as cause:
         error = RuntimeError('remote transport returned no result')
         error.diagnostics = {'stdout_tail': sanitize(result.stdout),
                              'stderr_tail': sanitize(result.stderr)}
@@ -195,9 +199,17 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks',
                    output_directory=directory + '/score')
         job['cpu_slots'] = max(2, len(config['gpu']))
+    cap = phase_cap(phase, stop_at) if cap is None else cap
+    if phase == 'native' and 'phase_budget_seconds' not in config['worker']:
+        # Without this the worker measures until the supervisor kills it, and a killed
+        # native phase returns no candidates at all. Leave room for the novelty pass.
+        reserve = float(config.get('novelty_reserve_seconds', NOVELTY_RESERVE_SECONDS))
+        job['phase_budget_seconds'] = max(1.0, cap - reserve)
+    if phase == 'score':
+        # The worker bounds each GPU lease inside the supervisor's wall cap.
+        job['wall_seconds'] = max(30.0, cap - 15.0)
     files['job.json'] = json.dumps(job).encode()
     command = [python, '-B', '-m', 'nanobody_opt.pr100_live_worker', '--job', directory + '/job.json']
-    cap = phase_cap(phase, stop_at) if cap is None else cap
     spec = {'command': command, 'cwd': release, 'environment': environment,
             'wall_seconds': cap, 'deadline_unix': stop_at,
             'receipt_path': directory + '/supervisor-receipt.json', 'cpu_slots': job['cpu_slots'],
@@ -259,10 +271,14 @@ def fetch_archive(target):
 def merge_scores(files, target):
     report = json.loads(files.get('score/report.json', b'{}'))
     merged = {'target': target, 'per_nanobody_components': {'0': {}}, 'structures': {}, 'source_batches': []}
+    if 'score/scorer_settings.json' not in files or not report.get('registered_scorer_sha256'):
+        raise ValueError('score phase returned no scored group')
     for group in report.get('groups', []):
         if group.get('valid') is not True:
             continue
-        raw = files[f"score/length{group['length']}/exact_all.json"]
+        raw = files.get('score/' + str(group.get('file')))
+        if raw is None:
+            continue  # partial result: the group file never arrived
         value = json.loads(raw)
         if value.get('target') != target:
             raise ValueError('scorer target changed')
@@ -391,15 +407,19 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                           {'input.json': json.dumps(validity).encode(), 'archive.csv': archive},
                           stop_at, chain, local, diagnostics=diagnostics)
         validity = json.loads(files['result.json'])
-        # The native stage also runs novelty (only on its passers). An unchecked novelty
-        # result is never publishable.
-        if validity.get('novelty_checked') is False:
-            raise ValueError('native stage reported no novelty check')
+        if validity.get('status') != 'complete':
+            raise ValueError('native phase did not complete')
         # No candidate cap: whatever the worker returns is scored.
         allow_marginal = bool(config['worker'].get('allow_marginal', True))
         ordered = order_candidates(validity['candidates'], allow_marginal=allow_marginal)
         if not ordered:
             raise ValueError('no native passing candidate')
+        # The native stage also runs novelty (only on its passers). An unchecked novelty
+        # result is never publishable.
+        if validity.get('novelty_checked') is not True:
+            raise ValueError('native stage reported no novelty check')
+        if len({r['sequence'] for r in ordered}) != len(ordered):
+            raise ValueError('duplicate sequence in native result')
         validity['candidates'] = ordered
         phase = 'score'
         files = run_phase(config, challenge, phase,
@@ -409,12 +429,28 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         settings_hash = hashlib.sha256(files['score/scorer_settings.json']).hexdigest()
         phase = 'publish'
         tiers = candidate_tiers(ordered)
+        receipt['scored_candidates'] = scores['n']
         for subset in publication_sequence(ordered, allow_marginal=allow_marginal):
-            attempt = dict(validity, candidates=subset)
-            outcome = publish(config, chain, challenge, attempt, scores, settings, scorer_hash,
-                              settings_hash, local, tiers=tiers, dry_run=dry_run)
+            # Only scored candidates can enter a fleet; an unscored margin-safe set is skipped.
+            scored = [r for r in subset if r['sequence'] in scores['per_nanobody_components']['0']]
+            if not scored:
+                continue
+            attempt = dict(validity, candidates=scored)
+            try:
+                outcome = publish(config, chain, challenge, attempt, scores, settings, scorer_hash,
+                                  settings_hash, local, tiers=tiers, dry_run=dry_run)
+            except Exception as error:
+                if not any(p.get('status') in ('published', 'dry_run') for p in receipt['publications']):
+                    raise
+                # An earlier attempt already published; a refused upgrade must not erase it.
+                receipt['publications'].append({'status': 'upgrade_refused',
+                                                'error_type': type(error).__name__,
+                                                'error': sanitize(str(error))})
+                continue
             receipt['publications'].append(outcome)
             receipt.update({k: v for k, v in outcome.items() if k != 'decision'})
+        if not receipt['publications']:
+            raise ValueError('no scored candidate to publish')
     except Exception as error:
         receipt.update(status='failed', stage=phase, error_type=type(error).__name__,
                        error=sanitize(str(error)))

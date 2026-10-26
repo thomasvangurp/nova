@@ -220,17 +220,23 @@ def test_merge_scores_joins_valid_groups_and_rejects_a_changed_target():
                            'per_nanobody_components': {'0': {sequence: {'x': 1.0}}},
                            'structures': {sequence: 'pdb'}}).encode()
     files = {'score/report.json': json.dumps(
-        {'groups': [{'length': 120, 'valid': True}, {'length': 121, 'valid': False}],
+        {'groups': [{'length': 120, 'valid': True, 'file': 'gpu-0/length120/exact_all.json'},
+                    {'length': 121, 'valid': False, 'file': 'gpu-1/length121/exact_all.json'},
+                    {'length': 122, 'valid': True, 'file': 'gpu-1/length122/exact_all.json'}],
          'registered_scorer_sha256': 'c' * 64, 'elapsed_seconds': 42.0}).encode(),
-        'score/length120/exact_all.json': payload('AAA'),
+        'score/gpu-0/length120/exact_all.json': payload('AAA'),
         'score/scorer_settings.json': json.dumps({'samples': 5}).encode()}
     merged, settings, scorer = controller.merge_scores(files, rules.TARGET)
     assert merged['n'] == 1 and merged['wall_seconds'] == 42.0
     assert settings == {'samples': 5} and scorer == 'c' * 64
 
-    files['score/length120/exact_all.json'] = json.dumps(
+    # A valid group whose file never arrived (partial transfer) is skipped, not fatal.
+    files['score/gpu-0/length120/exact_all.json'] = json.dumps(
         {'target': 'OTHER', 'per_nanobody_components': {'0': {}}, 'structures': {}}).encode()
     with pytest.raises(ValueError):
+        controller.merge_scores(files, rules.TARGET)
+    del files['score/scorer_settings.json']
+    with pytest.raises(ValueError, match='no scored group'):
         controller.merge_scores(files, rules.TARGET)
 
 

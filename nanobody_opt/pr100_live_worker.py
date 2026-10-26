@@ -279,6 +279,147 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=measure_batch,
     return result
 
 
+SCORE_SHARD_LIMIT = 128  # pr100_gpu_probe accepts 1..128 distinct sequences per run
+SCORE_ENV_KEYS = ('PATH', 'HOME', 'USER', 'LANG', 'LD_LIBRARY_PATH', 'PYTHONPATH',
+                  'PYTHONDONTWRITEBYTECODE', 'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS')
+_SCORE_FILE = __import__('re').compile(r'gpu-[0-9]+/length[0-9]+/exact_all\.json')
+
+
+def score_jobs(job, directory, sequences):
+    """One cooperative GPU reservation job per GPU, each running pr100_gpu_probe (fresh, 1 pass)."""
+    import sys
+    from nanobody_opt.pr100_live_gpu import ENV_KEYS
+    out = Path(job['output_directory'])
+    out.mkdir(parents=True, exist_ok=True)
+    release = Path(job['release'])
+    wall = float(job['wall_seconds'])
+    # run_reserved accepts a TTL of 10..1800 s; the probe must finish inside the TTL.
+    ttl = max(10.0, min(1800.0, wall - 20.0))
+    probe_timeout = int(max(60, min(3600, ttl - 30)))
+    shards = selection.shard([{'sequence': s} for s in sequences], list(job['gpus']))
+    environment = {k: os.environ[k] for k in SCORE_ENV_KEYS if k in os.environ and k in ENV_KEYS}
+    jobs = []
+    for gpu in job['gpus']:
+        rows = shards[gpu][:SCORE_SHARD_LIMIT]
+        if not rows:
+            continue
+        shard_input = out / f'shard-gpu-{gpu}.json'
+        pr100_filter.atomic(shard_input, {'sequences': [r['sequence'] for r in rows]})
+        command = [sys.executable, '-B', str(release / 'scripts/pr100_gpu_probe.py'),
+                   '--release', str(release), '--expected-sha', job['source_sha'],
+                   '--input', str(shard_input), '--output', str(out / f'gpu-{gpu}'),
+                   '--settings', job['scorer_settings'], '--gpu', str(gpu), '--passes', '1',
+                   '--mode', 'fresh', '--timeout', str(probe_timeout)]
+        jobs.append({'gpu': gpu, 'ttl_seconds': ttl, 'command': command, 'env': environment,
+                     'cwd': str(release), 'lock_directory': job['gpu_lock_directory'],
+                     'scorer': job['scorer'], 'receipt': str(out / f'gpu-receipt-{gpu}.json'),
+                     'candidate_count': len(rows)})
+    return jobs
+
+
+def collect_scores(out, jobs):
+    """Merge whatever per-GPU probe groups finished into score/report.json (partial allowed)."""
+    groups, shards, scorer_hashes, settings = [], [], set(), None
+    for gpu_job in jobs:
+        gpu = gpu_job['gpu']
+        entry = {'gpu': gpu, 'candidate_count': gpu_job['candidate_count']}
+        try:
+            entry['lease'] = json.loads(Path(gpu_job['receipt']).read_text()).get('status')
+        except (OSError, ValueError):
+            entry['lease'] = None
+        try:
+            report = json.loads((out / f'gpu-{gpu}' / 'report.json').read_text())
+        except (OSError, ValueError):
+            report = None
+        entry['probe_status'] = report.get('status') if report else None
+        if report:
+            for group in report.get('groups', []):
+                if group.get('valid') is not True:
+                    continue
+                name = f"gpu-{gpu}/length{int(group['length'])}/exact_all.json"
+                if not (out / name).is_file():
+                    continue
+                groups.append({'gpu': gpu, 'length': int(group['length']), 'valid': True,
+                               'candidates': group.get('candidates'), 'file': name})
+                scorer_hashes.add(report['registered_scorer_sha256'])
+                raw = (out / f'gpu-{gpu}' / 'scorer_settings.json').read_bytes()
+                if settings is not None and raw != settings:
+                    raise ValueError('scorer settings differ between gpu shards')
+                settings = raw
+        shards.append(entry)
+    if len(scorer_hashes) > 1:
+        raise ValueError('registered scorer differs between gpu shards')
+    if settings is not None:
+        (out / 'scorer_settings.json').write_bytes(settings)
+    scored = sum(g['candidates'] or 0 for g in groups)
+    complete = bool(jobs) and all(s['probe_status'] == 'complete' for s in shards)
+    report = {'schema': 'pr100-live-score-v1', 'groups': groups, 'shards': shards,
+              'registered_scorer_sha256': next(iter(scorer_hashes), None),
+              'gpus_attempted': len(jobs),
+              'gpus_finished': sum(1 for s in shards if s['probe_status'] == 'complete'),
+              'scored_candidates': scored, 'status': 'complete' if complete else 'partial'}
+    pr100_filter.atomic(out / 'report.json', report)
+    return report
+
+
+def score_phase(job, directory, *, launch=None, clock=time.monotonic, sleep=time.sleep):
+    """Shard every candidate across ``gpus``; each GPU runs in its own cooperative lease.
+
+    The per-GPU runners are separate sessions (the lease requires a session leader), so
+    the supervisor's process-group kill cannot reach them: SIGTERM is forwarded here and
+    every runner also carries its own TTL inside this phase's wall budget.
+    """
+    import signal
+    import subprocess
+    import sys
+    sequences = json.loads((directory / 'input.json').read_text())['sequences']
+    if len(set(sequences)) != len(sequences):
+        raise ValueError('duplicate sequence in score input')
+    if not sequences:
+        raise ValueError('no candidates to score')
+    jobs = score_jobs(job, directory, sequences)
+    out = Path(job['output_directory'])
+    launch = launch or (lambda path, log: subprocess.Popen(
+        [sys.executable, '-B', '-m', 'nanobody_opt.pr100_live_gpu', '--job', str(path)],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True))
+    stopping = []
+    previous = signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
+    runners = []
+    try:
+        for gpu_job in jobs:
+            path = out / f"gpu-job-{gpu_job['gpu']}.json"
+            pr100_filter.atomic(path, {k: v for k, v in gpu_job.items() if k != 'candidate_count'})
+            log = open(out / f"gpu-runner-{gpu_job['gpu']}.log", 'ab')
+            runners.append((launch(path, log), log))
+        deadline = clock() + float(job['wall_seconds'])
+        while any(p.poll() is None for p, _ in runners):
+            if stopping or clock() >= deadline:
+                for p, _ in runners:
+                    if p.poll() is None:
+                        p.send_signal(signal.SIGTERM)
+                end = clock() + 6
+                while clock() < end and any(p.poll() is None for p, _ in runners):
+                    sleep(0.1)
+                break
+            sleep(0.5)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        for _, log in runners:
+            log.close()
+    report = collect_scores(out, jobs)
+    scored = {}
+    for group in report['groups']:
+        value = json.loads((out / group['file']).read_text())
+        scored.update(value.get('per_nanobody_components', {}).get('0', {}))
+    result = {'challenge': job['challenge'], 'epoch': job['challenge']['epoch'],
+              'status': report['status'], 'input_count': len(sequences),
+              'scored_candidates': len(scored), 'gpus_attempted': report['gpus_attempted'],
+              'gpus_finished': report['gpus_finished'],
+              'candidates': [s for s in sequences if s in scored]}
+    pr100_filter.atomic(directory / 'result.json', result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--job', type=Path, required=True)
@@ -292,11 +433,17 @@ def main():
     os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:job['cpu_slots']])
     started = time.monotonic()
     try:
-        result = {'sequence': sequence_phase, 'native': native_phase}[job['phase']](job, directory)
-        receipt = {'status': result['status'], 'candidate_count': len(result['candidates']),
+        result = {'sequence': sequence_phase, 'native': native_phase,
+                  'score': score_phase}[job['phase']](job, directory)
+        # A partial score (some GPUs finished) is still a usable result for the controller.
+        status = 'complete' if result['status'] in ('complete', 'partial') else result['status']
+        receipt = {'status': status, 'result_status': result['status'],
+                   'candidate_count': len(result['candidates']),
                    'not_run': result.get('not_run', 0),
                    'tier_counts': result.get('tier_counts', {})}
     except Exception as error:
+        import traceback
+        traceback.print_exc()  # lands in the supervisor's sanitized stderr tail
         receipt = {'status': 'failed', 'error_type': type(error).__name__}
     receipt.update(epoch=expected['epoch'], phase=job['phase'], wall_seconds=time.monotonic() - started)
     pr100_filter.atomic(directory / 'worker-receipt.json', receipt)

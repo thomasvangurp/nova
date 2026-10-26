@@ -24,6 +24,7 @@ TAIL_BYTES = 4096
 GRACE_SECONDS = 10.0
 POLL_SECONDS = 1.0
 MAXIMUM_CLOCK_AGE = 180.0
+MAXIMUM_CLOCK_SKEW = 30.0
 REQUIRED = ('command', 'cwd', 'environment', 'wall_seconds', 'deadline_unix', 'receipt_path',
             'cpu_slots', 'clock_path', 'epoch', 'epoch_length', 'reserve_blocks')
 # Strip anything that looks like a credential before it can leave the host.
@@ -63,8 +64,11 @@ def blocks_remaining(clock_path, epoch, now=None):
         age = now - float(state['updated_at_unix'])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if length <= 0 or not 0 <= age <= MAXIMUM_CLOCK_AGE:
+    # The clock is written with the Pi's wall time; tolerate small host clock skew in
+    # either direction instead of killing the phase the moment the remote runs behind.
+    if length <= 0 or not -MAXIMUM_CLOCK_SKEW <= age <= MAXIMUM_CLOCK_AGE:
         return None
+    age = max(0.0, age)
     if block // length != epoch:
         return 0.0
     return (epoch + 1) * length - block - age / BLOCK_SECONDS
