@@ -158,3 +158,79 @@ class RunTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ShardTests(unittest.TestCase):
+    def base(self, directory, gpus):
+        return {'gpus': gpus, 'ttl_seconds': 600, 'scorer': '/pinned/scorer.py',
+                'lock_directory': str(Path(directory) / 'locks'),
+                'shard_directory': str(Path(directory) / 'shards'),
+                'receipt_directory': str(Path(directory) / 'receipts'),
+                'summary_receipt': str(Path(directory) / 'summary.json'),
+                'cwd': directory, 'env': {'PATH': '/usr/bin'},
+                'command_template': ['/bin/public-scorer', '--gpu', '{gpu}', '--shard', '{shard}']}
+
+    def candidates(self, count):
+        return [{'sequence': 'S%d' % i, 'psh_mean': 70 + i} for i in range(count)]
+
+    def test_candidates_shard_across_every_gpu(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = gpu.shard_jobs(self.base(d, [0, 1, 2]), self.candidates(7))
+        self.assertEqual([j['gpu'] for j in jobs], [0, 1, 2])
+        self.assertEqual(sum(j['candidate_count'] for j in jobs), 7)
+
+    def test_no_eight_candidate_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = gpu.shard_jobs(self.base(d, [0, 1]), self.candidates(40))
+        self.assertEqual(sum(j['candidate_count'] for j in jobs), 40)
+
+    def test_each_shard_keeps_single_gpu_reservation_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = gpu.shard_jobs(self.base(d, [0, 1]), self.candidates(4))
+            for job in jobs:
+                self.assertNotIn('gpus', job)
+                self.assertNotIn('command_template', job)
+                self.assertEqual(job['command'][2], str(job['gpu']))
+                self.assertTrue(job['receipt'].endswith('gpu-%d.json' % job['gpu']))
+                self.assertEqual(job['lock_directory'], str(Path(d) / 'locks'))
+                payload = json.loads(Path(job['shard_input']).read_text())
+                self.assertEqual(len(payload['sequences']), job['candidate_count'])
+
+    def test_empty_gpu_gets_no_job_and_no_candidates_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = gpu.shard_jobs(self.base(d, [0, 1, 2]), self.candidates(1))
+            self.assertEqual([j['gpu'] for j in jobs], [0])
+            with self.assertRaises(ValueError):
+                gpu.shard_jobs(self.base(d, [0]), [])
+
+    def test_invalid_gpu_list_or_template_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            for change in [{'gpus': []}, {'gpus': [0, 0]}, {'gpus': [-1]},
+                           {'command_template': []}, {'command_template': 'nope'}]:
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    gpu.shard_jobs({**self.base(d, [0]), **change}, self.candidates(2))
+
+    def test_sharded_run_reports_per_gpu_receipts(self):
+        seen = []
+        def runner(job):
+            seen.append(job['gpu'])
+            return {'status': 'process_finished', 'child_exit_code': 0}
+        with tempfile.TemporaryDirectory() as d:
+            job = self.base(d, [0, 1])
+            summary = gpu.run_sharded(job, self.candidates(5), runner=runner)
+            self.assertEqual(json.loads(Path(job['summary_receipt']).read_text()), summary)
+        self.assertEqual(seen, [0, 1])
+        self.assertEqual(summary['status'], 'complete')
+        self.assertEqual(summary['scored_candidates'], 5)
+
+    def test_one_unavailable_gpu_is_partial_not_silent_success(self):
+        def runner(job):
+            if job['gpu'] == 1:
+                return {'status': 'unavailable', 'reason': 'gpu_not_idle'}
+            return {'status': 'process_finished', 'child_exit_code': 0}
+        with tempfile.TemporaryDirectory() as d:
+            summary = gpu.run_sharded(self.base(d, [0, 1]), self.candidates(4), runner=runner)
+        self.assertEqual(summary['status'], 'partial')
+        self.assertEqual(summary['gpus_finished'], 1)
+        self.assertEqual(summary['scored_candidates'], 2)
+        self.assertEqual([s['reason'] for s in summary['shards']], [None, 'gpu_not_idle'])

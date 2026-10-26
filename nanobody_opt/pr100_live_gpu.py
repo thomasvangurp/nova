@@ -272,6 +272,65 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
     return result
 
 
+def shard_jobs(job, candidates):
+    """Build one reservation job per GPU. No 8-candidate cap is applied here.
+
+    Each shard keeps the single-GPU reservation and lock semantics unchanged:
+    the per-GPU job is the same shape ``run_reserved`` already validates, with
+    its own receipt path and its own shard input file.
+    """
+    from nanobody_opt.pr100_live_selection import shard
+    gpus = job['gpus']
+    template = job['command_template']
+    if not isinstance(template, list) or not template or any(
+            not isinstance(v, str) or not v or '\0' in v for v in template):
+        raise ValueError('invalid public command template')
+    directory = Path(job['shard_directory'])
+    receipts = Path(job.get('receipt_directory', directory))
+    shards = shard(list(candidates), gpus)
+    jobs = []
+    for gpu in gpus:
+        rows = shards[gpu]
+        if not rows:
+            continue
+        shard_path = directory / ('shard-gpu-' + str(gpu) + '.json')
+        atomic(shard_path, {'gpu': gpu, 'sequences': [r['sequence'] for r in rows],
+                            'candidate_count': len(rows)})
+        command = [part.replace('{gpu}', str(gpu)).replace('{shard}', str(shard_path))
+                   for part in template]
+        jobs.append({**{k: v for k, v in job.items()
+                        if k not in ('gpus', 'command_template', 'shard_directory',
+                                     'receipt_directory')},
+                     'gpu': gpu, 'command': command, 'shard_input': str(shard_path),
+                     'candidate_count': len(rows),
+                     'receipt': str(receipts / ('gpu-' + str(gpu) + '.json'))})
+    if not jobs:
+        raise ValueError('no candidates to shard')
+    return jobs
+
+
+def run_sharded(job, candidates, *, runner=run_reserved, **kwargs):
+    """Reserve each GPU in turn and run its shard; receipts are per GPU."""
+    results = []
+    for shard_job in shard_jobs(job, candidates):
+        outcome = runner(shard_job, **kwargs)
+        results.append({'gpu': shard_job['gpu'],
+                        'candidate_count': shard_job['candidate_count'],
+                        'shard_input': shard_job['shard_input'],
+                        'status': outcome.get('status'),
+                        'child_exit_code': outcome.get('child_exit_code'),
+                        'reason': outcome.get('reason')})
+    finished = [r for r in results
+                if r['status'] == 'process_finished' and r['child_exit_code'] == 0]
+    summary = {'schema': 'pr100-sharded-gpu-scoring-v1', 'shards': results,
+               'gpus_finished': len(finished), 'gpus_attempted': len(results),
+               'status': 'complete' if len(finished) == len(results) else 'partial',
+               'scored_candidates': sum(r['candidate_count'] for r in finished)}
+    if job.get('summary_receipt'):
+        atomic(job['summary_receipt'], summary)
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--job', type=Path, required=True)
