@@ -13,7 +13,6 @@ import json
 import math
 import os
 from pathlib import Path
-import queue
 import re
 import resource
 import shutil
@@ -24,8 +23,12 @@ import time
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+if __name__ == '__main__' and not sys.dont_write_bytecode:
+    print(json.dumps({'status': 'failed_preflight', 'error_class': 'BytecodeWritesEnabled'}))
+    raise SystemExit(1)
 sys.path.insert(0, str(ROOT))
 from nanobody_opt.pr100_native_benchmark import SCHEMA, MODES, FIELDS, A3D_FIELDS, digest, compare_results
+from nanobody_opt.pr100_resources import available_memory
 FROZEN_POPULATION = '1fe6a4bab9b41a055268036e89f088c998f4fe1046d56e68a2b75c20e3dd638d'
 THREADS = {key: '1' for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
                                'MKL_NUM_THREADS', 'OPENMM_CPU_THREADS')}
@@ -53,10 +56,12 @@ def sha_file(path, *, deadline=None):
     return hasher.hexdigest()
 
 
-def verify_runtime(runtime, *, deadline=None):
+def verify_runtime(runtime, *, deadline=None, preflight_only=False):
+    started = time.monotonic()
     if runtime.get('schema') != 'pr100-native-runtime-manifest-v1':
         raise ValueError('native manifest schema')
-    if runtime.get('closure_reviewed') is not True:
+    if not preflight_only and (runtime.get('closure_reviewed') is not True or
+                              not runtime.get('closure_reviewer') or not runtime.get('n0_receipt_sha256')):
         raise ValueError('dependency closure not independently reviewed')
     from scripts.release_manifest import RESEARCH_FILES, verify
     stage_manifest = ROOT / 'build_stamp.json'
@@ -65,7 +70,7 @@ def verify_runtime(runtime, *, deadline=None):
     stage = json.loads(stage_manifest.read_text())
     if stage.get('research_files') != sorted(RESEARCH_FILES):
         raise ValueError('research source not included in reviewed stage')
-    verify(ROOT, stage, expected_sha=runtime['source_stage_git_sha'])
+    verify(ROOT, stage, expected_sha=runtime['source_stage_git_sha'], deadline=deadline)
     if runtime.get('cuda_visible_devices') != '' or runtime.get('refinement_threads') != 1:
         raise ValueError('only the frozen CPU/thread1 comparison is permitted')
     if runtime.get('cpu_thread_settings') != THREADS:
@@ -89,6 +94,22 @@ def verify_runtime(runtime, *, deadline=None):
         resolved = shutil.which(name, path=runtime['path'])
         if not resolved or Path(resolved).resolve() != Path(runtime['entrypoints'][key]).resolve():
             raise ValueError('native executable resolution drift')
+    return {'seconds': time.monotonic()-started,
+            'hashed_bytes': sum(Path(p).stat().st_size for p in runtime['files']) +
+                            sum((ROOT/p).stat().st_size for p in stage['files']),
+            'runtime_file_count': len(runtime['files']), 'stage_file_count': len(stage['files'])}
+
+
+def mapping_classification(path, permissions, policies):
+    """Only exact, preregistered non-executable data mappings may omit a hash."""
+    if 'x' in permissions:
+        return None
+    for policy in policies:
+        if set(policy) != {'path', 'permissions', 'kind'} or policy['kind'] != 'non_executable_data':
+            raise ValueError('unknown special mapping policy')
+        if path == policy['path'] and permissions == policy['permissions']:
+            return 'registered_non_executable_data'
+    return None
 
 
 def validate_inputs(population, rows):
@@ -155,7 +176,7 @@ def safe_profile(profile):
     return result
 
 
-def verify_loaded_identity(runtime, destination, checked):
+def verify_loaded_identity(runtime, destination, checked, *, deadline=None):
     """Compare actual import/bytecode/library origins to pre-frozen file hashes."""
     expected = dict(runtime['files'])
     stage = json.loads((ROOT / 'build_stamp.json').read_text())
@@ -176,10 +197,14 @@ def verify_loaded_identity(runtime, destination, checked):
                 continue
             origins[name + ':' + field] = key
             candidates.add(key)
-    mapped = set()
+    mapped, special = set(), []
     for line in Path('/proc/self/maps').read_text().splitlines():
         parts = line.split(maxsplit=5)
         if len(parts) != 6 or not parts[5].startswith('/'):
+            continue
+        classification = mapping_classification(parts[5], parts[1], runtime.get('special_mapping_policies', []))
+        if classification:
+            special.append({'kind': classification, 'mapping_locator_sha256': hashlib.sha256(parts[5].encode()).hexdigest()})
             continue
         key = str(Path(parts[5]).resolve())
         if key not in expected:
@@ -187,10 +212,12 @@ def verify_loaded_identity(runtime, destination, checked):
         else:
             mapped.add(key); candidates.add(key)
     for key in candidates - checked:
-        if sha_file(key) != expected[key]:
+        if sha_file(key, deadline=deadline) != expected[key]:
             raise ValueError('loaded runtime file drift')
         checked.add(key)
-    receipt = {'module_origins': origins, 'mapped_files': sorted(mapped),
+    receipt = {'identity_audit_scope': 'worker_address_space_only',
+               'cli_child_loaded_identity_observed': False,
+               'module_origins': origins, 'mapped_files': sorted(mapped), 'registered_data_mappings': special,
                'unregistered_origins': unresolved, 'checked_file_count': len(checked)}
     atomic_json(destination, receipt)
     if unresolved:
@@ -199,6 +226,9 @@ def verify_loaded_identity(runtime, destination, checked):
 
 
 def worker(index, tasks, runtime, workdir, events):
+    assert_bytecode_disabled()
+    if os.environ.get('PATH') != runtime['path'] or os.environ.get('LD_LIBRARY_PATH', '') != runtime.get('library_path', ''):
+        raise ValueError('CLI inherited executable/library path differs from registration')
     if os.getpid() != os.getsid(0):
         os.setsid()
     # Native libraries may print arbitrary text. Both output channels are
@@ -356,18 +386,31 @@ def dedicated_controller():
         raise ValueError('subreaper unavailable')
 
 
-def available_memory():
-    values = {}
-    for line in Path('/proc/meminfo').read_text().splitlines():
-        if line.startswith('MemAvailable:'):
-            values['host_available_bytes'] = int(line.split()[1]) * 1024
-    root = Path('/sys/fs/cgroup')
-    if (root / 'memory.max').exists() and (root / 'memory.current').exists():
-        maximum = (root / 'memory.max').read_text().strip()
-        if maximum.isdecimal():
-            values['cgroup_headroom_bytes'] = max(0, int(maximum) - int((root / 'memory.current').read_text()))
-    values['available_bytes'] = min(values.values())
-    return values
+def assert_bytecode_disabled():
+    if not sys.dont_write_bytecode:
+        raise ValueError('controller and children require interpreter -B')
+
+
+def require_headroom(memory, minimum):
+    if memory['cgroup_resolution'] != 'resolved_visible_ancestors':
+        raise ValueError('applicable cgroup memory bounds unavailable')
+    if memory['available_bytes'] < minimum:
+        raise ValueError('insufficient measured memory headroom')
+
+
+def verification_budget(runtime):
+    measurements = runtime['n0_measurements']
+    verification = measurements['verification']['seconds']
+    audit = measurements['first_loaded_audit_seconds']
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0
+           for v in (verification, audit)):
+        raise ValueError('invalid measured verification costs')
+    projected = 1080 + 10 + 2*verification + 4*audit
+    if projected > 1200:
+        raise ValueError('registered profiling plus measured verification does not fit')
+    return {'projected_profile_seconds': 1080, 'cleanup_reserve_seconds': 10,
+            'verification_seconds_each': verification, 'first_audit_seconds_each': audit,
+            'first_audit_workers_charged_serially': 4, 'projected_total_seconds': projected}
 
 
 def stop_descendants(processes=(), *, timeout=5):
@@ -529,6 +572,7 @@ def run(population, sequences, runtime, output):
               'rss_sampling_interval_seconds': .05, 'rss_sum_double_counts_shared_pages': True,
               'population_sha256': population['population_sha256'], 'runtime_sha256': digest(runtime)}
     try:
+        assert_bytecode_disabled()
         if sys.platform != 'linux' or not hasattr(os, 'sched_setaffinity'):
             raise ValueError('Linux subreaper and CPU affinity required')
         dedicated_controller(); owned = True
@@ -549,9 +593,16 @@ def run(population, sequences, runtime, output):
             raise ValueError('eight available CPU slots required')
         os.sched_setaffinity(0, cpus[:8])
         report['start_memory'] = available_memory()
-        if report['start_memory']['available_bytes'] < limits['minimum_available_memory_bytes']:
-            raise ValueError('insufficient measured memory headroom')
-        verify_runtime(runtime, deadline=begin + 1190); verified = True
+        require_headroom(report['start_memory'], limits['minimum_available_memory_bytes'])
+        report['verification_budget'] = verification_budget(runtime)
+        post_reserve = report['verification_budget']['verification_seconds_each'] + 10
+        profile_deadline = begin + 1200 - post_reserve
+        report['pre_verification'] = verify_runtime(runtime, deadline=begin + min(120, post_reserve*2))
+        verified = True
+        post_reserve = max(post_reserve, report['pre_verification']['seconds'] + 10)
+        profile_deadline = begin + 1200 - post_reserve
+        if time.monotonic() + 1080 + 4*report['verification_budget']['first_audit_seconds_each'] > profile_deadline:
+            raise ValueError('measured preflight leaves insufficient registered profile budget')
         atomic_json(output / 'population.json', population)
         atomic_json(output / 'runtime.json', runtime)
         for index in range(4):
@@ -568,7 +619,7 @@ def run(population, sequences, runtime, output):
                              XDG_CACHE_HOME=str(private/'cache'), TORCH_HOME=str(private/'torch-cache'))
             if runtime.get('library_path'):
                 child_env['LD_LIBRARY_PATH'] = runtime['library_path']
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker', str(private / 'spec.json')],
+            process = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), '--worker', str(private / 'spec.json')],
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        start_new_session=True, env=child_env)
             processes.append(process); directories.append((private, tasks))
@@ -615,7 +666,9 @@ def run(population, sequences, runtime, output):
                 conditions.append('sampled_rss_abort')
             if memory['available_bytes'] < limits['available_memory_abort_bytes']:
                 conditions.append('available_memory_abort')
-            if time.monotonic() - begin >= 1190:
+            if memory['cgroup_resolution'] != 'resolved_visible_ancestors':
+                conditions.append('cgroup_resolution_lost')
+            if time.monotonic() >= profile_deadline:
                 conditions.append('wall_timeout')
             atomic_json(output / 'progress.json', {'received': len(records), 'done_workers': done,
                         'elapsed_seconds': time.monotonic()-begin, 'conditions': list(dict.fromkeys(conditions))})

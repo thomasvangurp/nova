@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,9 +29,10 @@ RESEARCH_FILES = frozenset({
     'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
     'docs/PR100_NATIVE_REVIEW_RESPONSE.md',
     'docs/experiments/pr100-native-reuse-v1.population.json',
-    'scripts/pr100_native_probe.py', 'nanobody_opt/pr100_native_benchmark.py',
+    'scripts/pr100_native_probe.py', 'scripts/pr100_runtime_preflight.py', 'nanobody_opt/pr100_native_benchmark.py',
     'nanobody_opt/tnp_daemon.py', 'nanobody_opt/pr100_filter.py', 'nanobody_opt/rules.py',
     'utils/aggrescan3d.py', 'config/nanobody_pr100.json', 'tests/test_pr100_native_benchmark.py',
+    'nanobody_opt/pr100_resources.py', 'tests/test_pr100_resources.py',
 })
 RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons',
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
@@ -47,8 +49,14 @@ CONTROL_FILES = frozenset({
 })
 
 
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def digest(path: Path, *, deadline=None) -> str:
+    hasher = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('release verification deadline')
+            hasher.update(block)
+    return hasher.hexdigest()
 
 
 def git(root: Path, *args: str) -> str:
@@ -131,7 +139,7 @@ PINNED_FILTER_REVISION = 'fe2d5868126406a0de8953d26ecd8bdccbdbd029'
 
 
 def verify(root: Path, manifest: dict, *, expected_sha: str,
-           runtime_only: bool = False, require_tests: bool = True) -> None:
+           runtime_only: bool = False, require_tests: bool = True, deadline=None) -> None:
     if not re.fullmatch('[0-9a-f]{40}', expected_sha) or manifest.get('git_sha') != expected_sha:
         raise ValueError('release does not match the tested revision')
     files = manifest.get('files', {})
@@ -157,8 +165,10 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
         raise ValueError('release runtime inventory is incomplete')
     names = expected_runtime if runtime_only else sorted(files)
     for name in names:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError('release verification deadline')
         path = safe_path(root, name)
-        if not path.is_file() or digest(path) != files[name]:
+        if not path.is_file() or digest(path, deadline=deadline) != files[name]:
             raise ValueError(f'release byte mismatch: {name}')
     if require_tests:
         result = manifest.get('validation', {})

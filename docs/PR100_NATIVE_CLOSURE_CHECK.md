@@ -1,6 +1,6 @@
 # N0: finite CPU import and runtime identity check
 
-Proposed protocol, not execution permission. Review before staging or running
+Executable protocol revision 2, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
 
@@ -11,6 +11,16 @@ same 96 GiB starting/64 GiB abort headroom as N1. First run the separately bound
 containment rehearsal as a dedicated session using interpreter `-S` (no site
 startup hooks). Its children also use `-S`. Stop on a cap or unresolved required identity; no retry
 or package installation. Record actual CPU, wall time and zero descendants.
+
+The executable is `scripts/pr100_runtime_preflight.py`. Its `assemble` action
+merges only explicitly provided, previously captured public inventory files and
+the exact CI `build_stamp.json` into a candidate manifest. It never marks its own
+closure reviewed. The `check` action runs as a dedicated Linux session through
+Pi, with interpreter `-B` and the native registered interpreter. Both controller
+and import child refuse bytecode-enabled startup. The import child has guards
+against model/physics construction, native metric entry points, CUDA discovery,
+subprocess launch and network connection. A guard hit exits that child and makes
+the receipt NO_GO; native logs and exception text are never returned.
 
 Stage the reviewed candidate commit into a new directory through Pi and verify
 the committed source manifest before and after. It must include research code,
@@ -47,9 +57,16 @@ Retain this finite evidence:
    Record existing bytecode digests alongside source when potentially used.
    An unregistered origin blocks the check; never inspect arbitrary application
    state to explain it or silently extend trusted roots.
-3. Absolute file-backed library paths from `/proc/self/maps`; discard addresses,
-   offsets and permissions. Hash only registered roots, compare with the frozen
+3. Absolute file-backed library paths from `/proc/self/maps`; discard addresses
+   and offsets. Permissions are used only to reject executable special mappings.
+   Hash only registered roots, compare with the frozen
    inventory, and retain every newly discovered required dependency.
+   The initial `special_mapping_policies` list is empty. Only an exact reviewed
+   path plus exact permissions tagged `non_executable_data` can later exempt a
+   data mapping from hashing; executable mappings cannot receive an exemption.
+   Unrecognized/deleted code is never permitted. Anonymous and kernel bracket
+   mappings are outside this file-backed audit, explicitly not a proof of all
+   machine code. A required unknown mapping stops N0 for a new frozen inventory.
 4. `Platform.getPlatformByName('CPU').getName()` and property names. Require CPU
    and Threads support without constructing a Context. Pin refinement source
    with its positive-`n_threads` CPU/Threads branch and the profiler's argument
@@ -63,6 +80,23 @@ Retain this finite evidence:
 6. Post-import required-file/source hashes and resource/cleanup receipt. Drift,
    missing models/databases/binaries, unbound origin, visible GPU, prohibited
    constructor call, cap breach or remaining descendant yields NO_GO.
+
+Record bytes and elapsed time for both complete runtime/source verifications,
+and elapsed time for the first loaded-origin audit. N1 retains the prior
+1080-second profiling projection and charges both verifications, four first
+audits conservatively in serial, and ten seconds cleanup. N1 refuses to start
+unless `1080 + 2*max(N0 verification times) + 4*N0 first audit + 10 <= 1200`.
+This is a feasibility projection, not a guaranteed execution time. N1 reserves
+the measured post-verification time before its profile deadline; all hash loops
+and release verification receive deadlines. A cap still yields incomplete NO_GO.
+
+N0 emits a receipt and an unreviewed `runtime-candidate.json` bound to its receipt
+SHA, harness SHA, source release and complete file inventories. N1 requires a
+separately recorded named closure reviewer and receipt digest. Identity audits
+are labelled `worker_address_space_only`; N0 does not observe TNP or builder CLI
+child maps. CLI closure evidence consists of the frozen files, this import
+check, and asserted identical PATH/LD_LIBRARY_PATH inheritance. Refinement and
+all scientific parameters remain unchanged.
 
 Record delayed imports/data/libraries as an explicit completeness limitation.
 If these cannot be bounded by prehashed source/data/library manifests, freeze

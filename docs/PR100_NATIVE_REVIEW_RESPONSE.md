@@ -30,3 +30,29 @@ support family-held-out generalization or choose a production policy.
 Loaded runtime inventory, independent review and Linux rehearsal remain
 prerequisites. CI is not native execution permission. No threshold, numerical
 tolerance, complete profile or downstream target-quality gate is waived.
+
+# Second review: B15–B19 and executable N0
+
+This follow-up is a new candidate, not a claim that f8870cd's review covers new
+bytes. It adds a finite import-only N0 runner and local assembly of its manifest.
+
+- B15: empty special mapping allowlist by default; only an exact reviewed path
+  and permissions can classify non-executable data. Unknown executable/deleted
+  code remains a failure. File-backed scope and anonymous/kernel exclusions are
+  explicit.
+- B16: controller and children launch with `-B`; controller scripts refuse before
+  importing project code if bytecode writes are enabled. Existing public
+  bytecode is frozen separately (5,484 files in the readonly snapshot).
+- B17: N0 measures verification bytes/time and first loaded audit time. N1 checks
+  its frozen 1080-second projection plus both verifications, four initial audits
+  and ten seconds cleanup against 1200 seconds. Deadline-aware release hashing
+  and post-verification reserve prevent treating unchecked completion as parity.
+- B18: applicable cgroup path and ancestor limits are resolved, with unavailable
+  bounds explicit. Host available memory alone cannot satisfy the start gate.
+- B19: receipts explicitly state worker-only address-space identity. CLI children
+  inherit the frozen executable/library paths; their loaded maps are not claimed
+  to have been observed.
+
+Control-flow tests do not certify native equivalence. Actual N0 and N1 remain
+unexecuted in this packet. Root separately measured the f887 dedicated-session
+containment rehearsal successfully; that is process containment evidence only.

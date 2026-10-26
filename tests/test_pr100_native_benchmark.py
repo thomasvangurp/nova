@@ -48,6 +48,7 @@ def test_research_artifacts_and_regressions_are_mandatory_shipping_inputs():
     for name in ('docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
                  'docs/experiments/pr100-native-reuse-v1.population.json'):
         assert name in SOURCE_PATHS and name in RESEARCH_FILES
+    assert 'scripts/pr100_runtime_preflight.py' in RESEARCH_FILES
 
 
 def test_population_freeze_is_order_invariant_and_rejects_overlapping_sources():
@@ -138,7 +139,7 @@ def test_linux_containment_rehearsal_or_explicit_platform_refusal():
     else:
         # Give the rehearsal its own ancestry: never stop pytest's other children.
         script = Path(__file__).resolve().parents[1] / 'scripts/pr100_native_probe.py'
-        process = subprocess.run([sys.executable, '-S', str(script), '--self-test-containment'], start_new_session=True,
+        process = subprocess.run([sys.executable, '-B', '-S', str(script), '--self-test-containment'], start_new_session=True,
                                  capture_output=True, text=True, timeout=12)
         assert process.returncode == 0
         result = json.loads(process.stdout)
@@ -231,3 +232,56 @@ def test_structure_callback_runs_before_cleanup_and_legacy_profile_unchanged(tmp
     legacy = profiler.profile_one('A'*120, 1)
     augmented.pop('aggrescan3d')
     assert augmented == legacy
+
+
+def test_runtime_deadlines_and_bytecode_disable_are_enforced(tmp_path, monkeypatch):
+    from scripts import pr100_native_probe as probe
+    from scripts.release_manifest import digest as file_digest
+    source = tmp_path/'public.py'; source.write_text('pass\n')
+    with pytest.raises(TimeoutError):
+        file_digest(source, deadline=0)
+    monkeypatch.setattr(probe.sys, 'dont_write_bytecode', False)
+    with pytest.raises(ValueError, match='-B'):
+        probe.assert_bytecode_disabled()
+    monkeypatch.setattr(probe.sys, 'dont_write_bytecode', True)
+    probe.assert_bytecode_disabled()
+    runtime = {'n0_measurements': {'verification': {'seconds': 20}, 'first_loaded_audit_seconds': 10}}
+    assert probe.verification_budget(runtime)['projected_total_seconds'] == 1170
+    runtime['n0_measurements']['verification']['seconds'] = 40
+    with pytest.raises(ValueError, match='does not fit'):
+        probe.verification_budget(runtime)
+
+
+def test_mapping_exceptions_are_exact_nonexecutable_data_only():
+    from scripts.pr100_native_probe import mapping_classification
+    policy = [{'path': '/dev/shm/registered-data (deleted)', 'permissions': 'rw-s', 'kind': 'non_executable_data'}]
+    assert mapping_classification(policy[0]['path'], 'rw-s', policy) == 'registered_non_executable_data'
+    assert mapping_classification(policy[0]['path'], 'r-xs', policy) is None
+    assert mapping_classification('/memfd:unknown (deleted)', 'rw-s', policy) is None
+    assert mapping_classification('/tmp/unknown-code.so (deleted)', 'r-xs', []) is None
+
+
+def test_n0_import_guard_and_plugin_categories_are_narrow():
+    from scripts.pr100_runtime_preflight import forbidden_call, plugin_categories
+    assert forbidden_call('ImmuneBuilder.NanoBodyBuilder2', '__init__', 'NanoBodyBuilder2')
+    assert forbidden_call('openmm.openmm', '__init__', 'Context')
+    assert forbidden_call('torch.cuda', 'is_available')
+    assert forbidden_call('theraprofnano.CDR_Profiler.CDR_Assigner', 'main')
+    assert forbidden_call('openmm.openmm', 'getPlatformByName', 'Platform') is None
+    assert plugin_categories(['libOpenMMHIP.so: libamdhip64.so.6 unavailable'])[0]['scope'] == 'unused_CPU_only'
+    with pytest.raises(ValueError, match='unclassified'):
+        plugin_categories(['libOpenMMCPU.so failed'])
+
+
+def test_n0_failed_preflight_writes_durable_no_go(tmp_path, monkeypatch):
+    from scripts import pr100_runtime_preflight as n0
+    def refuse():
+        raise ValueError('control fixture refusal')
+    monkeypatch.setattr(n0.probe, 'assert_bytecode_disabled', refuse)
+    out = tmp_path/'n0'
+    summary = n0.check({}, out)
+    report = json.loads((out/'receipt.json').read_text())
+    assert summary['status'] == report['status'] == 'NO_GO'
+    assert report['native_profiles_permitted'] == report['gpu_calls_permitted'] == 0
+    assert report['closure_reviewed'] is False
+    assert not (out/'runtime-candidate.json').exists()
