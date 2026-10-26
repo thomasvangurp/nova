@@ -247,5 +247,11 @@ def test_new_target_structure_is_packaged_exactly():
     if manifest.is_file():
         package=json.loads(manifest.read_text())
         assert package['submodules']['NOVA-nanobody-filter']==rules.FILTER_SHA
-        assert 'data/structures/8AOK.cif' in package['runtime_files']
-        assert 'NOVA-nanobody-filter/metanano/filters/aggrescan3d.py' in package['runtime_files']
+        required={'data/structures/8AOK.cif','NOVA-nanobody-filter/metanano/filters/aggrescan3d.py'}
+        assert required <= set(package['files'])
+        if package.get('deployment_profile') == 'release-controls':
+            # Control-only qualification tests the full source package, but
+            # its promotion must not install application code or target data.
+            assert required.isdisjoint(package['runtime_files'])
+        else:
+            assert required <= set(package['runtime_files'])
