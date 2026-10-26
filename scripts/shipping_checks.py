@@ -30,6 +30,8 @@ TEST_FILES = (
     'tests/test_pr100_live_gpu.py',
     'tests/test_pr100_live_selection.py',
     'tests/test_pr100_handoff_diagnostics.py',
+    # Challenge-indexed candidate bank: storage, use-time re-validation, build planning.
+    'tests/test_pr100_cell_bank.py',
     'tests/test_molecule_conformer_gate.py',
     'tests/test_pi_preparation_deadline.py',
     'tests/test_parent_merit.py',
