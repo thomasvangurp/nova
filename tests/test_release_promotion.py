@@ -278,6 +278,7 @@ def release(root, revision, *, extra=False):
         path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
         files[name] = gate.digest(path)
     manifest = {'schema': 1, 'git_sha': revision, 'files': files, 'runtime_files': sorted(files),
+        'submodules': {'NOVA-nanobody-filter': 'fe2d5868126406a0de8953d26ecd8bdccbdbd029'},
         'pixi_lock_hash': files['pixi.lock'], 'validation': {'passed': True, 'tests': 100,
         'failures': 0, 'errors': 0, 'skipped': 0, 'test_files': list(TEST_FILES)}}
     write(root / 'build_stamp.json', manifest)
