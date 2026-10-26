@@ -30,6 +30,7 @@ TEST_FILES = (
     'tests/test_pr100_live_gpu.py',
     'tests/test_pr100_live_selection.py',
     'tests/test_pr100_handoff_diagnostics.py',
+    'tests/test_pr100_live_handoff_contract.py',
     'tests/test_molecule_conformer_gate.py',
     'tests/test_pi_preparation_deadline.py',
     'tests/test_parent_merit.py',
