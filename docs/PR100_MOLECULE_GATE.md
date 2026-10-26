@@ -58,3 +58,22 @@ package installation or remote deployment was performed for this candidate.
 
 This is a separate branch based on d766fa8. The native N0/N1 experiment continues
 to use its original d766 source/runtime manifest and its existing review.
+
+## Preparation process control (separate operational delta)
+
+The Pi helper is also called by bank release and portfolio preflight. The live
+bank has thousands of eligible rows in some reactions; the measured 20-row
+portfolio is not a full-bank throughput qualification. Existing nested
+`subprocess.run` timeouts kill immediate children only and can orphan preparation
+work. The separate pinned loop patch routes its three `make_fleet` launches
+through the existing `epoch_deadline.run` process-group cleanup. The first uses
+the epoch's commit-reserve cutoff; both background branches use their existing
+`collect_at`. Two seconds are reserved for the one-second TERM grace and KILL.
+Expired work returns 124 and cannot publish a successful result. All selection
+arguments and the rest of `handle_epoch` are unchanged (AST regression checked).
+
+The installed loop contains an additional late-compound branch absent from the
+tracked loop; patching its exact audited bytes preserves that branch. Do not
+replace the live loop with the entire tracked file. A loop restart is required
+to load the change and must occur only after a fresh idle-phase/no-child audit,
+never during preparation or commit. Consumer/signer hold files stay unchanged.

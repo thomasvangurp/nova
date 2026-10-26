@@ -807,6 +807,36 @@ def dynamic_floor(reaction: int, epoch: int, static: float) -> tuple[float, dict
                     "static": static, "source": "rival_margin"}
 
 
+def run_preparation(command, *, cutoff_at, timeout, capture_output=True, text=True):
+    """Bound a preparation process tree before its epoch's collection cutoff.
+
+    Two seconds are reserved for the existing one-second TERM grace and KILL.
+    Scientific gates and selection are unchanged; an expired result is refused.
+    """
+    import math
+    from nanobody_opt.epoch_deadline import EpochDeadlineExceeded, run as bounded_run
+    if not capture_output or not text:
+        raise ValueError('preparation requires captured text output')
+    if not math.isfinite(cutoff_at) or not math.isfinite(timeout):
+        raise ValueError('preparation requires finite deadlines')
+
+    class Cutoff:
+        def remaining(self):
+            remaining = cutoff_at - time.time() - 2.0
+            if remaining <= 0:
+                raise EpochDeadlineExceeded('preparation collection cutoff reached')
+            return remaining
+
+    try:
+        Cutoff().remaining()  # Refuse to spawn after the cutoff.
+        if timeout <= 0:
+            raise EpochDeadlineExceeded('preparation time budget exhausted')
+        return bounded_run(command, deadline=Cutoff(), timeout=timeout, check=False,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except EpochDeadlineExceeded:
+        return subprocess.CompletedProcess(command, 124, '', 'preparation_deadline_exceeded')
+
+
 def handle_epoch(a, view, epoch, block, end, covered, state):
     # Anchor before any bank preparation. Adding the original block budget
     # to a later wall clock would silently extend the real chain deadline.
@@ -830,7 +860,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
             # which made say() raise TypeError at 25503
             say(**{**floor_info, "event": "dynamic_floor", "epoch": epoch,
                    "reaction": view["reaction"], "floor": floor})
-            made = subprocess.run(
+            made = run_preparation(
                 [sys.executable, str(ROOT / "tools/make_fleet.py"),
                  "--epoch", str(epoch), "--reaction", str(view["reaction"]),
                  "--crew", str(crew_path), "--python", a.rdkit_python,
@@ -839,7 +869,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 + (["--bank", str(ROOT / "bank.sqlite"),
                     "--out", str(ROOT / "release"),
                     "--fleet-tree", str(ROOT)] if a.on_submit_host else []),
-                capture_output=True, text=True, timeout=1200)
+                capture_output=True, text=True, timeout=1200, cutoff_at=epoch_end_at - max(commit_reserve(len(view["crew"])), BLACKOUT_BLOCKS + 1) * submission_timing.BLOCK_SECONDS)
             for line in made.stdout.strip().splitlines():
                 if line.startswith("{"):
                     say(**json.loads(line))
@@ -892,7 +922,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                 while time.time() + last_duration * 1.15 < min(collect_at, recheck_deadline - safety_margin):
                     attempt += 1
                     started = time.time()
-                    r = subprocess.run(
+                    r = run_preparation(
                         [sys.executable, str(ROOT / "tools/make_fleet.py"),
                          "--epoch", str(epoch), "--reaction", str(reaction),
                          "--crew", str(crew_path), "--python", a.rdkit_python,
@@ -900,7 +930,7 @@ def handle_epoch(a, view, epoch, block, end, covered, state):
                          "--prediction-offset", str(floor_info.get("optimism", 0.0)),
                          "--bank", str(ROOT / "bank.sqlite"),
                          "--out", str(recheck_out), "--fleet-tree", str(ROOT)],
-                        capture_output=True, text=True, timeout=1200)
+                        capture_output=True, text=True, timeout=1200, cutoff_at=collect_at)
                     recheck_result["returncode"] = r.returncode
                     recheck_result["stdout"] = r.stdout
                     recheck_result["attempts"] = attempt
