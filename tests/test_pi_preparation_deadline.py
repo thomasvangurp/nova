@@ -4,7 +4,7 @@ import pytest
 from scripts import patch_pi_preparation_deadline as patcher
 ROOT=Path(__file__).resolve().parents[1]
 def helper():
-    ns={'time':time,'subprocess':subprocess};exec(compile(patcher.helper_source(),str(ROOT/'tools/pi_epoch_loop.py'),'exec'),ns);return ns['run_preparation']
+    ns={'time':time,'subprocess':subprocess,'say':lambda **kw:None,'pi_alert':lambda *a:None};exec(compile(patcher.helper_source(),str(ROOT/'tools/pi_epoch_loop.py'),'exec'),ns);return ns['run_preparation']
 def test_expired_never_spawns():
     assert helper()(['must-not-execute'],cutoff_at=time.time()+1,timeout=100).returncode==124
 @pytest.mark.parametrize('cutoff,timeout',[(float('inf'),1),(float('nan'),1),(123,float('inf'))])
@@ -59,3 +59,12 @@ def test_patcher_refuses_unreviewed_helper(monkeypatch,tmp_path):
     monkeypatch.setattr(patcher,'ROOT',tmp_path)
     with pytest.raises(ValueError,match='reviewed preparation helper changed'):
         patcher.helper_source()
+
+
+def test_deadline_expiry_emits_event_and_pi_alert():
+    run=helper();events=[];alerts=[]
+    run.__globals__['say']=lambda **kw:events.append(kw)
+    run.__globals__['pi_alert']=lambda *args:alerts.append(args)
+    assert run(['must-not-execute'],cutoff_at=time.time()+1,timeout=10).returncode==124
+    assert events[0]['event']=='preparation_deadline_exceeded'
+    assert alerts[0][0]=='ERROR' and 'withheld' in alerts[0][1]
