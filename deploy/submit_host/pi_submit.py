@@ -176,9 +176,10 @@ def sequences_by_uid(artifact: dict, epoch: int,
     """
     from nanobody_opt import rules
     if epoch >= rules.ACTIVATION_EPOCH:
-        artifact = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length)
+        verified = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length)
         print(json.dumps(dict(event="pr100_fleet_verification", epoch=epoch,
-                              **artifact["handoff_diagnostics"])), flush=True)
+                              **verified["handoff_diagnostics"])), flush=True)
+        artifact = verified
         allow_stale = False
         if not artifact["sequence_pool"]:
             return {}
