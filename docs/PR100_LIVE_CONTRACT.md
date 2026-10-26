@@ -34,7 +34,8 @@ Native phase:
 | `candidate_budget_seconds` | number | `300` | per-candidate native budget, measured **from slot acquisition**, never from enqueue |
 | `repeats` | int | `3` | `k`: total measurements for a first-pass survivor |
 | `margin` | object | see §2 | repeat-and-margin parameters |
-| `allow_marginal` | bool | `true` | publish tier B when tier A is empty (see §4) |
+| `allow_marginal` | bool | `true` | include tier B in `candidates` (see §4) |
+| `phase_budget_seconds` | number | absent | optional wall ceiling for the whole native phase; when absent the controller owns the clock and nothing is marked `not_run` |
 
 `workers` default is derived from available cores/memory
 (~1.4 GB RSS per worker, master has 224 CPU slots and ~160 GiB free);
@@ -45,9 +46,18 @@ Score phase:
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
-| `gpus` | list[int] | required | margin-safe candidates are sharded across these |
+| `gpus` | list[int] | required | candidates are sharded round-robin across these |
+| `command_template` | list[str] | required | public command; `{gpu}` and `{shard}` are substituted per shard |
+| `shard_directory` | path | required | where per-GPU shard input files are written |
+| `receipt_directory` | path | `shard_directory` | per-GPU receipts, `gpu-<id>.json` |
+| `summary_receipt` | path | optional | sharded-run summary |
 
 The 8-candidate handoff cap is removed; the controller no longer truncates.
+`pr100_live_gpu.shard_jobs` builds one job per GPU in the exact shape
+`run_reserved` already validates, so reservation, lock and receipt semantics
+are unchanged per shard. `run_sharded` returns
+`{gpus_attempted, gpus_finished, scored_candidates, status: complete|partial}`;
+a GPU that was never admitted makes the run `partial`, never a silent success.
 
 ## 2. Margin parameters
 
@@ -67,7 +77,7 @@ with configurable constants under `margin`:
 | `z` | `1.3` | audit confidence multiplier |
 | `sigma` | `4.4` | per-measurement PSH noise SD (est. from 24 repeat triples) |
 | `min_repeats` | `2` | `k >= 2` required; a single measurement is never tier A |
-| `hard_margin` | `{"2": 80, "3": 82}` | hard floor; `k > 3` reuses the k=3 value |
+| `hard_margin` | `{"2": 80, "3": 82}` | hard floor; `k > 3` reuses the k=3 value, `k = 1` the strictest entry |
 
 This yields ~80 at k=2 and ~82 at k=3. A flat margin of 85 is **not** the
 default: the audit's own probability table puts a 3-repeat mean of 85 near a
@@ -162,3 +172,13 @@ lives beside it in `measurements`.
 `annotation / basic rules` -> `native developability (repeat-and-margin)` ->
 `archive novelty check`. Novelty runs **only on native passers**, so the
 expensive archive search is not spent on candidates that fail developability.
+
+Consequences for the controller:
+
+- The **sequence** phase result carries `novelty_checked: false` and
+  `annotated_total`; its `candidates` are annotated, not yet novel-checked.
+- The **native** phase runs novelty itself when `archive.csv` is present in its
+  job directory, re-checking `archive_sha256` first and raising if the snapshot
+  changed. It then sets `novelty_checked: true` and `archive_rows`. If no
+  archive is supplied, `novelty_checked` stays false and the controller must
+  run the check before publishing.
