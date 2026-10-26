@@ -26,7 +26,14 @@ predicate or fabricated passing profile cannot substitute for this run.
 Run these stages in order. Stop an infeasible branch and retain its result;
 do not run full-volume GPU trials merely to satisfy a checklist.
 
-1. Complete native developability profiling of all 4,080 distinct sequences
+1. First verify annotation parity under the pinned main-validator packages.
+   Re-annotate all 4,080 previously eligible sequences and a hash-ordered
+   sample of at least 20,000 excluded sequences. Report field changes,
+   bidirectional eligibility flips, missing old annotations and bucket deltas;
+   distinguish an unknown prior annotation from a measured prior rejection.
+   Then derive the population for native profiling. Run a complete new-runtime
+   census as the stronger follow-up, recording its input snapshot separately.
+   Complete native developability profiling of all 4,080 distinct sequences
    from the recorded census. Retain full PSH measurements, counts in the
    admissible interval [73.4, 89], every rejection stage, backend failures,
    per-bucket counts, concurrency, wall time and native binary digests. This
@@ -51,6 +58,9 @@ do not run full-volume GPU trials merely to satisfy a checklist.
    not retroactively turn a failed experiment into a pass.
 
 The full integration populations below follow feasibility, not the reverse.
+Native measurements already made remain useful for those measured sequences;
+they are not lost when annotation metadata changes. Reuse requires the same
+measurement dependency identity, not merely the same sequence and filter SHA.
 
 ### Integration populations
 
@@ -105,7 +115,7 @@ work completed before the challenge and all work charged inside its window.
 
 ### Archive consumption, lag and cold start
 
-Use K=20 consecutive epochs per sustained-capacity trial. Advance the archive
+Use K=20 consecutive epochs per sustained-capacity replay. Advance the archive
 with each accepted fleet before the next decision, retaining both revisions.
 Run every starting bucket and a repeated-same-bucket depletion stress case;
 also run fixed probability-weighted schedules. Require pairwise fleet novelty
@@ -113,6 +123,14 @@ under the pinned duplicate predicate, in addition to archive novelty. This is
 an intentional extra diversity constraint, not a claim about upstream's
 within-fleet handling. Report its cost and minimum residual capacity after
 each step, not only the first fleet's size.
+
+Run two declared third-party-growth scenarios: zero (explicitly an optimistic
+self-only upper bound) and the observed per-epoch additions from the last 20
+completed epochs of a named comparison target. Freeze that historical source
+before the run. It is a stress scenario, not a prediction of new-target growth.
+Apply actual added sequences, not only a count, so clonotype consumption is
+represented. Once new-target archive growth exists, repeat with that evidence.
+Record every intermediate archive and minimum residual capacity in each case.
 
 The local novelty snapshot A and the validator-time snapshot B can differ.
 Record revision and read time for both. Replay a real observed A-to-B delta,
@@ -124,16 +142,30 @@ necessarily strictly older when no archive update occurred.
 
 The current production contract has no cold-target exception. With no
 completed same-target comparison field at epoch 25955, it must abstain.
+Abstention here means withholding on-chain nanobody publication and promotion
+or competitive-performance claims. Isolated scoring, generation and retention
+of raw observations continue. Other participants can also supply a completed
+new-target field; our own on-chain publication is not a prerequisite.
 At 25956 and 25957, require an actual completed field meeting the existing
 support threshold and disjoint observations; a fabricated field or a two-row
 internal reference does not qualify. Exercise missing, insufficient, stale
 and sufficient fields at those epochs and the temporary-reference expiry.
 An alternative independent-replicate cold-start policy would be a separately
 reviewed contract, not an implied waiver in this workflow.
+Use at least 49 distinct sequences with all ten finite metrics from at least
+one completed same-target epoch as the numerical field-support floor, matching
+the configured 49-row comparison size. Enforcing this qualification floor is
+an open runtime gate; the existing replay check only rejects an empty field. This is
+only a support floor, not a guarantee of a precise rank comparison. After
+three consecutive epochs below that floor, enter NO_REFERENCE: keep research
+and reference refresh running, keep nanobody publication blocked, and report
+the missing support explicitly. Recovery requires a fresh sufficient field
+and all other promotion gates, never an automatic fallback at window expiry.
 
 ## Release decisions
 
-The full-production acceptance bars are fixed before the trials:
+The C1 full-production acceptance bars are fixed before the trials. Execute
+them only for the selected policy, not for every C2 comparison arm:
 
 - All 171 challenge combinations must have at least 13 distinct candidates
   accepted by the actual pinned validator against the current trial archive.
@@ -141,6 +173,13 @@ The full-production acceptance bars are fixed before the trials:
   Sequence-only counts and a sampled acceptance-rate extrapolation do not
   satisfy this bar. Replenishment must preserve it throughout the K=20
   consumption-and-lag trial above; record every intermediate archive.
+  This initial all-cell bar alone requires at least 171 * 13 = 2,223 actual
+  accepted distinct entries, before replenishment or clonotype attrition.
+  After the four-cell pilot, price a complete 171-cell sweep using measured
+  per-cell costs and explicit uncertainty; either budget and execute that
+  sweep or report C1 infeasible with the cost/supply gap. Four cells cannot
+  certify 171. A smaller stratified coverage promise would be a separate
+  contract; none is silently adopted here.
 - The three normal trials must each complete 4,800 NEW evaluations from at
   least 8,000 real proposals and produce 13 eligible entries before the existing
   handoff cutoff. The remaining incident cases may abstain or complete less,

@@ -85,6 +85,8 @@ def select(bank, expected, limit):
     if (bank.get('target') != rules.TARGET or bank.get('ruleset_sha256') != rules.fingerprint(config)
             or bank.get('target_scores_transferred') != 0):
         raise ValueError('PR100 bank profile mismatch')
+    if bank.get('annotation_identity') != annotation_identity():
+        raise ValueError('PR100 bank annotation identity mismatch')
     rows = bank['buckets'].get(bucket_key(expected['allowed_v'], expected['allowed_cdr3_length']), [])
     eligible = [r for r in rows if not rules.annotation_reason(r.get('pr100_annotation'),
                   config['nanobody_requirements'], sequence=r['sequence'], epoch_challenge=expected)]

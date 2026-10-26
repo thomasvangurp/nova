@@ -133,9 +133,11 @@ def _finite(value):
 
 
 def annotation_reason(annotation, requirements, *, sequence=None, epoch_challenge=None):
+    from nanobody_opt.pr100_filter import annotation_identity, ANNOTATION_RUNTIME
     if not isinstance(annotation, dict) or annotation.get("status") != "ok":
         return "annotation_unavailable"
-    if annotation.get("profile") != PROFILE:
+    if (annotation.get("profile") != PROFILE or
+            annotation.get("annotation_identity") != annotation_identity()):
         return "annotation_policy_mismatch"
     if sequence is not None and annotation.get("sequence_hash") != sequence_hash(sequence):
         return "annotation_sequence_mismatch"
@@ -153,6 +155,9 @@ def annotation_reason(annotation, requirements, *, sequence=None, epoch_challeng
     for key in ("reference_sha256", "hmm_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", str(germline.get(key, ""))):
             return "annotation_reference_missing"
+    if (germline["reference_sha256"] != ANNOTATION_RUNTIME["panel_sha256"] or
+            germline["hmm_sha256"] != ANNOTATION_RUNTIME["hmm_sha256"]):
+        return "annotation_reference_mismatch"
     length = annotation.get("cdr3_length")
     if not isinstance(length, int) or isinstance(length, bool):
         return "cdr3_length_unavailable"

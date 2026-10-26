@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import importlib.util
+import importlib.metadata
+import inspect
 import json
 import os
+import shutil
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +17,18 @@ from pathlib import Path
 from nanobody_opt import rules
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Measured in the isolated runtime built from PR100's main requirements.
+# Consumers can verify this identity without installing annotation libraries.
+ANNOTATION_RUNTIME = {
+    "schema": "pr100-annotation-v2",
+    "packages": {"abnumber": "0.4.4", "anarci": "2026.2.13.2",
+                 "anarcii": "2.0.5", "biopython": "1.86"},
+    "panel_sha256": "91813d37e96b23606652694c22f93051cd3e396169d23a7678fb9b96ad1146ef",
+    "hmm_sha256": "60051f5a838704eb97fe39488f23894aa335ddadd24ad72b241f6e1cea6829ee",
+    "hmmscan_sha256": "f225ab9d9c12bc2bb90b7b1994fd3de49180278df1bbe2a15002096e91cce480",
+    "scheme": "imgt", "cdr_definition": "imgt", "use_anarcii": False,
+}
 
 
 def activate_filter():
@@ -50,15 +66,43 @@ def atomic(path, value):
 
 @lru_cache(maxsize=1)
 def annotation_identity():
+    # Cache identity follows scientific extraction semantics, not unrelated
+    # developability/cache edits elsewhere in this adapter.
+    extraction = ast.dump(ast.parse(inspect.getsource(_annotate_uncached)),
+                          include_attributes=False)
+    return rules.digest({"runtime": ANNOTATION_RUNTIME, "extraction": extraction,
+        "source": hashlib.sha256((ROOT / "utils/germline_identity.py").read_bytes()).hexdigest()})
+
+
+@lru_cache(maxsize=1)
+def validate_annotation_runtime():
+    for package, expected in ANNOTATION_RUNTIME["packages"].items():
+        if importlib.metadata.version(package) != expected:
+            raise ValueError("annotation dependency version mismatch: " + package)
     germline = helper("germline_identity")
     _, panel = germline._anarci_panel("human")
-    return rules.digest({"profile": rules.PROFILE, "panel": panel,
-                         "hmm": germline._hmm_digest(), "filter": rules.FILTER_SHA,
-                         "adapter": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                         "source": hashlib.sha256((ROOT / "utils/germline_identity.py").read_bytes()).hexdigest()})
+    binary = shutil.which("hmmscan")
+    if (panel != ANNOTATION_RUNTIME["panel_sha256"] or
+            germline._hmm_digest() != ANNOTATION_RUNTIME["hmm_sha256"] or
+            not binary or hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+            != ANNOTATION_RUNTIME["hmmscan_sha256"]):
+        raise ValueError("annotation reference or HMMER binary mismatch")
+
+
+def _annotate_uncached(sequence):
+    from abnumber import Chain
+    germline = helper("germline_identity").human_germline_identity_anarci(sequence)
+    chain = Chain(sequence, scheme="imgt", cdr_definition="imgt", use_anarcii=False)
+    return {"profile": rules.PROFILE, "sequence_hash": rules.sequence_hash(sequence),
+            "status": "ok", "germline": germline,
+            "single_heavy_domain": chain.chain_type == "H", "scheme": chain.scheme,
+            "vhh_hallmarks": chain["H49"] in {"E", "Q"} and chain["H50"] == "R",
+            "canonical_cysteines": chain["H23"] == "C" and chain["H104"] == "C",
+            "cdr3_length": len(chain.cdr3_seq)}
 
 
 def annotate(sequence, cache_dir):
+    validate_annotation_runtime()
     identity = annotation_identity()
     key = rules.sequence_hash(sequence)
     path = Path(cache_dir) / "pr100" / "annotation" / identity / (key + ".json")
@@ -70,19 +114,7 @@ def annotate(sequence, cache_dir):
     except (OSError, ValueError, TypeError):
         pass
     try:
-        from abnumber import Chain
-        import inspect
-        germline = helper("germline_identity").human_germline_identity_anarci(sequence)
-        # The locked ANARCI-backed AbNumber predates the optional ANARCII flag.
-        # Newer versions accept it; both paths must use the same HMM backend.
-        options = {"use_anarcii": False} if "use_anarcii" in inspect.signature(Chain).parameters else {}
-        chain = Chain(sequence, scheme="imgt", cdr_definition="imgt", **options)
-        result = {"profile": rules.PROFILE, "annotation_identity": identity,
-                  "sequence_hash": key, "status": "ok", "germline": germline,
-                  "single_heavy_domain": chain.chain_type == "H", "scheme": chain.scheme,
-                  "vhh_hallmarks": chain["H49"] in {"E", "Q"} and chain["H50"] == "R",
-                  "canonical_cysteines": chain["H23"] == "C" and chain["H104"] == "C",
-                  "cdr3_length": len(chain.cdr3_seq)}
+        result = {**_annotate_uncached(sequence), "annotation_identity": identity}
     except Exception as error:
         # Execution failures are not durable biological rejections.
         return {"profile": rules.PROFILE, "sequence_hash": key, "status": "error",

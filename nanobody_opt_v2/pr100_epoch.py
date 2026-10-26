@@ -5,7 +5,7 @@ from pathlib import Path
 
 from nanobody_opt import rules
 from nanobody_opt.prepare_pr100_bank import select
-from nanobody_opt.pr100_filter import atomic
+from nanobody_opt.pr100_filter import atomic, annotation_identity
 
 
 def prepare(args, state, epoch, subtree):
@@ -14,6 +14,9 @@ def prepare(args, state, epoch, subtree):
     config = rules.pinned_config(epoch)
     if bank.get('ruleset_sha256') != rules.fingerprint(config):
         raise ValueError('PR100 bank has not been prepared for the qualified rules')
+    identity = annotation_identity()
+    if bank.get('annotation_identity') != identity:
+        raise ValueError('PR100 bank annotation identity mismatch')
     if epoch > int(state['epoch']):
         # The future block hash does not exist. Only the all-combinations bank
         # can be prepared now; no speculative challenge becomes scoring input.
@@ -27,6 +30,7 @@ def prepare(args, state, epoch, subtree):
     if output.is_file():
         previous = json.loads(output.read_text())
         if (previous.get('challenge') != expected or
+                previous.get('annotation_identity') != identity or
                 previous.get('candidate_budget') != args.epoch_candidate_budget or
                 previous.get('proposal_budget') != args.epoch_proposal_budget):
             raise ValueError('prepared PR100 pool does not match the current challenge')
@@ -45,7 +49,7 @@ def prepare(args, state, epoch, subtree):
     # An exhausted (or empty) challenge bank is a fresh-work shortfall, not a
     # reason to suppress the separate cached-candidate eligibility precheck.
     # Emit the empty pool so the normal epoch path can still start that work.
-    atomic(output, {'target': rules.TARGET, 'challenge': expected,
+    atomic(output, {'target': rules.TARGET, 'challenge': expected, 'annotation_identity': identity,
            'origin_epoch': epoch, 'target_epoch': epoch, 'prepared_during_epoch': state['epoch'],
            'candidate_budget': args.epoch_candidate_budget, 'proposal_budget': args.epoch_proposal_budget,
            'exact_admission_limit': args.epoch_candidate_budget,

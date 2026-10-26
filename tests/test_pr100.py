@@ -26,10 +26,12 @@ def evidence(sequence=SEQ, block_hash=HASH):
     config = rules.pinned_config(EPOCH)
     challenge = rules.challenge(config, EPOCH, block_hash)
     annotation = {'status': 'ok', 'profile': rules.PROFILE,
+        'annotation_identity': pr100_filter.annotation_identity(),
         'sequence_hash': rules.sequence_hash(sequence), 'single_heavy_domain': True,
         'scheme': 'imgt', 'vhh_hallmarks': True, 'canonical_cysteines': True,
         'cdr3_length': challenge['allowed_cdr3_length'],
-        'germline': {'reference_sha256': '1'*64, 'hmm_sha256': '2'*64,
+        'germline': {'reference_sha256': pr100_filter.ANNOTATION_RUNTIME['panel_sha256'],
+                     'hmm_sha256': pr100_filter.ANNOTATION_RUNTIME['hmm_sha256'],
                      'V': {'identity_pct': 82., 'genes': ['OTHER', challenge['allowed_v']]},
                      'J': {'identity_pct': 86.}}}
     develop = {'passed': True, 'red_flags': [], 'surface_hydrophobic_patches': 89.,
@@ -157,9 +159,45 @@ def test_bucket_membership_keeps_ties_but_does_not_reuse_other_challenges():
     a=e['annotation']; gene=e['challenge']['allowed_v']; length=a['cdr3_length']
     assert memberships(a,c)==[f'{gene}:{length}']
     bank={'target':rules.TARGET,'ruleset_sha256':rules.fingerprint(c),'target_scores_transferred':0,
+          'annotation_identity':pr100_filter.annotation_identity(),
           'buckets':{f'{gene}:{length}':[{'sequence':SEQ,'pr100_annotation':a}]}}
     assert len(select(bank,e['challenge'],8000))==1
     assert not select(bank,{**e['challenge'],'allowed_cdr3_length':length+1},8000)
+
+
+@pytest.mark.parametrize('changed', ['bank_identity', 'row_identity', 'panel', 'hmm'])
+def test_current_challenge_cannot_reuse_stale_annotation(changed):
+    e = evidence(); config = rules.pinned_config(EPOCH)
+    annotation = e['annotation']
+    key = f"{e['challenge']['allowed_v']}:{annotation['cdr3_length']}"
+    bank = {'target': rules.TARGET, 'ruleset_sha256': rules.fingerprint(config),
+            'target_scores_transferred': 0, 'annotation_identity': pr100_filter.annotation_identity(),
+            'buckets': {key: [{'sequence': SEQ, 'pr100_annotation': annotation}]}}
+    if changed == 'bank_identity':
+        bank['annotation_identity'] = 'old-runtime'
+        with pytest.raises(ValueError, match='annotation identity'):
+            select(bank, e['challenge'], 8000)
+        return
+    if changed == 'row_identity': annotation['annotation_identity'] = 'old-runtime'
+    if changed == 'panel': annotation['germline']['reference_sha256'] = '1'*64
+    if changed == 'hmm': annotation['germline']['hmm_sha256'] = '2'*64
+    assert select(bank, e['challenge'], 8000) == []
+    with pytest.raises(ValueError, match='annotation_'):
+        rules.validate_evidence(e, SEQ, e['challenge'], config)
+
+
+def test_wrong_annotation_runtime_is_refused_even_with_a_current_cache(tmp_path, monkeypatch):
+    identity = pr100_filter.annotation_identity()
+    path = tmp_path/'pr100/annotation'/identity/(rules.sequence_hash(SEQ)+'.json')
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(evidence()['annotation']))
+    pr100_filter.validate_annotation_runtime.cache_clear()
+    monkeypatch.setattr(pr100_filter.importlib.metadata, 'version', lambda name: '0.2.7')
+    try:
+        with pytest.raises(ValueError, match='dependency version mismatch'):
+            pr100_filter.annotate(SEQ, tmp_path)
+    finally:
+        pr100_filter.validate_annotation_runtime.cache_clear()
 
 
 class Response(io.BytesIO):
@@ -254,7 +292,8 @@ def test_preparation_never_guesses_a_future_block_hash(tmp_path):
     from nanobody_opt_v2.pr100_epoch import prepare
     c=rules.pinned_config(EPOCH)
     path=tmp_path/'artifacts/pr100_candidate_bank.json';path.parent.mkdir()
-    path.write_text(json.dumps({'target':rules.TARGET,'ruleset_sha256':rules.fingerprint(c)}))
+    path.write_text(json.dumps({'target':rules.TARGET,'ruleset_sha256':rules.fingerprint(c),
+                               'annotation_identity':pr100_filter.annotation_identity()}))
     args=SimpleNamespace(runtime_root=tmp_path)
     assert prepare(args,{'epoch':EPOCH-1},EPOCH,'live')==path
     assert not (tmp_path/f'live/epoch{EPOCH}/producer/epoch_candidate_pool.json').exists()
@@ -270,6 +309,7 @@ def test_empty_fresh_pool_preserves_cached_precheck_and_next_epoch(tmp_path, mon
     expected = evidence()['challenge']
     rows = [{'sequence': SEQ, 'pr100_annotation': annotation}] if has_cached else []
     bank = {'target': rules.TARGET, 'ruleset_sha256': rules.fingerprint(rules.pinned_config(EPOCH)),
+            'annotation_identity': pr100_filter.annotation_identity(),
             'target_scores_transferred': 0, 'buckets': {
                 bucket_key(expected['allowed_v'], expected['allowed_cdr3_length']): rows}}
     path = tmp_path/'artifacts/pr100_candidate_bank.json';path.parent.mkdir()
