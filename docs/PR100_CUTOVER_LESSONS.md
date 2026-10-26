@@ -78,3 +78,25 @@ review assertion.
 
 Faster native execution may reduce cost. It does not turn rejected candidates
 into eligible ones, fill an empty bank, or prove a near-optimal strategy.
+
+## Live learning is a separate release decision
+
+The user subsequently authorized a bounded live attempt rather than waiting
+for research qualification. Current-rule eligibility and the submission cutoff
+remain requirements; a full fleet, ten or twenty observations, demonstrated
+4,800-candidate capacity and a near-optimality study are not prerequisites for
+submitting a valid partial fleet.
+
+The installed Pi was missing the PR100 rules/config dependencies. The live
+consumer patch installs those dependencies and replaces the blanket hold with
+independent chain-context and per-candidate evidence checks. It retains the
+independent molecule path if a nanobody import, artifact or validation fails.
+The duplicate unconditional ten-observation check was removed: the checkpoint
+validator owns the evidence floor.
+
+The existing fast scorer uses 35 folding steps, while upstream specifies 200.
+Its measured observations must not be labelled validator-equivalent. The
+explicit schema-3 `live_trial` stage retains PR100 eligibility and finite actual
+measurements but disclaims exact-scoring equivalence, binds the current context
+and actual settings, and permits a single measured observation. Trial ranks
+among a small local pool are not competitive epoch ranks or multipass estimates.

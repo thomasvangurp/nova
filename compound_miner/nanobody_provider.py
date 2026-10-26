@@ -191,6 +191,35 @@ def _validate_provisional_exact_evidence(payload: Mapping[str, Any]) -> None:
     _finite_number(selection, "score_p90")
 
 
+def _validate_live_trial_evidence(payload: Mapping[str, Any], boltzgen: Mapping[str, Any]) -> None:
+    """Accept measured fast-baseline evidence without claiming equivalence.
+
+    The caller has already checked the actual current PR100 eligibility rules.
+    This stage relaxes only our local quality-certification requirement.
+    """
+    from nanobody_opt import rules
+    if payload['epoch'] < rules.ACTIVATION_EPOCH:
+        raise NanobodyCheckpointError('live trials require current PR100 eligibility')
+    if (boltzgen.get('mode') != 'live_fast_baseline'
+            or any(boltzgen.get(k) is not False for k in
+                   ('exact', 'runtime_matched', 'validator_matched', 'scoring_equivalence_qualified'))):
+        raise NanobodyCheckpointError('live trial must explicitly disclaim exact-scoring equivalence')
+    provenance = boltzgen.get('provenance')
+    if not isinstance(provenance, Mapping):
+        raise NanobodyCheckpointError('live baseline provenance is missing')
+    if provenance.get('epoch') != payload['epoch'] or provenance.get('target') != payload['target']:
+        raise NanobodyCheckpointError('live baseline provenance is for another context')
+    for key in ('scorer_sha256', 'settings_sha256'):
+        value = provenance.get(key)
+        if not isinstance(value, str) or len(value) != 64 or set(value) - set('0123456789abcdef'):
+            raise NanobodyCheckpointError('live baseline provenance digest is invalid')
+    settings = provenance.get('settings')
+    if not isinstance(settings, dict) or not settings or rules.digest(settings) != provenance['settings_sha256']:
+        raise NanobodyCheckpointError('live baseline settings do not match their digest')
+    _validate_metrics(boltzgen.get('metrics'))
+    _validate_provisional_exact_evidence(payload)
+
+
 def validate_nanobody_checkpoint(
     payload: Mapping[str, Any],
     *,
@@ -211,7 +240,7 @@ def validate_nanobody_checkpoint(
             raise NanobodyCheckpointError("checkpoint status is not qualified")
     else:
         stage = payload.get("publication_stage")
-        if stage not in {"provisional", "qualified"}:
+        if stage not in {"provisional", "qualified", "live_trial"}:
             raise NanobodyCheckpointError("checkpoint publication stage is invalid")
         if payload.get("status") != stage:
             raise NanobodyCheckpointError("checkpoint status does not match publication stage")
@@ -259,6 +288,9 @@ def validate_nanobody_checkpoint(
     boltzgen = validation.get("boltzgen")
     if not isinstance(boltzgen, dict):
         raise NanobodyCheckpointError("exact BoltzGen validation is missing")
+    if stage == 'live_trial':
+        _validate_live_trial_evidence(payload, boltzgen)
+        return sequence
     runtime_matched = boltzgen.get("runtime_matched") is True
     legacy_matched = boltzgen.get("validator_matched") is True
     if boltzgen.get("exact") is not True or not (runtime_matched or legacy_matched):

@@ -273,6 +273,38 @@ def test_pi_uses_provisional_checkpoint_evidence_floor(count, expected):
     assert bool(rules.verified_fleet(payload, EPOCH, HASH, 361)['sequence_pool']) is expected
 
 
+def live_trial_checkpoint():
+    cp = checkpoint()
+    cp.update(publication_stage='live_trial', status='live_trial')
+    cp['exact'] = {'observation_count': 1}
+    cp['selection'] = {'score': 12., 'score_p90': 12.}
+    bg = cp['validation']['boltzgen']
+    bg.update(mode='live_fast_baseline', exact=False, runtime_matched=False,
+              validator_matched=False, scoring_equivalence_qualified=False)
+    settings = {'fold_sampling_steps': 35, 'diffusion_samples': 5}
+    bg['provenance'] = {'epoch': EPOCH, 'target': rules.TARGET,
+                        'scorer_sha256': 'a' * 64, 'settings': settings,
+                        'settings_sha256': rules.digest(settings)}
+    return cp
+
+
+@pytest.mark.parametrize('defect', [None, 'claim_exact', 'old_target', 'old_epoch',
+                                  'settings', 'missing_native', 'wrong_challenge', 'no_observation'])
+def test_live_trial_relaxes_quality_only(defect):
+    cp = live_trial_checkpoint()
+    bg = cp['validation']['boltzgen']
+    if defect == 'claim_exact': bg['runtime_matched'] = True
+    if defect == 'old_target': bg['provenance']['target'] = 'P20809'
+    if defect == 'old_epoch': bg['provenance']['epoch'] = EPOCH - 1
+    if defect == 'settings': bg['provenance']['settings']['fold_sampling_steps'] = 200
+    if defect == 'missing_native': cp['pr100_evidence'].pop('developability')
+    if defect == 'wrong_challenge': cp['pr100_evidence']['challenge']['allowed_v'] = 'WRONG'
+    if defect == 'no_observation': cp['exact']['observation_count'] = 0
+    payload = {'epoch': EPOCH, 'target': rules.TARGET, 'sequence_pool': [SEQ],
+               'submissions': [], 'sequence_pool_checkpoints': {SEQ: cp}}
+    assert bool(rules.verified_fleet(payload, EPOCH, HASH, 361)['sequence_pool']) is (defect is None)
+
+
 def test_pi_attestation_uses_rpc_hash_and_nondefault_epoch_length():
     spec=importlib.util.spec_from_file_location('_pr100_pi_attest',ROOT/'deploy/submit_host/pi_submit.py')
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
