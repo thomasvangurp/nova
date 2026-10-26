@@ -27,6 +27,7 @@ TEST_FILES = (
     'tests/test_pr100_live_controller.py',
     'tests/test_pr100_live_supervisor.py',
     'tests/test_pr100_live_worker.py',
+    'tests/test_pr100_profile_executor.py',
     'tests/test_pr100_live_gpu.py',
     'tests/test_pr100_live_selection.py',
     'tests/test_pr100_handoff_diagnostics.py',

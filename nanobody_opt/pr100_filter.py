@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 
@@ -151,6 +152,32 @@ async def develop(sequences, concurrency):
         return result
     finally:
         await manager.shutdown()
+
+
+def run_develop(sequences, concurrency, *, backend=None):
+    """Run one batch on a private loop whose thread slots match its profile slots.
+
+    The pinned backend uses asyncio.to_thread after acquiring its TNP semaphore.
+    Python's default executor can admit fewer jobs than that semaphore, creating
+    another queue while the upstream per-profile timeout is already running.
+    This owns a fresh loop and executor; it never replaces a caller's executor.
+    Native commands, inputs, settings and output order are unchanged.
+    """
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        raise ValueError("developability concurrency must be a positive integer")
+    sequences = list(sequences)
+    backend = develop if backend is None else backend
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(
+            max_workers=max(1, min(concurrency, len(sequences))),
+            thread_name_prefix="pr100-profile"))
+        return await backend(sequences, concurrency)
+
+    # asyncio.run joins its owned default executor before returning, including
+    # error/cancellation paths. The caller's process supervisor owns hard bounds.
+    return asyncio.run(run())
 
 
 def cached_result(sequence, cache_dir):

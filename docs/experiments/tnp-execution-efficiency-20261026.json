@@ -1,0 +1,168 @@
+{
+  "schema": "tnp-execution-efficiency-review-v1",
+  "baseline_source_sha": "6c3d4a6d672efb6d4ed65323ce65f939bf64e14c",
+  "production_changed": false,
+  "native_or_gpu_experiments_started": false,
+  "reason_no_fresh_inference": "Epoch25959 is active on the only host with the native runtime. Recovered completed runs and inert framework tests are sufficient for this scoped investigation.",
+  "recovered_runs": [
+    {
+      "host_exit": 0
+    },
+    {
+      "completed_profiles": [
+        {
+          "name": "w48_s56",
+          "workers": 48,
+          "cpu_slots": 56,
+          "n": 48,
+          "rc": 0,
+          "wall": 99.5,
+          "last_batch_seconds": 99.09260869026184,
+          "completed": 48,
+          "status": "complete",
+          "box_busy_avg": 0.108,
+          "thread_settings": []
+        },
+        {
+          "name": "w48_s224",
+          "workers": 48,
+          "cpu_slots": 224,
+          "n": 48,
+          "rc": 0,
+          "wall": 117.5,
+          "last_batch_seconds": 116.32634637411684,
+          "completed": 48,
+          "status": "complete",
+          "box_busy_avg": 0.216,
+          "thread_settings": []
+        },
+        {
+          "name": "w48_s224_all1",
+          "workers": 48,
+          "cpu_slots": 224,
+          "n": 48,
+          "rc": 0,
+          "wall": 75.4,
+          "last_batch_seconds": 74.65013492386788,
+          "completed": 48,
+          "status": "complete",
+          "box_busy_avg": 0.248,
+          "thread_settings": []
+        },
+        {
+          "name": "w96_s224_all1",
+          "workers": 96,
+          "cpu_slots": 224,
+          "n": 96,
+          "rc": 0,
+          "wall": 144.7,
+          "last_batch_seconds": 143.24436534009874,
+          "completed": 96,
+          "status": "complete",
+          "box_busy_avg": 0.273,
+          "thread_settings": []
+        },
+        {
+          "name": "w24_s56",
+          "workers": 24,
+          "cpu_slots": 56,
+          "n": 48,
+          "rc": 0,
+          "wall": 156.6,
+          "last_batch_seconds": 78.78743610903621,
+          "completed": 48,
+          "status": "complete",
+          "box_busy_avg": 0.086,
+          "thread_settings": []
+        }
+      ]
+    },
+    {
+      "file": "P_w48_s56/result.json",
+      "status": "complete",
+      "completed": 48,
+      "input_count": 48,
+      "last_batch_seconds": 91.90662426874042,
+      "workers": 48,
+      "not_run": 0
+    },
+    {
+      "file": "P_w48_s56/job.json",
+      "workers": 48,
+      "cpu_slots": 56
+    }
+  ],
+  "parity_evidence": {
+    "source": "nova-reports/pr100-readiness-20261026/native-reuse/b622386-n1-verdict-summary.json",
+    "source_report_sha256": "8f823b20e1156c34a48b9e7c3a552303ed4cd886cb671d048cfe8e5df3cb85d0",
+    "cli_a_cli_b_pairs": 24,
+    "cli_a_cli_b_numeric_mismatches": 24,
+    "cli_a_cli_b_normalized_structure_mismatches": 24,
+    "cli_a_cli_b_final_eligibility_flips": 1,
+    "warm_to_cli_wall_ratio": 0.6996391313767069,
+    "registered_parity_decision": "NO_GO_PARITY",
+    "interpretation": "Observed baseline variation disproves an unconditional deterministic/bit-identical claim for this runtime. It does not identify which stage causes variation or demonstrate a warm-path distribution shift."
+  },
+  "findings": [
+    {
+      "proposal": "100x fresh unique candidate throughput",
+      "status": "unsupported",
+      "evidence": "Best recovered48-candidate run75.4s versus99.5s baseline is1.32x. Doubling48 to96 workers gives only1.04x throughput. Executor-patched48-candidate batch91.9066s versus99.0926s baseline batch is1.078x; one uncontrolled run, not an equivalence result."
+    },
+    {
+      "proposal": "cache by sequence or framework",
+      "status": "revise",
+      "reason": "Only the full sequence plus runtime/model/settings/tool identity can key a reusable measured result. A shared framework is not an identical input. Returning cached bytes preserves that recorded observation, not a fresh stochastic rerun. Cache reads must never count as independent repeats or fresh evaluations."
+    },
+    {
+      "proposal": "100x cache-heavy effective throughput",
+      "status": "conditional_arithmetic_only",
+      "formula": "speedup = 1 / ((1-hit_rate) + hit_rate * hit_seconds/miss_seconds)",
+      "illustration": {
+        "miss_seconds": 25,
+        "hit_seconds": 0.001,
+        "speedup": 100,
+        "required_hit_rate": 0.9900396015840633
+      },
+      "limitation": "No cache lookup latency or actual workload hit-rate benchmark performed. A workload of fresh unique inputs has no such gain."
+    },
+    {
+      "proposal": "true GPU batching",
+      "status": "unqualified",
+      "reason": "Current pinned live profile is CPU-only. GPU/batched kernels and refinement are numerical-path changes; matching weights/seeds/precision does not establish bit identity."
+    },
+    {
+      "proposal": "parallel postprocessing",
+      "status": "profile_before_change",
+      "reason": "The current dispatcher already profiles independent inputs concurrently. Additional nested CPU workers can oversubscribe. Existing evidence does not attribute a large share of wall time to postprocessing."
+    },
+    {
+      "proposal": "RAM-backed intermediates",
+      "status": "unmeasured",
+      "reason": "No recovered disk-wait or physical-I/O breakdown supports this as a dominant cost. Test bounded per-job tmpfs only after measuring I/O; memory competes with roughly1.4GB profile processes."
+    },
+    {
+      "proposal": "match executor width to admitted live profiles",
+      "status": "candidate_patch_framework_tested",
+      "reason": "Pinned service acquires a TNP semaphore then uses asyncio.to_thread. The old private asyncio.run loop uses the default executor capped at32 threads on its Python runtime, despite48 profile slots. The candidate patch owns a fresh loop and pool sized to the existing resource-bounded worker count; it does not alter backend commands, model or gates."
+    }
+  ],
+  "patch_scope": [
+    "Add run_develop() owning one loop and one bounded ThreadPoolExecutor",
+    "Route live worker measure_batch through it",
+    "Leave cached_develop and its legacy capacity behavior unchanged",
+    "No caching, model, seed, precision, GPU or scientific acceptance changes"
+  ],
+  "validation": {
+    "focused_tests_passed": 95,
+    "new_framework_tests": 9,
+    "new_test_scope": "Real pinned compute_tnp_profile_async AST with48 inert profiles rendezvousing, preserving output order; caller-loop isolation; owned-thread shutdown; errors; fresh repeats; invalid widths; empty batch",
+    "real_scientific_equivalence": "not established",
+    "production_promotion": "not approved"
+  },
+  "next_measurement": [
+    "Between live epochs, compare the private executor change against baseline using identical input cohorts and randomized run order; measure completed profiles/sec, errors, memory and live responsiveness.",
+    "Record preprocessing, prediction, refinement and metric/IO timing separately before optimizing them.",
+    "Persistent model reuse and GPU batching require their own stochastic-baseline versus candidate comparison; never claim exact parity unless measured at the required artifact level."
+  ]
+}

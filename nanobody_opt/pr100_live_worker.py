@@ -1,7 +1,6 @@
 """Measured baseline phases for the Pi-owned PR100 epoch controller."""
 from __future__ import annotations
 import argparse
-import asyncio
 import hashlib
 import json
 import os
@@ -70,7 +69,7 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None):
     """
     develop = develop or pr100_filter.develop
     acquired = clock()
-    values = asyncio.run(develop(list(sequences), workers))
+    values = pr100_filter.run_develop(list(sequences), workers, backend=develop)
     return values, acquired, clock() - acquired
 
 
