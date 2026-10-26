@@ -1,20 +1,49 @@
-"""Pi-owned, bounded baseline: current rules, fresh measurements, partial fleets."""
+"""Pi-owned, epoch-clocked PR100 controller: current rules, fresh measurements, monotone fleets.
+
+Timing comes from the chain clock, never from a wall-clock constant. The usable window runs
+from epoch start to the publication cutoff (``epoch_end_block - RESERVE_BLOCKS``, 12 s blocks)
+and each phase cap is a share of the time that is actually left when the phase launches, so
+caps can never oversubscribe the window. A partial fleet is published as soon as the first
+scored margin-safe (tier A) candidates exist, and republished only when the new set is at
+least as good: tier first, then margin (see docs/PR100_LIVE_CONTRACT.md).
+"""
 from __future__ import annotations
 import argparse
 import base64
 import hashlib
 import json
-import os
+import math
 from pathlib import Path
+import re
+import shlex
 import subprocess
-import sys
 import time
 import urllib.request
 
 from nanobody_opt import pr100_filter, rules
 
-RESERVE_BLOCKS = 40
-PHASE_CAPS = {'sequence': 420, 'native': 900, 'score': 600}
+BLOCK_SECONDS = 12.0
+# Publication cutoff reserve (offset ~315 of 361); the Pi export path itself refuses to
+# publish with 40 or fewer blocks left, so this stays strictly above that floor.
+RESERVE_BLOCKS = 46
+MINIMUM_RESERVE_BLOCKS = 40
+# Start whenever more than this many blocks remain: a late partial fleet beats skipping the
+# epoch. The old reserve=180 rule allowed starts only in the first ~36 minutes of an epoch.
+START_MINIMUM_BLOCKS = 90
+# Time held back from the phase budget for building, validating and publishing the fleet.
+PUBLISH_RESERVE_SECONDS = 150.0
+# Share of the remaining window a phase may consume; the last phase gets what is left.
+PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'score': 1.0}
+PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'score': 90.0}
+TAIL_BYTES = 2048
+ACTIVATION_EPOCH = 25957
+TIER_RANK = {'A': 0, 'B': 1}
+HOST_KEYS = ('address', 'port', 'release', 'annotation_python', 'native_python',
+             'scoring_python', 'python_path', 'path', 'references', 'scorer', 'scorer_settings')
+_SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?key|private[_-]?key)'
+                     r'(\s*[:=]\s*|\s+)\S+')
+_LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
+
 TRANSPORT = r'''
 import base64,hashlib,json,os,pathlib,subprocess,sys,time
 r=json.load(sys.stdin);d=pathlib.Path(r['directory']);d.mkdir(parents=True,exist_ok=True)
@@ -35,9 +64,10 @@ if r['operation']=='start':
    if name not in ('input.json','archive.csv','job.json','gpu-job.json'):raise ValueError('file name')
    (d/name).write_bytes(base64.b64decode(raw,validate=True))
   atom(d/'spec.json',r['spec'])
+  log=open(d/'transport-launch.log','ab')
   p=subprocess.Popen([r['python'],'-B',r['supervisor'],'--spec',str(d/'spec.json')],
    cwd=r['spec']['cwd'],env={**os.environ,**r['spec']['environment']},
-   stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+   stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
   atom(d/'launch.json',{'identity':identity,'pid':p.pid})
 out={'running':not(d/'supervisor-receipt.json').exists()}
 if not out['running']:
@@ -51,11 +81,29 @@ if not out['running']:
    if group.get('valid') is True:
     name='score/length'+str(int(group['length']))+'/exact_all.json'
     out['files'][name]=base64.b64encode((d/name).read_bytes()).decode()
+else:
+ for name in ('supervisor-stderr.log','transport-launch.log'):
+  p=d/name
+  if p.is_file():
+   with open(p,'rb') as h:
+    h.seek(0,2);s=h.tell();h.seek(max(0,s-2048))
+    out.setdefault('tails',{})[name]=h.read(2048).decode('utf-8','replace')
 print(json.dumps(out))
 '''
 
+
 def atomic(path, value):
     pr100_filter.atomic(path, value)
+
+
+def sanitize(text, limit=TAIL_BYTES):
+    """Bounded, credential-free text that is safe to store in a receipt."""
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', 'replace')
+    text = str(text)[-limit:]
+    text = _SECRET.sub(lambda m: m.group(1) + '=<redacted>', text)
+    return _LONG_OPAQUE.sub('<redacted>', text)
+
 
 def clock_state(chain):
     block = int(chain.get_current_block())
@@ -63,23 +111,58 @@ def clock_state(chain):
     return {'block': block, 'epoch': block // length, 'epoch_length': length,
             'updated_at_unix': time.time()}
 
-def admissible(clock, epoch, *, reserve=RESERVE_BLOCKS):
-    return (clock['epoch'] == epoch and clock['epoch_length'] > 0 and
-            (epoch + 1) * clock['epoch_length'] - clock['block'] > reserve)
+
+def blocks_remaining(clock, epoch, *, now=None):
+    """Blocks left in ``epoch``, discounting the age of the clock reading."""
+    now = time.time() if now is None else now
+    age = max(0.0, now - float(clock['updated_at_unix']))
+    return ((epoch + 1) * int(clock['epoch_length']) - int(clock['block'])
+            - age / BLOCK_SECONDS)
+
+
+def admissible(clock, epoch, *, reserve=RESERVE_BLOCKS, now=None):
+    return (clock['epoch'] == epoch and int(clock['epoch_length']) > 0
+            and blocks_remaining(clock, epoch, now=now) > reserve)
+
+
+def publication_cutoff(clock, epoch, *, reserve=RESERVE_BLOCKS, now=None):
+    """Unix time of the publication cutoff for ``epoch`` (the end of the usable window)."""
+    now = time.time() if now is None else now
+    return now + (blocks_remaining(clock, epoch, now=now) - reserve) * BLOCK_SECONDS
+
+
+def phase_cap(phase, stop_at, *, now=None, publish_reserve=PUBLISH_RESERVE_SECONDS):
+    """Cap for ``phase`` as a share of the window that is still left."""
+    now = time.time() if now is None else now
+    usable = stop_at - now - publish_reserve
+    cap = usable * PHASE_SHARES[phase]
+    if cap < PHASE_FLOORS[phase]:
+        raise TimeoutError(f'insufficient window for the {phase} phase')
+    return cap
+
 
 def remote(config, host, request):
     command = ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
                '-oConnectTimeout=8', '-p', str(config['hosts'][host]['port']),
-               config['hosts'][host]['address'], 'python3', '-c',
-               __import__('shlex').quote(TRANSPORT)]
+               config['hosts'][host]['address'], 'python3', '-c', shlex.quote(TRANSPORT)]
     result = subprocess.run(command, input=json.dumps(request).encode(),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=config.get('transport_timeout_seconds', 120))
     if result.returncode:
-        raise RuntimeError('remote transport failed')
-    return json.loads(result.stdout)
+        error = RuntimeError('remote transport failed')
+        error.diagnostics = {'returncode': result.returncode,
+                             'stderr_tail': sanitize(result.stderr)}
+        raise error
+    try:
+        return json.loads(result.stdout)
+    except ValueError as cause:
+        error = RuntimeError('remote transport returned no result')
+        error.diagnostics = {'stdout_tail': sanitize(result.stdout),
+                             'stderr_tail': sanitize(result.stderr)}
+        raise error from cause
 
 
-def phase_request(config, challenge, phase, files, stop_at, clock):
+def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     host = 'slave' if phase == 'sequence' else 'master'
     runtime = config['hosts'][host]
     release = runtime['release']
@@ -92,40 +175,42 @@ def phase_request(config, challenge, phase, files, stop_at, clock):
     if runtime.get('ld_library_path'):
         environment['LD_LIBRARY_PATH'] = runtime['ld_library_path']
     job = {'challenge': challenge, 'phase': phase, 'cpu_slots': 4 if phase == 'sequence' else 8}
+    # New worker knobs (proposals, workers, repeats, margin, allow_marginal, ...) pass
+    # through unchanged; the controller never second-guesses them.
     job.update(config['worker'])
     if phase == 'sequence':
+        job['references'] = runtime['references']
+    if 'archive.csv' in files:
+        # The worker runs novelty only when the archive snapshot it can verify is present,
+        # so every phase that checks novelty is handed the archive and its binding.
         job.update(archive_sha256=hashlib.sha256(files['archive.csv']).hexdigest(),
-                   archive_fetched_at=clock['updated_at_unix'], references=runtime['references'])
+                   archive_fetched_at=clock['updated_at_unix'])
     files = dict(files)
-    files['job.json'] = json.dumps(job).encode()
-    command = [python, '-B', '-m', 'nanobody_opt.pr100_live_worker', '--job', directory + '/job.json']
     if phase == 'score':
         python = runtime['scoring_python']
         environment['PYTHONPATH'] = release
-        environment['CUDA_VISIBLE_DEVICES'] = str(config['gpu'])
-        probe = [python, '-B', release + '/scripts/pr100_gpu_probe.py', '--release', release,
-                 '--expected-sha', config['source_sha'], '--input', directory + '/input.json',
-                 '--output', directory + '/score', '--settings', runtime['scorer_settings'],
-                 '--gpu', str(config['gpu']), '--passes', '1', '--mode', 'fresh', '--timeout', '580']
-        gpu = {'gpu': config['gpu'], 'ttl_seconds': 590, 'minimum_free_mib': 8192,
-               'lock_directory': config['remote_root'] + '/gpu-locks',
-               'receipt': directory + '/gpu-receipt.json', 'scorer': runtime['scorer'],
-               'command': probe, 'cwd': release,
-               'env': {k: v for k, v in environment.items() if k != 'CUDA_VISIBLE_DEVICES'}}
-        files['gpu-job.json'] = json.dumps(gpu).encode()
-        command = [python, '-B', '-m', 'nanobody_opt.pr100_live_gpu', '--job', directory + '/gpu-job.json']
+        environment['CUDA_VISIBLE_DEVICES'] = ','.join(str(gpu) for gpu in config['gpu'])
+        job.update(gpus=list(config['gpu']), release=release, scorer=runtime['scorer'],
+                   scorer_settings=runtime['scorer_settings'], source_sha=config['source_sha'],
+                   gpu_lock_directory=config['remote_root'] + '/gpu-locks',
+                   output_directory=directory + '/score')
+        job['cpu_slots'] = max(2, len(config['gpu']))
+    files['job.json'] = json.dumps(job).encode()
+    command = [python, '-B', '-m', 'nanobody_opt.pr100_live_worker', '--job', directory + '/job.json']
+    cap = phase_cap(phase, stop_at) if cap is None else cap
     spec = {'command': command, 'cwd': release, 'environment': environment,
-            'wall_seconds': PHASE_CAPS[phase], 'deadline_unix': stop_at,
+            'wall_seconds': cap, 'deadline_unix': stop_at,
             'receipt_path': directory + '/supervisor-receipt.json', 'cpu_slots': job['cpu_slots'],
             'clock_path': directory + '/clock.json', 'epoch': challenge['epoch'],
             'epoch_length': challenge['epoch_length'], 'reserve_blocks': RESERVE_BLOCKS}
-    return host, {'operation': 'start', 'directory': directory, 'python': python, 'source_sha': config['source_sha'],
+    return host, {'operation': 'start', 'directory': directory, 'python': python,
+                  'source_sha': config['source_sha'],
                   'supervisor': release + '/scripts/pr100_live_supervisor.py', 'spec': spec,
                   'clock': clock, 'files': {k: base64.b64encode(v).decode() for k, v in files.items()}}
 
 
 def run_phase(config, challenge, phase, files, stop_at, chain, local,
-              *, transport=remote, sleep=time.sleep):
+              *, transport=remote, sleep=time.sleep, diagnostics=None):
     clock = clock_state(chain)
     if not admissible(clock, challenge['epoch']) or time.time() >= stop_at:
         raise TimeoutError('epoch cutoff before launch')
@@ -137,12 +222,25 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         result = transport(config, host, request)
         if time.time() > stop_at + 15:
             raise TimeoutError('remote receipt deadline')
-    atomic(local / (phase + '-supervisor.json'), result['receipt'])
+    receipt = result['receipt']
+    atomic(local / (phase + '-supervisor.json'), receipt)
+    if diagnostics is not None:
+        diagnostics[phase] = {'reason': receipt.get('reason'), 'exit_code': receipt.get('exit_code'),
+                              'killed': receipt.get('killed'),
+                              'elapsed_seconds': receipt.get('elapsed_seconds'),
+                              'stderr_tail': sanitize(receipt.get('stderr_tail') or ''),
+                              'tails': {k: sanitize(v) for k, v in (result.get('tails') or {}).items()}}
     decoded = {k: base64.b64decode(v, validate=True) for k, v in result.get('files', {}).items()}
     for name, raw in decoded.items():
         output = local / phase / name
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(raw)
+    if receipt.get('reason') not in (None, 'completed') and 'result.json' not in decoded:
+        error = RuntimeError(f'{phase} phase produced no result')
+        error.diagnostics = {'phase': phase, 'reason': receipt.get('reason'),
+                             'exit_code': receipt.get('exit_code'),
+                             'stderr_tail': sanitize(receipt.get('stderr_tail') or '')}
+        raise error
     # Only already completed per-candidate records can survive a later timeout.
     return decoded
 
@@ -179,51 +277,164 @@ def merge_scores(files, target):
     return merged, json.loads(files['score/scorer_settings.json']), report['registered_scorer_sha256']
 
 
-def run_epoch(config, chain, clock):
+def _finite(value):
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value))
+
+
+def candidate_tiers(candidates):
+    """Map sequence -> the worker's tier and mean PSH, for the quality comparison."""
+    return {row['sequence']: {'tier': row.get('tier'),
+                              'psh_mean': float(row['psh_mean']) if _finite(row.get('psh_mean')) else None,
+                              'repeats': row.get('repeats'), 'margin_safe': row.get('margin_safe')}
+            for row in candidates}
+
+
+def order_candidates(candidates, *, allow_marginal=True):
+    """Worker order (tier A by ascending mean PSH, then tier B) with a local fallback."""
+    try:
+        from nanobody_opt.pr100_live_selection import order_candidates as ordered
+    except ImportError:
+        def key(row):
+            mean = row.get('psh_mean')
+            return (TIER_RANK.get(row.get('tier'), len(TIER_RANK)),
+                    mean if _finite(mean) else math.inf,
+                    str(row.get('sequence_hash') or ''))
+        rows = sorted((r for r in candidates if r.get('tier') in TIER_RANK), key=key)
+        return rows if allow_marginal else [r for r in rows if r.get('tier') == 'A']
+    return ordered(candidates, allow_marginal=allow_marginal)
+
+
+def fleet_quality(fleet, tiers):
+    """Quality of a fleet: tier A count, size, then each member's tier and margin."""
+    members = []
+    for sequence in fleet.get('sequence_pool', []):
+        info = tiers.get(sequence) or {}
+        members.append({'sequence_hash': rules.sequence_hash(sequence),
+                        'tier_rank': TIER_RANK.get(info.get('tier'), len(TIER_RANK)),
+                        'psh_mean': info.get('psh_mean')})
+    members.sort(key=lambda m: (m['tier_rank'], math.inf if m['psh_mean'] is None else m['psh_mean']))
+    return {'tier_a': sum(1 for m in members if m['tier_rank'] == TIER_RANK['A']),
+            'count': len(members), 'members': members}
+
+
+def quality_key(quality):
+    """Higher is strictly better, so a lexicographic comparison is the monotone rule."""
+    def member(entry):
+        mean = entry['psh_mean']
+        return (-entry['tier_rank'], -(math.inf if mean is None else mean))
+    return (quality['tier_a'], quality['count'],
+            tuple(member(entry) for entry in quality['members']))
+
+
+def monotone_decision(previous_quality, quality):
+    """'replace', 'idempotent' or 'rejected' under the monotone-quality rule."""
+    if previous_quality is None:
+        return 'replace'
+    new, old = quality_key(quality), quality_key(previous_quality)
+    if new > old:
+        return 'replace'
+    return 'idempotent' if new == old else 'rejected'
+
+
+def quality_path(local):
+    return Path(local) / 'published-quality.json'
+
+
+def published_quality(local, epoch):
+    try:
+        record = json.loads(quality_path(local).read_text())
+    except (OSError, ValueError):
+        return None
+    return record.get('quality') if record.get('epoch') == epoch else None
+
+
+def publication_sequence(ordered, *, allow_marginal=True):
+    """Margin-safe candidates first, then the monotone upgrade that adds tier B."""
+    safe = [row for row in ordered if row.get('tier') == 'A']
+    attempts = []
+    if safe:
+        attempts.append(safe)
+    if allow_marginal and len(ordered) > len(safe):
+        attempts.append(list(ordered))
+    return attempts or [list(ordered)]
+
+
+def run_epoch(config, chain, clock, *, dry_run=False):
     epoch, length = clock['epoch'], clock['epoch_length']
     local = Path(config['state_root']) / str(epoch)
     local.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    stop_at = started + 1800
+    reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
+    stop_at = publication_cutoff(clock, epoch, reserve=reserve, now=started)
     phase = 'challenge'
+    diagnostics = {}
     receipt = {'epoch': epoch, 'started_at_unix': started, 'source_sha': config['source_sha'],
-               'mac_runtime_dependency': False, 'signing_performed': False}
+               'mac_runtime_dependency': False, 'signing_performed': False, 'dry_run': bool(dry_run),
+               'publication_cutoff_unix': stop_at, 'reserve_blocks': reserve,
+               'usable_window_seconds': max(0.0, stop_at - started), 'publications': []}
     try:
         block_hash = chain.determine_block_hash(epoch * length)
         challenge = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, length)
+        receipt['challenge_cell'] = {k: challenge[k] for k in ('allowed_v', 'allowed_cdr3_length')
+                                     if k in challenge}
         phase = 'archive'
         archive = fetch_archive(challenge['target'])
         phase = 'sequence'
-        files = run_phase(config, challenge, phase, {'archive.csv': archive}, stop_at, chain, local)
+        files = run_phase(config, challenge, phase, {'archive.csv': archive}, stop_at, chain, local,
+                          diagnostics=diagnostics)
         validity = json.loads(files['result.json'])
         if not validity['candidates']:
             raise ValueError('no novel annotated candidates')
         phase = 'native'
-        files = run_phase(config, challenge, phase, {'input.json': json.dumps(validity).encode()}, stop_at, chain, local)
+        files = run_phase(config, challenge, phase,
+                          {'input.json': json.dumps(validity).encode(), 'archive.csv': archive},
+                          stop_at, chain, local, diagnostics=diagnostics)
         validity = json.loads(files['result.json'])
-        validity['candidates'] = validity['candidates'][:8]
-        if not validity['candidates']:
+        # The native stage also runs novelty (only on its passers). An unchecked novelty
+        # result is never publishable.
+        if validity.get('novelty_checked') is False:
+            raise ValueError('native stage reported no novelty check')
+        # No candidate cap: whatever the worker returns is scored.
+        allow_marginal = bool(config['worker'].get('allow_marginal', True))
+        ordered = order_candidates(validity['candidates'], allow_marginal=allow_marginal)
+        if not ordered:
             raise ValueError('no native passing candidate')
+        validity['candidates'] = ordered
         phase = 'score'
         files = run_phase(config, challenge, phase,
-                          {'input.json': json.dumps({'sequences': [r['sequence'] for r in validity['candidates']]}).encode()},
-                          stop_at, chain, local)
+                          {'input.json': json.dumps({'sequences': [r['sequence'] for r in ordered]}).encode()},
+                          stop_at, chain, local, diagnostics=diagnostics)
         scores, settings, scorer_hash = merge_scores(files, challenge['target'])
+        settings_hash = hashlib.sha256(files['score/scorer_settings.json']).hexdigest()
         phase = 'publish'
-        receipt.update(publish(config, chain, challenge, validity, scores, settings, scorer_hash,
-                               hashlib.sha256(files['score/scorer_settings.json']).hexdigest(), local))
+        tiers = candidate_tiers(ordered)
+        for subset in publication_sequence(ordered, allow_marginal=allow_marginal):
+            attempt = dict(validity, candidates=subset)
+            outcome = publish(config, chain, challenge, attempt, scores, settings, scorer_hash,
+                              settings_hash, local, tiers=tiers, dry_run=dry_run)
+            receipt['publications'].append(outcome)
+            receipt.update({k: v for k, v in outcome.items() if k != 'decision'})
     except Exception as error:
-        receipt.update(status='failed', stage=phase, error_type=type(error).__name__)
+        receipt.update(status='failed', stage=phase, error_type=type(error).__name__,
+                       error=sanitize(str(error)))
+        extra = getattr(error, 'diagnostics', None)
+        if isinstance(extra, dict):
+            receipt['failure_diagnostics'] = {
+                k: sanitize(v) if isinstance(v, (str, bytes)) else v for k, v in extra.items()}
+    receipt['phase_diagnostics'] = diagnostics
     receipt['wall_seconds'] = time.time() - started
     atomic(local / 'receipt.json', receipt)
     return receipt
 
 
-def publish(config, chain, challenge, validity, scores, settings, scorer_hash, settings_hash, local):
+def publish(config, chain, challenge, validity, scores, settings, scorer_hash, settings_hash, local,
+            *, tiers=None, dry_run=False):
     from nanobody_opt.pr100_live_trial_export import build
     epoch = challenge['epoch']
+    reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
     clock = clock_state(chain)
-    if not admissible(clock, epoch):
+    if not admissible(clock, epoch, reserve=reserve):
         raise TimeoutError('publication cutoff')
     if chain.determine_block_hash(epoch * challenge['epoch_length']) != challenge['epoch_start_block_hash']:
         raise ValueError('epoch start changed')
@@ -232,44 +443,110 @@ def publish(config, chain, challenge, validity, scores, settings, scorer_hash, s
         raise ValueError('archive changed after exact novelty check')
     fleet = build(validity, scores, settings, scorer_sha256=scorer_hash,
                   settings_file_sha256=settings_hash, now=time.time())
-    verified = rules.verified_fleet(fleet, epoch, challenge['epoch_start_block_hash'], challenge['epoch_length'])
+    verified = rules.verified_fleet(fleet, epoch, challenge['epoch_start_block_hash'],
+                                    challenge['epoch_length'])
     if verified['sequence_pool'] != fleet['sequence_pool'] or not fleet['sequence_pool']:
         raise ValueError('actual Pi validation rejected candidate')
+    tiers = candidate_tiers(validity['candidates']) if tiers is None else tiers
+    quality = fleet_quality(fleet, tiers)
     destination = Path(config['publication_path'])
+    decision = 'replace'
     if destination.exists():
         previous = json.loads(destination.read_text())
-        if previous.get('epoch') == epoch and not set(previous.get('sequence_pool', [])) <= set(fleet['sequence_pool']):
-            raise ValueError('cannot discard an existing valid partial fleet')
+        if previous.get('epoch') == epoch:
+            earlier = published_quality(local, epoch)
+            if earlier is None:
+                # Nothing recorded the earlier fleet's quality (a legacy producer write, for
+                # instance), so fall back to the never-discard subset rule.
+                if not set(previous.get('sequence_pool', [])) <= set(fleet['sequence_pool']):
+                    raise ValueError('cannot discard an existing valid partial fleet')
+            else:
+                decision = monotone_decision(earlier, quality)
+                if decision == 'rejected':
+                    raise ValueError('cannot degrade an existing valid partial fleet')
     atomic(local / 'prepared-fleet.json', fleet)
-    if not admissible(clock_state(chain), epoch):
+    outcome = {'count': len(fleet['sequence_pool']), 'decision': decision,
+               'sequence_hashes': [rules.sequence_hash(s) for s in fleet['sequence_pool']],
+               'tier_a_count': quality['tier_a'], 'actual_pi_validation': True,
+               'publication_stage': 'live_trial'}
+    if dry_run:
+        atomic(local / 'dry-run-fleet.json', fleet)
+        outcome.update(status='dry_run', published=False)
+        return outcome
+    if not admissible(clock_state(chain), epoch, reserve=reserve):
         raise TimeoutError('publication cutoff after validation')
     atomic(destination, fleet)
-    return {'status': 'published', 'count': len(fleet['sequence_pool']),
-            'sequence_hashes': [rules.sequence_hash(s) for s in fleet['sequence_pool']],
-            'published_sha256': hashlib.sha256(destination.read_bytes()).hexdigest(),
-            'actual_pi_validation': True, 'publication_stage': 'live_trial'}
+    atomic(quality_path(local), {'epoch': epoch, 'quality': quality, 'updated_at_unix': time.time()})
+    outcome.update(status='published', published=True,
+                   published_sha256=hashlib.sha256(destination.read_bytes()).hexdigest())
+    return outcome
 
 
 def validate_config(config):
-    if config['start_epoch'] < 25957 or config['gpu'] != 1:
-        raise ValueError('unregistered activation or GPU')
-    if not Path(config['state_root']).is_absolute() or not Path(config['publication_path']).is_absolute():
-        raise ValueError('absolute Pi paths required')
-    stamp = json.loads((Path(__file__).resolve().parents[1] / 'build_stamp.json').read_text())
+    missing = [k for k in ('start_epoch', 'hosts', 'remote_root', 'state_root', 'publication_path',
+                           'source_sha', 'worker', 'gpu') if k not in config]
+    if missing:
+        raise ValueError('config is missing required keys: ' + ', '.join(missing))
+    if isinstance(config['start_epoch'], bool) or not isinstance(config['start_epoch'], int) \
+            or config['start_epoch'] < ACTIVATION_EPOCH:
+        raise ValueError(f'start_epoch must be an integer >= {ACTIVATION_EPOCH}')
+    gpus = config['gpu']
+    if (not isinstance(gpus, list) or not gpus
+            or any(isinstance(g, bool) or not isinstance(g, int) or g < 0 for g in gpus)):
+        raise ValueError('gpu must be a non-empty list of non-negative gpu ids')
+    if len(set(gpus)) != len(gpus):
+        raise ValueError('gpu list contains a duplicate id')
+    for key in ('state_root', 'publication_path'):
+        if not Path(config[key]).is_absolute():
+            raise ValueError(f'{key} must be an absolute path')
+    if not str(config['remote_root']).startswith('/'):
+        raise ValueError('remote_root must be an absolute remote path')
+    if not isinstance(config['source_sha'], str) or not re.fullmatch(r'[0-9a-f]{40}', config['source_sha']):
+        raise ValueError('source_sha must be a 40-character git revision')
+    if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
+        raise ValueError('worker must be an object including native_tools')
+    hosts = config['hosts']
+    if not isinstance(hosts, dict) or not {'master', 'slave'} <= set(hosts):
+        raise ValueError('hosts must define both master and slave')
+    for name in ('master', 'slave'):
+        runtime = hosts[name]
+        if not isinstance(runtime, dict):
+            raise ValueError(f'hosts.{name} must be an object')
+        absent = [k for k in HOST_KEYS if k not in runtime]
+        if absent:
+            raise ValueError(f'hosts.{name} is missing: ' + ', '.join(absent))
+        port = runtime['port']
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError(f'hosts.{name}.port must be a tcp port')
+        if not str(runtime['release']).startswith('/'):
+            raise ValueError(f'hosts.{name}.release must be an absolute path')
+    reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
+    if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve <= MINIMUM_RESERVE_BLOCKS:
+        raise ValueError(f'reserve_blocks must be an integer greater than {MINIMUM_RESERVE_BLOCKS}')
+    verify_build_stamp(config)
+    return config
+
+
+def verify_build_stamp(config, root=None):
+    """The controller may only run from a release whose stamp matches ``source_sha``."""
+    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    stamp = json.loads((root / 'build_stamp.json').read_text())
     if stamp['git_sha'] != config['source_sha']:
         raise ValueError('controller source revision mismatch')
-    root = Path(__file__).resolve().parents[1]
     for name, digest in stamp['files'].items():
         if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
             raise ValueError('controller source drift')
+    return stamp
 
 
-def main():
+def main(argv=None):
     import fcntl
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--once', action='store_true')
-    args = parser.parse_args()
+    parser.add_argument('--dry-run', action='store_true',
+                        help='run every phase but never write the Pi publication destination')
+    args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
     validate_config(config)
     root = Path(config['state_root'])
@@ -283,15 +560,18 @@ def main():
             clock = clock_state(chain)
             epoch = clock['epoch']
             if epoch >= config['start_epoch'] and not (root / str(epoch) / 'receipt.json').exists():
-                if admissible(clock, epoch, reserve=180):
-                    run_epoch(config, chain, clock)
+                if admissible(clock, epoch, reserve=START_MINIMUM_BLOCKS):
+                    run_epoch(config, chain, clock, dry_run=args.dry_run)
                 else:
                     directory = root / str(epoch)
                     directory.mkdir(exist_ok=True)
-                    atomic(directory / 'receipt.json', {'status': 'missed_start_window', 'epoch': epoch})
+                    atomic(directory / 'receipt.json',
+                           {'status': 'missed_start_window', 'epoch': epoch,
+                            'blocks_remaining': blocks_remaining(clock, epoch)})
             atomic(root / 'heartbeat.json', {'status': 'watching', **clock})
         except Exception as error:
             atomic(root / 'heartbeat.json', {'status': 'failed', 'error_type': type(error).__name__,
+                                             'error': sanitize(str(error)),
                                              'updated_at_unix': time.time()})
         if args.once:
             return 0
