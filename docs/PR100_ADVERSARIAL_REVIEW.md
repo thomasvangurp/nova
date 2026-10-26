@@ -227,3 +227,28 @@ All statements below distinguish measured evidence from future requirements.
 No design improvement or reviewer agreement qualifies unmeasured runtime
 behavior. R10, R12, R16, R20, R31 and publication cold-start enforcement remain
 open implementation/evidence gates; none was silently waived.
+
+
+### Additional execution evidence for round 5
+
+The fixed conditional-proposal v1 CPU pilot completed in 13.585 seconds:
+16 arm records, 13 runnable and three with unavailable reference strata; 3,328
+emissions, 2,764 globally distinct sequences, zero GPU calls and zero annotation
+errors. Each runnable arm emitted 256; 251–255 passed the requested sequence
+cell. Cross-arm repeats are explicit and must not become repeated NEW charges.
+No native developability, novelty, binding or full-validator claim follows.
+
+A live Pi check found consumer ea9677c4 and signer 4065f061 still installed;
+neither is the tested PR100 application. The consumer has no cutover hold.
+An initial hold-only local test caught that its old plan suppresses molecule-only
+submissions and its signer rejects a null sequence half. Nothing was installed.
+The proposed bounded hold therefore includes both pure-path repairs: allow the
+validator's molecule-only wire format, retain all existing strict molecule
+identifier/reaction checks, and return no nanobody allocations from 25955 until
+an explicitly qualified release replaces the hold. Pure functions from the
+actual installed files are retained as regression fixtures. No wallets, signing,
+chain calls or authentication implementation are included in those fixtures.
+This operational hold is separate from application promotion and must receive
+local CI and independent review before installation. Install signer support
+first, then the consumer hold, with source-hash preconditions and exact backups.
+The proposed change makes no assertion of a qualified PR100 mining strategy.
