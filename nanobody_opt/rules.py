@@ -268,7 +268,10 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
                 min_sequence_length=config["nanobody_requirements"]["min_sequence_length"],
                 max_sequence_length=config["nanobody_requirements"]["max_sequence_length"],
                 epoch_start_block_hash=block_hash, epoch_length=epoch_length)
-            if found != sequence or int(checkpoint["exact"]["observation_count"]) < 10:
+            # The checkpoint validator owns the evidence floor. In particular,
+            # schema-3 provisional entries permit a measured first observation;
+            # a second, unconditional ten-pass gate silently disabled that path.
+            if found != sequence:
                 continue
         except (ValueError, TypeError, KeyError, AttributeError):
             continue

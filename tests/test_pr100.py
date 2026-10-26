@@ -261,6 +261,18 @@ def test_pi_checks_spare_pool_evidence_and_actual_chain_hash():
     assert rules.verified_fleet(payload,EPOCH,HASH,361)['sequence_pool']==[]
 
 
+@pytest.mark.parametrize('count,expected', [(1, True), (0, False), (True, False)])
+def test_pi_uses_provisional_checkpoint_evidence_floor(count, expected):
+    cp = checkpoint()
+    cp.update(publication_stage='provisional', status='provisional')
+    cp['exact']['observation_count'] = count
+    cp['exact'].pop('pose_stability')
+    cp['selection'] = {'score': 12., 'score_p90': 12.}
+    payload = {'epoch': EPOCH, 'target': rules.TARGET, 'sequence_pool': [SEQ],
+               'submissions': [], 'sequence_pool_checkpoints': {SEQ: cp}}
+    assert bool(rules.verified_fleet(payload, EPOCH, HASH, 361)['sequence_pool']) is expected
+
+
 def test_pi_attestation_uses_rpc_hash_and_nondefault_epoch_length():
     spec=importlib.util.spec_from_file_location('_pr100_pi_attest',ROOT/'deploy/submit_host/pi_submit.py')
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
