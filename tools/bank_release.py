@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import sqlite3
 import sys
@@ -51,6 +52,7 @@ BASE = Path('/root/bank')
 VALIDATOR_EXACT_SCORER = "boltz-2.2.1-r3-s100-d1-ar5-as100-ad3-skip0-skipconf0"
 RELEASE_SCHEMA_VERSION = 1
 MINIMUM_ENTROPY = 0.25
+MOLECULE_CONFORMER_ACTIVATION = 25955
 
 
 # Mirrors compound_miner.fleet_contract.required_exact_pool_size. It is mirrored
@@ -159,33 +161,16 @@ def validator_helpers(tree: Path = VALIDATOR_TREE):
     """
     if not (tree / "neurons/validator/molecule_validity.py").is_file():
         return None
-    import sys
-    import types
-    if str(tree) not in sys.path:
-        sys.path.insert(0, str(tree))
-    for _ in range(12):
-        try:
-            from utils import (get_heavy_atom_count, contains_atom_type,
-                               is_boltz_safe_smiles)
-            break
-        except ModuleNotFoundError as missing:
-            if missing.name.startswith(("utils", "neurons")):
-                return None
-            parts = missing.name.split(".")
-            for depth in range(1, len(parts) + 1):
-                dotted = ".".join(parts[:depth])
-                if dotted not in sys.modules:
-                    stub = types.ModuleType(dotted)
-                    stub.__path__ = []
-                    stub.__getattr__ = lambda attr: type(attr, (), {})
-                    sys.modules[dotted] = stub
-    else:
-        return None
+    # Exact source extraction avoids an already-imported, stale `utils`
+    # package and does not execute that module's dotenv/application startup.
+    spec = importlib.util.spec_from_file_location('_bank_molecule_gate', Path(__file__).with_name('molecule_gate.py'))
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    helpers = gate.load_helpers(tree / 'utils/molecules.py')
     import yaml
     config = yaml.safe_load((tree / "config/config.yaml").read_text())
-    return dict(heavy=get_heavy_atom_count, banned=contains_atom_type,
-                boltz=is_boltz_safe_smiles,
-                requirements=config["molecule_requirements"])
+    helpers['requirements'] = config['molecule_requirements']
+    return helpers
 
 
 def refused_by_validator(smiles_list, fingerprints, helpers=None):
@@ -354,6 +339,16 @@ def main() -> int:
         '       c.affinity_probability_binary, c.affinity_pred_value '
         'FROM rescored r JOIN candidates c ON c.name = r.name '
         'WHERE c.reaction = ? ORDER BY r.mean_score DESC', (arguments.reaction,)))
+    helpers, gate_evidence = None, None
+    if arguments.epoch >= MOLECULE_CONFORMER_ACTIVATION:
+        try:
+            helpers = validator_helpers()
+            if helpers is None or 'molecule_gate_identity' not in helpers:
+                raise ValueError('bound molecule gate unavailable')
+        except Exception as error:
+            print(json.dumps(dict(event='molecule_gate_unavailable', error_class=type(error).__name__,
+                                  action='release_refused')), file=sys.stderr)
+            return 1
     # Drop what the validator would refuse BEFORE choosing, not after. At 25248
     # every one of our ten uids was skipped for a single molecule at 0.811, and
     # 44 of the 56 we sent were over the line.
@@ -372,7 +367,8 @@ def main() -> int:
                       file=sys.stderr)
                 return 1
         history = historical_fingerprints(archive, Path(str(archive) + '.fps'))
-        helpers = validator_helpers()
+        if helpers is None:
+            helpers = validator_helpers()
         if helpers is None:
             print(json.dumps(dict(event="validator_tree_absent",
                                   why="similarity only; the pre-flight is the "
@@ -390,6 +386,16 @@ def main() -> int:
                               all_gates=helpers is not None)),
               file=sys.stderr)
         rows = kept
+        if helpers is not None and 'molecule_gate_identity' in helpers:
+            gate_evidence = dict(identity=helpers['molecule_gate_identity'],
+                                 considered=len(rows)+len(flagged), accepted=len(rows))
+    elif arguments.epoch >= MOLECULE_CONFORMER_ACTIVATION:
+        # Offline/history opt-out does not disable current chemical validity.
+        considered = len(rows)
+        flagged = refused_by_validator([r[1] for r in rows], [], helpers)
+        rows = [row for index, row in enumerate(rows) if index not in flagged]
+        gate_evidence = dict(identity=helpers['molecule_gate_identity'], considered=considered,
+                             accepted=len(rows))
 
     wanted = required_pool_size(arguments.fleet, arguments.count, arguments.spares)
     if len(rows) < wanted:
@@ -443,6 +449,8 @@ def main() -> int:
         ),
         molecules=molecules,
     )
+    if gate_evidence is not None:
+        payload['release']['molecule_gate'] = gate_evidence
     out = Path(arguments.output.format(reaction=arguments.reaction))
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = out.with_suffix('.json.tmp')
