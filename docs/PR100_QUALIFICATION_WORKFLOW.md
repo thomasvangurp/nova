@@ -66,6 +66,38 @@ precheck when there are zero NEW candidates. Do not relabel repeated work NEW.
 
 ## Release decisions
 
+The full-production acceptance bars are fixed before the trials:
+
+- All 171 challenge combinations must have at least 13 distinct candidates
+  accepted by the actual pinned validator against the frozen current archive.
+  Report the minimum, every bucket count and probability-weighted expectation.
+  Sequence-only counts and a sampled acceptance-rate extrapolation do not
+  satisfy this bar. Replenishment must preserve it across the trial schedule.
+- The three normal trials must each complete 4,800 NEW evaluations from at
+  least 8,000 real proposals and produce 13 eligible entries before the existing
+  handoff cutoff. The remaining incident cases may abstain or complete less,
+  but may not publish invalid evidence, miscount work or block the next epoch.
+- Zero local false acceptances versus the pinned validator are allowed in the
+  differential population. Every false rejection must be either corrected or
+  explicitly justified as an intentional stricter completeness/provenance
+  requirement. Such stricter checks must have their capacity cost reported.
+- Selected fleets require the promotion contract's disjoint selection and
+  held-out observations. Compare policies on the same frozen new-target field
+  and compute budget; no old-target numerical baseline is substituted. A
+  performance improvement claim requires a predeclared analysis and a 95%
+  confidence interval supporting it. Inconclusive evidence is not improvement.
+- Every required failure case must meet the existing submission cutoffs,
+  preserve durable budget/observation state, and leave zero prior-epoch workers
+  able to publish or consume a new epoch's lease. Any unresolved failure blocks
+  promotion, regardless of aggregate score or CI test count.
+
+These bars are deliberately NOT met by the current evidence. Empty-bucket tests
+establish safe failure behavior only. Full application promotion is blocked
+until generation and measured throughput supply the volumes above. The legacy
+contract is not waived, and no cold-target exception is implied. A differently
+sized production policy would require an explicit revised acceptance contract,
+independent review and a new experiment; it cannot be smuggled into fixtures.
+
 Run shipping CI against committed bytes and qualify the complete deployed
 dependency closure. Test the actual Pi consumer with measured evidence and
 current fleet allocations, without committing on chain. Respect the real
@@ -97,3 +129,42 @@ into a pass. Stop for unresolved blockers rather than forcing agreement.
 - A small new-target GPU probe is running; no throughput conclusion yet.
 - Broad candidate coverage, real passing fixtures, sustained replenishment,
   complete native runtime installation and measured full handoff remain open.
+
+## Evidence attribution after review round 1
+
+The statements above describe the initial evidence set, not the current source
+revision. Keep the original results unchanged and append later measurements:
+
+| Evidence | Source identity | What it establishes | What it does not establish |
+| --- | --- | --- | --- |
+| 812 tests per package profile | `f6828b4420f72827bec16439d493fd392dd1cfd7` | That staged application's shipping checks | Later uncommitted edits or runtime acceptance |
+| Census of 389,509; 4,080 sequence-eligible | Annotation identity `23bce71f804fe3d4fe4c77b9b85b2d8f4a12f5bf2f92fe048fe4711534395720` and rules fingerprint recorded in the census receipt | Population under that annotation implementation | A changed annotation identity or full developability |
+| 14 real native profiles; zero PSH passes | Pinned filter plus native binary digests in the qualification receipt | Those 14 measured rejections | Whole-bank pass rate or positive fixture coverage |
+| 10 GPU observations in 748.704 seconds | Application `f6828b…`; registered scorer `0fccc5d6…` | Technical target/length/record compatibility for three lengths | Corrected scorer, replica independence across jobs, validator sampler equivalence, or epoch-scale throughput |
+| 850 tests per package profile | `e43f9687a85b8d76762b8f36d1534a471626ca9c` | Committed correction plus 23 exact-validator control-flow cases and bounded probe tests | Any later edits or a production GO |
+
+The oracle control-flow fixtures are explicitly synthetic. Recorded GPU metrics
+are now retained separately, with original-file digests and scorer provenance.
+Neither dataset contains a real validator-accepted positive population yet.
+
+## Open review gates
+
+Before production approval, execute and retain receipts for:
+
+1. Digest verification of all twelve upstream files, exact caller/config-loader
+   challenge parity, live activation confirmation and drift refusal.
+2. Real annotation, archive novelty and native developability differential tests,
+   including positive fixtures, all threshold boundaries and incomplete input.
+3. Annotation/cache identity freshness, native binary and model closure, loaded
+   daemon/scorer identity, immutable worker rollout and rollback.
+4. Real non-replicate multi-chunk scoring and replica jobs with non-overlapping
+   seed namespaces; retained structure hashes and all ten finite metrics.
+5. Crash/resume/rollback accounting, empty-bank cached comparison, stale proof
+   refusal, next-epoch isolation, deadline exhaustion and actual Pi handoff.
+6. A realistic capacity/replenishment sweep and the full-volume paired trials
+   required above. Evaluate the redesign alternatives in PR100_PIPELINE_DESIGN.md.
+
+The review ledger distinguishes confirmed defects, corrected-but-unqualified
+code, existing safeguards requiring integration evidence, and findings disproved
+by the exact upstream source. An assertion by either reviewer is not itself an
+oracle result. Approval of this workflow does not close its execution gates.

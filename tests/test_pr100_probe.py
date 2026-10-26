@@ -31,10 +31,12 @@ def test_probe_diagnostics_do_not_persist_backend_output():
     assert 'private backend detail' not in json.dumps(result)
 
 
+@pytest.mark.parametrize('replicates', [False, True])
 @pytest.mark.parametrize('fault', [None, 'wrong_target', 'nan_metric', 'missing_replica',
                                  'wrong_sample_count', 'corrupt_structure', 'escaped_structure'])
-def test_probe_rejects_bad_metric_or_structure_evidence(tmp_path, fault):
-    seq='EXAMPLE'; key=hashlib.sha256(seq.encode()).hexdigest()+'0'; target='Q9NZQ7'
+def test_probe_rejects_bad_metric_or_structure_evidence(tmp_path, fault, replicates):
+    seq='EXAMPLE'; key=(hashlib.sha256(seq.encode()).hexdigest()+'0') if replicates else seq
+    target='Q9NZQ7'
     p=tmp_path/'sample.cif';p.write_text('synthetic structure fixture')
     digest=hashlib.sha256(p.read_bytes()).hexdigest()
     record={'path':str(p), 'confidence_path':str(p), 'writer_path':str(p),
@@ -51,6 +53,6 @@ def test_probe_rejects_bad_metric_or_structure_evidence(tmp_path, fault):
     if fault=='escaped_structure': record['confidence_path']=str(tmp_path.parent/'unreadable.cif')
     output=tmp_path/'exact_all.json';output.write_text(json.dumps(data))
     if fault:
-        with pytest.raises(ValueError): validate_result(output,[seq],1,target,unpack)
+        with pytest.raises(ValueError): validate_result(output,[seq],1,target,unpack,replicates=replicates)
     else:
-        assert validate_result(output,[seq],1,target,unpack)['valid']
+        assert validate_result(output,[seq],1,target,unpack,replicates=replicates)['valid']

@@ -173,6 +173,15 @@ complete all 4,800 to prove full-budget behavior; interrupted cases may finish
 fewer, but the candidate may not reduce baseline completed NEW coverage.
 Previously evaluated IDs cannot consume that budget.
 
+PR100 cold-target transition: these numeric requirements remain in force.
+There is currently no cold-target waiver. A bank with fewer than 4,800 eligible
+NEW candidates for a normal trial cannot qualify a full application promotion;
+the rollout stays blocked until generation and measured throughput supply the
+required population. Empty-bank/abstention tests prove failure handling only.
+Do not invent candidates, observations or prior new-target epochs to fill this
+schema. Any smaller production policy needs a separately reviewed contract and
+measured experiment before it can replace these requirements.
+
 Each report supplies `revision`, `fixture_sha256`, `handoff_artifact_sha256`,
 and identically ordered `cases`. Each result contains `name`, `epoch`, `status`,
 `confirmation_health`, unique `dispatched_new_ids` and `completed_new_ids`,

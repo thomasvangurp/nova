@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -37,12 +38,24 @@ def bounded(command, env, timeout):
             'replicate_flag_unsupported': 'unrecognized arguments: --allow-replicates' in text}
 
 
-def validate_result(path, sequences, passes, target, unpack):
+def validate_result(path, sequences, passes, target, unpack, *, replicates=True):
     from nanobody_opt.score_boltzgen_waves import _validated_wave
-    expected = [hashlib.sha256(s.encode()).hexdigest()+str(i)
-                for i, s in enumerate(s for s in sequences for _ in range(passes))]
+    expected = ([hashlib.sha256(s.encode()).hexdigest()+str(i)
+                 for i, s in enumerate(s for s in sequences for _ in range(passes))]
+                if replicates else sequences)
     payload = _validated_wave(path, expected, target, require_structures=True)
-    records = unpack(payload['per_nanobody_components']['0'], sequences, passes, target)
+    if replicates:
+        records = unpack(payload['per_nanobody_components']['0'], sequences, passes, target)
+    else:
+        from nanobody_opt.simulate_round import METRICS
+        records = []
+        for sequence in sequences:
+            metrics = payload['per_nanobody_components']['0'][sequence][target]
+            if any(isinstance(metrics.get(k), bool) or
+                   not isinstance(metrics.get(k), (int, float)) or not math.isfinite(metrics[k])
+                   for k in METRICS):
+                raise ValueError('fresh result lacks finite metrics')
+            records.append((sequence, 1, {k: metrics[k] for k in METRICS}))
     for by_target in payload['structures'].values():
         record = by_target[target]
         for key in ['confidence', 'writer']:
@@ -62,15 +75,19 @@ def validate_result(path, sequences, passes, target, unpack):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release', required=True, type=Path)
+    parser.add_argument('--expected-sha', required=True)
     parser.add_argument('--input', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--settings', required=True, type=Path)
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--passes', type=int, default=2)
+    parser.add_argument('--mode', choices=['replicates', 'fresh'], default='replicates')
     parser.add_argument('--timeout', type=int, default=1800)
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9]+', args.gpu) or not 1 <= args.passes <= 20 or not 60 <= args.timeout <= 3600:
         parser.error('invalid bounded probe limits')
+    if args.mode == 'fresh' and args.passes != 1:
+        parser.error('fresh probes require exactly one pass')
     args.release = args.release.resolve()
     sys.path.insert(0, str(args.release))
     from scripts.release_manifest import verify
@@ -79,7 +96,7 @@ def main():
     import yaml
 
     manifest = json.loads((args.release/'build_stamp.json').read_text())
-    verify(args.release, manifest, expected_sha=manifest['git_sha'])
+    verify(args.release, manifest, expected_sha=args.expected_sha)
     settings = json.loads(args.settings.read_text())
     scorer = Path(settings['scorer'])
     scorer_hash = hashlib.sha256(scorer.read_bytes()).hexdigest()
@@ -103,19 +120,23 @@ def main():
     settings_path = args.output/'scorer_settings.json'
     settings_path.write_text(json.dumps(private_settings))
     env = {k: v for k, v in os.environ.items()
-           if k in ['PATH', 'HOME', 'USER', 'LANG', 'LD_LIBRARY_PATH', 'PYTHONPATH']}
+           if k in ['PATH', 'HOME', 'USER', 'LANG', 'LD_LIBRARY_PATH']}
     env.update(NANOBODY_SCORER_DAEMON='0',
                NANOBODY_SCORER_SOCKET=str(args.output/'unused.sock'),
                NANOBODY_FAST_SCORER_CONFIG=str(settings_path),
                HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+               PYTHONPATH=str(args.release),
                OMP_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2',
                CUDA_VISIBLE_DEVICES=args.gpu)
     started = time.monotonic()
     report = {'candidate_sha': manifest['git_sha'], 'registered_scorer_sha256': scorer_hash,
               'target': rules.TARGET, 'scope': 'technical_only_not_publication_qualified',
               'scoring_equivalence_qualified': False,
-              'submission_attempts': 0, 'observation_store_writes': 0,
-              'candidate_count': len(sequences), 'passes': args.passes, 'groups': [],
+              'publication_enabled': False, 'observation_ingestion_enabled': False,
+              'write_isolation_instrumented': False,
+              'child_environment': {k: env[k] for k in ['PYTHONPATH', 'CUDA_VISIBLE_DEVICES',
+                  'NANOBODY_SCORER_DAEMON', 'NANOBODY_SCORER_SOCKET', 'HF_HUB_OFFLINE']},
+              'candidate_count': len(sequences), 'passes': args.passes, 'mode': args.mode, 'groups': [],
               'status': 'running'}
     report_path = args.output/'report.json'
     for length in sorted({len(s) for s in sequences}):
@@ -126,10 +147,12 @@ def main():
         inp.write_text(json.dumps({'sequences': [{'sequence': s} for s in group for _ in range(args.passes)]}))
         command = [sys.executable, str(args.release/'nanobody_opt/score_boltzgen_fast_adapter.py'),
                    '--sequences', str(inp), '--config', str(config), '--target', rules.TARGET,
-                   '--gpus', args.gpu, '--shards-per-gpu', '1', '--batch-size', '2',
+                   '--gpus', args.gpu, '--shards-per-gpu', '1', '--batch-size', '1',
                    '--work-root', str(work/'work'), '--out', str(work/'exact_all.json'),
                    '--structure-dir', str(work/'structures'), '--require-structures',
-                   '--allow-replicates', '--settings', str(settings_path)]
+                   '--settings', str(settings_path)]
+        if args.mode == 'replicates':
+            command.append('--allow-replicates')
         remaining = args.timeout - (time.monotonic() - started)
         if remaining <= 0:
             report['status'] = 'timed_out'
@@ -139,7 +162,8 @@ def main():
         result.update(length=length, candidates=len(group), seconds=round(time.monotonic()-before, 3))
         if result['exit'] == 0:
             try:
-                result.update(validate_result(work/'exact_all.json', group, args.passes, rules.TARGET, unpack))
+                result.update(validate_result(work/'exact_all.json', group, args.passes, rules.TARGET,
+                                              unpack, replicates=args.mode == 'replicates'))
             except (OSError, ValueError, KeyError, TypeError) as error:
                 result.update(valid=False, validation_error=type(error).__name__)
         else:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import closing
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import json
@@ -39,7 +40,7 @@ def build(database, output, cache, *, workers=8, limit=None):
                                               settings['cdr3_length_range']['max'] + 1)}
     # Copy the read-only snapshot quickly, then release its transaction before
     # annotation. Never hold the producer's WAL snapshot for an annotation run.
-    with sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True) as connection:
+    with closing(sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)) as connection:
         connection.execute('PRAGMA query_only=ON')
         rows = connection.execute('SELECT DISTINCT sequence FROM nodes').fetchall()
     if limit:

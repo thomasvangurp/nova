@@ -54,12 +54,14 @@ def for_epoch(config, epoch):
     if int(epoch) < ACTIVATION_EPOCH and not is_pr100(config["nanobody_requirements"]):
         result.pop("nova_epoch_challenge", None)
         return result
+    if int(epoch) < ACTIVATION_EPOCH:
+        raise ValueError("PR100 rules observed before the announced activation epoch")
     selected = pinned_config(epoch)
     if int(epoch) >= ACTIVATION_EPOCH:
         if is_pr100(config["nanobody_requirements"]):
             if fingerprint(config) != fingerprint(selected):
                 raise ValueError("upstream nanobody rules differ from the qualified PR100 profile")
-        elif int(epoch) > ACTIVATION_EPOCH:
+        else:
             raise ValueError("upstream PR100 activation has not been confirmed")
     for key in ("nanobody_requirements", "germline_filtering"):
         if key in selected:

@@ -49,35 +49,54 @@ def test_epoch_transition_preserves_legacy_and_unrelated_compound_settings():
     old = rules.pinned_config(EPOCH-1)
     old['protein_selection']['small_molecule']['target'] = 'UNCHANGED'
     assert rules.for_epoch(old, EPOCH-1) == old
-    new = rules.for_epoch(old, EPOCH)
+    new = rules.pinned_config(EPOCH)
+    new['protein_selection']['small_molecule']['target'] = 'UNCHANGED'
+    new = rules.for_epoch(new, EPOCH)
     assert new['protein_selection']['small_molecule']['target'] == 'UNCHANGED'
     assert new['protein_selection']['nanobody']['target'] == rules.TARGET
-    assert rules.for_epoch(new, EPOCH-1)['protein_selection']['nanobody']['target'] == 'P20809'
-    with pytest.raises(ValueError, match='not been confirmed'):
-        rules.for_epoch(old, EPOCH+1)
+    with pytest.raises(ValueError, match='before the announced'):
+        rules.for_epoch(new, EPOCH-1)
+    for epoch in [EPOCH, EPOCH+1]:
+        with pytest.raises(ValueError, match='not been confirmed'):
+            rules.for_epoch(old, epoch)
     changed = copy.deepcopy(new)
     changed['nanobody_requirements']['min_human_v_identity'] += 1
     with pytest.raises(ValueError, match='differ'):
         rules.for_epoch(changed, EPOCH+1)
 
 
-def test_ten_thousand_hashes_match_the_pinned_validator_function():
+def test_ten_thousand_hashes_match_the_pinned_validator_function(monkeypatch):
     # Execute the actual upstream function, without importing its network stack.
-    tree = ast.parse((ROOT/'tests/fixtures/pr100/upstream_challenge.py').read_text())
+    oracle=ROOT/'tests/fixtures/pr100/validator'
+    manifest=json.loads((oracle/'manifest.json').read_text())
+    for name in ['utils/challenge.py','neurons/validator/validator.py','config/config_loader.py']:
+        assert hashlib.sha256((oracle/name).read_bytes()).hexdigest()==manifest['files'][name]
+    tree = ast.parse((oracle/'utils/challenge.py').read_text())
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                     and n.name == 'get_challenge_params_from_blockhash')
-    namespace = {'random': random}
+    # The unrelated reaction count does not consume rng; use an explicit
+    # stand-in for its database, while preserving the validator's call shape.
+    import sys,types
+    reaction_module=types.ModuleType('_oracle_reactions.reactions')
+    reaction_module.get_total_reactions=lambda: 100
+    monkeypatch.setitem(sys.modules,'_oracle_reactions.reactions',reaction_module)
+    namespace = {'random': random,'__package__':'_oracle_reactions'}
     exec(compile(ast.Module(body=[function], type_ignores=[]), '<pinned-upstream>', 'exec'), namespace)
     config = rules.pinned_config(EPOCH)
-    settings = config['germline_filtering']
-    flat = {'small_molecule_target': 'irrelevant', 'nanobody_target': rules.TARGET,
-            'random_valid_reaction': False,
-            'v_neighborhood_categories': settings['v_neighborhood_categories'],
-            'cdr3_length_range': range(5,24)}
+    spec=importlib.util.spec_from_file_location('_oracle_config',oracle/'config/config_loader.py')
+    loader=importlib.util.module_from_spec(spec);spec.loader.exec_module(loader)
+    flat=loader.load_config(str(oracle/'config/config.yaml'))
+    caller=ast.parse((oracle/'neurons/validator/validator.py').read_text())
+    calls=[n for n in ast.walk(caller) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
+           and n.func.id=='get_challenge_params_from_blockhash']
+    assert len(calls)==1 and {k.arg for k in calls[0].keywords}=={'config','block_hash'}
+    call=compile(ast.Expression(body=calls[0]),'<pinned-validator-call>','eval')
+    namespace['config']=flat
     pairs = set()
     for i in range(10000):
         block_hash = '0x'+hashlib.sha256(str(i).encode()).hexdigest()
-        official = namespace[function.name](flat, block_hash)
+        namespace['start_block_hash']=block_hash
+        official = eval(call,namespace)
         ours = rules.challenge(config, EPOCH, block_hash)
         for key in ('allowed_v','allowed_cdr3_length'):
             assert ours[key] == official[key]
@@ -106,10 +125,18 @@ def test_missing_failed_or_incompatible_measurement_cannot_pass(key,value):
         rules.validate_evidence(e,SEQ,e['challenge'],rules.pinned_config(EPOCH))
 
 
-def test_legacy_developability_cache_is_never_pr100_evidence(tmp_path):
-    (tmp_path/(rules.sequence_hash(SEQ)+'.json')).write_text(json.dumps({'sequence':SEQ,
+def test_legacy_developability_cache_is_never_pr100_evidence(tmp_path,monkeypatch):
+    path=tmp_path/'pr100/developability'/rules.FILTER_SHA/(rules.sequence_hash(SEQ)+'.json')
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'sequence_hash':rules.sequence_hash(SEQ),'filter_sha':rules.FILTER_SHA,
         'developability':{'passed':True,'flags':{'PSH':'green'}}}))
     assert pr100_filter.cached_result(SEQ,tmp_path) is None
+    measured=evidence()['developability']; calls=[]
+    async def calculate(sequences,concurrency):
+        calls.append(sequences);return [measured]
+    monkeypatch.setattr(pr100_filter,'develop',calculate)
+    assert pr100_filter.cached_develop([{'sequence':SEQ}],tmp_path,1)==[measured]
+    assert calls==[[SEQ]]
 
 
 def test_error_measurement_retried_instead_of_cached(tmp_path,monkeypatch):

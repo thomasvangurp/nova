@@ -136,3 +136,22 @@ def test_master_rejects_old_slave_target_after_boundary():
     assert any('target' in s for s in validate([row]))
     row['target'] = rules.TARGET
     assert validate([row]) == []
+def test_unpack_actual_registered_scorer_gpu_output():
+    """Recorded real folds, not a payload manufactured from unpack's key rule."""
+    import json
+    from pathlib import Path
+    from tools.slave_runtime.slave_multipass_writeback import unpack
+    fixture=json.loads((Path(__file__).parent/'fixtures/pr100/recorded_gpu_metrics.json').read_text())
+    assert fixture['kind']=='recorded_gpu_metrics_projection'
+    total=0
+    for group in fixture['groups']:
+        payload=group['payload']
+        records=unpack(payload['per_nanobody_components']['0'],group['sequences'],
+                       fixture['passes'],payload['target'])
+        assert len(records)==len(group['sequences'])*fixture['passes']
+        for sequence in group['sequences']:
+            rows=[(replica,metrics) for s,replica,metrics in records if s==sequence]
+            assert {r for r,_ in rows}=={1,2}
+            assert len({json.dumps(m,sort_keys=True) for _,m in rows})==2
+        total+=len(records)
+    assert total==10

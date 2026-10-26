@@ -2,8 +2,16 @@
   "revision": "ce19ea8cbe656671c3440ba58b4093ff80798d4f",
   "files": {
     "neurons/validator/nanobody_validity.py": "e70664a6f0962524394d623a991ae9679fee0e553d35aef6a1da5324663e23d4",
+    "neurons/validator/validator.py": "9cf1e38dada341418e69da3846e7509348bfca43eec5a24e9b1f2e6748cd3719",
+    "neurons/validator/commitments.py": "c8daed3d9ef2fd347045f7bd28ea16e00ab83f39932efa51363e5e72b4e57e80",
+    "neurons/validator/ranking.py": "df105bbeb8437b9741521e9474f7b0acacdbaa900b164eb9162f494fa54ca273",
     "config/config.yaml": "b649659d00e75cd5c853c0480e2598e1dd9d4274b0639edf6ec4e1b02738f653",
+    "config/config_loader.py": "a1e0931f12a709d72dffa6fd1ebdde377c34195fea1e3b379d4e20fad4f5a594",
+    "utils/challenge.py": "22227864156ad4a8aeddb1d03411c97d3335a0e6ac8e29b2340aafb8c868bdf8",
+    "utils/filters.py": "d577fbe5c5200a567b593fe24037b477e8a541e965536adfb66b2ac8ec9ebfa0",
+    "utils/germline_identity.py": "df7b4a9811ca78d1898bf6ef4f1d93920354300616cf5168c75ebea93ec2aea0",
     "utils/aggrescan3d.py": "ecd3f23a1238b2262777cc1cd28bbcce260c9d52a83c215711641b329d36430e",
-    "utils/nanobodies.py": "4315ba7cb631f68717dc00fa7690ca3cf44621fa15d256c11913fbcff58e03ab"
+    "utils/nanobodies.py": "4315ba7cb631f68717dc00fa7690ca3cf44621fa15d256c11913fbcff58e03ab",
+    "utils/proteins.py": "e349403fc5d5efd87c140950ec86c95d1bbdbf1f27078da0bab1dd39eef33d98"
   }
 }

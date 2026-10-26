@@ -1,0 +1,207 @@
+{
+  "kind": "recorded_gpu_metrics_projection",
+  "production_qualified": false,
+  "captured_at": "2026-10-26T13:06:31.517398+00:00",
+  "candidate_sha": "f6828b4420f72827bec16439d493fd392dd1cfd7",
+  "scorer_sha256": "0fccc5d630ef2ea98aad456e76ee65170383a6302f7eb92ac636565d2bfd98ef",
+  "source_host_role": "slave",
+  "passes": 2,
+  "groups": [
+    {
+      "length": 116,
+      "sequences": [
+        "EVQLVESGGGLVQPGGSLRLSCAASGFTFSFYTMSWFRQAPGKEREFVAAISSGGHSYYADSVKGRFTISRDNSKNTVYLQMNSLRAEDTAVYYCVAFYDINYDYWGQGTLVTVSS"
+      ],
+      "source_sha256": "02e566436d5db63d57595f279f91a268f0ccb0bd3b83114bbe62dd6a1cb99ff3",
+      "payload": {
+        "target": "Q9NZQ7",
+        "n": 2,
+        "scorer_protocol": "validator-dual-sample-v1",
+        "observation_id": "7406ed5655fb4660821498dba4f019b9",
+        "predict_batch_size": 1,
+        "per_nanobody_components": {
+          "0": {
+            "d983102f7b80321dabae7fd9c1902abe63e535a527725eda334b74ac591181830": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.24391,
+                "design_ptm": 0.76623,
+                "design_to_target_iptm": 0.21224,
+                "min_design_to_target_pae": 13.55046,
+                "interaction_pae": 21.08726,
+                "plip_hbonds_refolded": 8.0,
+                "plip_saltbridge_refolded": 3.0,
+                "delta_sasa_refolded": 1127.2959,
+                "liability_score": 160.0,
+                "liability_num_violations": 18.0
+              }
+            },
+            "d983102f7b80321dabae7fd9c1902abe63e535a527725eda334b74ac591181831": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.216,
+                "design_ptm": 0.76758,
+                "design_to_target_iptm": 0.1976,
+                "min_design_to_target_pae": 14.60765,
+                "interaction_pae": 21.35766,
+                "plip_hbonds_refolded": 3.0,
+                "plip_saltbridge_refolded": 0.0,
+                "delta_sasa_refolded": 754.71094,
+                "liability_score": 160.0,
+                "liability_num_violations": 18.0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "length": 123,
+      "sequences": [
+        "EVQLVESGGGLVQPGGSLRLSCAASGFTVSNYGWGWFRQAPGKEREGVAVISPDGGSTYYADSVKGRFTISRDNCKNTLYLQMNSLRAEDTAVYYCAVARGLGSFDERYFDYWGQGTQVTVSS",
+        "EVQLVESGGGLVIPGGSLRLSCAASGFTVSNYGWGWFRQAPGKEREGVAVISPDGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAVARGLGSFDERYFDYWGQGTQVTVSS"
+      ],
+      "source_sha256": "19df1165d9e0151f6e847be8e37903a9226eb75471c26fbc0aea8b3b4e8462a1",
+      "payload": {
+        "target": "Q9NZQ7",
+        "n": 4,
+        "scorer_protocol": "validator-dual-sample-v1",
+        "observation_id": "27e3e9a177af44d7b6fe1ecdcba94aaf",
+        "predict_batch_size": 1,
+        "per_nanobody_components": {
+          "0": {
+            "00006882092498fbe48ab4dfa5b8b6a1b4cfffff11628d9a7f50c36ea8b9f2e70": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.18446,
+                "design_ptm": 0.74406,
+                "design_to_target_iptm": 0.18446,
+                "min_design_to_target_pae": 13.03016,
+                "interaction_pae": 21.26089,
+                "plip_hbonds_refolded": 3.0,
+                "plip_saltbridge_refolded": 4.0,
+                "delta_sasa_refolded": 694.9834,
+                "liability_score": 215.0,
+                "liability_num_violations": 23.0
+              }
+            },
+            "00006882092498fbe48ab4dfa5b8b6a1b4cfffff11628d9a7f50c36ea8b9f2e71": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.22271,
+                "design_ptm": 0.73887,
+                "design_to_target_iptm": 0.20144,
+                "min_design_to_target_pae": 12.6004,
+                "interaction_pae": 20.70754,
+                "plip_hbonds_refolded": 4.0,
+                "plip_saltbridge_refolded": 2.0,
+                "delta_sasa_refolded": 682.26074,
+                "liability_score": 215.0,
+                "liability_num_violations": 23.0
+              }
+            },
+            "0015460c3f525909a4629a0a8e5879b956dbd50dc60f56d988bbd7f52cd8f75f2": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.20806,
+                "design_ptm": 0.7453,
+                "design_to_target_iptm": 0.19981,
+                "min_design_to_target_pae": 12.91642,
+                "interaction_pae": 20.91129,
+                "plip_hbonds_refolded": 2.0,
+                "plip_saltbridge_refolded": 1.0,
+                "delta_sasa_refolded": 682.14062,
+                "liability_score": 200.0,
+                "liability_num_violations": 22.0
+              }
+            },
+            "0015460c3f525909a4629a0a8e5879b956dbd50dc60f56d988bbd7f52cd8f75f3": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.19543,
+                "design_ptm": 0.7457,
+                "design_to_target_iptm": 0.19161,
+                "min_design_to_target_pae": 12.97511,
+                "interaction_pae": 21.20186,
+                "plip_hbonds_refolded": 4.0,
+                "plip_saltbridge_refolded": 2.0,
+                "delta_sasa_refolded": 640.88672,
+                "liability_score": 200.0,
+                "liability_num_violations": 22.0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "length": 125,
+      "sequences": [
+        "EVQLVESGGGLVQPGGSLRLSCAASGFTFTNYNLGWFRQAPGKEREFVAAISSSDGSTYYADSIKGRFTISRDNSKNTVYLQMNSLRAEDTAVYYCATGRAGWSGLKYESYFDYWGQGTQVTVSS",
+        "EVQLVESGGGLVQPGGSLRLSCAASYFTFTNYNLGWFRQAPGKEREFVAAISSSDGSTYYADSVKGRFTISRDNSKNTVYLQMNSLRAEDTAVYYCATGRAGWSGLKYESYFDYWGQGTQVTVSS"
+      ],
+      "source_sha256": "a43a8f3c38992292eb518c2ee5ed07b8e5c25477334c9f483783186d59856311",
+      "payload": {
+        "target": "Q9NZQ7",
+        "n": 4,
+        "scorer_protocol": "validator-dual-sample-v1",
+        "observation_id": "2edcd30fc8204d52ad7b9fef962cefde",
+        "predict_batch_size": 1,
+        "per_nanobody_components": {
+          "0": {
+            "002da8b525e9c8a490ad88a2a1c5033629a8ae5c3125967a945e4944ddd539c50": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.22425,
+                "design_ptm": 0.73499,
+                "design_to_target_iptm": 0.17884,
+                "min_design_to_target_pae": 14.42668,
+                "interaction_pae": 21.52932,
+                "plip_hbonds_refolded": 2.0,
+                "plip_saltbridge_refolded": 1.0,
+                "delta_sasa_refolded": 539.35938,
+                "liability_score": 195.0,
+                "liability_num_violations": 21.0
+              }
+            },
+            "002da8b525e9c8a490ad88a2a1c5033629a8ae5c3125967a945e4944ddd539c51": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.20389,
+                "design_ptm": 0.73111,
+                "design_to_target_iptm": 0.17962,
+                "min_design_to_target_pae": 14.35861,
+                "interaction_pae": 21.57321,
+                "plip_hbonds_refolded": 5.0,
+                "plip_saltbridge_refolded": 2.0,
+                "delta_sasa_refolded": 712.75293,
+                "liability_score": 195.0,
+                "liability_num_violations": 21.0
+              }
+            },
+            "0050c08ac7d480ab37f40cdfc07a1632cc0be5defe109aec3fb039bd7a2da58c2": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.17345,
+                "design_ptm": 0.7234,
+                "design_to_target_iptm": 0.17006,
+                "min_design_to_target_pae": 15.44697,
+                "interaction_pae": 22.33789,
+                "plip_hbonds_refolded": 1.0,
+                "plip_saltbridge_refolded": 2.0,
+                "delta_sasa_refolded": 552.37842,
+                "liability_score": 195.0,
+                "liability_num_violations": 21.0
+              }
+            },
+            "0050c08ac7d480ab37f40cdfc07a1632cc0be5defe109aec3fb039bd7a2da58c3": {
+              "Q9NZQ7": {
+                "design_iiptm": 0.17533,
+                "design_ptm": 0.72076,
+                "design_to_target_iptm": 0.17533,
+                "min_design_to_target_pae": 15.279,
+                "interaction_pae": 22.38361,
+                "plip_hbonds_refolded": 4.0,
+                "plip_saltbridge_refolded": 2.0,
+                "delta_sasa_refolded": 482.55469,
+                "liability_score": 195.0,
+                "liability_num_violations": 21.0
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
