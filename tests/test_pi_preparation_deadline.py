@@ -51,3 +51,11 @@ def test_local_integration_and_required_ci():
     assert len(calls)==2
     assert all(ast.unparse(n.func)=='run_preparation' and any(k.arg=='cutoff_at' for k in n.keywords) for n in calls)
     assert 'tests/test_pi_preparation_deadline.py' in (ROOT/'scripts/shipping_checks.py').read_text()
+
+
+def test_patcher_refuses_unreviewed_helper(monkeypatch,tmp_path):
+    (tmp_path/'tools').mkdir()
+    (tmp_path/'tools/pi_epoch_loop.py').write_text('def run_preparation(*a, **kw):\n    return None\n')
+    monkeypatch.setattr(patcher,'ROOT',tmp_path)
+    with pytest.raises(ValueError,match='reviewed preparation helper changed'):
+        patcher.helper_source()

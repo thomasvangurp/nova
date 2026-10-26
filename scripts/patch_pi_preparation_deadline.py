@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PI_LOOP_SHA256 = '4294746ad30644ecd872d4f2a6c3fec86e8415864ee7ca6bb853abb7e90486d0'
+HELPER_SHA256 = 'acfd2cbde0f01a5e49062dad3612284b373179a2a3badb5a0b3f29aa007b6146'
 HANDLE_SHA256 = 'f66058039f928542f8b3f1e27de207eb6dbbccf6a6d527b8dc6454cfd35486e4'
 CALL_SHA256 = (
     '4c88c6eca2eeea427631ddf3472dc4b30734c18209a1d740021f7960b60ab790',
@@ -24,7 +25,10 @@ def helper_source():
     nodes = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'run_preparation']
     if len(nodes) != 1:
         raise ValueError('preparation helper missing or ambiguous')
-    return ast.get_source_segment(source, nodes[0]).encode()
+    result = ast.get_source_segment(source, nodes[0]).encode()
+    if hashlib.sha256(result).hexdigest() != HELPER_SHA256:
+        raise ValueError('reviewed preparation helper changed')
+    return result
 
 
 def span(source, node):
