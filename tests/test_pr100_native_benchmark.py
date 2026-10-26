@@ -21,7 +21,8 @@ def profile():
                 surface_hydrophobic_patches=88.0, positive_charge_patches=.2,
                 negative_charge_patches=.3, aggrescan3d=dict(
                     status='ok', passed=True, a3d_average=-.8, a3d_maximum=1.2,
-                    residue_count=120, input_structure_sha256='a'*64,
+                    a3d_minimum=-1.0, a3d_total=-96.0, a3d_positive_auc=2.0,
+                    residue_count=120, positive_residue_count=10, input_structure_sha256='a'*64,
                     normalized_structure_sha256='b'*64, sequence_hash='c'*64,
                     ph_scale='default-scale', surface_method='FreeSASA-2.0.1-NACCESS-LR100',
                     mode='static-no-minimization', radius_angstrom=10))
@@ -56,6 +57,7 @@ def test_missing_failed_and_repeated_observations_cannot_look_like_parity():
     report = compare_results(p, [{'sequence_hash': key, 'mode': 'warm', 'status': 'failed'}])
     assert report['missing'] == 71 and report['complete_pairs'] == 0
     assert report['failure_counts'] == {'failed': 1}
+    assert report['decision'] == 'NO_GO_INCOMPLETE'
     assert not report['qualification'] and not report['native_equivalence_claim']
     with pytest.raises(ValueError, match='repeated'):
         compare_results(p, [{'sequence_hash': key, 'mode': 'warm', 'status': 'failed'}]*2)
@@ -73,6 +75,27 @@ def test_cli_noise_does_not_hide_warm_gate_flip_or_numeric_delta():
     assert report['gate_flips'] == 2  # includes both CLI repeat and warm-vs-CLI
     assert report['pairs'][1]['numeric_deltas']['surface_hydrophobic_patches'] == .5
     assert report['complete_pairs'] == 3 and report['missing'] == 69
+
+
+def test_complete_execution_has_an_explicit_parity_and_cost_verdict():
+    p = population()
+    rows = [dict(sequence_hash=r['sequence_hash'], mode=mode, status='ok', profile=profile(),
+                 eligible=True, reason='passed', wall_seconds=8 if mode == 'warm' else 10,
+                 cpu_seconds=8) for r in p['records'] for mode in MODES]
+    good = compare_results(p, rows)
+    assert good['decision'] == 'GO_TO_LARGER_EXPERIMENT_ONLY'
+    assert not good['qualification'] and not good['native_equivalence_claim']
+    rows[0]['eligible'] = False
+    assert compare_results(p, rows)['decision'] == 'NO_GO_PARITY'
+    rows[0]['eligible'] = True
+    rows[0]['profile']['aggrescan3d']['a3d_total'] = -96.1
+    assert compare_results(p, rows)['decision'] == 'NO_GO_PARITY'
+    rows[0]['profile']['aggrescan3d']['a3d_total'] = -96.0
+    for r in rows:
+        r['wall_seconds'] = 10
+    assert compare_results(p, rows)['decision'] == 'NO_GO_PERFORMANCE'
+    rows[0].update(status='failed')
+    assert compare_results(p, rows)['decision'] == 'NO_GO_INCOMPLETE'
 
 
 def test_safe_profile_drops_backend_text_and_rejects_nonfinite_or_wrong_provenance():

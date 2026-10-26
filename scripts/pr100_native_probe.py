@@ -117,6 +117,9 @@ def safe_profile(profile):
             raise ValueError('native provenance changed')
         result['aggrescan3d'][key] = expected
     result['aggrescan3d'].update(status='ok', passed=a3d['passed'], radius_angstrom=a3d['radius_angstrom'])
+    if type(a3d['passed']) is not bool or a3d['radius_angstrom'] != 10:
+        raise ValueError('invalid native decision provenance')
+    result['aggrescan3d']['citation_doi'] = '10.1093/nar/gkv359'
     return result
 
 
@@ -367,6 +370,8 @@ def run(population, sequences, runtime, output):
                   allocated_cpu_seconds=8 * elapsed)
     if remaining or elapsed > limits['wall_seconds']:
         report['status'] = 'containment_or_wall_cap_failure'
+    if report['status'] != 'complete' or report.get('runtime_unchanged') is not True:
+        report['decision'] = 'NO_GO_EXECUTION'
     (output / 'report.json').write_text(json.dumps(report, indent=2, allow_nan=False))
     return report
 
@@ -389,9 +394,9 @@ def main():
         runtime = json.loads(args.runtime.read_text())
         sequences = validate_inputs(population, rows)
         report = run(population, sequences, runtime, args.output.resolve())
-        print(json.dumps({k: report[k] for k in ('status', 'received', 'missing', 'gate_flips',
+        print(json.dumps({k: report[k] for k in ('status', 'decision', 'received', 'missing', 'gate_flips',
                          'elapsed_seconds', 'actual_cpu_seconds', 'remaining_descendants')}))
-        return 0 if report['status'] == 'complete' and not report['missing'] else 1
+        return 0 if report['decision'] == 'GO_TO_LARGER_EXPERIMENT_ONLY' else 1
     except Exception as error:
         print(json.dumps({'status': 'failed_preflight', 'error_class': type(error).__name__}))
         return 1

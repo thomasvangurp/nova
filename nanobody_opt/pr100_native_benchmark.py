@@ -15,7 +15,8 @@ MODES = ('cli_a', 'cli_b', 'warm')
 FIELDS = ('total_cdr_length', 'cdr3_length', 'cdr3_compactness',
           'surface_hydrophobic_patches', 'positive_charge_patches',
           'negative_charge_patches')
-A3D_FIELDS = ('a3d_average', 'a3d_maximum', 'residue_count')
+A3D_FIELDS = ('a3d_average', 'a3d_maximum', 'a3d_minimum', 'a3d_total',
+              'a3d_positive_auc', 'residue_count', 'positive_residue_count')
 REASONS = ('passed', 'psh_threshold', 'developability_red_flags',
            'aggrescan_unavailable_or_failed')
 
@@ -131,5 +132,29 @@ def compare_results(manifest, records):
             report['pairs'].append(pair)
     report['complete_pairs'] = sum(p['complete'] for p in report['pairs'])
     report['gate_flips'] = sum(p.get('gate_flip', False) for p in report['pairs'])
+    complete = (len(found) == len(expected) and all(r['status'] == 'ok' for r in records)
+                and report['complete_pairs'] == 3 * len(manifest['records']))
+    parity = (complete and not report['gate_flips'] and
+              all(p['normalized_structure_equal'] and all(v == 0 for v in p['numeric_deltas'].values())
+                  for p in report['pairs']))
+    report['complete_data'] = complete
+    report['stress_set_parity'] = parity
+    report['decision'] = 'NO_GO_INCOMPLETE' if not complete else 'NO_GO_PARITY'
+    if complete:
+        times = {}
+        for metric in ('wall_seconds', 'cpu_seconds'):
+            if any(not isinstance(r[metric], (int, float)) or isinstance(r[metric], bool)
+                   or not math.isfinite(r[metric]) or r[metric] <= 0 for r in records):
+                raise ValueError('invalid measured timing')
+            cli = sum(r[metric] for r in records if r['mode'] != 'warm') / 2
+            warm = sum(r[metric] for r in records if r['mode'] == 'warm')
+            times[metric + '_warm_to_cli_ratio'] = warm / cli
+        report.update(times)
+        report['speed_continuation_passed'] = times['wall_seconds_warm_to_cli_ratio'] <= .90
+        report['cpu_continuation_passed'] = times['cpu_seconds_warm_to_cli_ratio'] <= 1.05
+        if parity:
+            report['decision'] = ('GO_TO_LARGER_EXPERIMENT_ONLY'
+                if report['speed_continuation_passed'] and report['cpu_continuation_passed']
+                else 'NO_GO_PERFORMANCE')
     # Even zero flips in this small enriched set cannot qualify a new runtime.
     return report
