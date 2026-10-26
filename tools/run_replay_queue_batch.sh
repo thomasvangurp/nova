@@ -21,6 +21,9 @@ if [ "$rc" -eq 4 ]; then echo "RUN_REPLAY_QUEUE_EMPTY"; exit 4; fi
 [ "$rc" -eq 0 ] || { echo "RUN_REPLAY_QUEUE_FAILED: build rc=$rc" >&2; exit "$rc"; }
 
 BATCH_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['batch_id'])" "$LOCAL_BATCH")
+EPOCH=$(python3 -c "import json,sys; print(int(json.load(open(sys.argv[1]))['epoch']))" "$LOCAL_BATCH")
+CONTEXT="$WORK/context_$BATCH_ID"
+$PY /root/tools/replay_context.py "$EPOCH" --output "$CONTEXT"
 REMOTE_BATCH="/root/replay_queue_in/${BATCH_ID}.json"
 REMOTE_OUT="/root/replay_queue_out/${BATCH_ID}.ndjson"
 LOCAL_OUT="$WORK/incoming/${BATCH_ID}.ndjson"
@@ -28,12 +31,14 @@ LOCAL_OUT="$WORK/incoming/${BATCH_ID}.ndjson"
 echo "[1/4] shipping batch $BATCH_ID"
 ssh "${SSH_OPTS[@]}" -p "$SLAVE_PORT" "$SLAVE_HOST" "mkdir -p /root/replay_queue_in /root/replay_queue_out"
 scp -q -P "$SLAVE_PORT" -o StrictHostKeyChecking=accept-new "$LOCAL_BATCH" "${SLAVE_HOST}:${REMOTE_BATCH}"
+scp -q -P "$SLAVE_PORT" -o StrictHostKeyChecking=accept-new "$CONTEXT/config.yaml" "${SLAVE_HOST}:${REMOTE_BATCH}.yaml"
+scp -q -P "$SLAVE_PORT" -o StrictHostKeyChecking=accept-new "$CONTEXT/field.json" "${SLAVE_HOST}:${REMOTE_BATCH}.field.json"
 
 echo "[2/4] scoring on slave (GPU lock shared with the rival replay)"
 START=$(date +%s)
 flock -w 14400 /root/artifacts/slave_gpu.lock timeout 3h \
   ssh "${SSH_OPTS[@]}" -p "$SLAVE_PORT" "$SLAVE_HOST" \
-  "/root/release_python_slave.sh /root/replay_queue_writeback.py --batch '$REMOTE_BATCH' --gpus 0,1,2,3 --out '$REMOTE_OUT'"
+  "/root/release_python_slave.sh /root/tools/slave_runtime/replay_queue_writeback.py --batch '$REMOTE_BATCH' --config '${REMOTE_BATCH}.yaml' --field-json '${REMOTE_BATCH}.field.json' --gpus 0,1,2,3 --out '$REMOTE_OUT'"
 echo "REPLAY_QUEUE_SCORING_SECONDS=$(( $(date +%s) - START ))"
 
 echo "[3/4] pulling NDJSON"

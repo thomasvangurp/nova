@@ -33,6 +33,8 @@ def evidence(sequence=SEQ, block_hash=HASH):
                      'V': {'identity_pct': 82., 'genes': ['OTHER', challenge['allowed_v']]},
                      'J': {'identity_pct': 86.}}}
     develop = {'passed': True, 'red_flags': [], 'surface_hydrophobic_patches': 89.,
+        'total_cdr_length': 30, 'cdr3_length': 16, 'cdr3_compactness': 1.,
+        'positive_charge_patches': .5, 'negative_charge_patches': .5,
         'aggrescan3d': {'status': 'ok', 'passed': True, 'sequence_hash': rules.sequence_hash(sequence),
             'a3d_average': str(rules.MAX_AVERAGE), 'a3d_maximum': str(rules.MAX_PEAK),
             'residue_count': len(sequence), 'input_structure_sha256': '3'*64,
@@ -229,3 +231,21 @@ def test_preparation_never_guesses_a_future_block_hash(tmp_path):
     args=SimpleNamespace(runtime_root=tmp_path)
     assert prepare(args,{'epoch':EPOCH-1},EPOCH,'live')==path
     assert not (tmp_path/f'live/epoch{EPOCH}/producer/epoch_candidate_pool.json').exists()
+
+
+@pytest.mark.parametrize('key',['total_cdr_length','cdr3_compactness','positive_charge_patches'])
+def test_pass_flag_cannot_replace_missing_developability_measurements(key):
+    e=evidence();e['developability'].pop(key)
+    with pytest.raises(ValueError,match='developability_unavailable'):
+        rules.validate_evidence(e,SEQ,e['challenge'],rules.pinned_config(EPOCH))
+
+
+def test_new_target_structure_is_packaged_exactly():
+    assert hashlib.sha256((ROOT/'data/structures/8AOK.cif').read_bytes()).hexdigest()==(
+        'b0633f8925379a9c73b20478b88c7f0a4c81e3f5359b553cb19b4a7ae55a62f9')
+    manifest=ROOT/'build_stamp.json'
+    if manifest.is_file():
+        package=json.loads(manifest.read_text())
+        assert package['submodules']['NOVA-nanobody-filter']==rules.FILTER_SHA
+        assert 'data/structures/8AOK.cif' in package['runtime_files']
+        assert 'NOVA-nanobody-filter/metanano/filters/aggrescan3d.py' in package['runtime_files']

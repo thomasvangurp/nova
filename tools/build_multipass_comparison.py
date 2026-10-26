@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from tools.rescale_multipass_history import rescale_epoch
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
 
 LOCAL_DB = Path("/root/artifacts/nanobody_mutations.sqlite")
 DEFAULT_OUT = Path("/root/artifacts/multipass_comparison.json")
@@ -76,12 +77,17 @@ def build(out_path: Path, *, lo: int | None, hi: int | None, recent: int = 0) ->
             existing = {}
     # An incremental refresh must never discard older measured epochs.
     result: dict = dict(existing)
+    for key, prior in list(result.items()):
+        if (str(key).isdigit() and int(key) >= ACTIVATION_EPOCH
+                and prior.get("method", {}).get("target") != target_for_epoch(int(key))):
+            result.pop(key)
     ok, skipped = 0, 0
     for epoch in range(hi, lo - 1, -1):
         entry = rescale_epoch(epoch)
         if entry is None:
             prior = existing.get(str(epoch), {})
-            if prior.get("method", {}).get("coverage_policy") == "complete_fleet_minimum_10_passes":
+            if (prior.get("method", {}).get("coverage_policy") == "complete_fleet_minimum_10_passes"
+                    and (epoch < ACTIVATION_EPOCH or prior.get("method", {}).get("target") == target_for_epoch(epoch))):
                 result[str(epoch)] = prior
             skipped += 1
             continue
@@ -90,6 +96,7 @@ def build(out_path: Path, *, lo: int | None, hi: int | None, recent: int = 0) ->
         # Publish progress before the next epoch's network/database work.
         # A killed or timed-out older epoch cannot lose today's completed work.
         _save(out_path, result)
+    _save(out_path, result)
     print(f"BUILD_DONE epochs={lo}-{hi} ok={ok} skipped_kept_prior={skipped} "
           f"out={out_path}", flush=True)
     return result

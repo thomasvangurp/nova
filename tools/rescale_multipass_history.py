@@ -41,6 +41,8 @@ import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
+from nanobody_opt.rules import target_for_epoch
+
 API = "https://compound-api.metanova-labs.ai"
 TARGET = "P20809"
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
@@ -94,7 +96,7 @@ def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
     for submission in data:
         coldkey = str(submission.get("coldkey") or "")
         for nb in submission.get("nanobodies") or []:
-            if nb.get("protein_name") != TARGET:
+            if nb.get("protein_name") != target_for_epoch(epoch):
                 continue
             seq = str(nb.get("sequence") or "").strip().upper()
             if seq and (coldkey, seq) not in seen:
@@ -110,6 +112,7 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
     rival, since we never run a rival's sequence through our own race)."""
     import sqlite3
 
+    target = target_for_epoch(epoch)
     conn = sqlite3.connect(f"file:{LOCAL_DB}?mode=ro", uri=True, timeout=30)
     base = (
         "SELECT n.sequence, o.observation_id, o.metrics_json "
@@ -120,7 +123,7 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
     )
     try:
         if sequences is None:
-            rows = conn.execute(base + " AND o.epoch = ?", (TARGET, epoch)).fetchall()
+            rows = conn.execute(base + " AND o.epoch = ?", (target, epoch)).fetchall()
         else:
             # Every canonical raw fold belongs to (sequence, target). Reuse
             # stored passes across epochs regardless of which replay writer
@@ -132,7 +135,7 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
                 rows += conn.execute(
                     base + f" AND n.sequence IN ({','.join('?' * len(chunk))}) "
                     "ORDER BY o.observation_id",
-                    (TARGET, *chunk),
+                    (target, *chunk),
                 ).fetchall()
     finally:
         conn.close()
@@ -149,7 +152,7 @@ def multipass_sum10_metrics(epoch: int, sequences: set[str] | None = None
     return out
 
 
-def our_race_metrics(sequences: set[str]) -> dict[str, dict[str, float]]:
+def our_race_metrics(sequences: set[str], target: str = TARGET) -> dict[str, dict[str, float]]:
     """{"<sequence>::<observation_id>": metrics} for OUR OWN sequences from
     the race's own exact-scoring history (OUR_RAW_SOURCES) -- the same data
     local_passes_for_ours() already reuses, no epoch filter: a fold is a
@@ -172,7 +175,7 @@ def our_race_metrics(sequences: set[str]) -> dict[str, dict[str, float]]:
             f"  AND o.source IN ({source_placeholders}) "
             f"  AND o.metrics_json IS NOT NULL AND o.metrics_json != '' "
             f"ORDER BY o.observation_id",
-            (TARGET, *sequences, *OUR_RAW_SOURCES),
+            (target, *sequences, *OUR_RAW_SOURCES),
         ).fetchall()
     finally:
         conn.close()
@@ -216,7 +219,7 @@ def validator_api_metrics(epoch: int, sequences: set[str]
             f"  AND o.source = 'public_validator_api' "
             f"  AND o.metrics_json IS NOT NULL AND o.metrics_json != '' "
             f"ORDER BY ABS(o.epoch - ?)",
-            (TARGET, *sequences, epoch),
+            (target_for_epoch(epoch), *sequences, epoch),
         ).fetchall()
     finally:
         conn.close()
@@ -264,7 +267,7 @@ def rescale_epoch(epoch: int) -> dict | None:
     } & our_seqs
     missing_our_seqs = our_seqs - covered_our_seqs
     if missing_our_seqs:
-        pass_metrics.update(our_race_metrics(missing_our_seqs))
+        pass_metrics.update(our_race_metrics(missing_our_seqs, target_for_epoch(epoch)))
 
     # A single validator draw is not a multipass mean. Keep missing
     # evidence explicit rather than silently changing measurement regimes.
@@ -277,7 +280,7 @@ def rescale_epoch(epoch: int) -> dict | None:
                     if key.rsplit("::", 1)[0] in qualified}
 
     fields = fetch_recent_fields_from_db(
-        LOCAL_DB, target=TARGET, before_epoch=epoch, count=FIELD_EPOCHS)
+        LOCAL_DB, target=target_for_epoch(epoch), before_epoch=epoch, count=FIELD_EPOCHS)
     if not fields:
         return None
     pooled = pool_recent_fields(fields)
@@ -296,6 +299,7 @@ def rescale_epoch(epoch: int) -> dict | None:
         "rivals": {},
         "sequences": {s: float(m) for s, m in seq_means.items()},
         "method": {
+            "target": target_for_epoch(epoch),
             "score_kind": "multipass_sum10_pass",
             "formula": "sum10",
             "measurement": "local_fast_scorer_multipass_mean",

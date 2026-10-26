@@ -15,6 +15,7 @@ from xml.etree import ElementTree
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FILES = (
     'tests/test_pr100.py',
+    'tests/test_pr100_replay.py',
     'tests/test_parent_merit.py',
     'tests/test_epoch_screen_budget.py',
     'tests/test_cached_confirmation.py',

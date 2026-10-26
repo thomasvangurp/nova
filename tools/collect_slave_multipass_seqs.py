@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sequences the slave still has to replay for one closed epoch.
 
-Every P20809 submission on that epoch's public leaderboard (all miners, us
+Every epoch-target submission on that epoch's public leaderboard (all miners, us
 included) plus our own qualified shortlist, minus any sequence that already
 has >= PASSES stored replay passes in master's local SQLite. Coverage is per
 sequence, not per epoch: a fold is a property of (sequence, target).
@@ -17,6 +17,9 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/{epoch}/nanobodies"
 DB = "/root/artifacts/nanobody_mutations.sqlite"
@@ -45,7 +48,7 @@ def leaderboard_sequences(epoch: int) -> list[str] | None:
     seqs = []
     for submission in rows:
         for nb in submission.get("nanobodies") or []:
-            if nb.get("protein_name") == TARGET and nb.get("sequence"):
+            if nb.get("protein_name") == target_for_epoch(epoch) and nb.get("sequence"):
                 seqs.append(str(nb["sequence"]).strip().upper())
     return seqs or None
 
@@ -58,7 +61,7 @@ def qualified_sequences(epoch: int) -> list[str]:
     return seqs
 
 
-def pass_counts(seqs: list[str]) -> dict[str, int]:
+def pass_counts(seqs: list[str], target: str = TARGET) -> dict[str, int]:
     conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=60)
     counts: dict[str, int] = {}
     label_sql = " OR ".join("(o.source=? AND o.score_kind=?)" for _ in REPLAY_LABELS)
@@ -69,7 +72,7 @@ def pass_counts(seqs: list[str]) -> dict[str, int]:
             f"SELECT n.sequence, COUNT(*) FROM observations o JOIN nodes n ON n.id=o.node_id "
             f"WHERE n.target=? AND n.sequence IN ({','.join('?' * len(chunk))}) AND ({label_sql}) "
             f"AND o.metrics_json NOT IN ('', '{{}}') GROUP BY n.sequence",
-            (TARGET, *chunk, *label_args),
+            (target, *chunk, *label_args),
         ).fetchall()
         counts.update({s: c for s, c in rows})
     conn.close()
@@ -83,15 +86,15 @@ def main() -> int:
         print(f"  leaderboard for epoch {epoch} not published yet")
         return 3
     wanted = sorted(set(board) | set(qualified_sequences(epoch)))
-    # The fast scorer only supports the modal length (127); a wave with any
-    # other length is refused, and a lone odd-length wave hangs. These are
-    # ~0.1% of submissions (1 x 128, 2 x 129 since 25600) and cannot be replayed.
-    odd = [s for s in wanted if len(s) != SUPPORTED_LENGTH]
+    # Preserve the legacy reference constraint for historical replay. PR100
+    # workers partition by length and use the ordinary design stage when no
+    # matching (target,length) synthesis reference is registered.
+    odd = [s for s in wanted if epoch < ACTIVATION_EPOCH and len(s) != SUPPORTED_LENGTH]
     if odd:
         print(f"  skipping {len(odd)} sequence(s) of unsupported length "
               f"{sorted({len(s) for s in odd})}")
-    wanted = [s for s in wanted if len(s) == SUPPORTED_LENGTH]
-    counts = pass_counts(wanted)
+    wanted = [s for s in wanted if s not in set(odd)]
+    counts = pass_counts(wanted, target_for_epoch(epoch))
     todo = [s for s in wanted if counts.get(s, 0) < passes]
     out_path.write_text(json.dumps(todo))
     print(f"  epoch {epoch}: {len(wanted)} submitted/qualified, {len(wanted) - len(todo)} already "

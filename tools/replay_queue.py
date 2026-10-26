@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, "/root")
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
 
 DB = "/root/artifacts/nanobody_mutations.sqlite"
 TARGET = "P20809"
@@ -69,13 +70,14 @@ def tier0_shadow() -> list[str]:
         return []
 
 
-def tier1_parents() -> list[str]:
+def tier1_parents(epoch: int | None = None) -> list[str]:
     seqs: list[str] = []
-    top50 = newest("/root/live/epoch*/producer/iteration_*/top50_index.json")
+    epoch_path = str(epoch) if epoch is not None and epoch >= ACTIVATION_EPOCH else "*"
+    top50 = newest(f"/root/live/epoch{epoch_path}/producer/iteration_*/top50_index.json")
     if top50:
         blob = json.load(open(top50))
         seqs += [str(s).strip().upper() for s in blob.get("live_sequences") or blob.get("sequences") or []]
-    parents = newest("/root/live/epoch*/producer/competitor_parents.json")
+    parents = newest(f"/root/live/epoch{epoch_path}/producer/competitor_parents.json")
     if parents:
         for cand in json.load(open(parents)).get("candidates") or []:
             p = str(cand.get("parent") or "").strip().upper()
@@ -91,24 +93,28 @@ def tier2_children(conn: sqlite3.Connection, epoch: int, limit: int = 300) -> li
         f"WHERE n.target = ? AND o.epoch >= ? AND o.score_kind IN ({marks}) "
         f"AND o.source IN ('live_exact_screen','local_exact_raw','live_exact_repeat') "
         f"GROUP BY n.sequence ORDER BY m ASC LIMIT ?",
-        (TARGET, epoch - 1, *OWN_SCORE_KINDS, limit),
+        (target_for_epoch(epoch), epoch - 1, *OWN_SCORE_KINDS, limit),
     ).fetchall()
     return [str(r[0]).strip().upper() for r in rows]
 
 
 def tier3_history(epoch: int, limit: int = 3000) -> list[str]:
-    if ELITE_CACHE.exists() and time.time() - ELITE_CACHE.stat().st_mtime < ELITE_TTL_SECONDS:
-        return json.load(open(ELITE_CACHE))["sequences"]
+    target = target_for_epoch(epoch)
+    cache = ELITE_CACHE if epoch < ACTIVATION_EPOCH else STATE_DIR / f"elite_history_{target}.json"
+    if cache.exists() and time.time() - cache.stat().st_mtime < ELITE_TTL_SECONDS:
+        blob = json.loads(cache.read_text())
+        if blob.get("target", TARGET) == target:
+            return blob["sequences"]
     from nanobody_opt.competitor_lane import fetch_elite_history_parents
 
-    scores = fetch_elite_history_parents(Path(DB), before_epoch=epoch, min_passes=3, limit=limit)
+    scores = fetch_elite_history_parents(Path(DB), target=target, before_epoch=epoch, min_passes=3, limit=limit)
     seqs = [s for s, _ in sorted(scores.items(), key=lambda kv: kv[1])]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    ELITE_CACHE.write_text(json.dumps({"sequences": seqs, "epoch": epoch}))
+    cache.write_text(json.dumps({"sequences": seqs, "epoch": epoch, "target": target}))
     return seqs
 
 
-def canonical_counts(conn: sqlite3.Connection, seqs: list[str]) -> dict[str, int]:
+def canonical_counts(conn: sqlite3.Connection, seqs: list[str], target: str = TARGET) -> dict[str, int]:
     counts: dict[str, int] = {}
     for i in range(0, len(seqs), 400):
         chunk = seqs[i:i + 400]
@@ -116,14 +122,14 @@ def canonical_counts(conn: sqlite3.Connection, seqs: list[str]) -> dict[str, int
             f"SELECT n.sequence, COUNT(*) FROM observations o JOIN nodes n ON n.id = o.node_id "
             f"WHERE n.target = ? AND n.sequence IN ({','.join('?' * len(chunk))}) "
             f"AND o.source = ? AND o.score_kind = ? AND o.metrics_json NOT IN ('', '{{}}') "
-            f"GROUP BY n.sequence", (TARGET, *chunk, SOURCE, KIND)).fetchall()
+            f"GROUP BY n.sequence", (target, *chunk, SOURCE, KIND)).fetchall()
         counts.update({str(s).upper(): int(c) for s, c in rows})
     return counts
 
 
-def load_attempts() -> dict[str, list[float]]:
+def load_attempts(path: Path | None = None) -> dict[str, list[float]]:
     try:
-        return json.load(open(ATTEMPTS))
+        return json.loads((path or ATTEMPTS).read_text())
     except (OSError, ValueError):
         return {}
 
@@ -141,11 +147,17 @@ def main() -> int:
     args = ap.parse_args()
 
     epoch = chain_epoch()
+    target = target_for_epoch(epoch)
     conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=60)
     now = time.time()
-    attempts = load_attempts()
+    attempts_path = ATTEMPTS if epoch < ACTIVATION_EPOCH else STATE_DIR / f"attempts_{target}.json"
+    attempts = load_attempts(attempts_path)
 
-    tiers: list[tuple[int, list[str]]] = [(0, tier0_shadow()), (1, tier1_parents()), (2, tier2_children(conn, epoch))]
+    # The old shadow tournament is an old-target experiment. Keep its
+    # backlog from consuming the new target's live replay budget.
+    tiers: list[tuple[int, list[str]]] = [
+        (0, tier0_shadow() if epoch < ACTIVATION_EPOCH else []),
+        (1, tier1_parents(epoch)), (2, tier2_children(conn, epoch))]
     items: list[dict] = []
     seen: set[str] = set()
     budget = args.budget_seq_passes
@@ -155,10 +167,11 @@ def main() -> int:
 
     def take(tier: int, seqs: list[str]) -> None:
         nonlocal budget
-        counts = canonical_counts(conn, [s for s in seqs if s not in seen and len(s) == SUPPORTED_LENGTH])
+        supported = lambda s: epoch >= ACTIVATION_EPOCH or len(s) == SUPPORTED_LENGTH
+        counts = canonical_counts(conn, [s for s in seqs if s not in seen and supported(s)], target)
         stat = stats.setdefault(tier, {"listed": 0, "short": 0, "taken": 0})
         for s in seqs:
-            if s in seen or len(s) != SUPPORTED_LENGTH:
+            if s in seen or not supported(s):
                 continue
             seen.add(s)
             stat["listed"] += 1
@@ -189,11 +202,11 @@ def main() -> int:
     if not items:
         return 4
     batch_id = f"{int(now)}"
-    args.out.write_text(json.dumps({"batch_id": batch_id, "epoch": epoch, "items": items}))
+    args.out.write_text(json.dumps({"batch_id": batch_id, "epoch": epoch, "target": target, "items": items}))
     for it in items:
         attempts.setdefault(it["sequence"], []).append(now)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    ATTEMPTS.write_text(json.dumps({s: [t for t in ts if now - t < 86400] for s, ts in attempts.items()
+    attempts_path.write_text(json.dumps({s: [t for t in ts if now - t < 86400] for s, ts in attempts.items()
                                     if any(now - t < 86400 for t in ts)}))
     print(f"REPLAY_QUEUE_BATCH id={batch_id} -> {args.out}")
     return 0

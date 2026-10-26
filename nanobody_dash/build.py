@@ -715,7 +715,7 @@ PAGE = """<!doctype html>
 TABS = [
     ("progress", "Our progress", [
         ("Are we getting better?", "Trailing 20-epoch field-beating-entry rate and top-10 rate per entry, with fleet size on the right axis. An entry wins when it beats the best molecule from every rival coldkey.", "progress"),
-        ("Us against the strongest rivals", "Trailing 10-epoch mean of the multi-pass rank-sum for us versus the four strongest rivals (lowest all-time mean), per epoch from the first replay-scored epoch. Lower is better.", "vsrivals"),
+        ("Us against the strongest rivals", "Trailing 10-epoch mean of the multi-pass rank-sum for us versus the four strongest rivals for the current target. Lower is better. A new target starts a separate averaging window; scores across targets are not directly comparable.", "vsrivals"),
         ("Multi-pass vs rivals", "Multi-pass replay mean rank-sum for us versus every rival coldkey, per epoch. Lower is better. Error bars are the fleet stdev and the hover shows fleet size. Only complete fleets with at least 10 stored passes per sequence appear. Gaps indicate missing replay coverage.", "multipass"),
         ("Multi-pass distribution", "Per-sequence mean rank-sum, with at least 10 stored passes per sequence. Lower is better. Fleets with incomplete replay coverage are omitted; gaps mean missing evidence. Single validator draws are never substituted.", "multipass_distribution"),
     ]),

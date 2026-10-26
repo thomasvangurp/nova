@@ -13,6 +13,7 @@ import statistics as st
 from pathlib import Path
 
 import plotly.graph_objects as go
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
 
 from .outcomes import is_entry_win
 
@@ -179,19 +180,37 @@ def _multipass_method(epoch: int, row) -> str:
     if isinstance(method, dict) and method.get("measurement"):
         key = f"{method.get('formula') or '?'}:{method['measurement']}"
         field = method.get("field")
-        return f"{key}:{field}" if field else key
+        key = f"{key}:{field}" if field else key
+        return f"{key}|target={target_for_epoch(epoch)}" if epoch >= ACTIVATION_EPOCH else key
+    if epoch >= ACTIVATION_EPOCH:
+        return f"sum10:local_fast_scorer_multipass_mean|target={target_for_epoch(epoch)}"
     if epoch <= LEGACY_API_BACKFILL_LAST_EPOCH:
         return "sum10:validator_published_single_pass"
     return "sum10:local_fast_scorer_multipass_mean"
 
 
 def _method_label(method: str) -> str:
+    method, _, target = method.partition("|target=")
     formula, _, rest = method.partition(":")
     measurement, _, field = rest.partition(":")
     label = f"{formula} · {MULTIPASS_METHOD_LABELS.get(measurement, measurement)}"
     if field:
         label += f" ({MULTIPASS_FIELD_LABELS.get(field, field)})"
+    if target:
+        label += f" · target {target}"
     return label
+
+
+def _load_multipass(path):
+    """Old-target or unidentified post-cutover measurements are gaps."""
+    payload = json.loads(path.read_text())
+    for key, row in payload.items():
+        if not str(key).isdigit() or not isinstance(row, dict):
+            continue
+        epoch = int(key)
+        if epoch >= ACTIVATION_EPOCH and (row.get("method") or {}).get("target") != target_for_epoch(epoch):
+            payload[key] = {"ours": None, "rivals": {}, "method": row.get("method") or {}}
+    return payload
 
 
 def _method_segments(epochs, methods):
@@ -316,6 +335,8 @@ def _recent_strongest_rivals(payload, exclude_prefix, window=10, minimum_epochs=
     Only rivals seen in at least ``minimum_epochs`` of the window qualify, and ``exclude_prefix`` (already shown) is skipped.
     """
     keys = sorted((int(k) for k, row in payload.items() if isinstance(row, dict) and str(k).isdigit()))[-window:]
+    if keys:
+        keys = [e for e in keys if target_for_epoch(e) == target_for_epoch(keys[-1])]
     seen: dict[str, list[float]] = {}
     for epoch in keys:
         for coldkey, actor in _multipass_all_rivals(payload[str(epoch)]):
@@ -388,7 +409,7 @@ def fig_multipass_vs_rival(path: Path | None = None,
         return _empty_multipass(figure, "No multi-pass comparison data yet",
                                 "multi-pass mean rank-sum (lower = better)")
 
-    payload = json.loads(path.read_text())
+    payload = _load_multipass(path)
     epochs = sorted(int(key) for key in payload)
     if not epochs:
         return _empty_multipass(figure, "No multi-pass comparison data yet",
@@ -468,8 +489,8 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
 
     Each line is a trailing 10-epoch mean of the per-epoch rank-sum (the raw
     point is one ~10-20 sequence sample and is noisy).  The ``top`` rivals are
-    chosen by lowest all-time mean (lower is better) and plotted over the full
-    replay-scored history.
+    chosen by lowest mean for the current target (lower is better). Historical
+    target data remains visible, with separate smoothing windows.
     """
     path = path or MULTIPASS_COMPARISON
     figure = go.Figure()
@@ -477,7 +498,7 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
         return _empty_multipass(figure, "No multi-pass comparison data yet",
                                 "multi-pass mean rank-sum (lower = better)")
 
-    payload = json.loads(path.read_text())
+    payload = _load_multipass(path)
     epochs = sorted(int(key) for key in payload)
     if not epochs:
         return _empty_multipass(figure, "No multi-pass comparison data yet",
@@ -505,9 +526,12 @@ def fig_multipass_strongest(path: Path | None = None, top: int = 4) -> go.Figure
             bucket["hover"].append(_multipass_hover(actor))
 
     def _mean(bucket: dict) -> float:
-        return sum(bucket["y"]) / len(bucket["y"])
+        values = [y for x, y in zip(bucket["x"], bucket["y"])
+                  if target_for_epoch(x) == target_for_epoch(epochs[-1])]
+        return sum(values) / len(values) if values else float("inf")
 
-    strongest = sorted(rival_buckets, key=lambda ck: _mean(rival_buckets[ck]))[:top]
+    strongest = sorted((ck for ck in rival_buckets if _mean(rival_buckets[ck]) != float("inf")),
+                       key=lambda ck: _mean(rival_buckets[ck]))[:top]
     for bucket in rival_buckets.values():
         observed = dict(zip(bucket["x"], zip(bucket["y"], bucket["hover"])))
         bucket["x"] = list(epochs)
@@ -568,7 +592,7 @@ def fig_multipass_distribution(path: Path | None = None,
         return _empty_multipass(figure, "No multi-pass distribution data yet",
                                 "multi-pass rank-sum (lower = better)")
 
-    payload = json.loads(path.read_text())
+    payload = _load_multipass(path)
     ours_epochs: dict[str, list] = {}
     rival_epochs: dict[str, dict] = {}
     methods: dict[str, str] = {}

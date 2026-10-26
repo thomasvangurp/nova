@@ -32,12 +32,15 @@ def main():
     from nanobody_opt.rank_exact import fetch_recent_fields_from_db, pool_recent_fields
     from ingest_slave_multipass import load_rows, validate
     from nanobody_opt.mutation_network import update_observation_store
+    from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
+    from tools.replay_context import prepare
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("epoch", type=int)
     parser.add_argument("--passes", type=int, default=20)
     parser.add_argument("--max-sequences", type=int)
     args = parser.parse_args()
+    target = target_for_epoch(args.epoch)
     from recover_batched_rival_outbox import recover
     recover()
     board = leaderboard_sequences(args.epoch)
@@ -45,9 +48,9 @@ def main():
         print(f"RUN_SLAVE_MULTIPASS_PENDING epoch={args.epoch}", flush=True)
         return 3
     wanted = sorted(set(board) | set(qualified_sequences(args.epoch)))
-    unsupported = sum(len(s) != 127 for s in wanted)
-    wanted = [s for s in wanted if len(s) == 127]
-    before = pass_counts(wanted)
+    unsupported = sum(args.epoch < ACTIVATION_EPOCH and len(s) != 127 for s in wanted)
+    wanted = [s for s in wanted if args.epoch >= ACTIVATION_EPOCH or len(s) == 127]
+    before = pass_counts(wanted, target)
     todo = [s for s in wanted if before.get(s, 0) < args.passes]
     if args.max_sequences:
         todo = todo[:args.max_sequences]
@@ -60,11 +63,7 @@ def main():
     inp, field, output = root / "sequences.json", root / "field.json", root / "observations.ndjson"
     inp.write_text(json.dumps(todo))
     db = Path("/root/artifacts/nanobody_mutations.sqlite")
-    fields = fetch_recent_fields_from_db(db, target="P20809", before_epoch=args.epoch, count=10)
-    if not fields:
-        raise RuntimeError("no recent validator field; refusing another measurement regime")
-    pooled = pool_recent_fields(fields)
-    field.write_text(json.dumps({"epochs": [e for e, _ in fields], "rows": json.loads(pooled.to_json(orient="records", double_precision=15))}, allow_nan=False))
+    config, field = prepare(args.epoch, root, db=db)
     host = "root@ssh2.vast.ai"
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-p", "28358", host]
     scp = ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-P", "28358"]
@@ -78,20 +77,22 @@ def main():
             return 4
         # Another in-flight batch may have filled this cohort while we waited.
         # Recollect on the next scheduler pass rather than rescore identical IDs.
-        current = pass_counts(todo)
+        current = pass_counts(todo, target)
         if any(current.get(s, 0) >= args.passes for s in todo):
             print(f"BATCHED_RIVALS_RECHECK epoch={args.epoch} coverage_changed_while_waiting", flush=True)
             return 0
         run(ssh + ["mkdir -p /root/slave_multipass_in /root/slave_multipass_out"], timeout=30)
         run(scp + [str(inp), f"{host}:{remote}_sequences.json"], timeout=60)
         run(scp + [str(field), f"{host}:{remote}_field.json"], timeout=60)
-        command = ["/root/release_python_slave.sh", "/root/slave_multipass_writeback.py",
+        run(scp + [str(config), f"{host}:{remote}_config.yaml"], timeout=60)
+        command = ["/root/release_python_slave.sh", "/root/tools/slave_runtime/slave_multipass_writeback.py",
                    "--sequences-json", remote + "_sequences.json", "--field-json", remote + "_field.json",
+                   "--config", remote + "_config.yaml",
                    "--epoch", str(args.epoch), "--passes", str(args.passes), "--gpus", "0,1,2,3", "--out", remote_out]
         run(ssh + [shlex.join(command)])
         run(scp + [f"{host}:{remote_out}", str(output)], timeout=90)
         rows = load_rows(output)
-        if validate(rows):
+        if validate(rows) or any(r.get('target') != target or r.get('epoch') != args.epoch for r in rows):
             raise RuntimeError("canonical observation validation failed")
         counts = Counter(r["sequence"] for r in rows)
         if set(counts) != set(todo) or any(n != args.passes for n in counts.values()):
@@ -113,7 +114,7 @@ def main():
                         or json.loads(stored[5]).get("allow_replicates") is not True
                         or stored[6] != 1):
                     raise RuntimeError("exact per-replicate database verification failed")
-        after = pass_counts(todo)
+        after = pass_counts(todo, target)
         if any(after.get(s, 0) < args.passes for s in todo):
             raise RuntimeError("database replicate count verification failed")
         distinct = [len({hashlib.sha256(json.dumps(r["metrics"], sort_keys=True).encode()).hexdigest()

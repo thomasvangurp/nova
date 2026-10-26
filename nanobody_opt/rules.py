@@ -25,6 +25,11 @@ MAX_PEAK = Decimal("1.58023066762925")
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
 
+def target_for_epoch(epoch):
+    """Target identity for historical readers as well as the live cutover."""
+    return TARGET if int(epoch) >= ACTIVATION_EPOCH else "P20809"
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      allow_nan=False).encode()).hexdigest()
@@ -162,6 +167,23 @@ def developability_reason(result, requirements, *, sequence=None):
         return "developability_unavailable"
     if result.get("red_flags"):
         return "developability_red_flags"
+    # Recheck the pinned filter's measured criteria on Pi as well. A bare
+    # `passed` flag or a truncated profile is not independent evidence.
+    for key, lower, upper in (("total_cdr_length", 20, 39),
+                              ("cdr3_length", 5, 23),
+                              ("cdr3_compactness", .56, 1.61),
+                              ("surface_hydrophobic_patches", 73.4, 155.47)):
+        value = result.get(key)
+        if not _finite(value):
+            return "developability_unavailable"
+        if not lower <= value <= upper:
+            return "developability_red_flags"
+    for key, upper in (("positive_charge_patches", 1.18), ("negative_charge_patches", 1.88)):
+        value = result.get(key)
+        if not _finite(value):
+            return "developability_unavailable"
+        if value > upper:
+            return "developability_red_flags"
     psh = result.get("surface_hydrophobic_patches")
     if not _finite(psh):
         return "psh_unavailable"

@@ -71,6 +71,7 @@ def validate(rows: list[dict]) -> list[str]:
     row from a different source/writer slip into update_observation_store's
     batch (which would refuse the WHOLE batch anyway -- this just gives a
     clearer error before any file I/O against the live DB happens)."""
+    from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
     problems = []
     for row in rows:
         oid = row.get("observation_id", "<missing>")
@@ -82,6 +83,9 @@ def validate(rows: list[dict]) -> list[str]:
             problems.append(f"{oid}: writer={row.get('writer')!r} not in {EXPECTED_WRITERS!r}")
         if not row.get("sequence") or not row.get("target"):
             problems.append(f"{oid}: missing sequence/target")
+        epoch = row.get('epoch')
+        if isinstance(epoch, int) and epoch >= ACTIVATION_EPOCH and row.get('target') != target_for_epoch(epoch):
+            problems.append(f"{oid}: target does not match the post-PR100 epoch")
     return problems
 
 

@@ -6,7 +6,7 @@ rival with the fleet's mean rank-sum, its standard deviation, the fleet size
 (number of sequences submitted), and the per-sequence rank-sums (distribution).
 
 The leaderboard API exposes ``coldkey`` per submission (the stable identity --
-the hotkey rotates each epoch). We group P20809 nanobodies by coldkey, run the
+the hotkey rotates each epoch). We group the epoch's target nanobodies by coldkey, run the
 fast scorer N times over every unique sequence, compute the validator's dense
 rank-sum vs the archive field each pass, and reduce to mean/stdev/fleet_size.
 
@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai"
 TARGET = "P20809"
@@ -110,14 +112,14 @@ def fetch_our_intended(epoch: int) -> list[tuple[str, str]]:
 
 
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
-    """Return (coldkey, sequence) for every P20809 nanobody, deduped.
+    """Return (coldkey, sequence) for every epoch-target nanobody, deduped.
 
     Returns ``None`` when the leaderboard is NOT AVAILABLE -- HTTP 404 for a
     not-yet-published epoch (the validator's publish lag is not bound to the
     72-minute epoch cadence; it has ranged from under an hour to several
     hours), any other HTTP/network error, or a payload without a ``data``
     list. ``None`` means "retry later", which is different from ``[]`` (the
-    leaderboard was published but holds no P20809 nanobodies). Callers must
+    leaderboard was published but holds no matching nanobodies). Callers must
     not collapse the two: see ``main``.
     """
     req = urllib.request.Request(
@@ -139,7 +141,7 @@ def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
         if not coldkey:
             continue
         for nb in submission.get("nanobodies") or []:
-            if nb.get("protein_name") != TARGET:
+            if nb.get("protein_name") != target_for_epoch(epoch):
                 continue
             seq = str(nb.get("sequence") or "").strip().upper()
             if not seq or seq in seen:
@@ -263,13 +265,13 @@ def prepare_topup(archive: pd.DataFrame, batch: set[str]
     return settings, plan, existing, hf_topup.pass_batches(plan)
 
 
-def raw_metrics_from_exact_all(payload: dict) -> dict[str, dict[str, float]]:
+def raw_metrics_from_exact_all(payload: dict, target: str = TARGET) -> dict[str, dict[str, float]]:
     """``{sequence: {metric: value}}`` for every finite numeric metric in one
     scorer pass's ``exact_all.json`` (wave 0, TARGET). Formula-independent."""
     wave = (payload.get("per_nanobody_components") or {}).get("0") or {}
     out: dict[str, dict[str, float]] = {}
     for seq, comp in wave.items():
-        m = (comp or {}).get(TARGET, {}) or {}
+        m = (comp or {}).get(target, {}) or {}
         values = {k: float(v) for k, v in m.items()
                   if isinstance(v, (int, float)) and not isinstance(v, bool)
                   and np.isfinite(float(v))}
@@ -317,7 +319,7 @@ def _recent_validator_field(epoch: int) -> tuple[pd.DataFrame, list[int]]:
 
     fields = fetch_recent_fields_from_db(
         Path("/root/artifacts/nanobody_mutations.sqlite"),
-        target=TARGET, before_epoch=epoch, count=RECENT_FIELD_EPOCHS,
+        target=target_for_epoch(epoch), before_epoch=epoch, count=RECENT_FIELD_EPOCHS,
     )
     if not fields:
         return pd.DataFrame(columns=METRICS_NEEDED), []
@@ -343,7 +345,7 @@ def pass_observations(*, epoch: int, run: int, passes: int,
         row = {
             "observation_id": f"public_multipass:epoch{epoch}:{seq}:pass{run}",
             "sequence": seq,
-            "target": TARGET,
+            "target": target_for_epoch(epoch),
             "epoch": epoch,
             # `source` stays the writer's population tag for continuity; the
             # cohort (ours vs rival) is explicit in provenance, because this
@@ -368,7 +370,7 @@ def pass_observations(*, epoch: int, run: int, passes: int,
 
 
 def score_pass(sequences: list[str], run: int, *, recent_field: pd.DataFrame,
-               config: Path, scorer: Path, out_root: Path
+               config: Path, scorer: Path, out_root: Path, target: str = TARGET
                ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
     """One fast-scorer pass -> ({sequence: rank_sum}, {sequence: cif_ref},
     {sequence: raw metrics})."""
@@ -384,34 +386,40 @@ def score_pass(sequences: list[str], run: int, *, recent_field: pd.DataFrame,
     subprocess.run(
         [sys.executable, "-m", "nanobody_opt.score_boltzgen_waves",
          "--sequences", str(inp), "--config", str(config),
-         "--target", TARGET, "--output-dir", str(out_dir),
+         "--target", target, "--output-dir", str(out_dir),
          "--gpus", gpus, "--wave-size", str(len(sequences)),
          "--predict-batch-size", "2", "--limit", str(len(sequences)),
          "--scorer", str(scorer), "--capture-structures"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     payload = json.loads((out_dir / "exact_all.json").read_text())
-    return rank_pass_payload(payload, recent_field)
+    return rank_pass_payload(payload, recent_field, target)
 
 
-def rank_pass_payload(payload: dict, recent_field: pd.DataFrame
+def rank_pass_payload(payload: dict, recent_field: pd.DataFrame, target: str = TARGET
                       ) -> tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]:
     """Rank one pass's ``exact_all.json`` against the pooled recent-epoch
     field (sum-of-10). See RECENT_FIELD_EPOCHS / _recent_validator_field."""
+    if payload.get("target", target) != target:
+        raise ValueError("replay payload belongs to another target")
+    if recent_field.empty:
+        raise ValueError("replay requires a measured field for the same target")
     wave = payload["per_nanobody_components"]["0"]
     rows = {}
     for seq, comp in wave.items():
-        m = comp.get(TARGET, {})
+        m = comp.get(target, {})
+        if not m:
+            continue
         rows[seq] = {k: float(v) for k, v in m.items()
                      if k in METRICS_NEEDED and isinstance(v, (int, float))}
-    raw = raw_metrics_from_exact_all(payload)
+    raw = raw_metrics_from_exact_all(payload, target)
     from nanobody_opt.rank_exact import rank_metrics_against_field
     ranks = rank_metrics_against_field(rows, recent_field)
     # Preserve the captured .cif reference per sequence (--capture-structures),
     # so it can be persisted to the mutation DB's observation_artifacts.
     structures: dict[str, dict] = {}
     for seq, by_target in (payload.get("structures") or {}).items():
-        rec = by_target.get(TARGET, {})
+        rec = by_target.get(target, {})
         if rec:
             structures[seq] = {
                 "path": rec.get("path"),
@@ -434,7 +442,7 @@ OUR_RAW_SOURCES = (
 
 
 def local_passes_for_ours(
-    sequences: list[str], n: int, recent_field: pd.DataFrame
+    sequences: list[str], n: int, recent_field: pd.DataFrame, target: str = TARGET
 ) -> tuple[list[tuple[dict[str, float], dict[str, dict], dict[str, dict[str, float]]]],
            set[str]]:
     """Build up to ``n`` synthetic scorer passes for OUR OWN sequences from
@@ -468,7 +476,7 @@ def local_passes_for_ours(
           AND o.metrics_json IS NOT NULL AND o.metrics_json != ''
         ORDER BY o.observation_id
         """,
-        (TARGET, *sequences, *OUR_RAW_SOURCES),
+        (target, *sequences, *OUR_RAW_SOURCES),
     ).fetchall()
     by_seq: dict[str, list[dict[str, float]]] = defaultdict(list)
     for seq, metrics_json, _obs_id in rows:
@@ -487,10 +495,10 @@ def local_passes_for_ours(
     passes: list[tuple[dict, dict, dict]] = []
     for run in range(n):
         wave = {
-            seq: {TARGET: by_seq[seq][run]} for seq in reusable
+            seq: {target: by_seq[seq][run]} for seq in reusable
         }
         payload = {"per_nanobody_components": {"0": wave}, "structures": {}}
-        ranks, structs, raw = rank_pass_payload(payload, recent_field)
+        ranks, structs, raw = rank_pass_payload(payload, recent_field, target)
         passes.append((ranks, structs, raw))
     return passes, short_sequences
 
@@ -517,8 +525,11 @@ def _write_ours_only_early(
     if not sequences:
         return
     recent_field, recent_epochs = _recent_validator_field(epoch)
+    if recent_field.empty:
+        print(f"REPLAY_FIELD_PENDING epoch={epoch} target={target_for_epoch(epoch)}", flush=True)
+        return
     field = recent_field_fingerprint(recent_field, recent_epochs)
-    local_passes, short_sequences = local_passes_for_ours(sequences, n, recent_field)
+    local_passes, short_sequences = local_passes_for_ours(sequences, n, recent_field, target_for_epoch(epoch))
     reused_sequences = set(sequences) - short_sequences
     if not reused_sequences:
         print(f"  ours-only early write: 0 of {len(sequences)} of our own "
@@ -547,6 +558,7 @@ def _write_ours_only_early(
         "rivals": {},
         "sequences": {s: v for s, v in seq_means.items()},
         "method": {
+            "target": target_for_epoch(epoch),
             "score_kind": PASS_SCORE_KIND, "formula": PASS_FORMULA_ID,
             "measurement": MEASUREMENT, "passes": n,
             "field": field.get("field"), "field_rows": field.get("field_rows"),
@@ -566,6 +578,7 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     epoch = int(sys.argv[1])
+    target = target_for_epoch(epoch)
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 20
     # Before any GPU time: the label we write must still mean this formula.
     assert_pass_label()
@@ -634,12 +647,20 @@ def main() -> int:
         return 1
 
     sequences = sorted({seq for _, seq in pairs})
+    # Never run a new-target replay with an old epoch's config or reference.
+    import yaml
+    cfg = yaml.safe_load(config.read_text())
+    if cfg["protein_selection"]["nanobody"]["target"] != target:
+        raise ValueError("replay config target does not match its epoch")
     # Still loaded for hf_topup's unrelated use below (identifying HF-archive
     # parent candidates) -- the RANKING field is now the recent-epochs pool,
     # not this static archive. See _recent_validator_field.
     archive = pd.read_csv(archive_path).drop_duplicates("sequence", keep="last")
     archive["sequence"] = archive["sequence"].astype(str).str.upper()
     recent_field, recent_epochs = _recent_validator_field(epoch)
+    if recent_field.empty:
+        print(f"REPLAY_FIELD_PENDING epoch={epoch} target={target}", flush=True)
+        return 3
     print(f"epoch={epoch} coldkeys={len(by_coldkey)} seqs={len(sequences)} "
           f"passes={n} recent_field_epochs={recent_epochs} "
           f"recent_field_rows={len(recent_field)}", flush=True)
@@ -651,8 +672,9 @@ def main() -> int:
     # Bounded HF top-up (R1): HF-archive parent candidates ride along in the
     # same scorer passes, each only for the passes it is still missing. They
     # are kept out of the leaderboard aggregation and the dashboard numbers.
-    topup_cfg, topup_plan, topup_existing, topup_batches = prepare_topup(
-        archive, set(sequences))
+    topup_cfg, topup_plan, topup_existing, topup_batches = (
+        prepare_topup(archive, set(sequences)) if epoch < ACTIVATION_EPOCH
+        else ({"enabled": False, "reason": "new_target_replay_only"}, {}, {}, []))
     for seq in topup_plan:
         cohort_of[seq] = TOPUP_COHORT
     leaderboard_set = set(sequences)
@@ -664,7 +686,7 @@ def main() -> int:
     # it is never degraded, just not optimized.
     our_sequences = sorted(seq for seq, c in cohort_of.items() if c == "ours")
     local_passes, short_sequences = (
-        local_passes_for_ours(our_sequences, n, recent_field) if our_sequences else ([], set())
+        local_passes_for_ours(our_sequences, n, recent_field, target) if our_sequences else ([], set())
     )
     reused_sequences = set(our_sequences) - short_sequences
     if reused_sequences:
@@ -694,7 +716,7 @@ def main() -> int:
         extra = topup_batches[run - 1] if run <= len(topup_batches) else []
         batch = (gpu_sequences if run <= n else []) + extra
         ranks, structs, raw = score_pass(batch, run, recent_field=recent_field, config=config,
-                                         scorer=scorer, out_root=out_root)
+                                         scorer=scorer, out_root=out_root, target=target)
         if run <= n and local_passes:
             local_ranks, local_structs, local_raw = local_passes[run - 1]
             ranks = {**ranks, **local_ranks}
@@ -796,6 +818,7 @@ def main() -> int:
         # How these numbers were made, so the dashboard never joins two
         # measurement regimes into one line (docs/OBSERVATION_LABELS.md).
         "method": {
+            "target": target,
             "score_kind": PASS_SCORE_KIND,
             "formula": PASS_FORMULA_ID,
             "measurement": MEASUREMENT,

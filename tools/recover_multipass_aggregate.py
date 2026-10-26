@@ -21,6 +21,9 @@ from multipass_all_rivals import (  # noqa: E402
 
 def main() -> int:
     epoch = int(sys.argv[1])
+    from nanobody_opt.rules import ACTIVATION_EPOCH
+    if epoch >= ACTIVATION_EPOCH:
+        raise ValueError('legacy aggregation cannot recover PR100; use rescale_multipass_history')
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(
         f"/root/multipass_all_rivals/{epoch}")
     archive_path = Path(sys.argv[3]) if len(sys.argv) > 3 else Path(

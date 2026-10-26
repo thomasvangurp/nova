@@ -116,6 +116,9 @@ def main() -> int:
               "new_rows": 0, "skipped_busy": 0}
     now = time.time()
     for epoch in parse_epochs(args.epochs, args.root):
+        if epoch >= mp.ACTIVATION_EPOCH:
+            print(f"epoch {epoch}: SKIP legacy archive backfill; use target-aware replay rescaling", flush=True)
+            continue
         epoch_dir = args.root / str(epoch)
         pass_files = sorted(
             (int(p.name[len("score"):]), p / "exact_all.json")

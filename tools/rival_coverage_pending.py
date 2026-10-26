@@ -27,8 +27,8 @@ def main() -> int:
         if board is None:
             continue
         wanted = sorted(s for s in set(board) | set(c.qualified_sequences(epoch))
-                        if len(s) == c.SUPPORTED_LENGTH)  # scorer only supports length 127
-        counts = c.pass_counts(wanted)
+                        if epoch >= c.ACTIVATION_EPOCH or len(s) == c.SUPPORTED_LENGTH)
+        counts = c.pass_counts(wanted, c.target_for_epoch(epoch))
         short = sum(1 for s in wanted if counts.get(s, 0) < PASSES)
         if short:
             print(f"RIVAL_COVERAGE_PENDING epoch={epoch} short={short}/{len(wanted)}")
