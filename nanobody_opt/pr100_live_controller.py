@@ -156,20 +156,34 @@ def remote(config, host, request, *, sleep=time.sleep):
     command = ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
                '-oConnectTimeout=8', '-p', str(config['hosts'][host]['port']),
                config['hosts'][host]['address'], 'python3', '-c', shlex.quote(TRANSPORT)]
+    # Retries share one epoch deadline, including every attempt and backoff.
+    deadline = request.get('transport_deadline_unix')
+    end = (time.monotonic() + max(0.0, float(deadline) - time.time())
+           if deadline is not None else math.inf)
+
+    def remaining():
+        seconds = end - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError('remote transport epoch deadline')
+        return seconds
+
+    def backoff(attempt):
+        sleep(min(TRANSPORT_BACKOFF_SECONDS * attempt, remaining()))
+
     for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
         try:
             result = subprocess.run(command, input=json.dumps(request).encode(),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    timeout=config.get('transport_timeout_seconds', 120))
+                                    timeout=min(config.get('transport_timeout_seconds', 120), remaining()))
         except subprocess.TimeoutExpired as cause:
             if attempt == TRANSPORT_ATTEMPTS:
                 error = RuntimeError('remote transport timed out')
                 error.diagnostics = {'attempts': attempt}
                 raise error from cause
-            sleep(TRANSPORT_BACKOFF_SECONDS * attempt)
+            backoff(attempt)
             continue
         if result.returncode == 255 and attempt < TRANSPORT_ATTEMPTS:
-            sleep(TRANSPORT_BACKOFF_SECONDS * attempt)
+            backoff(attempt)
             continue
         break
     if result.returncode:
@@ -238,6 +252,7 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
             'clock_path': directory + '/clock.json', 'epoch': challenge['epoch'],
             'epoch_length': challenge['epoch_length'], 'reserve_blocks': RESERVE_BLOCKS}
     return host, {'operation': 'start', 'directory': directory, 'python': python,
+                  'transport_deadline_unix': stop_at + 15,
                   'source_sha': config['source_sha'],
                   'supervisor': release + '/scripts/pr100_live_supervisor.py', 'spec': spec,
                   'clock': clock, 'files': {k: base64.b64encode(v).decode() for k, v in files.items()}}
@@ -256,9 +271,12 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         if time.time() > stop_at + 15:
             raise TimeoutError('remote receipt deadline')
         try:
-            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock_state(chain)}
+            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock_state(chain),
+                       'transport_deadline_unix': stop_at + 15}
             result = transport(config, host, request)
             failures = 0
+        except TimeoutError:
+            raise  # An epoch deadline is final, unlike a missed poll.
         except (RuntimeError, OSError) as error:
             # The remote job keeps running under its own supervisor; a failed poll is only a
             # missed look at it. Give up on the phase only after sustained failure.

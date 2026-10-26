@@ -533,6 +533,47 @@ def test_remote_gives_up_after_the_attempt_limit(tmp_path, monkeypatch):
     assert len(calls) == controller.TRANSPORT_ATTEMPTS
 
 
+def test_transport_retries_and_backoff_share_the_epoch_deadline(tmp_path, monkeypatch):
+    now = [1000.0]
+    calls = []
+    monkeypatch.setattr(controller.time, 'time', lambda: now[0])
+    monkeypatch.setattr(controller.time, 'monotonic', lambda: now[0])
+
+    def advance(seconds):
+        now[0] += seconds
+
+    def timeout(command, **kwargs):
+        calls.append(kwargs['timeout'])
+        advance(kwargs['timeout'])
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+
+    monkeypatch.setattr(controller.subprocess, 'run', timeout)
+    with pytest.raises(TimeoutError, match='epoch deadline'):
+        controller.remote(config(tmp_path), 'master',
+                          {'operation': 'poll', 'transport_deadline_unix': 1002.0}, sleep=advance)
+    assert calls == [2.0]
+    assert now[0] == 1002.0
+
+
+def test_run_phase_propagates_epoch_transport_deadline_without_more_polls(tmp_path):
+    calls = []
+    stop_at = time.time() + 2000
+
+    def transport(config_value, host, request):
+        calls.append(request)
+        assert request['transport_deadline_unix'] == stop_at + 15
+        if request['operation'] == 'start':
+            return {'running': True}
+        raise TimeoutError('remote transport epoch deadline')
+
+    local = tmp_path / 'local'
+    local.mkdir()
+    with pytest.raises(TimeoutError):
+        controller.run_phase(config(tmp_path), challenge(), 'native', {}, stop_at,
+                             Chain(), local, transport=transport, sleep=lambda s: None)
+    assert len(calls) == 2
+
+
 def test_run_phase_survives_transient_poll_failures_and_still_collects_the_result(tmp_path):
     import base64
     result = base64.b64encode(json.dumps({'candidates': []}).encode()).decode()

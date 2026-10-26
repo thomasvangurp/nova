@@ -10,7 +10,9 @@ atomically.  Child stdout/stderr are kept in the job directory for diagnosis.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import math
 import os
 import re
 import signal
@@ -88,7 +90,8 @@ def validate(spec):
     if not isinstance(spec['environment'], dict):
         raise ValueError('spec environment must be an object')
     for key in ('wall_seconds', 'deadline_unix', 'reserve_blocks'):
-        if isinstance(spec[key], bool) or not isinstance(spec[key], (int, float)) or spec[key] < 0:
+        if (isinstance(spec[key], bool) or not isinstance(spec[key], (int, float))
+                or not math.isfinite(spec[key]) or spec[key] < 0):
             raise ValueError(f'spec {key} must be a non-negative number')
     if int(spec['epoch_length']) <= 0 or int(spec['cpu_slots']) <= 0:
         raise ValueError('spec epoch_length and cpu_slots must be positive')
@@ -142,7 +145,7 @@ def _cpu_preexec(slots):
     return apply
 
 
-def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
+def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS, containment=None):
     started_wall, started = time.time(), time.monotonic()
     receipt = {'schema': 'pr100-live-supervisor-v1', 'epoch': spec.get('epoch'),
                'started_at_unix': started_wall, 'exit_code': None, 'reason': 'not_started',
@@ -151,8 +154,18 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
     directory = Path(receipt_path).parent if receipt_path else Path.cwd()
     stdout_path, stderr_path = directory / 'supervisor-stdout.log', directory / 'supervisor-stderr.log'
     receipt.update(stdout_path=str(stdout_path), stderr_path=str(stderr_path))
+    child = None
+    cleanup_attempted = False
+    interrupted = []
+    handlers = {}
+
+    def interrupted_by(signum, frame):
+        interrupted.append(signum)
+
     try:
         validate(spec)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            handlers[sig] = signal.signal(sig, interrupted_by)
         epoch, reserve = int(spec['epoch']), float(spec['reserve_blocks'])
         cutoff = min(started_wall + float(spec['wall_seconds']), float(spec['deadline_unix']))
         receipt['cutoff_unix'] = cutoff
@@ -174,7 +187,9 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
         clock_lost_since = None
         while child.poll() is None:
             now = time.time()
-            if now >= started_wall + float(spec['wall_seconds']):
+            if interrupted:
+                reason = 'terminated'
+            elif now >= started_wall + float(spec['wall_seconds']):
                 reason = 'wall_seconds'
             elif now >= float(spec['deadline_unix']):
                 reason = 'deadline_unix'
@@ -190,6 +205,7 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
                         reason = 'reserve_blocks'
             if reason:
                 receipt['killed'] = True
+                cleanup_attempted = True
                 receipt['killed_hard'] = stop_group(child, grace)
                 break
             time.sleep(poll)
@@ -197,6 +213,7 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
             # The leader exited; reap any detached descendants left in its group.
             if _group_alive(child.pid):
                 receipt['orphans_killed'] = True
+                cleanup_attempted = True
                 stop_group(child, grace)
         receipt['exit_code'] = child.returncode
         receipt['reason'] = reason or ('completed' if child.returncode == 0 else 'nonzero_exit')
@@ -205,6 +222,25 @@ def supervise(spec, *, poll=POLL_SECONDS, grace=GRACE_SECONDS):
         receipt['error_type'] = type(error).__name__
         receipt['error'] = sanitized_tail_text(str(error))
     finally:
+        # Service stops and unexpected exceptions must also reap the owned tree.
+        # On Linux the production supervisor is a subreaper, so setsid/double-fork
+        # children remain ours even after their original parent exits.
+        try:
+            if child is not None and not cleanup_attempted and (child.poll() is None or _group_alive(child.pid)):
+                receipt['killed'] = True
+                receipt['killed_hard'] = stop_group(child, grace) or receipt['killed_hard']
+            if containment is not None:
+                cleanup = containment.stop_descendants([child] if child is not None else (), timeout=5)
+                receipt['cleanup'] = cleanup
+                if cleanup['remaining_descendants']:
+                    receipt['reason'] = 'cleanup_failed'
+            if child is not None:
+                receipt['exit_code'] = child.poll()
+        except Exception as error:
+            receipt.update(reason='cleanup_failed', cleanup_error_type=type(error).__name__)
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
         receipt['elapsed_seconds'] = time.monotonic() - started
         receipt['stderr_tail'] = sanitized_tail(stderr_path)
         if receipt_path:
@@ -229,7 +265,23 @@ def main(argv=None):
                           'error_type': type(error).__name__, 'exit_code': None, 'killed': False,
                           'elapsed_seconds': 0.0, 'stderr_tail': ''})
         return 2
-    receipt = supervise(spec)
+    containment = None
+    if sys.platform == 'linux':
+        # Avoid an unrelated concrete scripts package in the native environment.
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root))
+        try:
+            module_spec = importlib.util.spec_from_file_location(
+                '_pr100_owned_processes', root / 'scripts' / 'pr100_native_probe.py')
+            containment = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(containment)
+            containment.dedicated_controller()
+        except Exception as error:
+            atomic(spec.get('receipt_path', args.spec.parent / 'supervisor-receipt.json'),
+                   {'schema': 'pr100-live-supervisor-v1', 'reason': 'containment_unavailable',
+                    'error_type': type(error).__name__, 'exit_code': None, 'killed': False})
+            return 2
+    receipt = supervise(spec, containment=containment)
     return 0 if receipt['reason'] == 'completed' else 1
 
 

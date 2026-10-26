@@ -100,3 +100,26 @@ explicit schema-3 `live_trial` stage retains PR100 eligibility and finite actual
 measurements but disclaims exact-scoring equivalence, binds the current context
 and actual settings, and permits a single measured observation. Trial ranks
 among a small local pool are not competitive epoch ranks or multipass estimates.
+
+## Claude session recovery, 2026-10-26
+
+The interrupted Claude session had committed and deployed controller revision `6a06d48`;
+its background/idle status was not evidence of continuing implementation. Independent
+readback matched all 1,078 manifest files on Pi, master, and slave. Both hosted workflows
+were successful. The Pi controller was active but disabled at boot; recovery enabled it
+without restarting the submission loop. Experimental throughput patches were not included
+in this recovery release without completed validation.
+
+Two orchestration gaps remained despite the earlier CI pass:
+
+- Every SSH retry and backoff now shares the epoch's absolute receipt deadline.
+  The previous five independent transport timeouts could outlast the epoch reserve.
+- A Linux supervisor now owns a dedicated subreaper session and reaps all descendants,
+  including children that start another session. SIGTERM, SIGINT, unexpected exceptions,
+  and normal leader exit all use cleanup. A process-group-only test could not detect
+  escaped GPU runners. Non-finite time bounds are rejected before spawning.
+
+Required regression coverage includes deadline exhaustion during transport retries,
+service termination, failure after process launch, detached descendants on Linux, and
+real exporter/verifier contract checks. Future deployment receipts must distinguish
+committed source, passing CI, installed hashes, enabled services, and actual submissions.
