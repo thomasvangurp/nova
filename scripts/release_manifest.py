@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -176,8 +177,13 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
                 or result.get('failures') != 0 or result.get('errors') != 0
                 or result.get('skipped') != 0):
             raise ValueError('release has no complete passing regression evidence')
-        from scripts.shipping_checks import TEST_FILES
-        if result.get('test_files') != list(TEST_FILES):
+        # Exact adjacent source: scientific runtimes may own another `scripts`
+        # package, which must not shadow the release's required CI suite.
+        spec = importlib.util.spec_from_file_location('_sn68_shipping_checks', Path(__file__).with_name('shipping_checks.py'))
+        checks = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = checks
+        spec.loader.exec_module(checks)
+        if result.get('test_files') != list(checks.TEST_FILES):
             raise ValueError('release omitted required regression suites')
 
 

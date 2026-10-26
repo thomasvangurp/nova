@@ -285,3 +285,58 @@ def test_n0_failed_preflight_writes_durable_no_go(tmp_path, monkeypatch):
     assert report['native_profiles_permitted'] == report['gpu_calls_permitted'] == 0
     assert report['closure_reviewed'] is False
     assert not (out/'runtime-candidate.json').exists()
+
+
+def test_forcefield_exception_binds_caller_argument_and_observed_counts():
+    from scripts.pr100_runtime_preflight import FORCEFIELD_IMPORT as r, ForceFieldImportGuard, forbidden_call
+    exact = (r['caller_module'], r['caller_function'], r['caller_path'], r['caller_line'],
+             r['constructor_path'], (r['xml_argument'],))
+    guard = ForceFieldImportGuard()
+    guard.enter(*exact)
+    guard.xml_open(r['xml_path'], 'r', 0)
+    guard.active = False
+    assert guard.finish()['constructor_count'] == guard.finish()['xml_open_count'] == 1
+    with pytest.raises(ValueError):
+        guard.enter(*exact)
+    for index, replacement in [(0, 'another.module'), (1, 'refine_once'), (2, '/tmp/refine.py'),
+                               (3, r['caller_line']+1), (4, '/tmp/forcefield.py'), (5, ('other.xml',))]:
+        args = list(exact); args[index] = replacement
+        with pytest.raises(ValueError):
+            ForceFieldImportGuard().enter(*args)
+    for path, mode, flags in [('/tmp/protein.ff14SB.xml', 'r', 0), (r['xml_path'], 'w', 1)]:
+        guard = ForceFieldImportGuard(); guard.enter(*exact)
+        with pytest.raises(ValueError):
+            guard.xml_open(path, mode, flags)
+    missing = ForceFieldImportGuard(); missing.enter(*exact); missing.active = False
+    with pytest.raises(ValueError, match='incomplete'):
+        missing.finish()
+    assert forbidden_call('openmm.app.forcefield', 'createSystem') == 'physics_execution'
+    assert forbidden_call('openmm.openmm', '__init__', 'Context') == 'physics_constructor'
+
+
+def test_research_helpers_do_not_shadow_regular_scientific_scripts_package(tmp_path):
+    # Reproduce the actual native package collision in a fresh interpreter.
+    package = tmp_path/'scripts'; package.mkdir()
+    (package/'__init__.py').write_text('SCIENTIFIC = True\n')
+    (package/'region_definitions.py').write_text('REGIONS = True\n')
+    root = Path(__file__).resolve().parents[1]
+    code = '''import importlib.util,json,sys
+from pathlib import Path
+root,site=map(Path,sys.argv[1:])
+sys.path[:0]=[str(root),str(site)]
+import scripts
+assert scripts.SCIENTIFIC
+spec=importlib.util.spec_from_file_location('_n0_collision_test',root/'scripts/pr100_runtime_preflight.py')
+n0=importlib.util.module_from_spec(spec);spec.loader.exec_module(n0)
+try:
+ n0.probe.verify_runtime({'schema':'pr100-native-runtime-manifest-v1','source_stage_manifest_sha256':'0'*64},preflight_only=True)
+except (FileNotFoundError,ValueError):pass
+assert '_pr100_release_manifest' in sys.modules
+import scripts.region_definitions
+assert scripts.region_definitions.REGIONS and scripts.SCIENTIFIC
+print(json.dumps({'research_helper_loaded':True,'scientific_package_preserved':True}))
+'''
+    result = subprocess.run([sys.executable, '-B', '-c', code, str(root), str(tmp_path)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {'research_helper_loaded': True, 'scientific_package_preserved': True}

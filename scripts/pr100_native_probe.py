@@ -9,6 +9,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -63,7 +64,11 @@ def verify_runtime(runtime, *, deadline=None, preflight_only=False):
     if not preflight_only and (runtime.get('closure_reviewed') is not True or
                               not runtime.get('closure_reviewer') or not runtime.get('n0_receipt_sha256')):
         raise ValueError('dependency closure not independently reviewed')
-    from scripts.release_manifest import RESEARCH_FILES, verify
+    spec = importlib.util.spec_from_file_location('_pr100_release_manifest', ROOT/'scripts/release_manifest.py')
+    release = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = release
+    spec.loader.exec_module(release)
+    RESEARCH_FILES, verify = release.RESEARCH_FILES, release.verify
     stage_manifest = ROOT / 'build_stamp.json'
     if sha_file(stage_manifest, deadline=deadline) != runtime['source_stage_manifest_sha256']:
         raise ValueError('staged source manifest drift')

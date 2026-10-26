@@ -56,3 +56,27 @@ bytes. It adds a finite import-only N0 runner and local assembly of its manifest
 Control-flow tests do not certify native equivalence. Actual N0 and N1 remain
 unexecuted in this packet. Root separately measured the f887 dedicated-session
 containment rehearsal successfully; that is process containment evidence only.
+
+# Pre-execution source findings after review 3 began
+
+Candidate b4165af was not executed. Readonly inspection found two concrete
+startup blockers; its artifact is retained as superseded preregistration.
+
+1. `ImmuneBuilder/refine.py:26` constructs a ForceField at import. Revision 2
+   correctly forbade it, so it could never complete. Revision 3 permits only the
+   pinned caller/line/constructor/XML, one parameter parser construction and one
+   observed XML open. The XML has no includes or scripts, and inspected parser
+   methods register data. Context, System, model and physics execution remain
+   forbidden. Wrong source, caller, argument, extra count or XML path fails.
+2. The native installation owns a regular `scripts` package for TNP region
+   definitions; repository research scripts form a namespace directory. Exact
+   file-based helper loading avoids that collision while preserving native
+   scientific package resolution. A fresh-interpreter regression reproduces
+   the collision and verifies both paths. A separate four-file readonly
+   inventory supplies the native source and existing bytecode identities.
+
+The empty special-mapping policy remains valid if actual N0 observes no mapping
+that needs exemption. Unknown file-backed origins still fail. No exemption is
+invented from a hypothetical mapping, and the policy has not been broadened.
+No N0/N1 profiles, native imports, model construction or remote mutations were
+performed during this source audit. Tests exercise guards, not native parity.

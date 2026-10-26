@@ -1,8 +1,11 @@
 # N0: finite CPU import and runtime identity check
 
-Executable protocol revision 2, not execution permission. Review before staging or running
+Executable protocol revision 3, not execution permission. Review before staging or running
 anything remotely. No model construction, prediction, refinement, native
 profile, target score, GPU context, download, production cache or wallet.
+The sole constructor exception is one exact native import-time XML parameter
+parser described below; System/Context/Simulation/Integrator construction and
+physics execution remain forbidden.
 
 Run one private child through Pi on master, under the inventoried native Python.
 Cap the complete check at 60 seconds, two affinity CPU slots and 4 GiB sampled
@@ -34,8 +37,40 @@ Before launch inspect the declared import modules for top-level model creation.
 If present, stop. Import only candidate adapters/rules, pinned metanano
 config/filter/wrappers, ImmuneBuilder's NanoBodyBuilder2 module, theraprofnano's
 three metric modules, torch and OpenMM app/refinement dependencies. Import
-classes without constructing models, force fields, simulations, integrators or
-contexts. Do not call CUDA availability, device count, NVML or GPU discovery.
+classes without constructing models, simulations, integrators or contexts. Do
+not call CUDA availability, device count, NVML or GPU discovery.
+
+Revision 2 was stopped by source inspection before any N0 execution: native
+`ImmuneBuilder/refine.py:26` constructs `ForceField("amber14/protein.ff14SB.xml")`.
+Its constructor initializes Python parameter tables and calls `loadFile`; the
+four relevant parsers register parameter generators. The fixed XML contains no
+Include, Script or InitializationScript. Actual System construction is in the
+separate `createSystem` method, which remains forbidden. No model weights are
+loaded by this exception.
+
+Revision 3 permits exactly one `ForceField.__init__`, only from module scope at
+that exact caller line, using that one argument. It binds these observed files:
+
+| File under native site-packages | SHA-256 |
+| --- | --- |
+| `ImmuneBuilder/refine.py` | `e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0` |
+| `openmm/app/forcefield.py` | `7c909edd1bbb8c48ac0070e5ea19b6bf0817be2aeccfbd23e7ebb1302c0da432` |
+| `openmm/app/data/amber14/protein.ff14SB.xml` | `d9f9779c09d67cd5f8bc657692f174ffab14c469dfd06d560ac1899fa7e976b8` |
+
+The import guard requires exactly one read-only open of that absolute XML during
+the constructor, no subsequent loadFile call, no duplicate constructor, and no
+other caller/argument/source. XML includes or scripts fail preflight. Execution
+of package entrypoint callbacks is forbidden (the inspected installation has
+no `openmm.forcefielddir` entrypoint group). No native source is patched. The
+receipt reports observed allowed-constructor/XML counts separately from the
+zero model/profile/GPU permissions. This exception is N0 only, not a change to
+N1 physics or a qualification claim.
+
+Native TNP requires a regular `scripts` package containing region definitions.
+Research helpers are therefore loaded from exact staged file paths under unique
+module names; they never replace that scientific package. The two scientific
+scripts sources and their existing bytecodes are added through a separate
+explicit readonly inventory, not a broad environment scan.
 
 The child gets only registered non-sensitive runtime environment settings.
 Set CUDA/HIP/ROCR visibility empty and registered CPU thread settings. Disable
