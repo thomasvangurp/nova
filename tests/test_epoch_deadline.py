@@ -14,6 +14,30 @@ from nanobody_opt.epoch_deadline import EpochDeadline, EpochDeadlineExceeded, ru
 from sn68_source import import_shipping
 
 
+@pytest.mark.parametrize('platform,status,allowed',[
+    ('darwin','Z',True), ('darwin','S',False), ('linux','Z',False),
+])
+def test_cleanup_permission_error_only_ignores_proven_dead_darwin_group(monkeypatch,platform,status,allowed):
+    from nanobody_opt import epoch_deadline as module
+    monkeypatch.setattr(module.sys,'platform',platform)
+    def denied(*args):raise PermissionError('fixture')
+    monkeypatch.setattr(module.os,'killpg',denied)
+    monkeypatch.setattr(module.subprocess,'run',lambda *a,**kw:SimpleNamespace(
+        returncode=0,stdout=f'42 {status}\n43 S\n'))
+    if allowed:module._signal_group(42,signal.SIGKILL)
+    else:
+        with pytest.raises(PermissionError):module._signal_group(42,signal.SIGKILL)
+
+
+def test_cleanup_does_not_assume_dead_when_process_state_is_unreadable(monkeypatch):
+    from nanobody_opt import epoch_deadline as module
+    monkeypatch.setattr(module.sys,'platform','darwin')
+    def denied(*args):raise PermissionError('fixture')
+    monkeypatch.setattr(module.os,'killpg',denied)
+    monkeypatch.setattr(module.subprocess,'run',lambda *a,**kw:SimpleNamespace(returncode=1,stdout=''))
+    with pytest.raises(PermissionError):module._signal_group(42,signal.SIGKILL)
+
+
 def clock(path, epoch=72, offset=20):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps({'epoch': epoch, 'epoch_length': 361,

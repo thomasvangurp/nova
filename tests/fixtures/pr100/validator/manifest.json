@@ -17,6 +17,8 @@
     "utils/minmax_weighted_rank.py": "836efe33b5deb2a4c4bac37f7db23c467df26e84d82a9b3fb594ec186aa438dd",
     "utils/stage_timer.py": "a87ae6680f36de16286eb4cf1a004ca703bf167165a30e2a4aa50ae3707e9d47",
     "utils/__init__.py": "17c711da5371f395ca5480082e8c5d4352513937a6bb8b025e6d62af80e76201",
-    "neurons/validator/setup.py": "d7cfa69fc28086a38a1557d5c48fa02b65bd917dc4c0d9c27a1eb8ba25e92046"
+    "neurons/validator/setup.py": "d7cfa69fc28086a38a1557d5c48fa02b65bd917dc4c0d9c27a1eb8ba25e92046",
+    "neurons/validator/molecule_validity.py": "6905b5f3d85e804e5084b1a97b97409e9e63b12174109c7a4b38fcf6ea7a41d8",
+    "utils/inference.py": "a5b7b844fc7b083d470db6a8811fbe145b3688a3f8b88b9bc4596dcd48e1e2b0"
   }
 }

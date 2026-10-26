@@ -304,3 +304,34 @@ annotation reasons and real IMGT/length distributions. The ongoing 351-profile
 native pilot is CPU-only and cannot certify target quality or a qualified bank.
 R38 requires explicit capacity arithmetic before a GPU strategy comparison;
 R37 requires achievable endpoint precision. Neither requirement is waived.
+
+The focused Opus-max hold review returned CONDITIONAL_GO after 697.3 seconds.
+B1 repeats the now-fixed mandatory-transform checks. B2 correctly notes that
+the molecule-only repair applies immediately: a UID lacking a sequence can
+now submit its valid molecule half before 25955 too. We accept that bounded
+repair explicitly. Existing rows with sequences and pre-cutover sequence
+allocation are unchanged; the earlier broader claim of wholly unchanged
+pre-cutover behavior was inaccurate. Added thirteen-UID allocation checks and
+full installed-main dry runs with every wallet/network/signing operation
+stubbed, plus the exact upstream null-half parser test. Actual-loop source shows
+molecule and nanobody validation feed inference independently; old commitments
+are restricted to the epoch's open interval, so omission cannot carry an old
+nanobody into the held epoch.
+
+The next application-profile CI found a Darwin cleanup race (EPERM from the
+second process-group signal); the controls profile passed all 926 tests.
+Apple's kern_sig.c filters zombies before the group signal count and can return
+EPERM for a zombie-only group. Cleanup now ignores that error on Darwin only
+after a bounded pgid/state-only check proves there are no live group members;
+permission failures for live groups, unreadable state and other platforms still
+raise. The failed CI receipt is retained. Source:
+https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c
+
+The hold is deliberately epoch-triggered even if the announced merge slips.
+That conservative choice forfeits our potential nanobody reward for each
+slipped epoch (the pinned competition assigns that track weight 0.4); it is not
+40% of guaranteed personal earnings, and no defensible monetary amount is yet
+available. It protects the independent molecule track and avoids automatically
+publishing unqualified nanobodies. A changed activation/pin requires review,
+not an automatic unhold. No additional hardware purchase is authorized by a
+capacity projection.

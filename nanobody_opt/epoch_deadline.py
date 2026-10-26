@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,20 +41,43 @@ class EpochDeadline:
             raise EpochDeadlineExceeded('chain clock unavailable; work cancelled') from error
 
 
-def _stop_group(process: subprocess.Popen) -> None:
-    # Children may survive their immediate parent, so always address the group.
+def _no_live_group_members(pgid: int) -> bool:
+    """A bounded process-state check; never inspect arguments or environment."""
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        result = subprocess.run(['ps', '-axo', 'pgid=,stat='], capture_output=True,
+                                text=True, timeout=2, check=False)
+        if result.returncode:
+            return False
+        for line in result.stdout.splitlines():
+            group, status = line.split()
+            if int(group) == pgid and not status.startswith('Z'):
+                return False
+        return True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Darwin's killpg filters zombies before counting signallable members
+        # and can return EPERM for a zombie-only group. Do not mask a real
+        # permission failure or abandon a live descendant on any platform.
+        if sys.platform != 'darwin' or not _no_live_group_members(pgid):
+            raise
+
+
+def _stop_group(process: subprocess.Popen) -> None:
+    # Children may survive their immediate parent, so always address the group.
+    _signal_group(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    _signal_group(process.pid, signal.SIGKILL)
     process.wait()
 
 

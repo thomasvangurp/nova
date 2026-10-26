@@ -339,3 +339,43 @@ three real policy executions. The bank/online schedulers are implementation
 obligations before a paired comparison can run. The pilot can decisively show
 that this proposal family needs revision without consuming the comparison
 budget. Such a result is not a working-strategy or near-optimality verdict.
+
+## Measured capacity sufficiency — 26 October, before further GPU comparison
+
+The 128-record, four-GPU measurement does not establish C1 capacity. With the
+current 361-block epoch and the shared 13-slot timing plan, scoring must end
+76 blocks before the boundary: W = (361 - 76) * 12 = 3,420 seconds. That reserve
+includes publication, transfer and commitment. It cannot be borrowed for work.
+
+| Reading of the retained measurement | GPU seconds / record | Implied GPU equivalents for 4,800 + 260 | NEW at four GPUs | NEW at nominal twelve |
+| --- | ---: | ---: | ---: | ---: |
+| First chunk, initialization excluded, slowest shard | 11.7013 | 17.31 (18 rounded up) | 909 | 3,247 |
+| Warm eight-record partial chunk, slowest shard | 15.6081 | 23.09 (24) | 616 | 2,369 |
+| Whole job including startup, four times 542.352 / 128 | 16.9485 | 25.08 (26) | 547 | 2,161 |
+
+This is sensitivity arithmetic, not a qualified throughput forecast. The first
+reading subtracts the elapsed design-load event and the folding load duration
+from the first 24-record completion, then divides by 24; it excludes startup
+and final collection and is optimistic. The second uses actual partial chunks,
+not full-size steady-state work. The last charges all four allocated GPUs.
+All rows additionally assume t_rep = t_new, which is unmeasured, and T_other = 0,
+which omits generation and other GPU work. The master has eight GPUs in addition
+to the four-GPU test slave; the nominal twelve column assumes equal speed and
+full availability across unequal hosts, neither of which is qualified.
+
+Decision: C1 is unsupported by the observed configuration. Do not start the
+large GPU strategy comparison or buy hardware from this projection. Measure a
+qualified warm configuration and its actual repeat rate, then recompute using
+the live window and measured critical path. A separately reviewed smaller
+production contract remains possible; C1's 4,800 completion bar is not silently
+waived. The user's 4,800 NEW cap remains distinct from repeats and cached reads.
+The arithmetic and source digest are retained in capacity-sufficiency-20261026.json.
+
+The v1 reference-stratum contrast is explicitly CDR3-conditional on shared
+framework draws at the same cell/ordinal. Its four arms are paired, not
+independent binomial samples. Changing seeds now would create v2; retain v1.
+Native pass rates alone do not demonstrate thirteen distinct accepted entries:
+report duplicate tiers, feasible pairwise-novel subset counts and, where an
+exact optimum is computed, its solver certificate. Do not label a greedy
+independent set a proven maximum. Real IMGT hallmark and length distributions
+must come from the retained actual annotations, not synthetic string indices.

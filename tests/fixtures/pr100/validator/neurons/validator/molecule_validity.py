@@ -1,0 +1,204 @@
+import os
+
+import bittensor as bt
+from rdkit import Chem, DataStructs
+from rdkit.Chem import rdFingerprintGenerator
+
+from utils import (
+    get_smiles, 
+    compute_fingerprint_entropy,
+    entry_unique_for_protein_hf,
+    find_chemically_identical,
+    is_reaction_allowed,
+    get_historical_submissions,
+    is_boltz_safe_smiles
+)
+from utils.filters import check as check_filters, validate_thresholds
+
+
+def validate_molecules_and_calculate_entropy(
+    uid_to_data: dict[int, dict[str, list]],
+    score_dict: dict[int, dict[str, list[list[float]]]],
+    config: dict,
+    allowed_reaction: str = None
+) -> dict[int, dict[str, list[str]]]:
+    """
+    Validates molecules for all UIDs and calculates their fingerprint entropy.
+    Updates the score_dict with entropy values.
+    
+    Args:
+        uid_to_data: Dictionary mapping UIDs to their data including molecules
+        score_dict: Dictionary to store scores and entropy
+        config: Configuration dictionary containing validation parameters
+        allowed_reaction: Optional allowed reaction filter for this epoch
+        
+    Returns:
+        Dictionary mapping UIDs to their list of valid SMILES strings
+    """
+
+    filter_thresholds = validate_thresholds(config.get('filters'))
+    
+    # index historical submissions by target (once per epoch)
+    historical_submissions = {target: get_historical_submissions(target, 'molecules') for target in config['small_molecule_target']}
+    morgan_gen = rdFingerprintGenerator.GetMorganGenerator(
+        radius=2,
+        fpSize=2048
+        )
+    for target, historical_submissions_df in historical_submissions.items():
+        if historical_submissions_df is not None:
+            mols = [Chem.MolFromSmiles(smi) for smi in historical_submissions_df["SMILES"]]
+            fps = morgan_gen.GetFingerprints(
+                    mols,
+                    numThreads=8,
+                )
+            historical_submissions_df["fingerprint"] = list(fps)
+
+    valid_molecules_by_uid = {}
+    
+    for uid, data in uid_to_data.items():
+        valid_smiles = []
+        valid_names = []
+
+        if any("~" in molecule for molecule in data["molecules"]):
+            continue
+        
+        # Check for duplicate molecules in submission
+        if len(data["molecules"]) != len(set(data["molecules"])):
+            bt.logging.warning(f"UID={uid}: submission contains duplicate molecules")
+            continue
+
+        submitted_molecules = data["molecules"]
+        if len(submitted_molecules) > config['num_molecules']:
+            bt.logging.warning(f"UID={uid}: submission contains {len(submitted_molecules)} molecules, considering only first {config['num_molecules']}")
+            submitted_molecules = submitted_molecules[:config['num_molecules']]
+        elif len(submitted_molecules) < config['num_molecules']:
+            bt.logging.warning(f"UID={uid}: submission contains {len(submitted_molecules)} molecules, expected {config['num_molecules']}, skipping")
+            continue
+
+        for molecule in submitted_molecules:
+            try:
+                # Check if reaction is allowed this epoch (if filtering enabled)
+                if config.get('random_valid_reaction') and not is_reaction_allowed(molecule, allowed_reaction):
+                    bt.logging.warning(
+                        f"UID={uid}: molecule='{molecule}' uses disallowed reaction for this epoch (only {allowed_reaction} allowed)"
+                    )
+                    break
+
+                elif not config.get('random_valid_reaction'):
+                    allowed_ok = [is_reaction_allowed(molecule, reaction) for reaction in config.get('allowed_reactions')]
+                    if len(allowed_ok) == 0:
+                        bt.logging.error(f"random_valid_reaction is false but no allowed reactions are specified. Check config/config.yaml")
+                        break
+                    if not any(allowed_ok):
+                        bt.logging.warning(f"UID={uid}: molecule='{molecule}' uses disallowed reaction for this epoch (only {config.get('allowed_reactions')} allowed)")
+                        break
+                
+                smiles = get_smiles(molecule)
+                if not smiles:
+                    bt.logging.warning(f"UID={uid}: no valid SMILES found for molecule='{molecule}'")
+                    break
+                
+                try:
+                    mol = Chem.MolFromSmiles(smiles)
+                    if mol is None:
+                        bt.logging.warning(f"UID={uid}: molecule='{molecule}' is not parseable by RDKit")
+                        break
+
+                    failures = check_filters(mol, filter_thresholds)
+                    if failures:
+                        bt.logging.warning(f"UID={uid}: molecule='{molecule}' rejected: {failures[0]}")
+                        break
+                except Exception as e:
+                    bt.logging.warning(f"UID={uid}: molecule='{molecule}' is not parseable by RDKit: {e}")
+                    break
+
+                boltz_safe, boltz_safe_reason = is_boltz_safe_smiles(smiles)
+                if not boltz_safe:
+                    bt.logging.warning(f"UID={uid}: molecule='{molecule}' is not safe for Boltz: {boltz_safe_reason}")
+                    break
+
+                # Check if the molecule is unique for all target proteins.
+                # NOVA_SKIP_HISTORICAL_CHECKS exists only to replay an already
+                # archived epoch for benchmarking
+                skip_historical = os.environ.get("NOVA_SKIP_HISTORICAL_CHECKS") == "1" # do not set it in live operation
+                is_unique = True
+                for target in ([] if skip_historical else config['small_molecule_target']):
+                    if not entry_unique_for_protein_hf(target, smiles, 'molecules'):
+                        bt.logging.warning(f"UID={uid}: molecule='{molecule}' is not unique for protein '{target}'")
+                        is_unique = False
+                        break
+                
+                if not is_unique:
+                    break
+                
+                # Check if the molecule is diverse enough compared to historical submissions.
+                pass_diversity = True
+                miner_mol_fp = morgan_gen.GetFingerprint(mol)
+                for target in ([] if skip_historical else config['small_molecule_target']):
+                    if historical_submissions[target] is not None:
+                        similarities = DataStructs.BulkTanimotoSimilarity(
+                                        miner_mol_fp,
+                                        historical_submissions[target]["fingerprint"],
+                                    )
+                        pass_ = not any(sim >= config['max_similarity_to_historical'] for sim in similarities)
+                        if not pass_:
+                            bt.logging.warning(f"UID={uid}: molecule='{molecule}' is not diverse enough compared to historical submissions for target '{target}'")
+                            pass_diversity = False
+                            break
+                    else:
+                        bt.logging.warning(f"UID={uid}: no historical submissions found for target '{target}'")
+                        continue
+                if not pass_diversity:
+                    break
+
+                valid_smiles.append(smiles)
+                valid_names.append(molecule)
+            except Exception as e:
+                bt.logging.warning(f"UID={uid}: error validating molecule='{molecule}': {e}")
+                break
+            
+        if len(valid_smiles) != config['num_molecules']:
+            bt.logging.warning(
+                f"UID={uid}: submission contains molecules that do not pass validity criteria, skipping."
+            )
+            continue
+
+        # Check for chemically identical molecules
+        if valid_smiles:
+            try:
+                identical_molecules = find_chemically_identical(valid_smiles)
+                if identical_molecules:
+                    duplicate_names = []
+                    for inchikey, indices in identical_molecules.items():
+                        molecule_names = [valid_names[idx] for idx in indices]
+                        duplicate_names.append(f"{', '.join(molecule_names)} (same InChIKey: {inchikey})")
+                    bt.logging.warning(f"UID={uid}: submission contains chemically identical molecules: {'; '.join(duplicate_names)}")
+                    continue 
+            except Exception as e:
+                bt.logging.warning(f"UID={uid}: error checking for chemically identical molecules: {e}")
+                continue
+
+        # Calculate entropy if we have valid molecules
+        if valid_smiles:
+            if config['num_molecules'] > 1:
+                try:
+                    entropy = compute_fingerprint_entropy(valid_smiles)
+                except Exception as e:
+                    bt.logging.warning(f"UID={uid}: error calculating entropy: {e}")
+                    continue
+
+                score_dict[uid]["entropy"] = entropy
+                if entropy < config['min_entropy']:
+                    bt.logging.warning(
+                        f"UID={uid}: fingerprint entropy {entropy:.4f} is below the "
+                        f"minimum of {config['min_entropy']}, skipping"
+                    )
+                    continue
+
+                valid_molecules_by_uid[uid] = {"smiles": valid_smiles, "names": valid_names}
+            else:
+                score_dict[uid]["entropy"] = None
+                valid_molecules_by_uid[uid] = {"smiles": valid_smiles, "names": valid_names}
+            
+    return valid_molecules_by_uid
+    

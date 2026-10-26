@@ -184,3 +184,42 @@ def test_archive_batch_inputs_and_failure_merges_match_exact_validator(monkeypat
     expected=namespace['_extract_cdrs_for_records'](records);expected_calls=calls[:];calls.clear()
     assert _pr100_archive_cdrs(records)==expected
     assert calls==expected_calls
+
+
+def test_exact_validator_molecule_path_runs_without_any_nanobody_half():
+    """Execute upstream routing with synthetic chemistry and inference boundaries."""
+    log=SimpleNamespace(info=lambda *a:None,warning=lambda *a:None,error=lambda *a:None)
+    config={'filters':{},'small_molecule_target':['fixture'],'random_valid_reaction':True,
+            'num_molecules':20,'max_similarity_to_historical':0.9,'min_entropy':0}
+    namespace={'bt':SimpleNamespace(logging=log),'os':SimpleNamespace(environ={}),
+        'validate_thresholds':lambda value:value,'get_historical_submissions':lambda *a:None,
+        'rdFingerprintGenerator':SimpleNamespace(GetMorganGenerator=lambda **kw:
+            SimpleNamespace(GetFingerprint=lambda mol:mol)),
+        'Chem':SimpleNamespace(MolFromSmiles=lambda value:value),
+        'is_reaction_allowed':lambda *a:True,'get_smiles':lambda value:value,
+        'check_filters':lambda *a:[],'is_boltz_safe_smiles':lambda *a:(True,''),
+        'entry_unique_for_protein_hf':lambda *a:True,'find_chemically_identical':lambda *a:{},
+        'compute_fingerprint_entropy':lambda *a:1.0}
+    load_functions(ORACLE/'neurons/validator/molecule_validity.py',
+                   ['validate_molecules_and_calculate_entropy'],namespace)
+    molecules=[f'rxn:1:{i}:2' for i in range(20)];scores={7:{}}
+    # No sequences key at all: an accidental dependency fails immediately.
+    valid=namespace['validate_molecules_and_calculate_entropy'](
+        {7:{'molecules':molecules}},scores,config,allowed_reaction=1)
+    assert valid[7]['names']==molecules
+    calls=[]
+    def workers(ctx,specs,**kwargs):
+        calls.extend(specs)
+        return [{'shard_id':0,'gpu':0,'per_molecule_components':{},'final_boltz_scores':{7:1}}]
+    def assemble(*args):scores[7]['molecule_path_executed']=True
+    namespace.update(torch=SimpleNamespace(cuda=SimpleNamespace(device_count=lambda:1)),
+        mp=SimpleNamespace(get_context=lambda *a:None),_inference_deadline_s=lambda c:60,
+        _max_retries=lambda:0,_run_workers=workers,_merge_boltz_shards=lambda *a:({}, {}, {7:1}),
+        assemble_molecule_scores=assemble,_log_inference_summary=lambda *a:None,
+        BoltzResult=lambda *a:SimpleNamespace(),BoltzgenResult=lambda *a:SimpleNamespace(),
+        InferenceResult=SimpleNamespace)
+    load_functions(ORACLE/'utils/inference.py',['main'],namespace)
+    result=namespace['main'](valid,{},scores,SimpleNamespace(to_dict=lambda:config))
+    assert len(calls)==1 and calls[0][2]=='boltz'
+    assert result.boltz is not None and result.boltzgen is None
+    assert scores[7]['molecule_path_executed']

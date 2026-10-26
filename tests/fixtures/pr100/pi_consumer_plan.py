@@ -170,3 +170,12 @@ def main(arguments):
     molecules, value = {}, {}
     rows = plan(crew, molecules, sequences, value)
     return sequences
+
+
+DUPLICATE_IDENTITY = 0.95
+
+def _identity(left: str, right: str) -> float:
+    """Position identity over the longer sequence, as the fleet dedupe uses."""
+    if not left or not right:
+        return 0.0
+    return sum(1 for a, b in zip(left, right) if a == b) / max(len(left), len(right))
