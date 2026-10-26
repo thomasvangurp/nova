@@ -50,6 +50,7 @@ def package(root):
     shutil.copytree(ROOT / control.FIXTURES, root / control.FIXTURES)
     files = {p.relative_to(root).as_posix(): gate.digest(p) for p in root.rglob('*') if p.is_file()}
     manifest = {'schema': 1, 'git_sha': NEW, 'deployment_profile': 'release-controls',
+        'submodules': {'NOVA-nanobody-filter': 'fe2d5868126406a0de8953d26ecd8bdccbdbd029'},
         'files': files, 'runtime_files': sorted(release.CONTROL_FILES), 'pixi_lock_hash': files['pixi.lock'],
         'validation': {'passed': True, 'tests': 100, 'failures': 0, 'errors': 0, 'skipped': 0,
                        'test_files': list(TEST_FILES)}}

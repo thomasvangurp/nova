@@ -18,6 +18,7 @@ def fixture_release(root):
         path = root/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
         files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {'schema': 1, 'git_sha': 'a'*40, 'pixi_lock_hash': files['pixi.lock'],
+            'submodules': {'NOVA-nanobody-filter': 'fe2d5868126406a0de8953d26ecd8bdccbdbd029'},
             'files': files, 'runtime_files': sorted(files),
             'validation': {'passed': True, 'tests': 100, 'failures': 0, 'errors': 0,
                            'skipped': 0, 'test_files': list(TEST_FILES)}}
@@ -29,6 +30,17 @@ def test_release_accepts_verified_bytes_and_rejects_tampering(tmp_path):
     (tmp_path/'nanobody_opt_v2/run_live_producer.py').write_text('changed')
     with pytest.raises(ValueError, match='byte mismatch'):
         release.verify(tmp_path, manifest, expected_sha='a'*40)
+
+
+@pytest.mark.parametrize('runtime_only', [False, True])
+@pytest.mark.parametrize('pin', [None, 'b'*40])
+def test_release_refuses_missing_or_substituted_filter_pin(tmp_path, runtime_only, pin):
+    manifest = fixture_release(tmp_path)
+    from nanobody_opt import rules
+    assert manifest['submodules']['NOVA-nanobody-filter'] == rules.FILTER_SHA
+    manifest['submodules'] = {} if pin is None else {'NOVA-nanobody-filter': pin}
+    with pytest.raises(ValueError, match='filter submodule'):
+        release.verify(tmp_path, manifest, expected_sha='a'*40, runtime_only=runtime_only)
 
 
 @pytest.mark.parametrize('kind', ['sha', 'lock', 'runtime', 'zero', 'skip', 'failure', 'missing_suite'])

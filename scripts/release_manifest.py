@@ -121,6 +121,12 @@ def verify(root: Path, manifest: dict, *, expected_sha: str,
     if (manifest.get('schema') != 1 or not files
             or manifest.get('pixi_lock_hash') != files.get('pixi.lock')):
         raise ValueError('invalid release manifest')
+    # Also enforced for a controls-only install, whose application modules may
+    # deliberately remain on the previous release. Do not import those modules
+    # to determine the pin for the candidate being verified.
+    if (manifest.get('submodules') or {}).get('NOVA-nanobody-filter') != (
+            'fe2d5868126406a0de8953d26ecd8bdccbdbd029'):
+        raise ValueError('release filter submodule does not match PR100 pin')
     profile = manifest.get('deployment_profile', 'application')
     if profile not in {'application', 'release-controls'}:
         raise ValueError('unknown deployment profile')

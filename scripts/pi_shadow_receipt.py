@@ -22,7 +22,7 @@ from scripts.promotion_gate import digest, read, require, sha
 
 
 def collect(artifact, consumer_root, *, revision, target, epoch, uids, publication_mtime=None,
-            epoch_start_block_hash=None):
+            epoch_start_block_hash=None, epoch_length=None):
     artifact, consumer_root = Path(artifact).resolve(), Path(consumer_root).resolve()
     require(consumer_root == Path('/opt/nova-submit') and platform.system() == 'Linux'
             and platform.machine() in {'aarch64', 'arm64'}, 'receipt_requires_pi')
@@ -47,7 +47,7 @@ def collect(artifact, consumer_root, *, revision, target, epoch, uids, publicati
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         spec.loader.exec_module(module)
         from nanobody_opt import rules
-        options = ({'epoch_start_block_hash': epoch_start_block_hash}
+        options = ({'epoch_start_block_hash': epoch_start_block_hash, 'epoch_length': epoch_length}
                    if epoch >= rules.ACTIVATION_EPOCH else {})
         allocated = module.sequences_by_uid(payload, epoch, allow_stale=False,
                                              crew=[(uid, '') for uid in uids], **options)
@@ -70,6 +70,7 @@ def main():
     parser.add_argument('--uids', type=int, nargs='+', required=True)
     parser.add_argument('--publication-mtime', type=float)
     parser.add_argument('--epoch-start-block-hash')
+    parser.add_argument('--epoch-length', type=int)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -77,7 +78,8 @@ def main():
         receipt = collect(args.artifact, args.consumer_root, revision=args.candidate_sha,
                           target=args.target, epoch=args.epoch, uids=args.uids,
                           publication_mtime=args.publication_mtime,
-                          epoch_start_block_hash=args.epoch_start_block_hash)
+                          epoch_start_block_hash=args.epoch_start_block_hash,
+                          epoch_length=args.epoch_length)
         with args.output.open('x') as handle:
             handle.write(json.dumps(receipt, indent=2) + '\n')
         print(json.dumps({'status': 'pi_trial_passed', 'accepted_entries': receipt['accepted_entries']}))

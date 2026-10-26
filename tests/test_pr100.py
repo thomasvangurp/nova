@@ -22,9 +22,9 @@ HASH = '0x' + 'a' * 64
 SEQ = 'ACDEFGHIKLMNPQRSTVWY' * 6
 
 
-def evidence(sequence=SEQ, block_hash=HASH):
+def evidence(sequence=SEQ, block_hash=HASH, epoch_length=361):
     config = rules.pinned_config(EPOCH)
-    challenge = rules.challenge(config, EPOCH, block_hash)
+    challenge = rules.challenge(config, EPOCH, block_hash, epoch_length)
     annotation = {'status': 'ok', 'profile': rules.PROFILE,
         'annotation_identity': pr100_filter.annotation_identity(),
         'sequence_hash': rules.sequence_hash(sequence), 'single_heavy_domain': True,
@@ -254,11 +254,46 @@ def test_pi_checks_spare_pool_evidence_and_actual_chain_hash():
     cp=checkpoint()
     payload={'epoch':EPOCH,'target':rules.TARGET,'sequence_pool':[SEQ,'A'*120],
              'submissions':[], 'sequence_pool_checkpoints':{SEQ:cp}}
-    assert rules.verified_fleet(payload,EPOCH,HASH)['sequence_pool']==[SEQ]
-    assert rules.verified_fleet(payload,EPOCH,'0x'+'b'*64)['sequence_pool']==[]
-    with pytest.raises(ValueError): rules.verified_fleet(payload,EPOCH+1,HASH)
+    assert rules.verified_fleet(payload,EPOCH,HASH,361)['sequence_pool']==[SEQ]
+    assert rules.verified_fleet(payload,EPOCH,'0x'+'b'*64,361)['sequence_pool']==[]
+    with pytest.raises(ValueError): rules.verified_fleet(payload,EPOCH+1,HASH,361)
     cp['pr100_evidence'].pop('developability')
-    assert rules.verified_fleet(payload,EPOCH,HASH)['sequence_pool']==[]
+    assert rules.verified_fleet(payload,EPOCH,HASH,361)['sequence_pool']==[]
+
+
+def test_pi_attestation_uses_rpc_hash_and_nondefault_epoch_length():
+    spec=importlib.util.spec_from_file_location('_pr100_pi_attest',ROOT/'deploy/submit_host/pi_submit.py')
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    calls=[]
+    chain=SimpleNamespace(get_current_block=lambda:EPOCH*362+10,
+        tempo=lambda netuid:361,
+        determine_block_hash=lambda block:(calls.append(block) or HASH))
+    context=module.attest_epoch(chain,EPOCH,68)
+    assert context['epoch_length']==362 and calls==[EPOCH*362]
+    assert context['source']=='pi_rpc'
+    cp=checkpoint();cp['pr100_evidence']=evidence(epoch_length=362)
+    payload={'epoch':EPOCH,'target':rules.TARGET,'sequence_pool':[SEQ],
+        'submissions':[], 'sequence_pool_checkpoints':{SEQ:cp}}
+    options={'epoch_start_block_hash':context['epoch_start_block_hash'],
+             'epoch_length':context['epoch_length'], 'crew':[(7,'public-key')]}
+    assert module.sequences_by_uid(payload,EPOCH,**options)=={7:SEQ}
+    # Internally consistent fabricated evidence is still refused against RPC.
+    cp['pr100_evidence']=evidence(block_hash='0x'+'b'*64,epoch_length=362)
+    assert module.sequences_by_uid(payload,EPOCH,**options)=={}
+    cp['pr100_evidence']=evidence(epoch_length=361)
+    assert module.sequences_by_uid(payload,EPOCH,**options)=={}
+    with pytest.raises(ValueError,match='epoch length'):
+        module.sequences_by_uid(payload,EPOCH,epoch_start_block_hash=HASH)
+
+
+def test_pi_attestation_refuses_epoch_boundary_crossing():
+    spec=importlib.util.spec_from_file_location('_pr100_pi_boundary',ROOT/'deploy/submit_host/pi_submit.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    blocks=iter([(EPOCH+1)*361-1,(EPOCH+1)*361])
+    chain=SimpleNamespace(get_current_block=lambda:next(blocks),tempo=lambda _:360,
+                          determine_block_hash=lambda _:HASH)
+    with pytest.raises(ValueError,match='epoch changed'):
+        module.attest_epoch(chain,EPOCH,68)
 
 
 def test_new_target_reference_uses_only_measured_folds_and_expires_after_startup():

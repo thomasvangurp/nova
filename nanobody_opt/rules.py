@@ -242,11 +242,13 @@ def validate_evidence(evidence, sequence, expected, config):
         raise ValueError(reason)
 
 
-def verified_fleet(payload, epoch, block_hash):
+def verified_fleet(payload, epoch, block_hash, epoch_length=None):
     """Filter to independently checked current-challenge checkpointed entries."""
     from compound_miner.nanobody_provider import validate_nanobody_checkpoint
+    if type(epoch_length) is not int or epoch_length < 1:
+        raise ValueError("independently supplied epoch length is required")
     config = pinned_config(epoch)
-    expected = challenge(config, epoch, block_hash)
+    expected = challenge(config, epoch, block_hash, epoch_length)
     if (not isinstance(payload, dict) or payload.get("epoch") != epoch
             or payload.get("target") != expected["target"]):
         raise ValueError("nanobody fleet target or epoch is stale")
@@ -265,7 +267,7 @@ def verified_fleet(payload, epoch, block_hash):
                 checkpoint, expected_target=expected["target"], expected_epoch=epoch,
                 min_sequence_length=config["nanobody_requirements"]["min_sequence_length"],
                 max_sequence_length=config["nanobody_requirements"]["max_sequence_length"],
-                epoch_start_block_hash=block_hash)
+                epoch_start_block_hash=block_hash, epoch_length=epoch_length)
             if found != sequence or int(checkpoint["exact"]["observation_count"]) < 10:
                 continue
         except (ValueError, TypeError, KeyError, AttributeError):

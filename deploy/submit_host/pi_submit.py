@@ -139,9 +139,28 @@ def _load(path: Path) -> dict:
         return json.load(handle)
 
 
+def attest_epoch(chain, epoch: int, netuid: int) -> dict:
+    """Read the authoritative epoch dimensions independently of the producer."""
+    from nanobody_opt import rules
+    first_block = chain.get_current_block()
+    tempo = chain.tempo(netuid)
+    if type(tempo) is not int or tempo < 0:
+        raise ValueError("invalid chain tempo")
+    epoch_length = tempo + 1
+    block_hash = chain.determine_block_hash(epoch * epoch_length)
+    last_block = chain.get_current_block()
+    if any(type(b) is not int or b // epoch_length != epoch
+           for b in (first_block, last_block)):
+        raise ValueError("Pi chain epoch changed during PR100 preflight")
+    context = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, epoch_length)
+    return {**context, "chain_read_first_block": first_block,
+            "chain_read_last_block": last_block, "source": "pi_rpc"}
+
+
 def sequences_by_uid(artifact: dict, epoch: int,
                      allow_stale: bool = False,
-                     crew=None, epoch_start_block_hash=None) -> dict[int, str]:
+                     crew=None, epoch_start_block_hash=None,
+                     epoch_length=None) -> dict[int, str]:
     """The nanobody half. A stale artifact is refused, not silently reused.
 
     Its epoch is checked because the producer rewrites it every epoch and a
@@ -156,7 +175,7 @@ def sequences_by_uid(artifact: dict, epoch: int,
     """
     from nanobody_opt import rules
     if epoch >= rules.ACTIVATION_EPOCH:
-        artifact = rules.verified_fleet(artifact, epoch, epoch_start_block_hash)
+        artifact = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length)
         allow_stale = False
         if not artifact["sequence_pool"]:
             return {}
@@ -623,18 +642,19 @@ def main(argv=None) -> int:
     crew = [(int(u), str(h)) for u, h in _load(Path(arguments.crew))]
     from nanobody_opt import rules
     epoch_hash = None
+    epoch_length = None
     if arguments.epoch >= rules.ACTIVATION_EPOCH:
         import bittensor as bt
         chain = bt.Subtensor(network=arguments.network)
-        current_block = chain.get_current_block()
-        epoch_length = chain.tempo(arguments.netuid) + 1
-        if current_block // epoch_length != arguments.epoch:
-            raise ValueError("Pi chain epoch changed before PR100 preflight")
-        epoch_hash = chain.determine_block_hash(arguments.epoch * epoch_length)
+        attestation = attest_epoch(chain, arguments.epoch, arguments.netuid)
+        epoch_hash = attestation["epoch_start_block_hash"]
+        epoch_length = attestation["epoch_length"]
+        print(json.dumps(dict(event="pr100_chain_attestation", **attestation)), flush=True)
     try:
         sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
                                      allow_stale=arguments.allow_stale_nanobody,
-                                     crew=crew, epoch_start_block_hash=epoch_hash)
+                                     crew=crew, epoch_start_block_hash=epoch_hash,
+                                     epoch_length=epoch_length)
     except (ValueError, TypeError, KeyError, OSError) as error:
         if arguments.epoch < rules.ACTIVATION_EPOCH:
             raise

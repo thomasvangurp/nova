@@ -199,6 +199,7 @@ def validate_nanobody_checkpoint(
     min_sequence_length: int,
     max_sequence_length: int,
     epoch_start_block_hash: str | None = None,
+    epoch_length: int | None = None,
 ) -> str:
     """Return the sole qualified sequence or reject the entire checkpoint."""
     version = payload.get("schema_version")
@@ -238,8 +239,10 @@ def validate_nanobody_checkpoint(
     from nanobody_opt import rules
     if expected_epoch >= rules.ACTIVATION_EPOCH:
         try:
+            if type(epoch_length) is not int or epoch_length < 1:
+                raise ValueError("independently supplied epoch length is required")
             config = rules.pinned_config(expected_epoch)
-            expected = rules.challenge(config, expected_epoch, epoch_start_block_hash)
+            expected = rules.challenge(config, expected_epoch, epoch_start_block_hash, epoch_length)
             if expected_target != expected["target"]:
                 raise ValueError("PR100 target mismatch")
             rules.validate_evidence(payload.get("pr100_evidence"), sequence, expected, config)
@@ -345,6 +348,7 @@ def load_qualified_nanobody(
         min_sequence_length=int(_config_value(config, "min_sequence_length")),
         max_sequence_length=int(_config_value(config, "max_sequence_length")),
         epoch_start_block_hash=challenge_params.get("epoch_start_block_hash"),
+        epoch_length=challenge_params.get("epoch_length"),
     )
 
 

@@ -115,7 +115,8 @@ def get_challenge_params_from_blockhash(
 
 def bind_nanobody_challenge(params, epoch, block_hash, epoch_length):
     from nanobody_opt import rules
-    result = {**params, "epoch": epoch, "epoch_start_block_hash": block_hash}
+    result = {**params, "epoch": epoch, "epoch_start_block_hash": block_hash,
+              "epoch_length": epoch_length}
     if epoch >= rules.ACTIVATION_EPOCH:
         context = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, epoch_length)
         result.update(nanobody_target=context["target"], allowed_v=context["allowed_v"],

@@ -116,3 +116,58 @@ Round 3 is asked to judge whether the revised methodology is sound to execute,
 separately from production approval. Open code defects remain production
 blockers even if the test design receives GO. Neither reviewer may label an
 untested architecture near optimal or use agreement as a substitute for data.
+
+## Round 3 and response for round 4
+
+Round 3 took 586.1 seconds. Claude Code reported Opus models at max effort and
+returned NO_GO for workflow, experiment, production and near optimality. Its
+unedited response is retained. Disagreement is resolved against source and
+measurements, not by accepting every reviewer assertion.
+
+- R19: the isolated pinned AbNumber 0.4.4/ANARCI 2026.2.13.2/ANARCII 2.0.5
+  runtime re-annotated all 4,080 eligible sequences: no eligibility or recorded
+  field changes. Of 20,000 hash-ordered excluded/current inventory sequences,
+  19,915 had old ineligible annotations and 85 had no old annotation; none
+  became eligible. J identity changed in 2,927, V gene in five, V identity in
+  three. The review's certainty that eligibility would change was unsupported.
+  Both default/explicit CDR-definition checks had zero differences among 64
+  rows each. This is not the full new-runtime inventory census or full validator
+  execution. Commit 9955822 enforces runtime and actual panel/HMM identities
+  before accepting cached annotation; 864 tests passed in both CI profiles.
+- R08 correction: the source already independently fetched the epoch hash and
+  tempo on Pi, and the miner writer fetched its hash from RPC too. Round 3 did
+  not receive those files. The real defect was the downstream implicit length
+  361. The correction threads authoritative length through all consumers,
+  records RPC read blocks, and refuses a preflight crossing an epoch boundary.
+  Tests include a nondefault length and internally consistent wrong evidence.
+  Live integration and cold-start publication gates remain open.
+- R20: Claude retracted the false 32-bit structural-disjointness claim. Its
+  replacement birthday arithmetic is also corrected: one million uniform
+  32-bit draws have collision probability effectively one, not 69%; about
+  100,000 draws give 69%. Torch accepts at most 64-bit seeds and Lightning's
+  seed_everything interface is 32-bit. A 96-bit integer cannot simply be passed
+  to either. RNG-consumer-specific derivation, exact realized same-input
+  collision accounting and empirical dispersion remain open. Different seeds
+  do not prove independent observations.
+- R21–R27: C2 version 2 explicitly withdraws the unbudgeted 600 full-volume
+  trials. C1 remains unchanged. C2 has a 24 allocated GPU-hour ceiling on the
+  existing four GPUs, reference availability labels, repeat work in the cost
+  inequality, a 13-entry existence gate, ten matched one-epoch cases, a scale
+  check, quality-first comparison after capacity, fixed margins and precision
+  requirements. The 171-cell bar still requires actual 2,223 distinct accepted
+  candidates plus measured attrition; a four-cell pilot cannot certify it.
+  Generator algorithms and measured throughput must fix the execution manifest
+  before strategy outcomes. No comparison has run or passed.
+- R28: qualification abstention means no nanobody publication, not no research
+  scoring. The proposed minimum new-target field is 49 distinct measured
+  sequences from completed epochs; after three insufficient epochs the state
+  is NO_REFERENCE, without an automatic waiver. Runtime enforcement remains
+  open. Publishing unqualified entries to create our own reference is rejected.
+- R15: release verification now refuses a missing/substituted filter revision
+  in full and runtime-only checks, including controls packages. This does not
+  close native binary/transitive-runtime qualification.
+
+Native feasibility remains labelled separately from validator equivalence.
+At 1,280 of 4,080 measured candidates, 18 passed; earlier zero-of-fourteen was
+only a stratified pilot, not a population finding. The current source changes
+have focused tests; every new commit still requires both shipping profiles.

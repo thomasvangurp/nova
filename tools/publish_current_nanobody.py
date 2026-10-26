@@ -770,6 +770,7 @@ def _is_current_qualified(
             min_sequence_length=int(requirements["min_sequence_length"]),
             max_sequence_length=int(requirements["max_sequence_length"]),
             epoch_start_block_hash=((payload.get("pr100_evidence") or {}).get("challenge") or {}).get("epoch_start_block_hash"),
+            epoch_length=((payload.get("pr100_evidence") or {}).get("challenge") or {}).get("epoch_length"),
         )
     except (KeyError, TypeError, ValueError, NanobodyCheckpointError):
         return False
