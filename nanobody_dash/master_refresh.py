@@ -15,7 +15,7 @@ def export_command(*, replay: bool = False) -> str:
     root = os.environ.get("NOVA_DASH_MASTER_RELEASE_DIR", "")
     if (not re.fullmatch(r"/root/(?:dashboard-)?releases/[0-9a-f]{40}", root)):
         raise ValueError("dashboard_master_release_required")
-    timeout = 1100 if replay else 240
+    timeout = 1300 if replay else 240
     module = "replay_refresh" if replay else "master_refresh"
     affinity = "taskset -c 104-111 " if replay else ""
     return (f"cd {shlex.quote(root)} && NOVA_LOCAL_SQLITE=1 "

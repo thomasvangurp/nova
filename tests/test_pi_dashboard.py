@@ -220,7 +220,7 @@ def test_master_export_requires_pinned_release_and_local_store(monkeypatch):
     assert "NOVA_LOCAL_SQLITE=1" in command
     assert "-m nanobody_dash.master_refresh" in command
     assert "cd /root &&" not in command
-    assert "timeout --kill-after=10 1100" in export_command(replay=True)
+    assert "timeout --kill-after=10 1300" in export_command(replay=True)
 
 
 def test_master_reference_sync_precedes_export_and_excludes_current_epoch(monkeypatch, tmp_path):
@@ -523,3 +523,80 @@ def test_pair_benchmark_does_not_postpone_partial_single_candidate(tmp_path, mon
     output.parent.mkdir(parents=True); output.write_text('{}')
     replay.plan_pair_benchmark(25968)
     assert not (tmp_path/'pair_benchmark.json').exists()
+
+
+def test_general_pairs_keep_exact_membership_across_leases_and_epochs(tmp_path, monkeypatch):
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    counts = {}
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: dict(counts))
+    queue = {'target': rules.TARGET, 'items': [
+        {'epoch': 25966, 'sequence': s} for s in ('ONE', 'TWO', 'LONGER')]}
+    (tmp_path/'pending_cohort.json').write_text(json.dumps(queue))
+    assert replay.pending(tmp_path/'unused', 25967) == (25966, ['ONE', 'TWO'])
+    # A completed member does not cause the remaining member to be repackaged.
+    counts['ONE'] = 10
+    assert replay.pending(tmp_path/'unused', 25968) == (25966, ['ONE', 'TWO'])
+    assert replay.pending(tmp_path/'unused', 25968, exclude=['ONE']) == (25966, ['LONGER'])
+    counts['TWO'] = 10
+    assert replay.pending(tmp_path/'unused', 25969) == (25966, ['LONGER'])
+
+
+def test_pairing_does_not_mix_epochs_lengths_or_legacy_partial_inputs(tmp_path, monkeypatch):
+    import hashlib
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: {})
+    (tmp_path/'pending_cohort.json').write_text(json.dumps({'target': rules.TARGET, 'items': [
+        {'epoch': 25965, 'sequence': 'OLD'}, {'epoch': 25966, 'sequence': 'ONE'},
+        {'epoch': 25966, 'sequence': 'TWO'}, {'epoch': 25966, 'sequence': 'SIX'},
+        {'epoch': 25966, 'sequence': 'LONGER'}]}))
+    batch = hashlib.sha256(json.dumps([25966, 10, ['ONE']]).encode()).hexdigest()[:16]
+    output = tmp_path/f'epoch25966/{batch}/work/epoch25966/replicates10/job/length3/pass1/exact_all.json'
+    output.parent.mkdir(parents=True); output.write_text('{}')
+    assert replay.pending(tmp_path/'unused', 25967) == (25965, ['OLD'])
+    assert replay.pending(tmp_path/'unused', 25967, exclude=['OLD']) == (25966, ['ONE'])
+    assert replay.pending(tmp_path/'unused', 25967, exclude=['OLD', 'ONE']) == (25966, ['SIX', 'TWO'])
+    assert replay.pending(tmp_path/'unused', 25967, exclude=['OLD', 'ONE', 'SIX', 'TWO']) == (25966, ['LONGER'])
+
+
+def test_three_gpu_scheduler_selects_six_distinct_candidates_and_stays_bounded(tmp_path, monkeypatch):
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: {})
+    (tmp_path/'pending_cohort.json').write_text(json.dumps({'target': rules.TARGET, 'items': [
+        {'epoch': 25966, 'sequence': s} for s in ('AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF', 'GGG')]}))
+    jobs = []
+    def run(**kwargs):
+        jobs.append((kwargs['gpu'], tuple(kwargs['selection'][1])))
+        return {'ok': True, 'epoch': 25966, 'rows': 20}
+    monkeypatch.setattr(replay, 'run', run)
+    result = replay.run_parallel(25968)
+    assert sorted(jobs) == [(5, ('AAA', 'BBB')), (6, ('CCC', 'DDD')), (7, ('EEE', 'FFF'))]
+    assert result['rows'] == 60
+    assert len(json.loads((tmp_path/'batch_plans.json').read_text())['plans']) == 3
+
+
+def test_paired_lease_and_all_enclosing_deadlines_allow_cleanup(paths, monkeypatch):
+    from nanobody_dash import replay_refresh as replay, master_refresh
+    for size in (True, 0, 3):
+        with pytest.raises(ValueError, match='batch_size'):
+            replay.lease_job(paths, gpu=5, epoch=25966, candidates=size)
+    job = replay.lease_job(paths, gpu=5, epoch=25966, candidates=2)
+    assert job['ttl_seconds'] == 1200
+    assert job['ttl_seconds'] + 30 < 1300
+    assert 'timeout --kill-after=10 1300' in master_refresh.export_command(replay=True)
+    monkeypatch.setattr(pi, 'master_endpoint', lambda: ('host', 22))
+    def run(command, timeout):
+        assert timeout == 1350 and timeout > 1300 + 10
+        return subprocess.CompletedProcess(command, 0, b'{"ok":true,"rows":20}')
+    monkeypatch.setattr(pi, 'run', run)
+    assert pi.auxiliary('replay')['ok']
+    override = Path(__file__).resolve().parents[1]/'deploy/dashboard/nova-dashboard-replay-timeout.conf'
+    assert 'TimeoutStartSec=1500' in override.read_text()

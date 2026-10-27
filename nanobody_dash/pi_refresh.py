@@ -277,7 +277,7 @@ def auxiliary(job: str) -> dict:
                    "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                    "-o", "ConnectTimeout=12", "-p", str(port), "root@" + host,
                    export_command(replay=True)]
-        completed = run(command, 1150)
+        completed = run(command, 1350)
         try:
             body = json.loads(completed.stdout)
         except (ValueError, TypeError):

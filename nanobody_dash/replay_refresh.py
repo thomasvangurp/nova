@@ -18,9 +18,75 @@ ROOT = Path(__file__).resolve().parents[1]
 DATABASE = Path("/root/artifacts/nanobody_mutations.sqlite")
 STATE = Path("/root/artifacts/dashboard_replay")
 PASSES = 10
-# Ten concurrent ordinary draws can exceed 900s. Keep the complete batch
-# within the existing 1100s remote command and 1150s Pi transport deadlines.
+# Retain separate limits for ordinary single and distinct two-candidate jobs.
 TTL = 1050
+PAIR_TTL = 1200
+
+
+def has_single_partial(item: dict) -> bool:
+    batch = hashlib.sha256(json.dumps([item['epoch'], PASSES, [item['sequence']]]).encode()).hexdigest()[:16]
+    directory = STATE/f"epoch{item['epoch']}"/batch
+    return any('.stale-' not in str(path) and '.qualified-' not in str(path)
+               for path in directory.glob('work/epoch*/replicates*/*/length*/pass*/exact_all.json'))
+
+
+def read_batch_plans(target: str) -> list[dict]:
+    from nanobody_opt.rules import target_for_epoch
+    from tools.collect_slave_multipass_seqs import pass_counts
+    path = STATE/'batch_plans.json'
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if value.get('target') != target:
+        return []
+    plans = value.get('plans', [])
+    if not isinstance(plans, list):
+        raise ValueError('invalid_replay_batch_plans')
+    for plan in plans:
+        seqs = plan.get('sequences', [])
+        if (type(plan.get('epoch')) is not int or target_for_epoch(plan['epoch']) != target
+                or not 1 <= len(seqs) <= 2 or any(not isinstance(s, str) or not s for s in seqs)
+                or len(set(seqs)) != len(seqs) or len({len(s) for s in seqs}) != 1):
+            raise ValueError('invalid_replay_batch_plan')
+    counts = pass_counts([s for plan in plans for s in plan['sequences']], target) if plans else {}
+    pending_plans = [plan for plan in plans if any(counts.get(s, 0) < PASSES for s in plan['sequences'])]
+    if pending_plans != plans:
+        save_batch_plans(target, pending_plans)
+    return pending_plans
+
+
+def save_batch_plans(target: str, plans: list[dict]) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    path = STATE/'batch_plans.json'
+    temporary = path.with_suffix('.json.next')
+    temporary.write_text(json.dumps({'target': target, 'plans': plans}))
+    os.replace(temporary, path)
+
+
+def choose_batch(items: list[dict], counts: dict, excluded: set, target: str,
+                 plans: list[dict]) -> tuple[int | None, list[str]]:
+    """Persist exact group membership before launch, including singleton tails."""
+    reserved = {s for plan in plans for s in plan['sequences']}
+    missing = [item for item in items if counts.get(item['sequence'], 0) < PASSES
+               and item['sequence'] not in excluded | reserved]
+    if not missing:
+        return None, []
+    first = missing[0]
+    group = [first['sequence']]
+    # Legacy partial single jobs retain their own input context and raw calls.
+    if not has_single_partial(first) and counts.get(first['sequence'], 0) == 0:
+        partner = next((item for item in missing[1:]
+                        if item['epoch'] == first['epoch']
+                        and len(item['sequence']) == len(first['sequence'])
+                        and item['sequence'] != first['sequence']
+                        and counts.get(item['sequence'], 0) == 0
+                        and not has_single_partial(item)), None)
+        if partner is not None:
+            group.append(partner['sequence'])
+    group.sort()
+    save_batch_plans(target, [*plans, {'epoch': first['epoch'], 'sequences': group}])
+    return int(first['epoch']), group
 
 
 def plan_pair_benchmark(epoch: int) -> None:
@@ -42,10 +108,7 @@ def plan_pair_benchmark(epoch: int) -> None:
     missing = [item for item in items if counts.get(item['sequence'], 0) < PASSES]
     # Never move a partly completed single-candidate job into a new batch.
     for item in missing:
-        batch = hashlib.sha256(json.dumps([item['epoch'], PASSES, [item['sequence']]]).encode()).hexdigest()[:16]
-        directory = STATE/f"epoch{item['epoch']}"/batch
-        if any('.stale-' not in str(path) and '.qualified-' not in str(path)
-               for path in directory.glob('work/epoch*/replicates*/*/length*/pass*/exact_all.json')):
+        if has_single_partial(item):
             return
     groups = {}
     for item in missing:
@@ -79,6 +142,10 @@ def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list
                 return pair['epoch'], sequences
     except (OSError, ValueError, TypeError, KeyError):
         pass
+    plans = read_batch_plans(target)
+    for plan in plans:
+        if plan['epoch'] < epoch and not excluded.intersection(plan['sequences']):
+            return plan['epoch'], plan['sequences']
     queue_path = STATE/'pending_cohort.json'
     try:
         queued = json.loads(queue_path.read_text())
@@ -88,9 +155,9 @@ def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list
     if items:
         counts = pass_counts([item['sequence'] for item in items], target)
         missing = [item for item in items if counts.get(item['sequence'], 0) < PASSES]
-        for item in missing:
-            if item['sequence'] not in excluded:
-                return int(item['epoch']), [item['sequence']]
+        selection = choose_batch(items, counts, excluded, target, plans)
+        if selection[0] is not None:
+            return selection
         if missing:
             return None, []
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30) as db:
@@ -106,15 +173,16 @@ def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list
             temporary.write_text(json.dumps({'target': target, 'items': items}))
             os.replace(temporary, queue_path)
             counts = pass_counts([item['sequence'] for item in items], target)
-            for item in items:
-                if counts.get(item['sequence'], 0) < PASSES and item['sequence'] not in excluded:
-                    return int(item['epoch']), [item['sequence']]
+            selection = choose_batch(items, counts, excluded, target, plans)
+            if selection[0] is not None:
+                return selection
     for completed in epochs:
         sequences = sorted(set(leaderboard_sequences(completed) or []))
         counts = pass_counts(sequences, target)
-        missing = [s for s in sequences if counts.get(s, 0) < PASSES and s not in excluded]
-        if missing:
-            return completed, missing[:1]
+        selection = choose_batch([{'epoch': completed, 'sequence': s} for s in sequences],
+                                 counts, excluded, target, plans)
+        if selection[0] is not None:
+            return selection
     return None, []
 
 
@@ -161,18 +229,20 @@ def priority_cohort(chain_epoch: int, published_epoch: int) -> list[dict]:
     return result
 
 
-def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
+def lease_job(directory: Path, *, gpu: int, epoch: int, candidates: int = 1) -> dict:
     # Indices 0-4 are reserved for the live pipeline. Background work may use
     # only 5-7, and even there must pass the existing idle/lock/contention gate.
     if isinstance(gpu, bool) or gpu not in (5, 6, 7):
         raise ValueError("dashboard_gpu_outside_background_pool")
+    if type(candidates) is not int or candidates not in (1, 2):
+        raise ValueError('unsupported_dashboard_batch_size')
     env = {k: os.environ[k] for k in (
         "PATH", "HOME", "USER", "LANG", "LD_LIBRARY_PATH") if k in os.environ}
     env.update(PYTHONPATH=str(ROOT) + ":/root/bgen_shim:/root/external_tools/boltzgen/src",
                HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", OMP_NUM_THREADS="1",
                OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
                PYTHONDONTWRITEBYTECODE="1")
-    return {"gpu": gpu, "ttl_seconds": TTL, "minimum_free_mib": 12288,
+    return {"gpu": gpu, "ttl_seconds": PAIR_TTL if candidates == 2 else TTL, "minimum_free_mib": 12288,
             "scorer": str(ROOT/"nanobody_opt/score_boltzgen_fast_adapter.py"),
             "lock_directory": "/root/pr100-controller/gpu-locks",
             "receipt": str(directory/"lease.json"), "cwd": str(ROOT), "env": env,
@@ -205,11 +275,11 @@ def run(*, epoch: int, gpu: int = 5, selection=None) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     (directory/"sequences.json").write_text(json.dumps(sequences))
     prepare(selected, directory, db=DATABASE)
-    job = lease_job(directory, gpu=gpu, epoch=selected)
+    job = lease_job(directory, gpu=gpu, epoch=selected, candidates=len(sequences))
     job_path = directory/"job.json"
     job_path.write_text(json.dumps(job))
     result = subprocess.run([sys.executable, "-m", "nanobody_opt.pr100_live_gpu", "--job", str(job_path)],
-                            cwd=ROOT, capture_output=True, timeout=TTL + 30)
+                            cwd=ROOT, capture_output=True, timeout=job['ttl_seconds'] + 30)
     receipt = json.loads((directory/"lease.json").read_text())
     if (result.returncode or receipt.get("status") != "process_finished"
             or receipt.get("child_exit_code") != 0):
