@@ -605,10 +605,11 @@ def test_same_novelty_identity_code_upgrade_cannot_claim_pending_migration_excep
     assert events == [] and a.read(base / 'pr100-controller.json') == old
 
 
-def test_qualified_novelty_release_is_approved_predecessor(deployment, novelty_receipt):
+@pytest.mark.parametrize('predecessor', [a.QUALIFIED_NOVELTY_RELEASE, a.ARCHIVE_CACHE_RELEASE])
+def test_qualified_novelty_release_is_approved_predecessor(deployment, novelty_receipt, predecessor):
     *_, old = deployment
-    old['source_sha'] = a.QUALIFIED_NOVELTY_RELEASE
-    for host in old['hosts'].values(): host['release'] = '/root/releases/' + a.QUALIFIED_NOVELTY_RELEASE
+    old['source_sha'] = predecessor
+    for host in old['hosts'].values(): host['release'] = '/root/releases/' + predecessor
     release, receipt, _ = novelty_receipt
     value = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', novelty_runtimes=a.verify_novelty_qualification(release, receipt))
     assert value['source_sha'] == SHA

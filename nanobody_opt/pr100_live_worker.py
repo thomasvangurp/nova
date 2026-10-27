@@ -280,6 +280,26 @@ def native_resume_identity(job, directory, requirements):
             'runtime_identity_status': 'checkpoint_bound' if complete else 'incomplete'}
 
 
+def terminal_rejection_reason(values, requirements, sequence, reason):
+    """Distinguish a completed aggregation rejection from an unavailable tool.
+
+    The publication gate checks the backend's passed flag before numeric caps.
+    Its shared failure label alone cannot revoke earlier evidence. Classify only
+    completed authoritative CPU profiles with the existing finite-metric and
+    provenance checks; never load audit journal rows as measurements.
+    """
+    if reason != 'aggrescan_unavailable_or_failed':
+        return reason
+    from nanobody_opt.pr100_native_journal import observation
+    for value in values:
+        if not selection.authoritative_cpu_measurement(value):
+            continue
+        observed = observation(value, requirements, sequence)
+        if observed['outcome'] == 'rejected' and observed['gate_reason'] == 'aggrescan_threshold':
+            return 'aggrescan_threshold'
+    return reason
+
+
 def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=None, screen=None,
                  refill=None):
     from nanobody_opt import pr100_native_journal as journal_module
@@ -511,7 +531,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'execution_host': job.get('native_host', 'master')}}
             else:
                 confirmation_progress[key] = {'sequence_hash': rules.sequence_hash(key),
-                                               'terminal_reason': verdict['reason']}
+                    'terminal_reason': terminal_rejection_reason(
+                        measurements[key], requirements, key, verdict['reason'])}
             try:
                 pr100_filter.atomic(directory / 'native-confirmations.json', {
                     'challenge': job['challenge'], 'records': list(confirmation_progress.values())})
@@ -856,9 +877,11 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                          'psh_boundary_margin': verdict['psh_boundary_margin'],
                          'selection_reason': verdict['reason']})
     result['native_passed'] = len(passers)
-    result['terminal_native_outcomes'] = {rules.sequence_hash(key): verdict['reason']
-        for key, verdict in verdicts.items() if verdict['tier'] is None
-        and verdict['reason'] in journal_module.REJECTION_REASONS}
+    result['terminal_native_outcomes'] = {}
+    for key, verdict in verdicts.items():
+        reason = terminal_rejection_reason(measurements[key], requirements, key, verdict['reason'])
+        if verdict['tier'] is None and reason in journal_module.REJECTION_REASONS:
+            result['terminal_native_outcomes'][rules.sequence_hash(key)] = reason
     result['native_classification_complete'] = True
     flush()
 
