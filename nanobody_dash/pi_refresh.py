@@ -129,6 +129,15 @@ def master_endpoint() -> tuple[str, int]:
     return host, port
 
 
+def master_ssh_options() -> list[str]:
+    # Replays are silent while the owned worker draws. Keep the transport alive
+    # without extending the independent remote lease or command deadline.
+    return ["-i", str(IDENTITY), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=12", "-o", "ConnectionAttempts=2",
+            "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3"]
+
+
 def accept_comparison(pending: Path) -> int:
     body = json.loads(pending.read_text())
     if not isinstance(body, dict) or not body or any(
@@ -147,8 +156,7 @@ def multipass() -> dict:
     from .master_refresh import export_command
 
     host, port = master_endpoint()
-    options = ["-i", str(IDENTITY), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-               "-o", "ConnectTimeout=12", "-o", "StrictHostKeyChecking=yes"]
+    options = master_ssh_options()
     outcomes_ok = submission_outcomes(host, port, options)
     # timeout runs remotely too: losing SSH must not leave an unbounded export.
     try:
@@ -273,9 +281,7 @@ def auxiliary(job: str) -> dict:
     if job == "replay":
         from .master_refresh import export_command
         host, port = master_endpoint()
-        command = ["ssh", "-i", str(IDENTITY), "-o", "IdentitiesOnly=yes",
-                   "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                   "-o", "ConnectTimeout=12", "-p", str(port), "root@" + host,
+        command = ["ssh", *master_ssh_options(), "-p", str(port), "root@" + host,
                    export_command(replay=True)]
         completed = run(command, 1350)
         try:
@@ -286,10 +292,13 @@ def auxiliary(job: str) -> dict:
             return {"ok": False, "reason": "replay_result_unavailable"}
         # The remote process emits only these operational fields. Do not pass
         # through arbitrary output, even from a future or mismatched release.
-        return {"ok": completed.returncode == 0 and body.get("ok") is True,
+        success = completed.returncode == 0 and body.get("ok") is True
+        active = body.get("reason") == "replay_in_progress"
+        return {"ok": success,
                 "epoch": body.get("epoch") if type(body.get("epoch")) is int else None,
                 "rows": body.get("rows") if type(body.get("rows")) is int else None,
-                "reason": "replay_verified" if body.get("ok") is True else "replay_pending"}
+                "reason": ("replay_in_progress" if active else "replay_verified")
+                          if success else "replay_pending"}
     if job == "compound":
         ok = module("nanobody_dash.compound", 1200)
         state = read_json(DATA / "compound_status.json")

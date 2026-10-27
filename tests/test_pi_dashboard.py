@@ -259,6 +259,35 @@ def test_replay_lease_excludes_live_gpus_and_shared_daemon(tmp_path):
     assert "TOKEN" not in " ".join(job["env"])
 
 
+def test_disconnected_replay_retry_reports_owned_work_without_restarting(tmp_path, monkeypatch, capsys):
+    import fcntl
+    from nanobody_dash import replay_refresh as replay
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    receipt = tmp_path/'health.json'
+    receipt.write_text('{"ok":true,"rows":20}')
+    monkeypatch.setattr(replay, 'run_parallel', lambda *a: pytest.fail('must not launch another producer'))
+    with (tmp_path/'refresh.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert replay.main() == 0
+    assert json.loads(capsys.readouterr().out) == {'ok': True, 'reason': 'replay_in_progress'}
+    assert json.loads(receipt.read_text()) == {'ok': True, 'rows': 20}
+
+
+def test_replay_transport_keepalive_and_busy_state_are_not_completed_rows(monkeypatch):
+    monkeypatch.setattr(pi, 'master_endpoint', lambda: ('host', 22))
+    monkeypatch.setenv('NOVA_DASH_MASTER_RELEASE_DIR', '/root/dashboard-releases/'+'a'*40)
+    def run(command, timeout):
+        assert 'ServerAliveInterval=15' in command
+        assert 'ServerAliveCountMax=3' in command
+        assert 'ConnectionAttempts=2' in command
+        assert 'StrictHostKeyChecking=yes' in command
+        assert timeout == 1350
+        return subprocess.CompletedProcess(command, 0, b'{"ok":true,"reason":"replay_in_progress"}')
+    monkeypatch.setattr(pi, 'run', run)
+    assert pi.auxiliary('replay') == {'ok': True, 'reason': 'replay_in_progress',
+                                     'epoch': None, 'rows': None}
+
+
 def test_replay_pending_uses_same_target_and_missing_depth(monkeypatch, tmp_path):
     import sqlite3
     from nanobody_dash import replay_refresh as replay

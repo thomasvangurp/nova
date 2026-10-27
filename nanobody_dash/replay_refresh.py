@@ -341,6 +341,9 @@ def main() -> int:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            # The prior owned worker can outlive a disconnected SSH client.
+            # Report that state without launching work or replacing its receipt.
+            print(json.dumps({"ok": True, "reason": "replay_in_progress"}))
             return 0
         try:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
