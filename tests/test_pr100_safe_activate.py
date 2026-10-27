@@ -530,3 +530,63 @@ def test_cli_requires_explicit_novelty_qualification_before_any_operations(monke
     with pytest.raises(SystemExit) as error:
         a.main([SHA, 'preserve', '--staging-receipt', '/unused'])
     assert error.value.code == 2
+
+
+def pending_migration(deployment):
+    base, release, unit, root, old = deployment
+    state = {**STATE, 'active': {'number': 6, 'phase': 'native', 'native_unresolved': True}}
+    a.atomic(root / '25964/continuation.json', state)
+    directory = root / '25964/attempts/00006'
+    a.atomic(directory / 'native-dispatch.json', {'challenge': STATE['challenge'],
+        'source_sha': old['source_sha'], 'hosts': ['master']})
+    operation = directory / 'novelty-rechecks/operation'
+    a.atomic(operation / 'novelty-request.json', {'host': 'master', 'request': {'spec': {'epoch': 25964}}})
+    a.atomic(operation / 'novelty-supervisor.json', {'reason': 'completed',
+        'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}})
+    a.atomic(operation / 'novelty-collected.json', {'files': ['result.json']})
+    return directory, operation, state
+
+
+def test_qualified_migration_can_handoff_clean_pending_prelaunch_failure(deployment, novelty_receipt):
+    base, release, unit, root, old = deployment; events = []
+    directory, operation, state = pending_migration(deployment)
+    native_release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(native_release, receipt)
+    before = (root / '25964/continuation.json').read_bytes()
+    assert not a.boundary(old, CLOCK, 1000)
+    result = a.handoff(base, SHA, 'preserve', release, None, novelty_runtimes=runtimes,
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'activated'
+    assert (root / '25964/continuation.json').read_bytes() == before
+    assert a.read(root / '25964/continuation.json')['active']['native_unresolved'] is True
+
+
+@pytest.mark.parametrize('fault', ['uncollected', 'owned_native', 'wrong_epoch', 'changed_plan', 'running', 'legacy'])
+def test_pending_migration_never_overrides_unproven_ownership(deployment, fault):
+    base, release, unit, root, old = deployment
+    directory, operation, state = pending_migration(deployment)
+    if fault == 'uncollected': (operation / 'novelty-collected.json').unlink()
+    elif fault == 'owned_native':
+        a.atomic(directory / 'native-hosts/master/native-request.json', {'host': 'master', 'request': {'spec': {'epoch': 25964}}})
+    elif fault == 'wrong_epoch':
+        a.atomic(operation / 'novelty-request.json', {'host': 'master', 'request': {'spec': {'epoch': 25963}}})
+    elif fault == 'changed_plan':
+        plan = a.read(directory / 'native-dispatch.json'); plan['source_sha'] = 'f'*40
+        a.atomic(directory / 'native-dispatch.json', plan)
+    elif fault == 'running': a.atomic(root / 'heartbeat.json', {**HEARTBEAT, 'status': 'running'})
+    else: a.atomic(root / '25964/continuation.json', {**state, 'legacy_uncertain_phase': 'native'})
+    assert not a.boundary(old, CLOCK, 1000, novelty_migration=True)
+
+
+def test_pending_migration_rechecks_new_owner_after_stop(deployment, novelty_receipt):
+    base, release, unit, root, old = deployment; events = []
+    directory, operation, state = pending_migration(deployment)
+    native_release, receipt, _ = novelty_receipt
+    def stop():
+        a.atomic(directory / 'native-hosts/master/native-request.json', {'host': 'master', 'request': {'spec': {'epoch': 25964}}})
+    result = a.handoff(base, SHA, 'preserve', release, None,
+        novelty_runtimes=a.verify_novelty_qualification(native_release, receipt), clock_reader=lambda: CLOCK,
+        now=lambda: 1000, service_factory=service_factory(unit, events, stop=stop))
+    assert result['status'] == 'boundary_race_old_service_restarted'
+    assert a.read(base / 'pr100-controller.json') == old
+    assert 'install' not in events

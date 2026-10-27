@@ -162,7 +162,7 @@ def atomic(path, value, *, raw=False):
         except FileNotFoundError: pass
 
 
-def ready_for_activation(clock, heartbeat, state, now, *, heartbeat_max_age=30):
+def ready_for_activation(clock, heartbeat, state, now, *, heartbeat_max_age=30, recoverable_attempt=False):
     """A receipt says nothing about current continuation ownership."""
     if not all(isinstance(v, dict) for v in (clock, heartbeat, state)):
         return False
@@ -175,8 +175,45 @@ def ready_for_activation(clock, heartbeat, state, now, *, heartbeat_max_age=30):
         and isinstance(heartbeat.get('updated_at_unix'), (float, int))
         and 0 <= now - heartbeat['updated_at_unix'] <= heartbeat_max_age
         and state.get('challenge', {}).get('epoch') == epoch
-        and 'active' in state and state['active'] is None
+        and 'active' in state and (state['active'] is None or recoverable_attempt)
         and not state.get('legacy_uncertain_phase'))
+
+
+def clean_pending_novelty_migration(config, clock, state):
+    """A preserved pending attempt is migratable only after all owners are clean.
+
+    Native launch intent is persisted before any remote start. Empty host intent
+    directories therefore do not establish a live owner, despite a conservative
+    aggregate ownership_unresolved flag after pre-dispatch failure.
+    """
+    active = state.get('active')
+    if (not isinstance(active, dict) or type(active.get('number')) is not int or active['number'] < 1
+            or active.get('phase') not in ('native', 'score', 'novelty', 'publish')):
+        return False
+    directory = Path(config['state_root']) / str(clock['epoch']) / 'attempts' / str(active['number']).zfill(5)
+    plan = read(directory / 'native-dispatch.json', {})
+    if (not isinstance(plan, dict) or plan.get('challenge') != state.get('challenge')
+            or plan.get('source_sha') != config['source_sha']
+            or set(plan.get('hosts', [])) != set(config.get('native_hosts', ['master']))):
+        return False
+    requests = [directory / (phase + '-request.json') for phase in ('sequence', 'native', 'score')]
+    requests += [directory / 'native-hosts' / host / 'native-request.json' for host in ('master', 'slave')]
+    for group, phase in (('novelty-rechecks', 'novelty'), ('score-batches', 'score')):
+        requests.extend((directory / group).glob('*/' + phase + '-request.json'))
+    for intent in requests:
+        if not intent.is_file():
+            continue
+        saved = read(intent, {}); request = saved.get('request', {})
+        phase = intent.name.removesuffix('-request.json')
+        supervisor = read(intent.parent / (phase + '-supervisor.json'), {})
+        cleanup = supervisor.get('cleanup', {})
+        if (request.get('spec', {}).get('epoch') != clock['epoch']
+                or saved.get('host') not in ('master', 'slave')
+                or not (intent.parent / (phase + '-collected.json')).is_file()
+                or type(cleanup.get('remaining_descendants')) is not int
+                or cleanup['remaining_descendants'] != 0 or cleanup.get('fixed_point_reached') is not True):
+            return False
+    return True
 
 
 def qualification_identity_verified(receipt):
@@ -381,11 +418,13 @@ class Service:
             raise RuntimeError('service_release_mismatch')
 
 
-def boundary(config, clock, now, *, heartbeat_max_age=30):
+def boundary(config, clock, now, *, heartbeat_max_age=30, novelty_migration=False):
     root = Path(config['state_root'])
+    state = read(root / str(clock['epoch']) / 'continuation.json', {})
+    recoverable = novelty_migration and clean_pending_novelty_migration(config, clock, state)
     return ready_for_activation(clock, read(root / 'heartbeat.json', {}),
-                                read(root / str(clock['epoch']) / 'continuation.json', {}), now,
-                                heartbeat_max_age=heartbeat_max_age)
+                                state, now, heartbeat_max_age=heartbeat_max_age,
+                                recoverable_attempt=recoverable)
 
 
 def rendered_unit(release, path):
@@ -411,7 +450,8 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, c
             service_factory=Service, now=time.time):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
-    if not boundary(config, clock, now()): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
+    migration = novelty_runtimes is not None
+    if not boundary(config, clock, now(), novelty_migration=migration): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
@@ -433,7 +473,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, c
     changed, start_attempted = False, False
     # Keep the short pause between attempts free of another slow chain RPC.
     # The fresh chain check under the lock below still precedes any install.
-    if path.read_bytes() != original or not boundary(config, clock, now()):
+    if path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     # The prepared config must use the same current epoch as the final check.
     if proposal['start_epoch'] != clock['epoch']:
@@ -445,7 +485,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, c
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fresh = clock_reader()
             raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
-                     or not boundary(config, fresh, now(), heartbeat_max_age=90))
+                     or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration))
             if not raced:
                 # Do not rewrite continuation state or the publication artifact.
                 changed = True
