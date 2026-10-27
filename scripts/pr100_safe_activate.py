@@ -1,6 +1,6 @@
 """Run on Pi: stamped release handoff at a verified continuation boundary.
 
-Usage: python3 SCRIPT SHA master|both|preserve --staging-receipt PATH
+Usage: python3 SCRIPT SHA preserve --staging-receipt PATH --novelty-qualification-receipt PATH
 Both mode additionally requires --qualification-receipt PATH.
 All subprocess output is captured; only allowlisted operational status is emitted.
 """
@@ -10,6 +10,7 @@ import copy
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -34,6 +35,110 @@ NATIVE_WRAPPER_SHA256 = 'ab23f3e807a65753207d219a323d567924f9d00c8633c6cad811981
 NATIVE_ALTERNATE = {'native_python': ALTERNATE_PREFIX + '/bin/native-python',
                     'native_path': ALTERNATE_PREFIX + '/bin:/usr/local/bin:/usr/bin:/bin',
                     'native_python_path': ALTERNATE_PREFIX + '/shim'}
+NOVELTY_PREFIX = '/root/pr100-novelty-runtime-20261027'
+NOVELTY_PATHS = {'python': NOVELTY_PREFIX + '/bin/novelty-python',
+                'path': NOVELTY_PREFIX + '/bin:/usr/local/bin:/usr/bin:/bin',
+                'python_path': NOVELTY_PREFIX + '/shim'}
+NOVELTY_SOURCES = frozenset({
+    'nanobody_opt/check_validator_novelty.py', 'nanobody_opt/pr100_novelty_runtime.py',
+    'NOVA-nanobody-filter/metanano/config.py',
+    'NOVA-nanobody-filter/metanano/search/search_engine.py',
+    'NOVA-nanobody-filter/metanano/search/index_manager.py',
+    'NOVA-nanobody-filter/metanano/utils/alignment.py',
+    'NOVA-nanobody-filter/metanano/utils/cdr_utils.py',
+    'NOVA-nanobody-filter/metanano/utils/kmer.py'})
+NOVELTY_ARCHIVES = {
+    'old': ('2e426028e1bb34b0d14ba17759c539fc91f7a825c9b7e5fe4f9ec5c3618ba260', 8553),
+    'new': ('faa66bc72600e2fd4979754ab02c2637ef7d8725ee487fb5cd48cfa260b7eb2e', 8575)}
+NOVELTY_INPUT_SHA256 = '47940cc481d43ab28650f1c4cfc0d1155426973ec764337d1dec4e849d887905'
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def hash_value(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def verified_novelty_runtimes(value):
+    if not isinstance(value, dict) or set(value) != {'master', 'slave'}:
+        raise ValueError('both_novelty_runtimes_required')
+    for runtime in value.values():
+        if (not isinstance(runtime, dict) or set(runtime) != set(NOVELTY_PATHS) | {'identity_sha256'}
+                or any(runtime.get(key) != path for key, path in NOVELTY_PATHS.items())
+                or not hash_value(runtime.get('identity_sha256'))):
+            raise ValueError('unqualified_novelty_runtime_layout')
+    return copy.deepcopy(value)
+
+
+def verify_novelty_qualification(release, path):
+    """Require complete two-host replay and bind scientific sources to the release."""
+    value = read(path, {}) if path else {}
+    if (not isinstance(value, dict) or value.get('schema') != 'pr100-novelty-runtime-qualification-v1'
+            or value.get('artifact_hash_encoding') != 'canonical-json-v1'
+            or not isinstance(value.get('hosts'), dict) or set(value['hosts']) != {'master', 'slave'}):
+        raise ValueError('both_host_novelty_qualification_required')
+    if any(not isinstance(item, dict) for item in value['hosts'].values()):
+        raise ValueError('novelty_host_receipt_invalid')
+    runtimes = verified_novelty_runtimes({host: item.get('runtime') for host, item in value['hosts'].items()})
+    cohort = None
+    for host, item in value['hosts'].items():
+        identity, result, supervisor = item.get('identity', {}), item.get('result', {}), item.get('supervisor', {})
+        if (not all(isinstance(obj, dict) for obj in (identity, result, supervisor))
+                or item.get('artifact_sha256') != {name: digest(item.get(name)) for name in ('identity', 'result', 'supervisor')}):
+            raise ValueError('novelty_artifact_digest_mismatch')
+        runtime_hash = runtimes[host]['identity_sha256']
+        if (not isinstance(identity, dict) or identity.get('schema') != 'pr100-qualified-novelty-v1'
+                or digest(identity) != runtime_hash or not hash_value(identity.get('python_binary_sha256'))
+                or not hash_value(identity.get('execution_environment_sha256'))
+                or not hash_value(identity.get('annotation_identity'))
+                or not isinstance(identity.get('sources'), dict) or set(identity['sources']) != NOVELTY_SOURCES
+                or not isinstance(identity.get('assets'), dict)
+                or set(identity['assets']) != {'assets-manifest.json', 'pydantic-assets-manifest.json', 'hmmer-assets-manifest.json'}
+                or not all(hash_value(v) for v in identity['assets'].values())):
+            raise ValueError('novelty_runtime_identity_unverified')
+        for name, expected in identity['sources'].items():
+            source = (Path(release) / name).resolve()
+            if (not hash_value(expected) or not source.is_relative_to(Path(release).resolve())
+                    or hashlib.sha256(source.read_bytes()).hexdigest() != expected):
+                raise ValueError('novelty_scientific_source_mismatch')
+        cleanup = supervisor.get('cleanup', {})
+        if not isinstance(cleanup, dict):
+            raise ValueError('novelty_owner_cleanup_unverified')
+        if (supervisor.get('reason') != 'completed' or type(supervisor.get('exit_code')) is not int
+                or supervisor['exit_code'] != 0 or type(cleanup.get('remaining_descendants')) is not int
+                or cleanup['remaining_descendants'] != 0 or cleanup.get('fixed_point_reached') is not True):
+            raise ValueError('novelty_owner_cleanup_unverified')
+        if (result.get('status') != 'complete' or result.get('runtime_sha256') != runtime_hash
+                or type(result.get('input_count')) is not int or result['input_count'] != 22
+                or result.get('input_sha256') != NOVELTY_INPUT_SHA256
+                or not isinstance(result.get('snapshots'), dict) or set(result['snapshots']) != set(NOVELTY_ARCHIVES)):
+            raise ValueError('novelty_replay_incomplete_or_unbound')
+        for name, (archive_hash, count) in NOVELTY_ARCHIVES.items():
+            snapshot = result['snapshots'][name]
+            if (not isinstance(snapshot, dict) or snapshot.get('archive_sha256') != archive_hash or type(snapshot.get('archive_rows')) is not int
+                    or snapshot['archive_rows'] != count or type(snapshot.get('archive_cdr_available')) is not int
+                    or snapshot['archive_cdr_available'] != count or type(snapshot.get('kept_count')) is not int
+                    or snapshot['kept_count'] != 22 or not isinstance(snapshot.get('verdicts'), list)
+                    or len(snapshot['verdicts']) != 22):
+                raise ValueError('novelty_full_archive_coverage_unverified')
+            hashes = []
+            for verdict in snapshot['verdicts']:
+                if not isinstance(verdict, dict):
+                    raise ValueError('novelty_positive_verdict_unverified')
+                score = verdict.get('maximum_identity')
+                if (not hash_value(verdict.get('sequence_hash')) or verdict.get('validator_novel') is not True
+                        or verdict.get('exact_historical') is not False
+                        or type(verdict.get('coarse_candidates')) is not int or verdict['coarse_candidates'] < 0
+                        or isinstance(score, bool) or not isinstance(score, (int, float))
+                        or not math.isfinite(score) or not 0 <= score <= 1):
+                    raise ValueError('novelty_positive_verdict_unverified')
+                hashes.append(verdict['sequence_hash'])
+            if len(set(hashes)) != 22 or cohort is not None and hashes != cohort:
+                raise ValueError('novelty_replay_cohort_mismatch')
+            cohort = hashes
+    return runtimes
 
 
 def read(path, default=None):
@@ -188,13 +293,29 @@ def selected_mode(current, mode):
     return mode
 
 
-def proposed_config(current, sha, epoch, mode, qualification=None):
+def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None):
     if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
     if mode not in ('master', 'both'):
         raise ValueError('invalid_activation_mode')
     value = copy.deepcopy(current); previous = current['source_sha']
+    if novelty_runtimes is not None:
+        # This rollout repairs annotation only. Preserve qualified native
+        # runtimes, worker admission, affinity, GPUs and scientific settings.
+        runtimes = verified_novelty_runtimes(novelty_runtimes)
+        if mode != selected_mode(current, 'preserve'):
+            raise ValueError('novelty_rollout_cannot_change_native_topology')
+        if mode == 'both' and qualification is None:
+            raise ValueError('slave_runtime_not_qualified')
+        value.update(source_sha=sha, start_epoch=epoch)
+        for host in ('master', 'slave'):
+            runtime = value['hosts'][host]
+            if not runtime['release'].endswith('/' + previous):
+                raise ValueError('unexpected_host_release')
+            runtime['release'] = runtime['release'][:-len(previous)] + sha
+            runtime['novelty_runtime'] = runtimes[host]
+        return value
     value.update(source_sha=sha, start_epoch=epoch, native_hosts=['master'] if mode == 'master' else ['master', 'slave'])
     if sha != THROUGHPUT_RELEASE:
         value['epoch_fresh_native_limit'] = current.get('epoch_fresh_native_limit', 4800)
@@ -286,13 +407,13 @@ def recovery_required(sha, epoch, error, *, start_attempted):
             'scientific_ownership_must_be_checked_before_recovery': True}
 
 
-def handoff(base, sha, mode, release, qualification, *, clock_reader=current_clock,
+def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, clock_reader=current_clock,
             service_factory=Service, now=time.time):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
     if not boundary(config, clock, now()): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
-    proposal = proposed_config(config, sha, clock['epoch'], mode, qualification)
+    proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -337,7 +458,7 @@ def handoff(base, sha, mode, release, qualification, *, clock_reader=current_clo
         # lock cannot safely be held through startup. Do not roll it back here.
         start_attempted = True
         service.start(); verify_started_service(service, release, path)
-        return {'status': 'activated', 'epoch': fresh['epoch'], 'native_hosts': proposal['native_hosts'],
+        return {'status': 'activated', 'epoch': fresh['epoch'], 'native_hosts': proposal.get('native_hosts', ['master']),
                 'source_sha': sha, 'state_preserved': True, 'publication_preserved': True}
     except Exception as error:
         if changed and start_attempted:
@@ -362,6 +483,7 @@ def main(argv=None):
     parser.add_argument('sha'); parser.add_argument('mode', choices=('master', 'both', 'preserve'))
     parser.add_argument('--staging-receipt', required=True, type=Path)
     parser.add_argument('--qualification-receipt', type=Path)
+    parser.add_argument('--novelty-qualification-receipt', required=True, type=Path)
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if not re.fullmatch('[0-9a-f]{40}', args.sha) or not 1 <= args.wait_seconds <= 7200:
@@ -380,8 +502,9 @@ def main(argv=None):
                     effective_mode = selected_mode(read(BASE / 'pr100-controller.json', {}), args.mode)
                     q = verify_prerequisites(args.sha, release, args.staging_receipt,
                         mode=effective_mode, qualification_path=args.qualification_receipt)
+                    novelty = verify_novelty_qualification(release, args.novelty_qualification_receipt)
                     try:
-                        value = handoff(BASE, args.sha, args.mode, release, q)
+                        value = handoff(BASE, args.sha, args.mode, release, q, novelty_runtimes=novelty)
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}
                 atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})

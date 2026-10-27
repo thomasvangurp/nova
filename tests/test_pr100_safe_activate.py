@@ -401,13 +401,14 @@ def test_recovery_required_is_terminal_failure_not_a_retry_or_success(deployment
     stage = base / 'stage.json'; stage.write_text('{}')
     monkeypatch.setattr(a, 'BASE', base)
     monkeypatch.setattr(a, 'verify_prerequisites', lambda *_a, **_k: None)
+    monkeypatch.setattr(a, 'verify_novelty_qualification', lambda *_a, **_k: {})
     calls = []
     def handoff(*_a, **_k):
         calls.append(1)
         return {'status': status, 'recovery_required': True, 'source_sha': SHA}
     monkeypatch.setattr(a, 'handoff', handoff)
     monkeypatch.setattr(a.time, 'sleep', lambda *_: pytest.fail('cannot retry unresolved activation'))
-    assert a.main([SHA, 'master', '--staging-receipt', str(stage), '--wait-seconds', '5']) == 1
+    assert a.main([SHA, 'master', '--staging-receipt', str(stage), '--novelty-qualification-receipt', str(stage), '--wait-seconds', '5']) == 1
     assert len(calls) == 1 and json.loads(capsys.readouterr().out)['status'] == status
 
 
@@ -422,3 +423,110 @@ def test_historical_used_script_and_receipts_remain_exact():
     batch = a.read(evidence / 'disjoint-first-batch.json')
     assert batch['shared_inputs'] == 0
     assert [batch['hosts'][host]['fresh_evaluations'] for host in ('master', 'slave')] == [96, 32]
+
+
+def reseal_novelty(value):
+    for item in value['hosts'].values():
+        item['artifact_sha256'] = {name: a.digest(item[name]) for name in ('identity', 'result', 'supervisor')}
+
+
+@pytest.fixture
+def novelty_receipt(tmp_path):
+    release = tmp_path / 'novelty-release'; release.mkdir()
+    sources = {}
+    for name in a.NOVELTY_SOURCES:
+        path = release / name; path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('qualified scientific source: ' + name)
+        sources[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    identity = {'schema': 'pr100-qualified-novelty-v1', 'sources': sources,
+        'python_binary_sha256': 'a'*64, 'execution_environment_sha256': 'b'*64,
+        'annotation_identity': 'c'*64,
+        'assets': {name: 'e'*64 for name in ('assets-manifest.json', 'pydantic-assets-manifest.json', 'hmmer-assets-manifest.json')}}
+    verdicts = [{'sequence_hash': hashlib.sha256(str(i).encode()).hexdigest(), 'validator_novel': True,
+                 'exact_historical': False, 'coarse_candidates': i, 'maximum_identity': 0.9} for i in range(22)]
+    item = {'runtime': {**a.NOVELTY_PATHS, 'identity_sha256': a.digest(identity)}, 'identity': identity,
+        'result': {'status': 'complete', 'runtime_sha256': a.digest(identity), 'input_count': 22,
+            'input_sha256': a.NOVELTY_INPUT_SHA256,
+            'snapshots': {name: {'archive_sha256': sha, 'archive_rows': count,
+                'archive_cdr_available': count, 'kept_count': 22, 'verdicts': copy.deepcopy(verdicts)}
+                for name, (sha, count) in a.NOVELTY_ARCHIVES.items()}},
+        'supervisor': {'reason': 'completed', 'exit_code': 0,
+            'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}}}
+    value = {'schema': 'pr100-novelty-runtime-qualification-v1', 'artifact_hash_encoding': 'canonical-json-v1',
+             'hosts': {host: copy.deepcopy(item) for host in ('master', 'slave')}}
+    reseal_novelty(value)
+    path = tmp_path / 'novelty.json'; a.atomic(path, value)
+    return release, path, value
+
+
+def test_both_completed_novelty_replays_bind_final_scientific_sources(novelty_receipt):
+    release, path, value = novelty_receipt
+    assert a.verify_novelty_qualification(release, path) == {h: v['runtime'] for h, v in value['hosts'].items()}
+    (release / 'nanobody_opt/pr100_novelty_runtime.py').write_text('changed after qualification')
+    with pytest.raises(ValueError, match='source_mismatch'):
+        a.verify_novelty_qualification(release, path)
+
+
+@pytest.mark.parametrize('fault', ['missing_host', 'running', 'missing_cdrs', 'incomplete', 'wrong_archive',
+    'duplicate', 'changed_cohort', 'failed_verdict', 'nan', 'owned_child', 'failed_cleanup',
+    'wrong_runtime', 'wrong_artifact', 'unapproved_path', 'identity_changed', 'unknown_encoding'])
+def test_novelty_qualification_rejects_partial_unbound_or_unclean_evidence(novelty_receipt, fault):
+    release, path, value = novelty_receipt; item = value['hosts']['slave']
+    snapshot = item['result']['snapshots']['new']
+    if fault == 'missing_host': del value['hosts']['slave']
+    elif fault == 'running': item['result']['status'] = 'running'
+    elif fault == 'missing_cdrs': snapshot['archive_cdr_available'] = 0
+    elif fault == 'incomplete': snapshot['kept_count'] = 21
+    elif fault == 'wrong_archive': snapshot['archive_sha256'] = 'f'*64
+    elif fault == 'duplicate': snapshot['verdicts'][1] = copy.deepcopy(snapshot['verdicts'][0])
+    elif fault == 'changed_cohort': snapshot['verdicts'][0]['sequence_hash'] = 'f'*64
+    elif fault == 'failed_verdict': snapshot['verdicts'][0]['validator_novel'] = False
+    elif fault == 'nan': snapshot['verdicts'][0]['maximum_identity'] = 'nan'
+    elif fault == 'owned_child': item['supervisor']['cleanup']['remaining_descendants'] = 1
+    elif fault == 'failed_cleanup': item['supervisor']['cleanup']['fixed_point_reached'] = False
+    elif fault == 'wrong_runtime': item['result']['runtime_sha256'] = 'f'*64
+    elif fault == 'unapproved_path': item['runtime']['python'] = '/unqualified/python'
+    elif fault == 'identity_changed': item['identity']['execution_environment_sha256'] = 'f'*64
+    elif fault == 'unknown_encoding': value['artifact_hash_encoding'] = 'raw-remote-files'
+    reseal_novelty(value)
+    if fault == 'wrong_artifact': item['artifact_sha256']['result'] = 'f'*64
+    a.atomic(path, value)
+    with pytest.raises(ValueError): a.verify_novelty_qualification(release, path)
+
+
+def test_novelty_handoff_preserves_all_native_settings_and_current_work(deployment, novelty_receipt):
+    base, release, unit, root, old = deployment; events = []
+    old['native_hosts'] = ['master', 'slave']
+    old['native_worker_overrides'] = {'master': {'workers': 96}, 'slave': {'workers': 32}}
+    old['worker'].update(native_screen={'enabled': False}, repeats=3, candidate_budget_seconds=300)
+    old['epoch_fresh_native_limit'] = 4800
+    for host in old['hosts'].values(): host.update(native_python='/existing/native', native_tools='/existing/tools', gpus=[0, 1])
+    a.atomic(base / 'pr100-controller.json', old)
+    native_release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(native_release, receipt)
+    prior_state = (root / '25964/continuation.json').read_bytes(); prior_publication = (base / 'publication.json').read_bytes()
+    result = a.handoff(base, SHA, 'preserve', release, {'runtime': {'unused': True}}, novelty_runtimes=runtimes,
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'activated'
+    new = a.read(base / 'pr100-controller.json'); expected = copy.deepcopy(old)
+    expected.update(source_sha=SHA, start_epoch=CLOCK['epoch'])
+    for host in expected['hosts']:
+        expected['hosts'][host]['release'] = '/root/releases/' + SHA
+        expected['hosts'][host]['novelty_runtime'] = runtimes[host]
+    assert new == expected
+    assert (root / '25964/continuation.json').read_bytes() == prior_state
+    assert (base / 'publication.json').read_bytes() == prior_publication
+
+
+def test_novelty_rollout_cannot_also_change_native_topology(deployment, novelty_receipt):
+    *_, old = deployment
+    release, receipt, _ = novelty_receipt
+    with pytest.raises(ValueError, match='native_topology'):
+        a.proposed_config(old, SHA, CLOCK['epoch'], 'both', {}, novelty_runtimes=a.verify_novelty_qualification(release, receipt))
+
+
+def test_cli_requires_explicit_novelty_qualification_before_any_operations(monkeypatch):
+    monkeypatch.setattr(a, 'handoff', lambda *_a, **_k: pytest.fail('must not mutate'))
+    with pytest.raises(SystemExit) as error:
+        a.main([SHA, 'preserve', '--staging-receipt', '/unused'])
+    assert error.value.code == 2

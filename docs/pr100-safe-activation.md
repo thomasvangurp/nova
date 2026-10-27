@@ -88,8 +88,18 @@ The CLI runs on Pi with a tested/staged release:
 
 ```text
 python3 scripts/pr100_safe_activate.py SHA preserve \
-  --staging-receipt PATH --qualification-receipt PATH
+  --staging-receipt PATH --qualification-receipt PATH \
+  --novelty-qualification-receipt PATH
 ```
+
+The novelty rollout requires the completed qualification receipt for both hosts.
+The gate verifies canonical hashes of the embedded artifacts, runtime identities,
+the eight scientific source files against the staged release, complete annotation
+coverage of both historical archives, all 22 replay verdicts, and zero-descendant
+fixed-point cleanup. Whole application commit identity is not substituted for
+scientific source identity. This rollout changes only release/start-epoch fields
+and each host's qualified `novelty_runtime`; it preserves native topology, native
+runtimes, worker settings, GPUs, continuation state and the publication artifact.
 
 Subprocess stdout/stderr is captured. Reports contain only operational status,
 release identifiers, counts and error classes. No credential values or raw
