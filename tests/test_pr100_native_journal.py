@@ -54,6 +54,19 @@ def records(directory):
             if line.strip()]
 
 
+@pytest.mark.parametrize('stratum', ['same_v_nearby_length', 'other_v_nearby_length',
+                                   'unseeded_control', SENTINEL])
+def test_async_journal_retains_allowlisted_donor_stratum(tmp_path, cheap_context, stratum):
+    sink = journal.AsyncJournal(tmp_path, {}, REQ)
+    candidate = {**row(), 'reference_stratum': stratum}
+    assert sink.save(candidate, 1, journal.observation(profile(), REQ, SEQUENCE))
+    sink.close(timeout=1)
+    saved = records(tmp_path)[-1]
+    assert saved['reference_hash'] == 'c'*64
+    assert saved['reference_stratum'] == ('unknown' if stratum == SENTINEL else stratum)
+    assert SENTINEL not in json.dumps(saved)
+
+
 def test_real_gate_pass_and_decimal_precision_are_preserved():
     original = profile()
     before = copy.deepcopy(original)

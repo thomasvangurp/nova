@@ -139,14 +139,17 @@ def sequence_phase(job, directory):
     import pandas as pd
     from nanobody_opt import gates, pr100_proposal_pilot as proposals
     from nanobody_opt import check_validator_novelty as novelty
+    from nanobody_opt import pr100_reference_donors as donors
+    from collections import Counter
     expected = job['challenge']
     config = rules.pinned_config(expected['epoch'])
     pr100_filter.validate_annotation_runtime()
     archive = directory / 'archive.csv'
     if file_digest(archive) != job['archive_sha256']:
         raise ValueError('archive snapshot changed')
-    bank = json.loads(Path(job['references']).read_text())['rows']
-    cell = f"{expected['allowed_v']}:{expected['allowed_cdr3_length']}"
+    fallback = donors.enabled(job)
+    bank_path = Path(job['references'])
+    bank = json.loads(bank_path.read_text())['rows']
     slots = job.get('reference_slots', DEFAULT_REFERENCE_SLOTS)
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
     proposal_offset = job.get('proposal_offset', 0)
@@ -160,22 +163,35 @@ def sequence_phase(job, directory):
     for name, value in (('reference_slots', slots), ('proposals', proposals_wanted)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(name + ' must be a positive integer')
-    refs = sorted((r for r in bank if cell in r['cells']),
-                  key=lambda r: rules.digest([expected['epoch'], r['sequence_hash']]))[:slots]
+    refs, proposal_donors, reference_coverage = donors.select(bank, expected, slots,
+                                                           fallback=fallback)
+    reference_coverage['bank_sha256'] = file_digest(bank_path)
     panels, _ = pr100_filter.helper('germline_identity')._anarci_panel('human')
     rows = [{**r, 'source': 'existing_native_reference'} for r in refs]
+    source_counts = Counter()
     for index in range(proposals_wanted):
         ordinal = proposal_offset + index
         reference_share = proposals_wanted // 2
-        ref = refs[ordinal % len(refs)] if refs and index < reference_share else None
+        ref, provenance = (proposal_donors[ordinal % len(proposal_donors)]
+                           if proposal_donors and index < reference_share
+                           else (None, {'reference_stratum': 'unseeded_control'}))
         cdr3 = (Chain(ref['sequence'], scheme='imgt', cdr_definition='imgt',
                       use_anarcii=False).cdr3_seq if ref else None)
         row = proposals.propose(panels, expected['allowed_v'], expected['allowed_cdr3_length'],
                                 seed=expected['epoch'], ordinal=ordinal, reference_cdr3=cdr3)
         rows.append({**row, 'source': 'fresh_baseline_proposal',
-                     'reference_hash': ref['sequence_hash'] if ref else None})
+                     'reference_hash': ref['sequence_hash'] if ref else None,
+                     **provenance})
+        source_counts[provenance['reference_stratum']] += 1
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
-    unique = {r['sequence']: r for r in rows if rules.sequence_hash(r['sequence']) not in excluded}
+    # Missing-cell donors are never candidates themselves. Also refuse an
+    # accidental proposal collision with any parent; do not spend extra
+    # ordinals or change the requested proposal/native admission budgets.
+    parent_hashes = ({r['sequence_hash'] for r in bank}
+                     if reference_coverage['fallback_used'] else set())
+    parent_collisions = set(generated) & parent_hashes
+    unique = {r['sequence']: r for r in rows
+              if rules.sequence_hash(r['sequence']) not in excluded | parent_hashes}
     eligible, reasons = [], {}
     for sequence, row in unique.items():
         annotation = {**pr100_filter._annotate_uncached(sequence),
@@ -193,6 +209,11 @@ def sequence_phase(job, directory):
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'],
               'archive_sha256': job['archive_sha256'], 'archive_checked_at_unix': job['archive_fetched_at'],
               'archive_rows': len(frame), 'existing_references': len(refs),
+              'reference_coverage': reference_coverage,
+              'proposal_source_counts': dict(source_counts),
+              'eligible_proposal_source_counts': dict(Counter(
+                  r['reference_stratum'] for r in eligible if 'reference_stratum' in r)),
+              'donor_parent_reuse_blocked': len(parent_collisions),
               'proposals': proposals_wanted, 'annotation_reasons': reasons,
               'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposals_wanted,
               'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique),

@@ -27,6 +27,7 @@ import time
 import uuid
 
 from nanobody_opt import rules
+from nanobody_opt.pr100_reference_donors import REFERENCE_STRATA
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -379,7 +380,9 @@ class Journal:
                           "timestamp_unix": time.time(), "observational": True, "reusable": False,
                           "annotation_identity": _hash(annotation.get("annotation_identity")),
                           "source": _enum(row.get("source"), SOURCES),
-                          "reference_hash": _hash(row.get("reference_hash")), "observation": safe}
+                          "reference_hash": _hash(row.get("reference_hash")),
+                          "reference_stratum": _enum(row.get("reference_stratum"), REFERENCE_STRATA),
+                          "observation": safe}
                 if not self._header_saved:
                     self._header_saved = self._append(self._header())
                 if not self._header_saved or not self._append(record):
@@ -516,6 +519,7 @@ class AsyncJournal:
             annotation = annotation if isinstance(annotation, dict) else {}
             safe_row = {"sequence": sequence, "source": _enum(row.get("source"), SOURCES),
                         "reference_hash": _hash(row.get("reference_hash")),
+                        "reference_stratum": _enum(row.get("reference_stratum"), REFERENCE_STRATA),
                         "pr100_annotation": {"annotation_identity": _hash(annotation.get("annotation_identity"))}}
             item = (safe_row, repeat, _safe_observation(observed),
                     _progress_fields(progress) if progress is not None else None)

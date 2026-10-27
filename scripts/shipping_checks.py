@@ -40,6 +40,7 @@ TEST_FILES = (
     'tests/test_pr100_live_supervisor.py',
     'tests/test_pr100_live_worker.py',
     'tests/test_pr100_terminal_invalidation.py',
+    'tests/test_pr100_reference_donors.py',
     'tests/test_pr100_novelty_runtime_adversarial.py',
     'tests/test_pr100_native_journal.py',
     'tests/test_pr100_native_screen.py',

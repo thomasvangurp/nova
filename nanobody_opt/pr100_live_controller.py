@@ -739,6 +739,8 @@ def validate_config(config):
         raise ValueError('source_sha must be a 40-character git revision')
     if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
         raise ValueError('worker must be an object including native_tools')
+    from nanobody_opt.pr100_reference_donors import enabled as donor_fallback_enabled
+    donor_fallback_enabled(config['worker'])
     from nanobody_opt.pr100_fresh_budget import validate_limit, DEFAULT_LIMIT
     if type(config.get('archive_cache_enabled', True)) is not bool:
         raise ValueError('archive_cache_enabled must be a boolean')

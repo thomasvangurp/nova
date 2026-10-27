@@ -192,6 +192,22 @@ def test_sequence_phase_runs_on_the_slave_with_the_reference_bank(tmp_path):
     assert host == 'slave' and job['references'] == '/bank.json'
 
 
+def test_missing_cell_donor_opt_in_is_validated_and_forwarded_without_budget_changes(tmp_path, monkeypatch):
+    import base64
+    value = config(tmp_path)
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    value['worker']['missing_cell_donor_fallback'] = 'true'
+    with pytest.raises(ValueError, match='missing_cell_donor_fallback'):
+        controller.validate_config(value)
+    value['worker'].update(missing_cell_donor_fallback=True, proposals=600, repeats=3)
+    assert controller.validate_config(value) is value
+    _, request = controller.phase_request(value, challenge(), 'sequence',
+                                          {'archive.csv': b'x'}, time.time()+2000, clock())
+    job = json.loads(base64.b64decode(request['files']['job.json']))
+    assert job['missing_cell_donor_fallback'] is True
+    assert job['proposals'] == 600 and job['repeats'] == 3
+
+
 # --- run_phase polling -------------------------------------------------------------
 
 def fake_transport(responses):
