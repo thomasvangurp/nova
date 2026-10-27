@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -99,7 +100,7 @@ def candidate_budget(job):
 
 
 def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
-                  on_result=None, on_result_error=None):
+                  on_result=None, on_result_error=None, timeout_seconds=None):
     """Profile a batch and report wall measured from slot acquisition.
 
     The upstream ProfileExecution timeout starts before the semaphore is
@@ -111,7 +112,16 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
     acquired = clock()
     callbacks = ({'on_result': on_result, 'on_result_error': on_result_error}
                  if on_result is not None else {})
-    values = asyncio.run(develop(list(sequences), workers, **callbacks))
+    if timeout_seconds is not None:
+        callbacks['task_timeout_seconds'] = timeout_seconds
+    def private_loop():
+        loop = asyncio.new_event_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=workers,
+                                                    thread_name_prefix='pr100-native'))
+        return loop
+    # Only this batch owns this loop. Avoid the implicit32-thread ceiling.
+    with asyncio.Runner(loop_factory=private_loop) as runner:
+        values = runner.run(develop(list(sequences), workers, **callbacks))
     return values, acquired, clock() - acquired
 
 
@@ -263,6 +273,15 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     pr100_filter.helper('aggrescan3d').tool_paths = lambda: (tools / 'aggrescan3d-rs', tools / 'freesasa')
     workers = worker_count(job)
     budget = candidate_budget(job)
+    timed_admission = 'native_minimum_call_window_seconds' in job
+    minimum_window = job.get('native_minimum_call_window_seconds', budget)
+    cleanup_reserve = job.get('native_cleanup_reserve_seconds', 10. if timed_admission else 0.)
+    if (isinstance(minimum_window, bool) or not isinstance(minimum_window, (int, float))
+            or not math.isfinite(minimum_window) or minimum_window <= 0 or minimum_window > budget
+            or timed_admission and minimum_window < 10
+            or isinstance(cleanup_reserve, bool) or not isinstance(cleanup_reserve, (int, float))
+            or not math.isfinite(cleanup_reserve) or not 0 <= cleanup_reserve <= 60):
+        raise ValueError('invalid native call admission bounds')
     repeats = job.get('repeats', selection.DEFAULT_REPEATS)
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
         raise ValueError('repeats must be a positive integer')
@@ -301,9 +320,24 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'psh_rescue_margin': screening['psh_rescue_margin'],
                     'recall_guarantee': False, 'authoritative': False},
                   measurement_outcomes={'passed': 0, 'rejected': 0, 'inconclusive': 0})
+    result['native_admission'] = {'deadline_clamped': timed_admission,
+        'minimum_call_window_seconds': minimum_window, 'cleanup_reserve_seconds': cleanup_reserve,
+        'candidate_timeout_cap_seconds': budget, 'allocations': []}
 
     def record(reason):
         result['rejection_counts'][reason] = result['rejection_counts'].get(reason, 0) + 1
+
+    def checkpoint_measurements(values, sequence):
+        kept = []
+        for value in values:
+            if not selection.authoritative_cpu_measurement(value):
+                continue
+            observed = journal_module.observation(value, requirements, sequence)
+            if observed['outcome'] == 'rejected':
+                return []  # A real negative cannot be erased by a later draw.
+            if observed['outcome'] == 'passed':
+                kept.append(value)
+        return kept
 
     def flush():
         result['observation_journal'] = journal.progress()
@@ -312,7 +346,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         result['deferred_candidates'] = [r for r in rows if r['sequence'] not in admitted]
         result['deferred_confirmations'] = []
         for row in rows:
-            key = row['sequence']; values = measurements.get(key, [])
+            key = row['sequence']; values = checkpoint_measurements(measurements.get(key, []), key)
             required = max(confirmation_count if key in screen_evidence else repeats,
                            resumed_required.get(key, 0))
             if values and len(values) < required and selection.decide(values, requirements,
@@ -321,7 +355,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'schema': 'pr100-native-confirmation-checkpoint-v1',
                     'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
                     'measurements': values, 'required_cpu_observations': required,
-                    'accelerated_screen': screen_evidence.get(key)}})
+                    'accelerated_screen': screen_evidence.get(key),
+                    'execution_host': job.get('native_host', 'master')}})
         pr100_filter.atomic(directory / 'result.json', result)
 
     phase_budget = job.get('phase_budget_seconds')
@@ -334,7 +369,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     deadline = None if phase_budget is None else clock() + float(phase_budget)
 
     def out_of_time():
-        return deadline is not None and clock() + budget > deadline
+        return deadline is not None and clock() + minimum_window + cleanup_reserve > deadline
 
     measurements = {}
     confirmation_progress = {}
@@ -345,12 +380,16 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     resumed_required = {}
     audited = set()
     screen_skipped = set()
+    blocked = []
     for row in rows:
         saved = row.get('native_resume')
         if saved is None:
             continue
         if not isinstance(saved, dict):
             raise ValueError('invalid native confirmation checkpoint')
+        if saved.get('identity') != resume_identity or not resume_identity['resume_eligible']:
+            blocked.append({**row, 'continuation_blocked': 'native_runtime_identity_mismatch'})
+            continue
         values = saved.get('measurements') if isinstance(saved, dict) else None
         required = saved.get('required_cpu_observations') if isinstance(saved, dict) else None
         if (not resume_identity['resume_eligible']
@@ -369,6 +408,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             if identity is None:
                 raise ValueError('invalid accelerated confirmation checkpoint')
             screen_evidence[key] = identity
+    blocked_keys = {r['sequence'] for r in blocked}
+    rows = [r for r in rows if r['sequence'] not in blocked_keys]
+    result['blocked_confirmations'] = blocked
     journal = journal_module.AsyncJournal(directory, job, requirements)
     result['carried_cpu_observations'] = sum(map(len, measurements.values()))
     result['observation_journal'] = journal.progress()
@@ -379,10 +421,16 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         result['observation_errors'] += 1
 
     def measure_and_record(batch):
+        allocated = min(budget, deadline - clock() - cleanup_reserve) if deadline is not None else budget
+        if timed_admission and allocated < minimum_window:
+            raise TimeoutError('native admission window closed')
+        result['native_admission']['allocations'].append({'candidate_count': len(batch),
+            'timeout_seconds': allocated if timed_admission else budget,
+            'deadline_limited': timed_admission and allocated < budget})
         by_sequence = {row['sequence']: row for row in batch}
         expected = {key: len(measurements.get(key, [])) + 1 for key in by_sequence}
         started.update(by_sequence)
-        result['not_started'] = len(rows) - len(started)
+        result['not_started'] = result['input_count'] - len(started)
         result['in_flight'] += len(batch)
         # Persist admission before starting scientific calls. An interrupted phase
         # must never cause these candidates to be blindly evaluated again.
@@ -397,7 +445,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             result[counter] += 1
             result['total_profile_evaluations'] = result['completed'] + result['native_screen']['completed_profiles']
             result['unique_profiled_candidates'] = len(set(measurements) | screened)
-            result['not_completed'] = len(rows) - len(measurements)
+            result['not_completed'] = result['input_count'] - len(measurements)
             result['in_flight'] -= 1
             # Dedicated continuation checkpoints are not audit journal records.
             # Save each completion before a slower sibling can exhaust the phase.
@@ -405,12 +453,14 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                            resumed_required.get(key, 0))
             verdict = selection.decide(measurements[key], requirements, sequence=key,
                                        repeats=repeats, margin=margin)
-            if verdict['tier'] is not None:
+            confirmed = checkpoint_measurements(measurements[key], key)
+            if confirmed:
                 confirmation_progress[key] = {**by_sequence[key], 'native_resume': {
                     'schema': 'pr100-native-confirmation-checkpoint-v1',
                     'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
-                    'measurements': measurements[key], 'required_cpu_observations': required,
-                    'accelerated_screen': screen_evidence.get(key)}}
+                    'measurements': confirmed, 'required_cpu_observations': required,
+                    'accelerated_screen': screen_evidence.get(key),
+                    'execution_host': job.get('native_host', 'master')}}
             else:
                 confirmation_progress[key] = {'sequence_hash': rules.sequence_hash(key),
                                                'terminal_reason': verdict['reason']}
@@ -436,9 +486,11 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 observation_error(type(error).__name__)
 
         if measure is None:
+            deadline_options = {'timeout_seconds': allocated} if timed_admission else {}
             values, acquired, elapsed = measure_batch(
                 [r['sequence'] for r in batch], workers, clock=clock,
-                on_result=completed, on_result_error=observation_error)
+                on_result=completed, on_result_error=observation_error,
+                **deadline_options)
         else:
             values, acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
         for row, value in zip(batch, values, strict=True):
@@ -532,18 +584,19 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         # Confirm each batch's survivors before spending the remaining window on
         # another fresh batch. A global first pass exhausted the admission window
         # before any repeats, leaving repeats=3 effectively at one observation.
-        # Every admission still reserves the original full candidate timeout.
+        # Late admissions use a bounded native timeout, while the supervisor
+        # retains the absolute phase and epoch deadlines.
         measured_rows = []
         for offset in range(0, len(rows), workers):
             original_batch = rows[offset:offset + workers]
-            if out_of_time():
-                break
             complete = [r for r in original_batch if r['sequence'] in resumed_required
                         and len(measurements[r['sequence']]) >= max(repeats, resumed_required[r['sequence']])]
             measured_rows.extend(complete)
             original_batch = [r for r in original_batch if r not in complete]
             if not original_batch:
                 continue
+            if out_of_time():
+                break
             carry = [r for r in original_batch if r['sequence'] in resumed_required]
             fresh = [r for r in original_batch if r['sequence'] not in resumed_required]
             batch, held = screen_batch_rows(fresh, offset // workers) if fresh else ([], [])
@@ -655,8 +708,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     result['candidates'] = selection.order_candidates(passers, allow_marginal=allow_marginal)
     result['tier_counts'] = {tier: sum(1 for r in result['candidates'] if r['tier'] == tier)
                              for tier in ('A', 'B')}
-    result['cpu_not_run'] = len(rows) - len(started)
-    result['not_run'] = len(rows) - len(started | screened)
+    result['cpu_not_run'] = result['input_count'] - len(started)
+    result['not_run'] = result['input_count'] - len(started | screened)
     if screen_skipped:
         result['rejection_counts']['nonauthoritative_screen_negative'] = len(screen_skipped)
     if result['not_run']:

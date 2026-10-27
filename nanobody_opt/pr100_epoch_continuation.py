@@ -123,7 +123,10 @@ def required_seconds(mode, config):
         return c.PUBLISH_RESERVE_SECONDS + float(config.get('novelty_reserve_seconds', c.NOVELTY_RESERVE_SECONDS))
     required = c.PUBLISH_RESERVE_SECONDS + c.PHASE_FLOORS['score']
     if mode in ('native', 'sequence'):
-        required += float(config['worker'].get('candidate_budget_seconds', 300))
+        required += float(config['worker'].get('native_minimum_call_window_seconds',
+                                              config['worker'].get('candidate_budget_seconds', 300)))
+        required += float(config['worker'].get('native_cleanup_reserve_seconds',
+                            10 if 'native_minimum_call_window_seconds' in config['worker'] else 0))
         required += float(config.get('novelty_reserve_seconds', c.NOVELTY_RESERVE_SECONDS))
         required += c.NATIVE_SETUP_RESERVE_SECONDS
     if mode == 'sequence':
@@ -191,12 +194,22 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     def save(): c.atomic(path, state)
     def phase(name, payload):
         active['phase'] = name; save()
+        if name == 'native' and 'native_hosts' in config:
+            from nanobody_opt.pr100_native_dispatch import run as dispatch
+            return dispatch(attempt_config, challenge, payload, stop_at, chain, attempt_dir,
+                            diagnostics=diagnostics)
         phase_config, phase_local = attempt_config, attempt_dir
         if name == 'novelty':
             operation = hashlib.sha256(payload['archive.csv']).hexdigest()
             active['novelty_operation'] = operation; save()
             phase_config = {**attempt_config, '_phase_operation': operation}
             phase_local = attempt_dir / 'novelty-rechecks' / operation
+            phase_local.mkdir(parents=True, exist_ok=True)
+        if name == 'score' and 'native_hosts' in config:
+            operation = rules.digest(json.loads(payload['input.json']))
+            active['score_operation'] = operation; save()
+            phase_config = {**attempt_config, '_phase_operation': operation}
+            phase_local = attempt_dir / 'score-batches' / operation
             phase_local.mkdir(parents=True, exist_ok=True)
         return c.run_phase(phase_config, challenge, name, payload, stop_at, chain, phase_local,
                            diagnostics=diagnostics)
@@ -220,10 +233,20 @@ def run_epoch(config, chain, clock, *, dry_run=False):
             seen = set(state['native_attempted_hashes'])
             rows = union_rows(state.get('pending_confirmation', []),
                 [r for r in state['pending_native'] if rules.sequence_hash(r['sequence']) not in seen])
-            if rows:
+            if rows or active.get('native_unresolved'):
+                native_input = attempt_dir / 'native-input.json'
+                if native_input.is_file():
+                    native_payload = native_input.read_bytes()
+                else:
+                    native_payload = json.dumps({**binding, 'candidates': rows}).encode()
+                    c.atomic(native_input, json.loads(native_payload))
                 files = phase('native', {'archive.csv': archive,
-                    'input.json': json.dumps({**binding, 'candidates': rows}).encode()})
+                    'input.json': native_payload})
                 value = json.loads(files['result.json'])
+                active['native_unresolved'] = bool(value.get('unresolved_native_hosts'))
+                state['blocked_confirmations'] = union_rows(state.get('blocked_confirmations', []),
+                                                            value.get('blocked_confirmations', []))
+                held = {rules.sequence_hash(r['sequence']) for r in state['blocked_confirmations']}
                 progress = json.loads(files.get('native-confirmations.json', b'{}'))
                 if progress.get('challenge') == challenge:
                     records = progress.get('records', [])
@@ -239,7 +262,8 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                          else r['sequence_hash'] for r in records})
                 attempted = value.get('attempted_sequence_hashes', [rules.sequence_hash(r['sequence']) for r in rows])
                 state['native_attempted_hashes'] = sorted(seen | set(attempted))
-                state['pending_native'] = [r for r in state['pending_native'] if rules.sequence_hash(r['sequence']) not in set(attempted)]
+                state['pending_native'] = [r for r in state['pending_native']
+                    if rules.sequence_hash(r['sequence']) not in set(attempted) | held]
                 state['pending_confirmation'] = [r for r in value.get('deferred_confirmations', [])
                     if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
                 rejected = set(value.get('terminal_native_outcomes', {}))
@@ -320,11 +344,17 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         else:
             receipt['status'] = 'no_passing_candidate'
         state.pop('pending_publication', None)
-        state['active'] = None; save()
+        if active.get('native_unresolved'):
+            active['phase'] = 'native'
+        else:
+            state['active'] = None
+        save()
     except Exception as error:
         receipt.update(status='recoverable_failure', stage=active['phase'], error_type=type(error).__name__)
         terminal_dir = (attempt_dir / 'novelty-rechecks' / active['novelty_operation']
                         if active['phase'] == 'novelty' and active.get('novelty_operation') else attempt_dir)
+        if active['phase'] == 'score' and active.get('score_operation'):
+            terminal_dir = attempt_dir / 'score-batches' / active['score_operation']
         terminal = read(terminal_dir / (active['phase'] + '-supervisor.json'), {})
         if cleanup_verified(terminal):
             if active['phase'] in ('novelty', 'publish'):
@@ -338,7 +368,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 state['pending_confirmation'] = [r for r in partial.get('deferred_confirmations', [])
                     if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
             elif active['phase'] == 'score':
-                partial = read(attempt_dir / 'score/result.json', {})
+                partial = read(terminal_dir / 'score/result.json', {})
                 admitted = partial.get('attempted_sequence_hashes',
                     [rules.sequence_hash(r['sequence']) for r in state['native_rows']])
                 state['score_attempted_hashes'] = sorted(set(state['score_attempted_hashes']) | set(admitted))

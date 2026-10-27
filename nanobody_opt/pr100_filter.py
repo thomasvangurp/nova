@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -132,13 +133,25 @@ def annotate(sequence, cache_dir):
     return result
 
 
-async def develop(sequences, concurrency, *, on_result=None, on_result_error=None):
+async def develop(sequences, concurrency, *, on_result=None, on_result_error=None,
+                  task_timeout_seconds=None):
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
         raise ValueError("developability concurrency must be a positive integer")
+    deadline = None
+    if task_timeout_seconds is not None:
+        if (isinstance(task_timeout_seconds, bool) or not isinstance(task_timeout_seconds, (int, float))
+                or not 10 <= task_timeout_seconds <= 300):
+            raise ValueError("native task timeout must be between 10 and 300 seconds")
+        deadline = time.monotonic() + float(task_timeout_seconds)
     activate_filter()
     from metanano.services.async_manager import AsyncServiceManager
     from metanano.services.developability_service import DevelopabilityService
     config = helper("aggrescan3d").developability_config()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining < 10:
+            raise TimeoutError("native setup consumed the allocated window")
+        config.async_config.task_timeout = remaining
     config.async_config.max_concurrent_tnp = concurrency
     # ProfileExecution starts its timeout before semaphore acquisition. Never
     # enqueue more profiles than can start, or waiting consumes science time.

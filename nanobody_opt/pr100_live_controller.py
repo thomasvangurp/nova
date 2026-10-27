@@ -243,25 +243,32 @@ def remote(config, host, request, *, sleep=time.sleep):
 
 
 def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
-    host = 'slave' if phase == 'sequence' else 'master'
+    host = 'slave' if phase == 'sequence' else config.get('_native_host', 'master') if phase == 'native' else 'master'
     runtime = config['hosts'][host]
     release = runtime['release']
     attempt = config.get('_attempt')
     suffix = '' if attempt is None else '/attempts/' + str(attempt).zfill(5)
     directory = f"{config['remote_root']}/{challenge['epoch']}{suffix}/{phase}"
-    if phase == 'novelty' and config.get('_phase_operation'):
+    if phase in ('novelty', 'score') and config.get('_phase_operation'):
         directory += '/' + config['_phase_operation']
     python = runtime['annotation_python'] if phase == 'sequence' else runtime['native_python']
     environment = {'PYTHONPATH': release + ':' + runtime['python_path'],
                    'PATH': runtime['path'], 'PYTHONDONTWRITEBYTECODE': '1',
                    'HOME': '/root', 'USER': 'root', 'LANG': 'C.UTF-8',
                    'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1'}
+    if phase in ('native', 'novelty'):
+        environment['PATH'] = runtime.get('native_path', runtime['path'])
+        environment['PYTHONPATH'] = release + ':' + runtime.get('native_python_path', runtime['python_path'])
     if runtime.get('ld_library_path'):
         environment['LD_LIBRARY_PATH'] = runtime['ld_library_path']
     job = {'challenge': challenge, 'phase': phase, 'cpu_slots': 4 if phase == 'sequence' else 8}
     # New worker knobs (proposals, workers, repeats, margin, allow_marginal, ...) pass
     # through unchanged; the controller never second-guesses them.
     job.update(config['worker'])
+    if phase == 'native':
+        job.update(config.get('native_worker_overrides', {}).get(host, {}))
+        job['native_host'] = host
+        job['native_tools'] = runtime.get('native_tools', job['native_tools'])
     if phase == 'sequence':
         job['references'] = runtime['references']
     if 'archive.csv' in files:
@@ -288,7 +295,9 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     cap = phase_cap(phase, stop_at) if cap is None else cap
     if config.get('_continuation') and phase in ('sequence', 'native'):
         usable = stop_at - time.time() - PUBLISH_RESERVE_SECONDS
-        native_minimum = (float(job.get('candidate_budget_seconds', 300))
+        native_minimum = (float(job.get('native_minimum_call_window_seconds', job.get('candidate_budget_seconds', 300)))
+                          + float(job.get('native_cleanup_reserve_seconds',
+                                          10 if 'native_minimum_call_window_seconds' in job else 0))
                           + float(config.get('novelty_reserve_seconds', NOVELTY_RESERVE_SECONDS))
                           + NATIVE_SETUP_RESERVE_SECONDS)
         downstream = PHASE_FLOORS['score'] + (native_minimum if phase == 'sequence' else 0)
@@ -342,9 +351,12 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         file_identity[name] = hashlib.sha256(raw).hexdigest()
     binding = rules.digest({'challenge': challenge, 'phase': phase, 'files': file_identity,
                             'source_sha': config['source_sha'], 'worker': config['worker'],
-                            'runtime': config['hosts']['slave' if phase == 'sequence' else 'master'],
+                            'runtime': config['hosts']['slave' if phase == 'sequence' else
+                                config.get('_native_host', 'master') if phase == 'native' else 'master'],
                             'gpus': config.get('gpu'), 'native_gpus': config.get('native_gpu')})
     saved = json.loads(intent.read_text()) if intent.is_file() else None
+    dispatch_started = (saved.get('created_at_unix', saved['request']['clock']['updated_at_unix'])
+                        if saved else clock['updated_at_unix'])
     if saved is not None and saved.get('binding') != binding:
         raise ValueError('saved phase input or source identity mismatch')
     if complete.is_file():
@@ -363,20 +375,30 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
     else:
         host, request = phase_request(config, challenge, phase, files, stop_at, clock)
         # Persist ownership before the potentially ambiguous remote start.
-        atomic(intent, {'host': host, 'request': request, 'binding': binding})
+        atomic(intent, {'host': host, 'request': request, 'binding': binding,
+                        'created_at_unix': dispatch_started})
     transport_config = {**config, '_refresh_clock': lambda: clock_state(chain)} if transport is remote else config
+    poll_deadline = stop_at + 15
+    if config.get('_bounded_phase_collection'):
+        poll_deadline = min(poll_deadline, request['spec']['wall_seconds'] + dispatch_started + 30)
+        if poll_deadline <= time.time():
+            # The old wall budget elapsed. Probe its ownership once; never
+            # restart scientific work under the old launch identity.
+            poll_deadline = min(stop_at + 15, time.time() + 20)
+            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock}
+        request['transport_deadline_unix'] = poll_deadline
     heartbeat(clock)
     result = transport(transport_config, host, request)
     failures = 0
     while result['running']:
         sleep(5)
-        if time.time() > stop_at + 15:
+        if time.time() > poll_deadline:
             raise TimeoutError('remote receipt deadline')
         try:
             clock = clock_state(chain)
             heartbeat(clock)
             request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
-                       'transport_deadline_unix': stop_at + 15}
+                       'transport_deadline_unix': poll_deadline}
             result = transport(transport_config, host, request)
             failures = 0
         except TimeoutError:
@@ -688,6 +710,21 @@ def validate_config(config):
         raise ValueError('source_sha must be a 40-character git revision')
     if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
         raise ValueError('worker must be an object including native_tools')
+    native_hosts = config.get('native_hosts', ['master'])
+    if (not isinstance(native_hosts, list) or not native_hosts or len(native_hosts) != len(set(native_hosts))
+            or any(host not in ('master', 'slave') for host in native_hosts)):
+        raise ValueError('native_hosts must name distinct master/slave hosts')
+    overrides = config.get('native_worker_overrides', {})
+    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools'}
+    if not isinstance(overrides, dict) or set(overrides) - {'master', 'slave'}:
+        raise ValueError('invalid native worker host overrides')
+    for value in overrides.values():
+        if not isinstance(value, dict) or set(value) - allowed:
+            raise ValueError('unsupported native worker override')
+        if any(type(v) is not int or not 1 <= v <= 256 for k, v in value.items() if k != 'native_tools'):
+            raise ValueError('invalid native worker resource bound')
+        if 'native_tools' in value and not str(value['native_tools']).startswith('/'):
+            raise ValueError('native tools must be an absolute path')
     screen = config['worker'].get('native_screen', {})
     if (not isinstance(screen, dict) or type(screen.get('enabled', False)) is not bool
             or screen.get('backend', 'resident_cpu') not in ('resident_cpu', 'cuda_refine')):
