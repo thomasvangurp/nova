@@ -243,3 +243,50 @@ were still required. No candidate qualified in that accelerated arm. This is
 evidence to keep screening disabled under the tested policy. It does not
 establish validator parity or a whole-epoch speedup. Both runs were bounded,
 resource-isolated, and left no descendant processes.
+
+## Native throughput and two-host execution, 2026-10-27
+
+Continuation alone did not use the available capacity. Each late native phase
+reserved the full 300-second candidate timeout even when the remaining phase
+could support another bounded call. The native event loop also inherited
+Python's default executor ceiling, so a larger configured worker count did not
+establish that the requested concurrency actually ran. Use an explicit bounded
+executor and a separately configured minimum admission window. Clamp each
+admitted call to the remaining phase budget, retain a cleanup reserve, and
+report interrupted work as inconclusive rather than a measured rejection.
+
+Release `036a6c48c32b762b3f803ffa920eaf3cf66d454a` passed all 1,499 shipping
+tests, with zero failures, errors or skips. Its 1,092 manifest files matched on
+Pi, master and slave. Pi activated the release during the quiet cutoff gap in
+epoch 25964, preserving continuation state and the publication artifact.
+Master's configured native capacity is now 96 workers on 104 CPU slots; the
+admission minimum is 130 seconds with a 10-second cleanup reserve. These are
+configuration and activation facts, not a measured whole-epoch speedup.
+Experimental GPU screening remains disabled.
+
+Parallel native hosts must receive deterministic disjoint candidate partitions,
+persisted before launch. Each host has independent durable result and ownership
+records. A malformed or unreachable peer must not erase valid completed work;
+unresolved ownership must prevent a new overlapping attempt even if downstream
+scoring fails. Recovered cohorts need immutable scoring directories of their
+own. Confirmation checkpoints remain bound to the host and runtime that
+produced them. CI covers these recovery cases and compressed transport of large
+requests, as well as the actual SSH receiver's legacy uncompressed input.
+
+Slave initially lacked the native scientific runtime. Declaring it in a host
+list would not create working capacity. Exact runtime cloning was too slow over
+the available connection. The alternate isolated runtime deliberately reuses a
+different installed Torch binary; record and review that difference instead of
+claiming bit identity. Bind scientific source, model weights, tools, and the
+launcher environment in its qualification receipt. Require actual concurrent
+numeric profiles and verified CPU affinity before enabling slave. Preserve its
+separate annotation runtime. Provisioning, qualification and activation are
+Pi-owned operations and must survive closing the Mac.
+
+Epoch 25964 completed 881 fresh evaluations under the previous configuration,
+with no fully passing candidates: 603 PSH rejections, 275 other developability
+rejections and three Aggrescan-unavailable/failed classifications. Those three
+labels do not independently distinguish a tool failure from biological failure.
+Throughput improvement does not by itself establish a better pass rate.
+Fresh candidates, repeat measurements, unstarted work and incomplete calls must
+remain separate counters; attempted hashes alone are not completed fresh work.
