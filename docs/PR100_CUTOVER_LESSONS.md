@@ -234,3 +234,12 @@ Verify an actual continuation attempt on the Pi after activation. Keep GPU
 screening disabled until its complete batch cost, including required CPU
 confirmation and rescue, demonstrates a benefit; a component speedup alone
 does not justify enabling it.
+
+The corrected 48-input native-pipeline experiment measured 158.79 seconds for
+CUDA screening plus required CPU work versus 76.39 seconds for its paired CPU
+control (2.08 times slower). All 48 accelerated profiles actually ran; only
+five CPU first passes were avoided, while 43 fresh CPU profiles and one repeat
+were still required. No candidate qualified in that accelerated arm. This is
+evidence to keep screening disabled under the tested policy. It does not
+establish validator parity or a whole-epoch speedup. Both runs were bounded,
+resource-isolated, and left no descendant processes.
