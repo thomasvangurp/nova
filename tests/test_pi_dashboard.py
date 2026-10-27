@@ -18,6 +18,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(pi, "COMPARISON", tmp_path / "comparison.json")
     monkeypatch.setenv("NOVA_DASH_LOCAL_PI", "1")
     monkeypatch.setenv("NOVA_DASH_MASTER_RELEASE_DIR", "/root/releases/" + "a" * 40)
+    monkeypatch.setattr(pi, 'refresh_api_status', lambda: None)
     return tmp_path
 
 
@@ -389,6 +390,7 @@ def test_submission_status_requires_per_uid_receipts_and_archived_inputs(tmp_pat
 
 def test_ui_separates_commit_receipts_from_api_evaluation(paths, monkeypatch):
     monkeypatch.setattr(pi, 'latest_leaderboard', lambda: 25965)
+    monkeypatch.setattr(pi, 'latest_api_epoch', lambda: 25965)
     (paths/'data/dashboard_submission_status.json').write_text(json.dumps({
         'epoch': 25966, 'committed': 13, 'planned': 13}))
     text = pi.status_text()
@@ -431,6 +433,7 @@ def test_commit_receipts_survive_uid_independent_archive(tmp_path):
 def test_ui_reports_chain_and_incomplete_replay_separately(paths, monkeypatch):
     monkeypatch.setattr(pi, 'latest_chain_epoch', lambda: 25967)
     monkeypatch.setattr(pi, 'latest_leaderboard', lambda: 25966)
+    monkeypatch.setattr(pi, 'latest_api_epoch', lambda: 25966)
     pi.COMPARISON.write_text(json.dumps({'25966': {
         'ours': {'mean': None, 'scored_sequences': 1, 'fleet_size': 13},
         'rivals': {'rival': {'scored_sequences': 0, 'fleet_size': 4}}}}))
@@ -468,3 +471,22 @@ def test_chain_status_rejects_stale_slot_record(paths, monkeypatch):
     with sqlite3.connect(pi.DATA/'nanobody_dash.sqlite') as db:
         db.execute('UPDATE slots SET time=999')
     assert pi.latest_chain_epoch() == 25967
+
+
+def test_validator_fallback_cannot_advance_api_label(paths, monkeypatch):
+    monkeypatch.setattr(pi, 'latest_leaderboard', lambda: 25967)
+    monkeypatch.setattr(pi, 'latest_api_epoch', lambda: 25966)
+    text = pi.status_text()
+    assert 'API leaderboard 25966' in text and 'validator rows 25967' in text
+    assert 'API leaderboard 25967' not in text
+
+
+def test_old_target_complete_fleet_is_not_current_replay(paths):
+    pi.COMPARISON.write_text(json.dumps({
+        '25954': {'ours': {'mean': 123, 'scored_sequences': 13}},
+        '25965': {'ours': {'mean': None, 'scored_sequences': 1, 'fleet_size': 3}},
+        '25966': {'ours': {'mean': None, 'scored_sequences': 0, 'fleet_size': 9}}}))
+    text = pi.status_text()
+    assert 'measured fleet pending' in text
+    assert 'earlier replay 25965: 1 sequences at ≥10 passes' in text
+    assert 'measured fleet 25954' not in text

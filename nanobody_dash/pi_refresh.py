@@ -64,6 +64,22 @@ def latest_chain_epoch() -> int | None:
     return None
 
 
+def refresh_api_status() -> None:
+    from .collect import api_latest_epoch
+    path = DATA/'dashboard_api_status.json'
+    previous = read_json(path)
+    epoch = api_latest_epoch()
+    value = {'ok': type(epoch) is int, 'attempted_at': time.time(),
+             'epoch': epoch if type(epoch) is int else previous.get('epoch'),
+             'observed_at': time.time() if type(epoch) is int else previous.get('observed_at')}
+    save(path, value)
+
+
+def latest_api_epoch() -> int | None:
+    value = read_json(DATA/'dashboard_api_status.json').get('epoch')
+    return value if type(value) is int else None
+
+
 def latest_multipass(payload: dict) -> int | None:
     return max((int(k) for k in payload if k.isdecimal()), default=None)
 
@@ -76,6 +92,7 @@ def refresh() -> dict:
                            "--slot-log", str(Path.home() / ".nova/subnet68_slots.jsonl"))
     except subprocess.TimeoutExpired:
         collected = False
+    refresh_api_status()
     submission_status()
     out = ROOT / "public" / "index.html.next"
     built = module("nanobody_dash.build", 120, "--out", str(out))
@@ -208,7 +225,9 @@ def status_text() -> str:
         return ""
     payload = read_json(COMPARISON)
     newest = latest_multipass(payload)
+    from nanobody_opt.rules import target_for_epoch
     measured = max((int(k) for k, v in payload.items() if k.isdecimal()
+                    and (newest is None or target_for_epoch(int(k)) == target_for_epoch(newest))
                     and isinstance(v, dict) and (v.get("ours") or {}).get("mean") is not None), default=None)
     health = read_json(DATA / "dashboard_multipass_health.json")
     age = int(max(0, time.time() - float(health.get("last_success_at") or 0)) / 60)
@@ -228,10 +247,26 @@ def status_text() -> str:
             coverage = (f" · replay {newest}: own {ours['scored_sequences']}/{ours['fleet_size']}"
                         f"; rivals {sum(v.get('scored_sequences', 0) for v in rivals)}/"
                         f"{sum(v.get('fleet_size', 0) for v in rivals)} sequences at ≥10 passes")
+        available = max((int(k) for k, value in payload.items() if k.isdecimal()
+                         and target_for_epoch(int(k)) == target_for_epoch(newest)
+                         and isinstance(value, dict)
+                         and ((value.get('ours') or {}).get('scored_sequences', 0)
+                              or any(v.get('scored_sequences', 0)
+                                     for v in (value.get('rivals') or {}).values()))), default=None)
+        if available is not None and available != newest:
+            prior = payload[str(available)]
+            groups = [prior.get('ours') or {}, *(prior.get('rivals') or {}).values()]
+            coverage += (f" · earlier replay {available}: "
+                         f"{sum(v.get('scored_sequences', 0) for v in groups)} sequences at ≥10 passes")
+    api = latest_api_epoch()
+    api_health = read_json(DATA/'dashboard_api_status.json')
+    api_note = '; refresh unavailable' if api_health and not api_health.get('ok') else ''
+    validator = latest_leaderboard()
+    validator_note = f" · validator rows {validator}" if validator and validator != api else ''
     return (f" · updates from Pi · chain {latest_chain_epoch() or 'unavailable'}"
             f" · multipass export {newest or 'pending'}{coverage}"
             f" · measured fleet {measured or 'pending'} · multipass refresh {sync}"
-            f"{commits} · API leaderboard {latest_leaderboard() or 'pending'}")
+            f"{commits} · API leaderboard {api or 'pending'}{api_note}{validator_note}")
 
 
 def auxiliary(job: str) -> dict:
