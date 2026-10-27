@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -25,11 +26,33 @@ def pending(database: Path, epoch: int) -> tuple[int | None, list[str]]:
     from tools.collect_slave_multipass_seqs import leaderboard_sequences, pass_counts
 
     target = target_for_epoch(epoch)
+    queue_path = STATE/'pending_cohort.json'
+    try:
+        queued = json.loads(queue_path.read_text())
+    except (OSError, ValueError):
+        queued = {}
+    items = queued.get('items', []) if queued.get('target') == target else []
+    if items:
+        counts = pass_counts([item['sequence'] for item in items], target)
+        for item in items:
+            if counts.get(item['sequence'], 0) < PASSES:
+                return int(item['epoch']), [item['sequence']]
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30) as db:
         epochs = [int(row[0]) for row in db.execute(
             "SELECT DISTINCT o.epoch FROM observations o JOIN nodes n ON n.id=o.node_id "
             "WHERE o.source='public_validator_api' AND n.target=? AND o.epoch<? "
             "ORDER BY o.epoch DESC LIMIT 6", (target, epoch))]
+    if epochs:
+        items = priority_cohort(epoch, epochs[0])
+        if items:
+            STATE.mkdir(parents=True, exist_ok=True)
+            temporary = queue_path.with_suffix('.json.next')
+            temporary.write_text(json.dumps({'target': target, 'items': items}))
+            os.replace(temporary, queue_path)
+            counts = pass_counts([item['sequence'] for item in items], target)
+            for item in items:
+                if counts.get(item['sequence'], 0) < PASSES:
+                    return int(item['epoch']), [item['sequence']]
     for completed in epochs:
         sequences = sorted(set(leaderboard_sequences(completed) or []))
         counts = pass_counts(sequences, target)
@@ -37,6 +60,49 @@ def pending(database: Path, epoch: int) -> tuple[int | None, list[str]]:
         if missing:
             return completed, missing[:1]
     return None, []
+
+
+def priority_cohort(chain_epoch: int, published_epoch: int) -> list[dict]:
+    """Finish a committed fleet and its strongest published rival before moving on."""
+    from nanobody_dash.collect import fetch_epoch
+    from nanobody_opt.rules import target_for_epoch
+    from tools.rescale_multipass_history import OUR_COLDKEY
+    target = target_for_epoch(chain_epoch)
+    own = []
+    path = DATABASE.parent/'dashboard_committed_sequences.json'
+    try:
+        committed = json.loads(path.read_text())
+        if (committed.get('target') == target and type(committed.get('epoch')) is int
+                and committed['epoch'] < chain_epoch):
+            own = [{'epoch': committed['epoch'], 'sequence': row['sequence']}
+                   for row in committed.get('submissions', [])
+                   if isinstance(row.get('sequence'), str) and row['sequence']]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    groups, scores = {}, {}
+    for row in fetch_epoch(published_epoch):
+        coldkey, value = row.get('coldkey'), row.get('final_score')
+        if not isinstance(coldkey, str):
+            continue
+        sequences = [nb['sequence'] for nb in row.get('nanobodies', [])
+                     if isinstance(nb, dict) and nb.get('protein_name') == target
+                     and isinstance(nb.get('sequence'), str) and nb['sequence']]
+        groups.setdefault(coldkey, []).extend(sequences)
+        if type(value) in (int, float) and math.isfinite(value):
+            scores[coldkey] = min(scores.get(coldkey, math.inf), value)
+    own.extend({'epoch': published_epoch, 'sequence': sequence}
+               for sequence in groups.get(OUR_COLDKEY, []))
+    rivals = [key for key in groups if key != OUR_COLDKEY and key in scores]
+    best = min(rivals, key=lambda key: scores[key]) if rivals else None
+    main = [{'epoch': published_epoch, 'sequence': sequence} for sequence in groups.get(best, [])]
+    # Interleave a fixed cohort before filtering its existing pass counts, so
+    # the strongest rival is not postponed until all thirteen owned UIDs finish.
+    result, seen = [], set()
+    for index in range(max(len(own), len(main))):
+        for rows in (own, main):
+            if index < len(rows) and rows[index]['sequence'] not in seen:
+                result.append(rows[index]); seen.add(rows[index]['sequence'])
+    return result
 
 
 def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
@@ -61,7 +127,7 @@ def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
                         "--epoch", str(epoch), "--passes", str(PASSES),
                         # The pinned scorer sets CUDA_VISIBLE_DEVICES itself,
                         # so its argument must remain the physical leased GPU.
-                        "--gpus", str(gpu), "--direct", "--independent-calls",
+                        "--gpus", str(gpu), "--owned-daemon", "--independent-calls",
                         "--out", str(directory/"observations.ndjson"),
                         "--out-root", str(directory/"work")]}
 

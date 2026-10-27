@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import json
@@ -12,6 +13,8 @@ from pathlib import Path
 import subprocess
 import shutil
 import sys
+import time
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -57,9 +60,20 @@ def score_group(sequences, passes, root, gpus, config, target, *, daemon=True,
         if independent_calls:
             # Keep the master's registered base-v1 runtime: independent
             # ordinary calls need no replica-batching capability or new pin.
+            group_root = independent_checkpoint(root/f'length{length}', group, passes, config, target)
             for replica in range(1, passes + 1):
-                work = root / f'length{length}' / f'pass{replica}'
+                work = group_root / f'pass{replica}'
                 work.mkdir(parents=True, exist_ok=True)
+                output = work/'exact_all.json'
+                completed = None
+                if output.is_file():
+                    try:
+                        completed = ordinary_records(output, group, target, replica)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        pass
+                if completed is not None:
+                    records.extend(completed)
+                    continue
                 inp = work/'input.json'
                 inp.write_text(json.dumps({'sequences': [{'sequence': s} for s in group]}))
                 command = replicate_command(inp, work, gpus, config, target)
@@ -67,17 +81,14 @@ def score_group(sequences, passes, root, gpus, config, target, *, daemon=True,
                 if not daemon:
                     command.append('--no-daemon')
                 env = dict(os.environ, NANOBODY_SCORER_DAEMON='1' if daemon else '0')
+                started = time.monotonic()
                 result = subprocess.run(command, env=env, capture_output=True, timeout=14400)
                 if result.returncode:
                     raise RuntimeError(f'independent scorer failed rc={result.returncode}; output withheld')
-                payload = json.loads((work/'exact_all.json').read_text())
-                if payload.get('target', target) != target:
-                    raise ValueError('independent result target mismatch')
-                wave = payload['per_nanobody_components']['0']
-                if set(wave) != set(group):
-                    raise ValueError('independent result cardinality mismatch')
-                for sequence in group:
-                    records.append((sequence, replica, _metrics(wave[sequence].get(target, {}), replica)))
+                records.extend(ordinary_records(output, group, target, replica))
+                (work/'timing.json').write_text(json.dumps({
+                    'pass': replica, 'elapsed_seconds': time.monotonic() - started,
+                    'model_reuse': bool(daemon)}))
                 shutil.rmtree(work/'work', ignore_errors=True)
                 shutil.rmtree(work/'structures', ignore_errors=True)
             continue
@@ -101,6 +112,84 @@ def score_group(sequences, passes, root, gpus, config, target, *, daemon=True,
         shutil.rmtree(work/'work', ignore_errors=True)
         shutil.rmtree(work/'structures', ignore_errors=True)
     return records
+
+
+def independent_checkpoint(root, sequences, passes, config, target):
+    """Reuse complete calls only under the same input, runtime and settings."""
+    from nanobody_opt import score_boltzgen_fast_adapter as adapter
+    settings = adapter.load_settings()
+    runtime = [Path(__file__), Path(adapter.__file__),
+               Path(settings.get('scorer', adapter.DEFAULT_SCORER))]
+    if settings.get('python'):
+        runtime.append(Path(settings['python']))
+    identity = {'sequences': sequences, 'passes': passes, 'target': target,
+                'config': hashlib.sha256(config.read_bytes()).hexdigest(),
+                'settings': settings,
+                'runtime': {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                            if p.is_file() else None for p in runtime}}
+    signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    marker = root/'context.sha256'
+    previous = marker.read_text().strip() if marker.is_file() else None
+    if root.exists() and previous != signature:
+        # Preserve incompatible partial work for audit; never relabel it as
+        # evidence from this invocation's scientific context.
+        root.rename(root.with_name(root.name + '.stale-' + str(time.time_ns())))
+    root.mkdir(parents=True, exist_ok=True)
+    marker.write_text(signature + '\n')
+    return root
+
+
+def ordinary_records(path, sequences, target, replica):
+    payload = json.loads(path.read_text())
+    if payload.get('target', target) != target:
+        raise ValueError('independent result target mismatch')
+    wave = payload['per_nanobody_components']['0']
+    if set(wave) != set(sequences):
+        raise ValueError('independent result cardinality mismatch')
+    return [(sequence, replica, _metrics(wave[sequence].get(target, {}), replica))
+            for sequence in sequences]
+
+
+@contextmanager
+def owned_daemon():
+    """Keep model reuse inside this lease's owned process tree and socket."""
+    from nanobody_opt import score_boltzgen_fast_adapter as adapter, scorer_daemon
+    settings = adapter.load_settings()
+    scorer = str(settings.get('scorer', adapter.DEFAULT_SCORER))
+    adapter.require_pinned_scorer(Path(scorer), settings.get('scorer_sha256'))
+    directory = Path(tempfile.mkdtemp(prefix='nova-dash-scorer-'))
+    socket = directory/'worker.sock'
+    keys = ('NANOBODY_SCORER_DAEMON', 'NANOBODY_SCORER_SOCKET', 'NANOBODY_WORKER_LOG_DIR')
+    previous = {k: os.environ.get(k) for k in keys}
+    process = None
+    try:
+        os.environ.update(NANOBODY_SCORER_DAEMON='1', NANOBODY_SCORER_SOCKET=str(socket),
+                          NANOBODY_WORKER_LOG_DIR=str(directory))
+        process = subprocess.Popen(
+            [settings.get('python') or sys.executable, str(ROOT/'nanobody_opt/scorer_daemon.py'),
+             '--scorer', scorer, '--socket', str(socket)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 120
+        while not scorer_daemon.available(str(socket)):
+            if process.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError('owned_daemon_unavailable')
+            time.sleep(.2)
+        yield
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=5)
+        # The outer cooperative lease is the subreaper and confirms that all
+        # owned descendants, including worker sessions, are gone before unlock.
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def reference_ranks(records, field):
@@ -146,6 +235,8 @@ def main():
                         help="use only the caller's leased GPU, bypassing the shared daemon")
     parser.add_argument("--independent-calls", action="store_true",
                         help="collect separate ordinary calls with the registered base-v1 worker")
+    parser.add_argument("--owned-daemon", action="store_true",
+                        help="reuse registered models in a private daemon owned by this lease")
     args = parser.parse_args()
     sequences = sorted(set(json.loads(args.sequences_json.read_text())))
     if not sequences or args.passes < 2:
@@ -156,8 +247,11 @@ def main():
     job_id = hashlib.sha256(json.dumps([args.passes, sequences]).encode()).hexdigest()[:16]
     root = args.out_root / f"epoch{args.epoch}" / f"replicates{args.passes}" / job_id
     root.mkdir(parents=True, exist_ok=True)
-    records = score_group(sequences, args.passes, root, args.gpus, args.config, target,
-                          daemon=not args.direct, independent_calls=args.independent_calls)
+    if args.direct and args.owned_daemon:
+        raise ValueError('direct and owned-daemon modes are mutually exclusive')
+    with owned_daemon() if args.owned_daemon else nullcontext():
+        records = score_group(sequences, args.passes, root, args.gpus, args.config, target,
+                              daemon=not args.direct, independent_calls=args.independent_calls)
     rows = []
     for sequence, replicate, metrics, score in reference_ranks(records, field):
         rows.append(dict(observation_id=f"slave_batched:epoch{args.epoch}:{sequence}:pass{replicate}",

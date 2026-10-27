@@ -65,6 +65,7 @@ def refresh() -> dict:
                            "--slot-log", str(Path.home() / ".nova/subnet68_slots.jsonl"))
     except subprocess.TimeoutExpired:
         collected = False
+    submission_status()
     out = ROOT / "public" / "index.html.next"
     built = module("nanobody_dash.build", 120, "--out", str(out))
     if built:
@@ -151,6 +152,19 @@ def submission_outcomes(host, port, options) -> bool:
     from .submission_outcomes import export
     path = DATA / "pi_submission_outcomes.json"
     try:
+        submission_status()
+        committed = DATA / "dashboard_committed_sequences.json"
+        if committed.is_file():
+            pending_committed = "/root/artifacts/dashboard_committed_sequences.json.next"
+            copied = run(["scp", "-O", *options, "-P", str(port), str(committed),
+                          f"root@{host}:{pending_committed}"], 60)
+            if copied.returncode:
+                return False
+            promoted = run(["ssh", *options, "-p", str(port), "root@" + host,
+                            "mv /root/artifacts/dashboard_committed_sequences.json.next "
+                            "/root/artifacts/dashboard_committed_sequences.json"], 30)
+            if promoted.returncode:
+                return False
         export(DATA / "nanobody_dash.sqlite", Path("/opt/nova-submit/archive"), path)
         pending = "/root/artifacts/pi_submission_outcomes.json.next"
         copied = run(["scp", "-O", *options, "-P", str(port), str(path),
@@ -165,6 +179,18 @@ def submission_outcomes(host, port, options) -> bool:
         return False
 
 
+def submission_status() -> dict:
+    from .submission_status import latest
+    try:
+        status, sequences = latest(Path('/opt/nova-submit/loop.log'), Path('/opt/nova-submit/archive'))
+        if status:
+            save(DATA/'dashboard_submission_status.json', status)
+            save(DATA/'dashboard_committed_sequences.json', sequences)
+        return status
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 def status_text() -> str:
     if os.environ.get("NOVA_DASH_LOCAL_PI") != "1":
         return ""
@@ -175,8 +201,12 @@ def status_text() -> str:
     health = read_json(DATA / "dashboard_multipass_health.json")
     age = int(max(0, time.time() - float(health.get("last_success_at") or 0)) / 60)
     sync = "pending" if not health else ("failed; retrying" if not health.get("ok") else f"{age}m ago")
+    receipt = read_json(DATA/'dashboard_submission_status.json')
+    commits = (f" · Pi commits {receipt['epoch']}: {receipt['committed']}/{receipt['planned']}"
+               if all(type(receipt.get(k)) is int for k in ('epoch', 'committed', 'planned')) else '')
     return (f" · updates from Pi · multipass export {newest or 'pending'}"
-            f" · measured fleet {measured or 'pending'} · multipass refresh {sync}")
+            f" · measured fleet {measured or 'pending'} · multipass refresh {sync}"
+            f"{commits} · API leaderboard {latest_leaderboard() or 'pending'}")
 
 
 def auxiliary(job: str) -> dict:

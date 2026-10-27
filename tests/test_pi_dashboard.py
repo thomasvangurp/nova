@@ -250,7 +250,8 @@ def test_replay_lease_excludes_live_gpus_and_shared_daemon(tmp_path):
     job = replay.lease_job(tmp_path, gpu=5, epoch=25965)
     assert job["gpu"] == 5 and job["ttl_seconds"] == 900
     assert job["lock_directory"] == "/root/pr100-controller/gpu-locks"
-    assert "--direct" in job["command"]
+    assert "--owned-daemon" in job["command"]
+    assert "--direct" not in job["command"]
     assert job["command"][job["command"].index("--gpus")+1] == "5"
     assert "CUDA_VISIBLE_DEVICES" not in job["env"]
     assert "TOKEN" not in " ".join(job["env"])
@@ -262,6 +263,8 @@ def test_replay_pending_uses_same_target_and_missing_depth(monkeypatch, tmp_path
     from nanobody_opt import rules
     from tools import collect_slave_multipass_seqs as collector
     db = tmp_path/"data.sqlite"
+    monkeypatch.setattr(replay, "STATE", tmp_path/'queue')
+    monkeypatch.setattr(replay, "priority_cohort", lambda *a: [])
     with sqlite3.connect(db) as connection:
         connection.executescript("CREATE TABLE nodes(id INTEGER,target TEXT);"
                                  "CREATE TABLE observations(node_id INTEGER,epoch INTEGER,source TEXT);")
@@ -325,3 +328,69 @@ def test_replay_import_requires_all_distinct_passes(monkeypatch, tmp_path, dupli
     else:
         assert replay.run(epoch=25967)["rows"] == 10
         assert imported == rows
+
+
+def test_replay_finishes_queued_fleet_across_epoch_changes(monkeypatch, tmp_path):
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    (tmp_path/'pending_cohort.json').write_text(json.dumps({'target': rules.TARGET, 'items': [
+        {'epoch': 25966, 'sequence': 'COVERED'}, {'epoch': 25965, 'sequence': 'RIVAL'}]}))
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: {'COVERED': 10, 'RIVAL': 5})
+    monkeypatch.setattr(replay, 'priority_cohort', lambda *a: pytest.fail('must finish pending cohort'))
+    assert replay.pending(tmp_path/'unused.sqlite', 25968) == (25965, ['RIVAL'])
+
+
+def test_replay_interleaves_commits_with_main_rival(monkeypatch, tmp_path):
+    from nanobody_dash import replay_refresh as replay, collect
+    from nanobody_opt import rules
+    from tools.rescale_multipass_history import OUR_COLDKEY
+    monkeypatch.setattr(replay, 'DATABASE', tmp_path/'data.sqlite')
+    (tmp_path/'dashboard_committed_sequences.json').write_text(json.dumps({
+        'epoch': 25966, 'target': rules.TARGET,
+        'submissions': [{'sequence': 'OUR_A'}, {'sequence': 'OUR_B'}]}))
+    def row(coldkey, score, sequence):
+        return {'coldkey': coldkey, 'final_score': score, 'nanobodies': [
+            {'protein_name': rules.TARGET, 'sequence': sequence}]}
+    monkeypatch.setattr(collect, 'fetch_epoch', lambda epoch: [
+        row('MAIN', 1, 'RIVAL_A'), row('MAIN', 3, 'RIVAL_B'),
+        row('OTHER', 20, 'LATER'), row(OUR_COLDKEY, 10, 'OUR_OLD')])
+    assert replay.priority_cohort(25967, 25965) == [
+        {'epoch': 25966, 'sequence': 'OUR_A'}, {'epoch': 25965, 'sequence': 'RIVAL_A'},
+        {'epoch': 25966, 'sequence': 'OUR_B'}, {'epoch': 25965, 'sequence': 'RIVAL_B'},
+        {'epoch': 25965, 'sequence': 'OUR_OLD'}]
+
+
+@pytest.mark.parametrize('receipts', [True, False])
+def test_submission_status_requires_per_uid_receipts_and_archived_inputs(tmp_path, receipts):
+    from nanobody_dash.submission_status import latest
+    from nanobody_opt import rules
+    archive = tmp_path/'archive/epoch25966'
+    archive.mkdir(parents=True)
+    (archive/'nanobody_result.json').write_text(json.dumps({
+        'epoch': 25966, 'target': rules.TARGET,
+        'submissions': [{'uid': 1, 'sequence': 'ONE'}, {'uid': 2, 'sequence': 'TWO'}]}))
+    events = [{'event': 'plan', 'epoch': 25966, 'committing': 2, 'with_sequence': 2}]
+    if receipts:
+        events.extend({'event': 'commit', 'uid': uid, 'rc': 0, 'sequence': True} for uid in (1, 2))
+    events.append({'event': 'done', 'committed': 2, 'failed': 0})
+    log = tmp_path/'loop.log'
+    log.write_text('\n'.join(json.dumps(v) for v in events))
+    status, data = latest(log, tmp_path/'archive')
+    if receipts:
+        assert status == {'epoch': 25966, 'committed': 2, 'planned': 2, 'failed': 0,
+                          'source': 'pi_commit_receipts'}
+        assert len(data['submissions']) == 2
+    else:
+        assert status == data == {}
+
+
+def test_ui_separates_commit_receipts_from_api_evaluation(paths, monkeypatch):
+    monkeypatch.setattr(pi, 'latest_leaderboard', lambda: 25965)
+    (paths/'data/dashboard_submission_status.json').write_text(json.dumps({
+        'epoch': 25966, 'committed': 13, 'planned': 13}))
+    text = pi.status_text()
+    assert 'Pi commits 25966: 13/13' in text
+    assert 'API leaderboard 25965' in text
+    assert 'measured fleet pending' in text

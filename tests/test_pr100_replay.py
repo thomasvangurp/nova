@@ -166,11 +166,51 @@ def test_registered_base_worker_uses_separate_ordinary_calls(tmp_path, monkeypat
             items[0]['sequence']: {rules.TARGET: {m: float(len(commands)) for m in worker.SUM_OF_TEN_DIRS}}}}}))
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(worker.subprocess, 'run', score)
+    (tmp_path/'config.yaml').write_text('fixture')
     rows = worker.score_group(['FIXTURE'], 10, tmp_path/'work', '5', tmp_path/'config.yaml',
                                rules.TARGET, daemon=False, independent_calls=True)
     assert len(commands) == 10
     assert {r for _, r, _ in rows} == set(range(1, 11))
     assert len({json.dumps(m, sort_keys=True) for _, _, m in rows}) == 10
+    # A second bounded lease must resume validated completed calls, not spend
+    # its whole allowance starting the same ten passes over again.
+    again = worker.score_group(['FIXTURE'], 10, tmp_path/'work', '5', tmp_path/'config.yaml',
+                                rules.TARGET, daemon=False, independent_calls=True)
+    assert again == rows and len(commands) == 10
+    (tmp_path/'config.yaml').write_text('changed scientific settings')
+    worker.score_group(['FIXTURE'], 10, tmp_path/'work', '5', tmp_path/'config.yaml',
+                       rules.TARGET, daemon=False, independent_calls=True)
+    assert len(commands) == 20
+    assert list((tmp_path/'work').glob('length*.stale-*'))
+
+
+def test_owned_replay_daemon_has_private_socket_and_is_stopped(monkeypatch):
+    import os
+    from pathlib import Path
+    from nanobody_opt import score_boltzgen_fast_adapter as adapter, scorer_daemon
+    monkeypatch.setattr(adapter, 'load_settings', lambda: {'scorer': '/registered/scorer.py'})
+    monkeypatch.setattr(adapter, 'require_pinned_scorer', lambda *a: None)
+    monkeypatch.setenv('NANOBODY_SCORER_SOCKET', '/existing/shared.sock')
+    queried, stopped, launches = [], [], []
+    monkeypatch.setattr(scorer_daemon, 'available', lambda path: queried.append(path) or True)
+    class Process:
+        def poll(self): return None
+        def terminate(self): stopped.append('terminate')
+        def wait(self, timeout): stopped.append('wait')
+    def launch(command, **kwargs):
+        launches.append((command, kwargs))
+        assert 'start_new_session' not in kwargs
+        assert os.environ['NANOBODY_SCORER_SOCKET'] != '/existing/shared.sock'
+        return Process()
+    monkeypatch.setattr(worker.subprocess, 'Popen', launch)
+    with worker.owned_daemon():
+        socket = Path(os.environ['NANOBODY_SCORER_SOCKET'])
+        assert socket.parent.is_dir()
+        assert queried == [str(socket)]
+    assert not socket.parent.exists()
+    assert stopped == ['terminate', 'wait']
+    assert os.environ['NANOBODY_SCORER_SOCKET'] == '/existing/shared.sock'
+    assert launches[0][0][launches[0][0].index('--scorer')+1] == '/registered/scorer.py'
 def test_unpack_actual_registered_scorer_gpu_output():
     """Recorded real folds, not a payload manufactured from unpack's key rule."""
     import json
