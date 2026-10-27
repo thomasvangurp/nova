@@ -311,6 +311,11 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     allow_marginal = job.get('allow_marginal', True)
     if not isinstance(allow_marginal, bool):
         raise ValueError('allow_marginal must be a boolean')
+    interleave = job.get('native_interleave_confirmations', False)
+    if not isinstance(interleave, bool):
+        raise ValueError('native_interleave_confirmations must be a boolean')
+    if interleave and screening['enabled']:
+        raise ValueError('interleaved native confirmations require original CPU profiling')
     config = rules.pinned_config(job['challenge']['epoch'])
     requirements = config['nanobody_requirements']
     resume_identity = native_resume_identity(job, directory, requirements)
@@ -330,6 +335,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                           'lower_threshold_at_k': selection.margin_lower_threshold(repeats, margin)},
                   novelty_checked=False, native_classification_complete=False,
                   observation_errors=0,
+                  native_scheduling='interleaved_confirmations' if interleave else 'confirmation_barriers',
                   native_screen={'enabled': screening['enabled'], 'requested_backend': screening['backend'],
                     'attempted_batches': 0, 'completed_profiles': 0, 'actual_backends': {},
                     'cpu_fallback_candidates': 0, 'screen_negative_candidates': 0,
@@ -688,8 +694,48 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         # candidate exactly once, including failures on confirmation passes.
         return measured_rows
 
+    def collect_interleaved_measurements():
+        # Give confirmations the first slots in every wave, filling remaining
+        # slots with fresh work. A handful of survivors must not leave the
+        # other native workers idle for several entire confirmation rounds.
+        # Each sequence still has at most one call per wave, and every next
+        # draw requires a passing preceding observation.
+        from collections import deque
+        def needed(row):
+            key = row['sequence']
+            return max(confirmation_count if key in screen_evidence else repeats,
+                       resumed_required.get(key, 0))
+
+        measured = {r['sequence'] for r in rows if r['sequence'] in resumed_required
+                    and len(measurements[r['sequence']]) >= needed(r)}
+        pending = deque(r for r in rows if r['sequence'] in resumed_required
+                        and r['sequence'] not in measured)
+        fresh = deque(r for r in rows if r['sequence'] not in resumed_required)
+        while pending or fresh:
+            if out_of_time():
+                break
+            batch = []
+            while pending and len(batch) < workers:
+                batch.append(pending.popleft())
+            capacity = min(workers - len(batch), fresh_limit - len(fresh_admitted))
+            for _ in range(min(capacity, len(fresh))):
+                batch.append(fresh.popleft())
+            if not batch:
+                break
+            _acquired, elapsed = measure_and_record(batch)
+            measured.update(r['sequence'] for r in batch)
+            result['last_batch_seconds'] = elapsed
+            flush()
+            for row in batch:
+                key = row['sequence']
+                if (len(measurements.get(key, [])) < needed(row)
+                        and selection.decide(measurements.get(key, []), requirements,
+                            sequence=key, repeats=repeats, margin=margin)['tier'] is not None):
+                    pending.append(row)
+        return [r for r in rows if r['sequence'] in measured]
+
     try:
-        survivors = collect_measurements()
+        survivors = collect_interleaved_measurements() if interleave else collect_measurements()
     finally:
         journal.close(timeout=1.0)
         result['observation_journal'] = journal.progress()

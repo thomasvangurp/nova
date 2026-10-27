@@ -12,6 +12,108 @@ from tests.test_pr100_native_screen_integration import profile, CHALLENGE
 from tests.test_pr100_live_worker import observed_backend
 
 
+def interleaved_case(tmp_path, monkeypatch, *, enabled=True, fresh_limit=4800,
+                     fail_confirmation=False, phase_seconds=430, screen_enabled=False):
+    monkeypatch.setattr(worker, 'worker_count', lambda _: 3)
+    monkeypatch.setattr(worker, 'native_resume_identity', lambda *a: {'resume_eligible': False})
+    monkeypatch.setattr(pr100_filter, 'helper', lambda _: SimpleNamespace(tool_paths=None))
+    monkeypatch.setattr(rules, 'validate_evidence', lambda *a: None)
+    sequences = list('ABCDEF')
+    pr100_filter.atomic(tmp_path/'input.json', {
+        'challenge': CHALLENGE, 'epoch': CHALLENGE['epoch'], 'target': CHALLENGE['target'],
+        'archive_sha256': 'a'*64, 'archive_checked_at_unix': 1,
+        'candidates': [{'sequence': s, 'pr100_annotation': {}} for s in sequences]})
+    now, batches, counts = [0.], [], {}
+    def measure(seqs, *_args, **kwargs):
+        batches.append(list(seqs))
+        assert len(seqs) <= 3 and len(seqs) == len(set(seqs))
+        values = []
+        for sequence in seqs:
+            counts[sequence] = counts.get(sequence, 0) + 1
+            passing = sequence == 'A' and not (fail_confirmation and counts[sequence] > 1)
+            values.append(profile(sequence, 80. if passing else 160.))
+        now[0] += 100.
+        return values, 0., 100.
+    job = {'challenge': CHALLENGE, 'native_tools': '/tools', 'workers': 3, 'repeats': 3,
+           'phase_budget_seconds': phase_seconds, 'candidate_budget_seconds': 300,
+           'native_minimum_call_window_seconds': 130, 'native_cleanup_reserve_seconds': 10,
+           'native_interleave_confirmations': enabled, 'fresh_admission_limit': fresh_limit,
+           'native_screen': {'enabled': screen_enabled}}
+    result = worker.native_phase(job, tmp_path, measure=measure, clock=lambda: now[0])
+    return result, batches, counts
+
+
+@pytest.mark.parametrize('enabled,fresh', [(False, 3), (True, 6)])
+def test_confirmations_fill_spare_slots_with_fresh_work_before_same_deadline(
+        enabled, fresh, tmp_path, monkeypatch):
+    result, batches, counts = interleaved_case(tmp_path, monkeypatch, enabled=enabled)
+    assert result['fresh_evaluations'] == fresh and result['repeat_evaluations'] == 2
+    assert counts['A'] == 3
+    assert result['candidates'][0]['repeats'] == 3
+    assert len(batches) == 3
+    if enabled:
+        assert batches[1] == ['A', 'D', 'E'] and batches[2] == ['A', 'F']
+    else:
+        assert batches[1:] == [['A'], ['A']]
+
+
+def test_interleaved_fresh_cap_does_not_spend_repeat_budget(tmp_path, monkeypatch):
+    result, batches, counts = interleaved_case(tmp_path, monkeypatch, fresh_limit=4)
+    assert result['fresh_evaluations'] == result['fresh_admitted_unique'] == 4
+    assert result['repeat_evaluations'] == 2 and counts['A'] == 3
+    assert set(counts) == set('ABCD')
+    assert {r['sequence'] for r in result['deferred_candidates']} == set('EF')
+
+
+def test_interleaved_confirmation_failure_never_gets_a_lucky_extra_draw(tmp_path, monkeypatch):
+    result, batches, counts = interleaved_case(tmp_path, monkeypatch,
+        fail_confirmation=True, phase_seconds=700)
+    assert result['fresh_evaluations'] == 6 and result['repeat_evaluations'] == 1
+    assert counts['A'] == 2 and result['candidates'] == []
+    assert rules.sequence_hash('A') in result['terminal_native_outcomes']
+    assert all('A' not in batch for batch in batches[2:])
+
+
+@pytest.mark.parametrize('fresh_limit', [0, 2])
+def test_interleaved_carried_confirmations_keep_history_and_do_not_count_as_fresh(
+        tmp_path, monkeypatch, fresh_limit):
+    row = checkpoint_input(tmp_path, monkeypatch)
+    monkeypatch.setattr(worker, 'worker_count', lambda _: 3)
+    monkeypatch.setattr(rules, 'validate_evidence', lambda *a: None)
+    data = json.loads((tmp_path/'input.json').read_text())
+    data['candidates'].extend({'sequence': s, 'pr100_annotation': {}} for s in ('BBBB', 'CCCC'))
+    pr100_filter.atomic(tmp_path/'input.json', data)
+    calls = []
+    def measure(sequences, *_a, **kw):
+        calls.append(list(sequences))
+        return [profile(s, 80. if s == 'AAAA' else 160.) for s in sequences], 0., 100.
+    result = worker.native_phase({'challenge': CHALLENGE, 'native_tools': '/tools',
+        'workers': 3, 'repeats': 3, 'native_host': 'slave', 'fresh_admission_limit': fresh_limit,
+        'native_interleave_confirmations': True}, tmp_path, measure=measure)
+    assert calls == [['AAAA', 'BBBB', 'CCCC'] if fresh_limit else ['AAAA']]
+    assert result['carried_cpu_observations'] == 2
+    assert result['repeat_evaluations'] == 1 and result['fresh_evaluations'] == fresh_limit
+    assert result['candidates'][0]['measurements'][:2] == row['native_resume']['measurements']
+
+
+@pytest.mark.parametrize('value', [1, 'true', None])
+def test_interleaving_switch_rejects_ambiguous_values(tmp_path, monkeypatch, value):
+    with pytest.raises(ValueError, match='must be a boolean'):
+        interleaved_case(tmp_path, monkeypatch, enabled=value)
+
+
+def test_interleaving_refuses_unqualified_experimental_screen_combination(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match='require original CPU profiling'):
+        interleaved_case(tmp_path, monkeypatch, screen_enabled=True)
+
+
+def test_interleaving_starts_no_work_after_admission_window(tmp_path, monkeypatch):
+    result, batches, counts = interleaved_case(tmp_path, monkeypatch, phase_seconds=130)
+    assert batches == [] and counts == {}
+    assert result['fresh_evaluations'] == result['repeat_evaluations'] == 0
+    assert result['fresh_never_started_sequence_hashes'] == sorted(rules.sequence_hash(s) for s in 'ABCDEF')
+
+
 def test_private_executor_admits_more_than32_and_joins_all_threads():
     gate = threading.Barrier(40, timeout=3)
     def call(value):

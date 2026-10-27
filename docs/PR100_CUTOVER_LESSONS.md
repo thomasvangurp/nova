@@ -313,6 +313,24 @@ same effective environment as live operation, including the native launcher.
 This finding establishes an uncontrolled thread default, not a measured
 whole-epoch speedup or equivalence to the validator's runtime.
 
+Sparse passing candidates also exposed an avoidable scheduling barrier. The
+native worker confirmed every survivor of a fresh batch before admitting the
+next fresh batch. With one survivor, nearly the whole worker pool sat idle
+during two confirmation rounds. The opt-in `native_interleave_confirmations`
+mode gives pending confirmations the first slots in each wave and fills the
+remaining slots with fresh candidates. It keeps the same original CPU calls,
+required observation counts, rejection rules, per-call timeout, owned cleanup,
+checkpoint bindings, and shared fresh-admission ceiling. A failed observation
+never receives another chance through this queue. Experimental screening cannot
+be combined with this mode.
+
+The deadline regression uses identical 100-second inert call waves and a
+430-second phase budget: the old schedule admits three fresh candidates and
+two repeats; interleaving admits six fresh candidates and the same two repeats.
+Both finish the passing candidate's three observations before the same cutoff.
+This demonstrates the eliminated idle slots, not a measured production speedup.
+The switch remains off unless explicitly enabled in a tested deployment.
+
 ## Slave runtime repair and submission audit, 2026-10-27
 
 Static ELF dependency closure missed MKL libraries loaded through runtime
