@@ -29,6 +29,7 @@ TEST_FILES = (
     'tests/test_pr100_live_worker.py',
     'tests/test_pr100_native_journal.py',
     'tests/test_pr100_live_gpu.py',
+    'tests/test_pr100_wide_screen.py',
     'tests/test_pr100_live_selection.py',
     'tests/test_pr100_handoff_diagnostics.py',
     'tests/test_pr100_live_handoff_contract.py',

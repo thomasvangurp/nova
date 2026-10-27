@@ -99,7 +99,7 @@ if not out['running']:
  if report.is_file():
   for group in json.loads(report.read_text()).get('groups',[]):
    f=str(group.get('file',''))
-   if group.get('valid') is True and re.fullmatch(r'gpu-[0-9]+/length[0-9]+/exact_all[.]json',f) and (d/'score'/f).is_file():
+   if group.get('valid') is True and re.fullmatch(r'(?:wave-[0-9]+/)?gpu-[0-9]+/length[0-9]+/exact_all[.]json',f) and (d/'score'/f).is_file():
     out['files']['score/'+f]=base64.b64encode((d/'score'/f).read_bytes()).decode()
 else:
  for name in ('supervisor-stderr.log','transport-launch.log'):
@@ -261,6 +261,7 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     if phase == 'score':
         # The worker bounds each GPU lease inside the supervisor's wall cap.
         job['wall_seconds'] = max(30.0, cap - 15.0)
+        job['deadline_unix'] = stop_at
     files['job.json'] = json.dumps(job).encode()
     command = [python, '-B', '-m', 'nanobody_opt.pr100_live_worker', '--job', directory + '/job.json']
     spec = {'command': command, 'cwd': release, 'environment': environment,

@@ -1,0 +1,39 @@
+{
+  "schema": "pr100-wide-screening-experiment-v1",
+  "base_revision": "d9771ff",
+  "scope": "execution framework only; no eligibility, generation or scorer numerical changes",
+  "production_deployed": false,
+  "native_or_gpu_jobs_run": false,
+  "entrypoint": "nanobody_opt.pr100_wide_screen.screen_phase; worker phase screen; score phase dispatches here above 128 inputs per GPU",
+  "input_contract": {
+    "sequences": "canonical unique inputs; duplicates are refused",
+    "previously_evaluated_hashes": "optional authoritative caller-supplied exclusions; excluded before submitting any lease",
+    "freshness_limit": "Without previous-evaluation history, fresh means unique fresh evaluations within this invocation, not never evaluated in an earlier epoch"
+  },
+  "bounds": {
+    "absolute_deadline": "Required deadline_unix; wall_seconds and monotonic time can only shorten it",
+    "default_wave_candidates_per_gpu": 128,
+    "minimum_wave_seconds": 110,
+    "default_maximum_wave_seconds": 1800,
+    "cleanup": "Dedicated subreaper owns only its GPU lease runners and descendants; bounded cleanup before another wave",
+    "existing_output": "Refused; cached reports cannot be counted as new evaluations"
+  },
+  "inert_verification": {
+    "input_counts": [13, 512, 513, 4800],
+    "verified": [
+      "every eligible input is submitted at most once",
+      "actual validated group entries determine fresh completion counts",
+      "completed waves survive deadlines, partial probes and later invalid results",
+      "GPU lock remains held through owned cleanup and can be reacquired in the next wave",
+      "unavailable leases and incomplete probes do not count as fresh results",
+      "prior evaluation exclusions, clock movement, launch failure and SIGTERM are accounted for"
+    ]
+  },
+  "limitations": [
+    "No claim that 4800 evaluations fit within a real epoch",
+    "No real GPU throughput or native eligibility yield was measured",
+    "The caller must supply authoritative historical exclusions to guarantee globally new inputs",
+    "Only complete validated probe groups are retained; incomplete groups remain uncounted",
+    "The live supervisor remains responsible for chain-clock rollover and the enclosing process deadline"
+  ]
+}

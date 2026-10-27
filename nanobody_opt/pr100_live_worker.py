@@ -352,10 +352,12 @@ def score_jobs(job, directory, sequences):
     ttl = max(10.0, min(1800.0, wall - 20.0))
     probe_timeout = int(max(60, min(3600, ttl - 30)))
     shards = selection.shard([{'sequence': s} for s in sequences], list(job['gpus']))
+    if any(len(rows) > SCORE_SHARD_LIMIT for rows in shards.values()):
+        raise ValueError('score shard exceeds probe limit; use bounded screening waves')
     environment = {k: os.environ[k] for k in SCORE_ENV_KEYS if k in os.environ and k in ENV_KEYS}
     jobs = []
     for gpu in job['gpus']:
-        rows = shards[gpu][:SCORE_SHARD_LIMIT]
+        rows = shards[gpu]
         if not rows:
             continue
         shard_input = out / f'shard-gpu-{gpu}.json'
@@ -369,6 +371,8 @@ def score_jobs(job, directory, sequences):
                      'cwd': str(release), 'lock_directory': job['gpu_lock_directory'],
                      'scorer': job['scorer'], 'receipt': str(out / f'gpu-receipt-{gpu}.json'),
                      'candidate_count': len(rows)})
+        if 'deadline_unix' in job:
+            jobs[-1]['deadline_unix'] = job['deadline_unix']
     return jobs
 
 
@@ -432,6 +436,9 @@ def score_phase(job, directory, *, launch=None, clock=time.monotonic, sleep=time
         raise ValueError('duplicate sequence in score input')
     if not sequences:
         raise ValueError('no candidates to score')
+    if len(sequences) > SCORE_SHARD_LIMIT * len(job['gpus']):
+        from nanobody_opt.pr100_wide_screen import screen_phase
+        return screen_phase(job, directory, launch=launch, clock=clock, sleep=sleep)
     jobs = score_jobs(job, directory, sequences)
     out = Path(job['output_directory'])
     launch = launch or (lambda path, log: subprocess.Popen(
@@ -488,8 +495,9 @@ def main():
     os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:job['cpu_slots']])
     started = time.monotonic()
     try:
+        from nanobody_opt.pr100_wide_screen import screen_phase
         result = {'sequence': sequence_phase, 'native': native_phase,
-                  'score': score_phase}[job['phase']](job, directory)
+                  'score': score_phase, 'screen': screen_phase}[job['phase']](job, directory)
         # A partial score (some GPUs finished) is still a usable result for the controller.
         status = 'complete' if result['status'] in ('complete', 'partial') else result['status']
         receipt = {'status': status, 'result_status': result['status'],

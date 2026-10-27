@@ -177,7 +177,7 @@ def _controller():
 
 
 def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.Popen,
-                 clock=time.monotonic, sleep=time.sleep):
+                 clock=time.monotonic, sleep=time.sleep, wall_clock=time.time):
     """Run in a dedicated session/process. TTL includes admission and cleanup.
 
     Caller supplies a public command/environment, never credential values. This
@@ -197,21 +197,36 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
     supplied_env = job.get('env', {})
     if set(supplied_env) - ENV_KEYS or any(not isinstance(v, str) for v in supplied_env.values()):
         raise ValueError('unregistered environment variable')
+    absolute = job.get('deadline_unix')
+    if absolute is not None and (type(absolute) not in (int, float)
+                                 or not math.isfinite(absolute) or absolute <= 0):
+        raise ValueError('invalid absolute GPU deadline')
     control = control or _controller()
     control.dedicated_controller()
-    began = clock(); deadline = began + ttl
+    began = clock()
+    if absolute is not None:
+        ttl = min(ttl, max(0.0, absolute - wall_clock()))
+    deadline = began + ttl
+    def remaining():
+        return max(0.0, min(deadline - clock(),
+                            math.inf if absolute is None else absolute - wall_clock()))
     result = {'schema': 'pr100-cooperative-gpu-lease-v1', 'gpu': gpu,
               'owner_pid': os.getpid(), 'ttl_seconds': ttl, 'exclusive_gpu': False,
               'started_monotonic': began, 'deadline_monotonic': deadline,
-              'created_unix': time.time(), 'expires_unix': time.time() + ttl,
+              'created_unix': wall_clock(), 'expires_unix': wall_clock() + ttl,
               'coordination': 'file-lock participants only; legacy daemon lock is process-local',
               'dispatcher_locks': list(job.get('dispatcher_locks', [])), 'status': 'preparing'}
+    if absolute is not None:
+        result['deadline_unix'] = absolute
+        result['expires_unix'] = min(result['expires_unix'], absolute)
     children = []; prior = {}
     def expired(signum, frame):
         raise LeaseExpired('GPU reservation expired')
     def interrupted(signum, frame):
         raise InterruptedError('owned GPU reservation interrupted')
     try:
+        if ttl < 10:
+            raise Unavailable('epoch_deadline_before_admission')
         for sig in (signal.SIGTERM, signal.SIGINT):
             prior[sig] = signal.signal(sig, interrupted)
         if signal.getitimer(signal.ITIMER_REAL)[0]:
@@ -227,7 +242,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
                 result.update(status='reserved', admission=second)
                 atomic(job['receipt'], result)
                 env = dict(supplied_env, CUDA_VISIBLE_DEVICES=str(gpu))
-                if clock() >= deadline - 5:
+                if remaining() <= 5:
                     raise Unavailable('reservation_expired_before_launch')
                 child = launch(job['command'], env=env, cwd=job['cwd'],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -235,7 +250,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
                 children.append(child); result.update(status='running', child_pid=child.pid)
                 atomic(job['receipt'], result)
                 while child.poll() is None:
-                    if clock() >= deadline - 5:
+                    if remaining() <= 5:
                         result['status'] = 'expired'; break
                     if not uncontended(snapshot(gpu, job['scorer']), second,
                                        control.descendants(), 512):
@@ -248,7 +263,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
                 signal.setitimer(signal.ITIMER_REAL, 0)
                 # Keep the lock until the entire owned process tree is gone.
                 if children:
-                    result['cleanup'] = control.stop_descendants(children, timeout=4)
+                    result['cleanup'] = control.stop_descendants(children, timeout=min(4, remaining()))
                     children.clear()
     except LeaseExpired:
         result['status'] = 'expired'
@@ -260,7 +275,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
         if signal.SIGALRM in prior:
             signal.setitimer(signal.ITIMER_REAL, 0)
         if children:
-            result['cleanup'] = control.stop_descendants(children, timeout=4)
+            result['cleanup'] = control.stop_descendants(children, timeout=min(4, remaining()))
         for sig, handler in prior.items():
             signal.signal(sig, handler)
         cleanup = result.get('cleanup')
