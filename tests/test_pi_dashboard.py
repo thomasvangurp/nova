@@ -409,6 +409,7 @@ def test_parallel_replay_uses_only_three_distinct_background_leases(monkeypatch)
         seen.append((kwargs['gpu'], tuple(kwargs['selection'][1])))
         return {'ok': True, 'epoch': kwargs['epoch']-1, 'rows': 10}
     monkeypatch.setattr(replay, 'pending', choose)
+    monkeypatch.setattr(replay, 'plan_pair_benchmark', lambda epoch: None)
     monkeypatch.setattr(replay, 'run', run)
     result = replay.run_parallel(25967)
     assert sorted(seen) == [(5, ('A',)), (6, ('B',)), (7, ('C',))]
@@ -490,3 +491,35 @@ def test_old_target_complete_fleet_is_not_current_replay(paths):
     assert 'measured fleet pending' in text
     assert 'earlier replay 25965: 1 sequences at ≥10 passes' in text
     assert 'measured fleet 25954' not in text
+
+
+def test_requested_pair_benchmark_reuses_two_compatible_pending_candidates(tmp_path, monkeypatch):
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: {})
+    (tmp_path/'pair_benchmark.request').touch()
+    (tmp_path/'pending_cohort.json').write_text(json.dumps({'target': rules.TARGET, 'items': [
+        {'epoch': 25966, 'sequence': 'ONE'}, {'epoch': 25966, 'sequence': 'LONGER'},
+        {'epoch': 25966, 'sequence': 'TWO'}]}))
+    replay.plan_pair_benchmark(25968)
+    assert replay.pending(tmp_path/'unused', 25969) == (25966, ['ONE', 'TWO'])
+    assert replay.pending(tmp_path/'unused', 25969, exclude=['ONE', 'TWO']) == (25966, ['LONGER'])
+
+
+def test_pair_benchmark_does_not_postpone_partial_single_candidate(tmp_path, monkeypatch):
+    import hashlib
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    monkeypatch.setattr(replay, 'STATE', tmp_path)
+    monkeypatch.setattr(collector, 'pass_counts', lambda *a: {})
+    (tmp_path/'pair_benchmark.request').touch()
+    (tmp_path/'pending_cohort.json').write_text(json.dumps({'target': rules.TARGET, 'items': [
+        {'epoch': 25966, 'sequence': 'ONE'}, {'epoch': 25966, 'sequence': 'TWO'}]}))
+    batch = hashlib.sha256(json.dumps([25966, 10, ['ONE']]).encode()).hexdigest()[:16]
+    output = tmp_path/f'epoch25966/{batch}/work/epoch25966/replicates10/job/length3/pass1/exact_all.json'
+    output.parent.mkdir(parents=True); output.write_text('{}')
+    replay.plan_pair_benchmark(25968)
+    assert not (tmp_path/'pair_benchmark.json').exists()

@@ -23,12 +23,62 @@ PASSES = 10
 TTL = 1050
 
 
+def plan_pair_benchmark(epoch: int) -> None:
+    """One requested ordinary two-candidate trial, after partial work finishes."""
+    from nanobody_opt.rules import target_for_epoch
+    from tools.collect_slave_multipass_seqs import pass_counts
+    plan = STATE/'pair_benchmark.json'
+    if plan.exists() or not (STATE/'pair_benchmark.request').is_file():
+        return
+    try:
+        queue = json.loads((STATE/'pending_cohort.json').read_text())
+    except (OSError, ValueError):
+        return
+    target = target_for_epoch(epoch)
+    if queue.get('target') != target:
+        return
+    items = queue.get('items', [])
+    counts = pass_counts([item['sequence'] for item in items], target)
+    missing = [item for item in items if counts.get(item['sequence'], 0) < PASSES]
+    # Never move a partly completed single-candidate job into a new batch.
+    for item in missing:
+        batch = hashlib.sha256(json.dumps([item['epoch'], PASSES, [item['sequence']]]).encode()).hexdigest()[:16]
+        directory = STATE/f"epoch{item['epoch']}"/batch
+        if any('.stale-' not in str(path) and '.qualified-' not in str(path)
+               for path in directory.glob('work/epoch*/replicates*/*/length*/pass*/exact_all.json')):
+            return
+    groups = {}
+    for item in missing:
+        if not item['epoch'] < epoch:
+            continue
+        key = (item['epoch'], len(item['sequence']))
+        groups.setdefault(key, []).append(item['sequence'])
+        if len(groups[key]) == 2:
+            value = {'epoch': key[0], 'target': target, 'sequences': groups[key],
+                     'kind': 'ordinary_distinct_pair_benchmark', 'passes': PASSES}
+            temporary = plan.with_suffix('.json.next')
+            temporary.write_text(json.dumps(value)); os.replace(temporary, plan)
+            return
+
+
 def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list[str]]:
     from nanobody_opt.rules import target_for_epoch
     from tools.collect_slave_multipass_seqs import leaderboard_sequences, pass_counts
 
     target = target_for_epoch(epoch)
     excluded = set(exclude)
+    try:
+        pair = json.loads((STATE/'pair_benchmark.json').read_text())
+        sequences = pair.get('sequences', [])
+        if (pair.get('target') == target and type(pair.get('epoch')) is int
+                and pair['epoch'] < epoch and len(sequences) == len(set(sequences)) == 2
+                and len(sequences[0]) == len(sequences[1])
+                and not excluded.intersection(sequences)):
+            counts = pass_counts(sequences, target)
+            if any(counts.get(s, 0) < PASSES for s in sequences):
+                return pair['epoch'], sequences
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
     queue_path = STATE/'pending_cohort.json'
     try:
         queued = json.loads(queue_path.read_text())
@@ -191,6 +241,7 @@ def run(*, epoch: int, gpu: int = 5, selection=None) -> dict:
 
 def run_parallel(epoch: int) -> dict:
     from concurrent.futures import ThreadPoolExecutor
+    plan_pair_benchmark(epoch)
     plans, assigned = [], set()
     for gpu in (5, 6, 7):
         selection = pending(DATABASE, epoch, exclude=assigned)
