@@ -130,6 +130,14 @@ def sequence_phase(job, directory):
     cell = f"{expected['allowed_v']}:{expected['allowed_cdr3_length']}"
     slots = job.get('reference_slots', DEFAULT_REFERENCE_SLOTS)
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
+    proposal_offset = job.get('proposal_offset', 0)
+    if type(proposal_offset) is not int or proposal_offset < 0:
+        raise ValueError('proposal_offset must be a nonnegative integer')
+    excluded = job.get('excluded_sequence_hashes', [])
+    if (not isinstance(excluded, list) or any(not isinstance(v, str) or
+            not re.fullmatch(r'[0-9a-f]{64}', v) for v in excluded)):
+        raise ValueError('invalid excluded sequence hashes')
+    excluded = set(excluded)
     for name, value in (('reference_slots', slots), ('proposals', proposals_wanted)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(name + ' must be a positive integer')
@@ -137,16 +145,18 @@ def sequence_phase(job, directory):
                   key=lambda r: rules.digest([expected['epoch'], r['sequence_hash']]))[:slots]
     panels, _ = pr100_filter.helper('germline_identity')._anarci_panel('human')
     rows = [{**r, 'source': 'existing_native_reference'} for r in refs]
-    for ordinal in range(proposals_wanted):
+    for index in range(proposals_wanted):
+        ordinal = proposal_offset + index
         reference_share = proposals_wanted // 2
-        ref = refs[ordinal % len(refs)] if refs and ordinal < reference_share else None
+        ref = refs[ordinal % len(refs)] if refs and index < reference_share else None
         cdr3 = (Chain(ref['sequence'], scheme='imgt', cdr_definition='imgt',
                       use_anarcii=False).cdr3_seq if ref else None)
         row = proposals.propose(panels, expected['allowed_v'], expected['allowed_cdr3_length'],
                                 seed=expected['epoch'], ordinal=ordinal, reference_cdr3=cdr3)
         rows.append({**row, 'source': 'fresh_baseline_proposal',
                      'reference_hash': ref['sequence_hash'] if ref else None})
-    unique = {r['sequence']: r for r in rows}
+    generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
+    unique = {r['sequence']: r for r in rows if rules.sequence_hash(r['sequence']) not in excluded}
     eligible, reasons = [], {}
     for sequence, row in unique.items():
         annotation = {**pr100_filter._annotate_uncached(sequence),
@@ -165,6 +175,8 @@ def sequence_phase(job, directory):
               'archive_sha256': job['archive_sha256'], 'archive_checked_at_unix': job['archive_fetched_at'],
               'archive_rows': len(frame), 'existing_references': len(refs),
               'proposals': proposals_wanted, 'annotation_reasons': reasons,
+              'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposals_wanted,
+              'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique),
               'candidates': eligible, 'novelty_checked': False,
               'annotated_total': len(eligible), 'status': 'complete'}
     pr100_filter.atomic(directory / 'result.json', result)
@@ -188,6 +200,60 @@ def check_novelty(rows, archive, *, novelty=None):
     return kept, len(frame)
 
 
+def novelty_phase(job, directory, *, novelty=None):
+    """Recheck a fresh archive using completed native evidence; no profiling."""
+    incoming = json.loads((directory / 'input.json').read_text())
+    if incoming.get('challenge') != job['challenge']:
+        raise ValueError('novelty input challenge mismatch')
+    archive = directory / 'archive.csv'
+    if file_digest(archive) != job['archive_sha256']:
+        raise ValueError('novelty archive snapshot changed')
+    config = rules.pinned_config(job['challenge']['epoch'])
+    for row in incoming['candidates']:
+        if row.get('layer2_passed') is not True:
+            raise ValueError('missing completed native gate')
+        rules.validate_evidence(row.get('pr100_evidence'), row['sequence'], job['challenge'], config)
+    kept, archive_rows = check_novelty(incoming['candidates'], archive, novelty=novelty)
+    result = {**incoming, 'candidates': kept, 'novelty_checked': True, 'status': 'complete',
+              'archive_rows': archive_rows, 'archive_sha256': job['archive_sha256'],
+              'archive_checked_at_unix': job['archive_fetched_at']}
+    pr100_filter.atomic(directory / 'result.json', result)
+    return result
+
+
+def native_resume_identity(job, directory, requirements):
+    """Same-runtime checkpoint binding; deliberately no model-equivalence claim."""
+    import importlib.util
+    from nanobody_opt.pr100_native_journal import _context
+    context = _context(directory, job, requirements)
+    scientific, weights = {}, {}
+    try:
+        immune = Path(importlib.util.find_spec('ImmuneBuilder').origin).parent
+        tnp = Path(importlib.util.find_spec('theraprofnano').origin).parent
+        for name, path in {
+            'builder': immune / 'NanoBodyBuilder2.py', 'refine': immune / 'refine.py',
+            'cdr': tnp / 'CDR_Profiler/CDR3_Conf_Assigner.py',
+            'surface': tnp / 'Hydrophobicity_and_Charge_Profiler/Hydrophobicity_and_Charge_Assigner.py',
+        }.items():
+            scientific[name] = file_digest(path)
+        for index in range(1, 5):
+            weights[str(index)] = file_digest(immune / 'trained_model' / f'nanobody_model_{index}')
+    except (OSError, ImportError, AttributeError, TypeError, ValueError):
+        pass
+    runtime = context['runtime']
+    complete = (len(scientific) == 4 and len(weights) == 4
+                and bool(runtime['python_binary_sha256'])
+                and all(runtime['packages'][name]['version_sha256'] for name in ('torch', 'numpy', 'openmm'))
+                and all(runtime['tools'][name]['sha256'] for name in ('aggrescan3d-rs', 'freesasa', 'TNP')))
+    return {'challenge_sha256': rules.digest(job['challenge']), 'resume_eligible': bool(complete),
+            'requirements_sha256': rules.digest(requirements), 'filter_sha': rules.FILTER_SHA,
+            'runtime': runtime, 'sources': {k: v for k, v in context['source_sha256'].items()
+                if k not in ('worker', 'journal', 'rules')},
+            'scientific_sources': scientific, 'model_weights': weights,
+            'model_weight_identity': 'complete' if len(weights) == 4 else 'incomplete',
+            'runtime_identity_status': 'checkpoint_bound' if complete else 'incomplete'}
+
+
 def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=None, screen=None):
     from nanobody_opt import pr100_native_journal as journal_module
     incoming = json.loads((directory / 'input.json').read_text())
@@ -208,6 +274,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         raise ValueError('allow_marginal must be a boolean')
     config = rules.pinned_config(job['challenge']['epoch'])
     requirements = config['nanobody_requirements']
+    resume_identity = native_resume_identity(job, directory, requirements)
     rows = incoming['candidates']
     if len({r['sequence'] for r in rows}) != len(rows):
         raise ValueError('duplicate sequence in native input')
@@ -240,6 +307,21 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
 
     def flush():
         result['observation_journal'] = journal.progress()
+        admitted = started | screened | screen_admitted
+        result['attempted_sequence_hashes'] = sorted(rules.sequence_hash(s) for s in admitted)
+        result['deferred_candidates'] = [r for r in rows if r['sequence'] not in admitted]
+        result['deferred_confirmations'] = []
+        for row in rows:
+            key = row['sequence']; values = measurements.get(key, [])
+            required = max(confirmation_count if key in screen_evidence else repeats,
+                           resumed_required.get(key, 0))
+            if values and len(values) < required and selection.decide(values, requirements,
+                    sequence=key, repeats=repeats, margin=margin)['tier'] is not None:
+                result['deferred_confirmations'].append({**row, 'native_resume': {
+                    'schema': 'pr100-native-confirmation-checkpoint-v1',
+                    'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
+                    'measurements': values, 'required_cpu_observations': required,
+                    'accelerated_screen': screen_evidence.get(key)}})
         pr100_filter.atomic(directory / 'result.json', result)
 
     phase_budget = job.get('phase_budget_seconds')
@@ -255,12 +337,40 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         return deadline is not None and clock() + budget > deadline
 
     measurements = {}
+    confirmation_progress = {}
     started = set()
     screened = set()
     screen_evidence = {}
+    screen_admitted = set()
+    resumed_required = {}
     audited = set()
     screen_skipped = set()
+    for row in rows:
+        saved = row.get('native_resume')
+        if saved is None:
+            continue
+        if not isinstance(saved, dict):
+            raise ValueError('invalid native confirmation checkpoint')
+        values = saved.get('measurements') if isinstance(saved, dict) else None
+        required = saved.get('required_cpu_observations') if isinstance(saved, dict) else None
+        if (not resume_identity['resume_eligible']
+                or saved.get('schema') != 'pr100-native-confirmation-checkpoint-v1'
+                or saved.get('identity') != resume_identity
+                or saved.get('sequence_hash') != rules.sequence_hash(row['sequence'])
+                or not isinstance(values, list) or not 1 <= len(values) < 64
+                or type(required) is not int or not len(values) <= required <= 64
+                or selection.decide(values, requirements, sequence=row['sequence'],
+                                    repeats=repeats, margin=margin)['tier'] is None):
+            raise ValueError('invalid native confirmation checkpoint')
+        key = row['sequence']
+        measurements[key] = list(values); started.add(key); resumed_required[key] = required
+        if saved.get('accelerated_screen') is not None:
+            identity = screen_identity(saved['accelerated_screen'], key, job['challenge'])
+            if identity is None:
+                raise ValueError('invalid accelerated confirmation checkpoint')
+            screen_evidence[key] = identity
     journal = journal_module.AsyncJournal(directory, job, requirements)
+    result['carried_cpu_observations'] = sum(map(len, measurements.values()))
     result['observation_journal'] = journal.progress()
     flush()
 
@@ -274,6 +384,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         started.update(by_sequence)
         result['not_started'] = len(rows) - len(started)
         result['in_flight'] += len(batch)
+        # Persist admission before starting scientific calls. An interrupted phase
+        # must never cause these candidates to be blindly evaluated again.
+        flush()
 
         def completed(key, value):
             if len(measurements.get(key, [])) >= expected[key]:
@@ -286,6 +399,26 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             result['unique_profiled_candidates'] = len(set(measurements) | screened)
             result['not_completed'] = len(rows) - len(measurements)
             result['in_flight'] -= 1
+            # Dedicated continuation checkpoints are not audit journal records.
+            # Save each completion before a slower sibling can exhaust the phase.
+            required = max(confirmation_count if key in screen_evidence else repeats,
+                           resumed_required.get(key, 0))
+            verdict = selection.decide(measurements[key], requirements, sequence=key,
+                                       repeats=repeats, margin=margin)
+            if verdict['tier'] is not None:
+                confirmation_progress[key] = {**by_sequence[key], 'native_resume': {
+                    'schema': 'pr100-native-confirmation-checkpoint-v1',
+                    'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
+                    'measurements': measurements[key], 'required_cpu_observations': required,
+                    'accelerated_screen': screen_evidence.get(key)}}
+            else:
+                confirmation_progress[key] = {'sequence_hash': rules.sequence_hash(key),
+                                               'terminal_reason': verdict['reason']}
+            try:
+                pr100_filter.atomic(directory / 'native-confirmations.json', {
+                    'challenge': job['challenge'], 'records': list(confirmation_progress.values())})
+            except OSError:
+                observation_error('ConfirmationCheckpointWriteError')
             try:
                 # An unexpected backend must not lose its provenance and enter
                 # the authoritative CPU journal as a successful measurement.
@@ -324,6 +457,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             return batch, []
         state['attempted_batches'] += 1
         batch_dir = directory / 'native-screen' / f'batch-{index:05d}'
+        screen_admitted.update(r['sequence'] for r in batch)
+        flush()
         try:
             backend = screen
             if backend is None:
@@ -403,7 +538,16 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             original_batch = rows[offset:offset + workers]
             if out_of_time():
                 break
-            batch, held = screen_batch_rows(original_batch, offset // workers)
+            complete = [r for r in original_batch if r['sequence'] in resumed_required
+                        and len(measurements[r['sequence']]) >= max(repeats, resumed_required[r['sequence']])]
+            measured_rows.extend(complete)
+            original_batch = [r for r in original_batch if r not in complete]
+            if not original_batch:
+                continue
+            carry = [r for r in original_batch if r['sequence'] in resumed_required]
+            fresh = [r for r in original_batch if r['sequence'] not in resumed_required]
+            batch, held = screen_batch_rows(fresh, offset // workers) if fresh else ([], [])
+            batch = carry + batch
             if not batch or out_of_time():
                 break
             _acquired, elapsed = measure_and_record(batch)
@@ -437,7 +581,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 screen_skipped.update(r['sequence'] for r in held)
                 result['native_screen']['screen_negative_candidates'] += len(held)
             pending = batch
-            needed = lambda row: confirmation_count if row['sequence'] in screen_evidence else repeats
+            needed = lambda row: max(confirmation_count if row['sequence'] in screen_evidence else repeats,
+                                     resumed_required.get(row['sequence'], 0))
             for _ in range(max((needed(r) - 1 for r in batch), default=0)):
                 # Recheck the full native gate after every observation. Once a
                 # candidate fails, a later lucky draw cannot restore eligibility.
@@ -465,7 +610,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         key = row['sequence']
         verdict = selection.decide(measurements[key], requirements, sequence=key,
                                    repeats=repeats, margin=margin,
-                                   cpu_confirmation_minimum=confirmation_count if key in screen_evidence else 0)
+                                   cpu_confirmation_minimum=max(confirmation_count if key in screen_evidence else 0,
+                                                                resumed_required.get(key, 0)))
         verdicts[key] = verdict
         if verdict['tier'] is None:
             record(verdict['reason'] or 'rejected')
@@ -474,11 +620,11 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         evidence = {'challenge': job['challenge'], 'filter_sha': rules.FILTER_SHA,
                     'annotation': row['pr100_annotation'],
                     'developability': verdict['measurements'][0]}
-        if key in screen_evidence:
+        if key in screen_evidence or key in resumed_required:
             # Carry the confirmation requirement across export and Pi validation;
             # a forged tier label cannot discard it at a publication boundary.
             evidence['native_screen_confirmation'] = {
-                'screen': screen_evidence[key], 'minimum': confirmation_count,
+                'screen': screen_evidence.get(key), 'minimum': verdict['cpu_confirmation_minimum'],
                 'measurements': verdict['measurements']}
         rules.validate_evidence(evidence, key, job['challenge'], config)
         passers.append({**row, 'layer2_passed': True, 'pr100_evidence': evidence,
@@ -493,6 +639,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                          'psh_boundary_margin': verdict['psh_boundary_margin'],
                          'selection_reason': verdict['reason']})
     result['native_passed'] = len(passers)
+    result['terminal_native_outcomes'] = {rules.sequence_hash(key): verdict['reason']
+        for key, verdict in verdicts.items() if verdict['tier'] is None
+        and verdict['reason'] in journal_module.REJECTION_REASONS}
     result['native_classification_complete'] = True
     flush()
 
@@ -552,25 +701,30 @@ def score_jobs(job, directory, sequences):
         jobs.append({'gpu': gpu, 'ttl_seconds': ttl, 'command': command, 'env': environment,
                      'cwd': str(release), 'lock_directory': job['gpu_lock_directory'],
                      'scorer': job['scorer'], 'receipt': str(out / f'gpu-receipt-{gpu}.json'),
-                     'candidate_count': len(rows)})
+                     'candidate_count': len(rows),
+                     'candidate_hashes': [rules.sequence_hash(r['sequence']) for r in rows]})
     return jobs
 
 
 def collect_scores(out, jobs):
     """Merge whatever per-GPU probe groups finished into score/report.json (partial allowed)."""
-    groups, shards, scorer_hashes, settings = [], [], set(), None
+    groups, shards, scorer_hashes, settings, admitted = [], [], set(), None, set()
     for gpu_job in jobs:
         gpu = gpu_job['gpu']
         entry = {'gpu': gpu, 'candidate_count': gpu_job['candidate_count']}
         try:
-            entry['lease'] = json.loads(Path(gpu_job['receipt']).read_text()).get('status')
+            lease = json.loads(Path(gpu_job['receipt']).read_text())
+            entry['lease'] = lease.get('status')
         except (OSError, ValueError):
+            lease = None
             entry['lease'] = None
         try:
             report = json.loads((out / f'gpu-{gpu}' / 'report.json').read_text())
         except (OSError, ValueError):
             report = None
         entry['probe_status'] = report.get('status') if report else None
+        if lease is None or lease.get('child_pid') is not None or report is not None:
+            admitted.update(gpu_job.get('candidate_hashes', []))
         if report:
             for group in report.get('groups', []):
                 if group.get('valid') is not True:
@@ -594,6 +748,7 @@ def collect_scores(out, jobs):
     complete = bool(jobs) and all(s['probe_status'] == 'complete' for s in shards)
     report = {'schema': 'pr100-live-score-v1', 'groups': groups, 'shards': shards,
               'registered_scorer_sha256': next(iter(scorer_hashes), None),
+              'attempted_sequence_hashes': sorted(admitted),
               'gpus_attempted': len(jobs),
               'gpus_finished': sum(1 for s in shards if s['probe_status'] == 'complete'),
               'scored_candidates': scored, 'status': 'complete' if complete else 'partial'}
@@ -617,6 +772,11 @@ def score_phase(job, directory, *, launch=None, clock=time.monotonic, sleep=time
     if not sequences:
         raise ValueError('no candidates to score')
     jobs = score_jobs(job, directory, sequences)
+    planned = sorted({key for item in jobs for key in item['candidate_hashes']})
+    pr100_filter.atomic(directory / 'result.json', {
+        'challenge': job['challenge'], 'status': 'running', 'candidates': [],
+        'attempted_sequence_hashes': planned,
+        'deferred_sequence_hashes': sorted({rules.sequence_hash(s) for s in sequences} - set(planned))})
     out = Path(job['output_directory'])
     launch = launch or (lambda path, log: subprocess.Popen(
         [sys.executable, '-B', '-m', 'nanobody_opt.pr100_live_gpu', '--job', str(path)],
@@ -627,7 +787,8 @@ def score_phase(job, directory, *, launch=None, clock=time.monotonic, sleep=time
     try:
         for gpu_job in jobs:
             path = out / f"gpu-job-{gpu_job['gpu']}.json"
-            pr100_filter.atomic(path, {k: v for k, v in gpu_job.items() if k != 'candidate_count'})
+            pr100_filter.atomic(path, {k: v for k, v in gpu_job.items()
+                                      if k not in ('candidate_count', 'candidate_hashes')})
             log = open(out / f"gpu-runner-{gpu_job['gpu']}.log", 'ab')
             runners.append((launch(path, log), log))
         deadline = clock() + float(job['wall_seconds'])
@@ -654,6 +815,9 @@ def score_phase(job, directory, *, launch=None, clock=time.monotonic, sleep=time
               'status': report['status'], 'input_count': len(sequences),
               'scored_candidates': len(scored), 'gpus_attempted': report['gpus_attempted'],
               'gpus_finished': report['gpus_finished'],
+              'attempted_sequence_hashes': report['attempted_sequence_hashes'],
+              'deferred_sequence_hashes': sorted({rules.sequence_hash(s) for s in sequences}
+                                                 - set(report['attempted_sequence_hashes'])),
               'candidates': [s for s in sequences if s in scored]}
     pr100_filter.atomic(directory / 'result.json', result)
     return result
@@ -672,7 +836,7 @@ def main():
     os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:job['cpu_slots']])
     started = time.monotonic()
     try:
-        result = {'sequence': sequence_phase, 'native': native_phase,
+        result = {'sequence': sequence_phase, 'native': native_phase, 'novelty': novelty_phase,
                   'score': score_phase}[job['phase']](job, directory)
         # A partial score (some GPUs finished) is still a usable result for the controller.
         status = 'complete' if result['status'] in ('complete', 'partial') else result['status']

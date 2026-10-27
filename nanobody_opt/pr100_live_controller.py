@@ -35,8 +35,8 @@ START_MINIMUM_BLOCKS = 190
 # Time held back from the phase budget for building, validating and publishing the fleet.
 PUBLISH_RESERVE_SECONDS = 150.0
 # Share of the remaining window a phase may consume; the last phase gets what is left.
-PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'score': 1.0}
-PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'score': 90.0}
+PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'novelty': 1.0, 'score': 1.0}
+PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'novelty': 60.0, 'score': 90.0}
 TAIL_BYTES = 2048
 _JOURNAL_COLLECTOR = None
 # Direct worker SSH setup alone measured about four seconds. Collection is
@@ -44,6 +44,7 @@ _JOURNAL_COLLECTOR = None
 JOURNAL_COLLECTION_SECONDS = 20.0
 # Wall reserved at the end of the native phase for the archive novelty pass (234 s in 25956).
 NOVELTY_RESERVE_SECONDS = 300.0
+NATIVE_SETUP_RESERVE_SECONDS = 15.0
 ACTIVATION_EPOCH = 25957
 TIER_RANK = {'A': 0, 'B': 1}
 HOST_KEYS = ('address', 'port', 'release', 'annotation_python', 'native_python',
@@ -69,6 +70,11 @@ if r['operation']=='journal':
     else:out={'status':'collected','sha256':hashlib.sha256(raw).hexdigest(),'data':base64.b64encode(raw).decode()}
  except OSError:pass
  print(json.dumps(out));sys.exit(0)
+if r['operation']=='poll' and not (d/'launch.json').exists() and not (d/'supervisor-receipt.json').exists():
+ if (d/'spec.json').exists():
+  print(json.dumps({'running':True,'launch_uncertain':True}));sys.exit(0)
+ print(json.dumps({'running':False,'receipt':{'reason':'not_launched','cleanup':
+  {'remaining_descendants':0,'fixed_point_reached':True}},'files':{}}));sys.exit(0)
 d.mkdir(parents=True,exist_ok=True)
 def atom(p,v):
  t=p.with_name('.'+p.name+'.tmp');t.write_text(json.dumps(v,allow_nan=False));os.replace(t,p)
@@ -79,6 +85,8 @@ if r['operation']=='start':
  for name,expected in stamp['files'].items():
   if hashlib.sha256((release/name).read_bytes()).hexdigest()!=expected:raise ValueError('source identity')
  identity=hashlib.sha256(json.dumps({k:v for k,v in r['spec'].items() if k not in('wall_seconds','deadline_unix')},sort_keys=True).encode()).hexdigest()
+ if (d/'spec.json').exists() and not (d/'launch.json').exists() and not (d/'supervisor-receipt.json').exists():
+  print(json.dumps({'running':True,'launch_uncertain':True}));sys.exit(0)
  if (d/'launch.json').exists():
   old=json.loads((d/'launch.json').read_text())
   if old['identity']!=identity:raise ValueError('different existing job')
@@ -95,7 +103,7 @@ if r['operation']=='start':
 out={'running':not(d/'supervisor-receipt.json').exists()}
 if not out['running']:
  out['receipt']=json.loads((d/'supervisor-receipt.json').read_text());out['files']={}
- for name in ('result.json','worker-receipt.json','score/report.json','score/scorer_settings.json'):
+ for name in ('result.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
   p=d/name
   if p.is_file():out['files'][name]=base64.b64encode(p.read_bytes()).decode()
  report=d/'score/report.json'
@@ -195,6 +203,14 @@ def remote(config, host, request, *, sleep=time.sleep):
         sleep(min(TRANSPORT_BACKOFF_SECONDS * attempt, remaining()))
 
     for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
+        refresh = config.get('_refresh_clock')
+        if refresh is not None and request.get('operation') != 'journal':
+            # A gateway retry may take minutes. Never dispatch the stale clock
+            # sample that preceded the retries to a new supervisor.
+            current = refresh()
+            if not admissible(current, request['clock']['epoch']):
+                raise TimeoutError('remote transport epoch cutoff')
+            request = {**request, 'clock': current}
         try:
             result = subprocess.run(command, input=json.dumps(request).encode(),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -230,7 +246,11 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     host = 'slave' if phase == 'sequence' else 'master'
     runtime = config['hosts'][host]
     release = runtime['release']
-    directory = f"{config['remote_root']}/{challenge['epoch']}/{phase}"
+    attempt = config.get('_attempt')
+    suffix = '' if attempt is None else '/attempts/' + str(attempt).zfill(5)
+    directory = f"{config['remote_root']}/{challenge['epoch']}{suffix}/{phase}"
+    if phase == 'novelty' and config.get('_phase_operation'):
+        directory += '/' + config['_phase_operation']
     python = runtime['annotation_python'] if phase == 'sequence' else runtime['native_python']
     environment = {'PYTHONPATH': release + ':' + runtime['python_path'],
                    'PATH': runtime['path'], 'PYTHONDONTWRITEBYTECODE': '1',
@@ -266,6 +286,16 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                    scorer=runtime['scorer'], source_sha=config['source_sha'],
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks')
     cap = phase_cap(phase, stop_at) if cap is None else cap
+    if config.get('_continuation') and phase in ('sequence', 'native'):
+        usable = stop_at - time.time() - PUBLISH_RESERVE_SECONDS
+        native_minimum = (float(job.get('candidate_budget_seconds', 300))
+                          + float(config.get('novelty_reserve_seconds', NOVELTY_RESERVE_SECONDS))
+                          + NATIVE_SETUP_RESERVE_SECONDS)
+        downstream = PHASE_FLOORS['score'] + (native_minimum if phase == 'sequence' else 0)
+        cap = min(max(cap, native_minimum if phase == 'native' else PHASE_FLOORS['sequence']),
+                  usable - downstream)
+        if cap < (native_minimum if phase == 'native' else PHASE_FLOORS['sequence']):
+            raise TimeoutError('insufficient remaining phase window')
     if phase == 'native' and 'phase_budget_seconds' not in config['worker']:
         # Without this the worker measures until the supervisor kills it, and a killed
         # native phase returns no candidates at all. Leave room for the novelty pass.
@@ -301,9 +331,42 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
     clock = clock_state(chain)
     if not admissible(clock, challenge['epoch']) or time.time() >= stop_at:
         raise TimeoutError('epoch cutoff before launch')
-    host, request = phase_request(config, challenge, phase, files, stop_at, clock)
+    intent = local / (phase + '-request.json')
+    complete = local / (phase + '-collected.json')
+    file_identity = {}
+    for name, raw in files.items():
+        if name == 'input.json':
+            value = json.loads(raw)
+            value.pop('archive_checked_at_unix', None)
+            raw = json.dumps(value, sort_keys=True).encode()
+        file_identity[name] = hashlib.sha256(raw).hexdigest()
+    binding = rules.digest({'challenge': challenge, 'phase': phase, 'files': file_identity,
+                            'source_sha': config['source_sha'], 'worker': config['worker'],
+                            'runtime': config['hosts']['slave' if phase == 'sequence' else 'master'],
+                            'gpus': config.get('gpu'), 'native_gpus': config.get('native_gpu')})
+    saved = json.loads(intent.read_text()) if intent.is_file() else None
+    if saved is not None and saved.get('binding') != binding:
+        raise ValueError('saved phase input or source identity mismatch')
+    if complete.is_file():
+        terminal = json.loads((local / (phase + '-supervisor.json')).read_text())
+        if config.get('_continuation'):
+            from nanobody_opt.pr100_epoch_continuation import cleanup_verified
+            if not cleanup_verified(terminal):
+                raise RuntimeError('cached phase cleanup unverified')
+        names = json.loads(complete.read_text())['files']
+        return {name: (local / phase / name).read_bytes() for name in names}
+    if saved is not None:
+        host, request = saved['host'], saved['request']
+        if request['spec']['epoch'] != challenge['epoch']:
+            raise ValueError('saved phase epoch mismatch')
+        request['clock'] = clock
+    else:
+        host, request = phase_request(config, challenge, phase, files, stop_at, clock)
+        # Persist ownership before the potentially ambiguous remote start.
+        atomic(intent, {'host': host, 'request': request, 'binding': binding})
+    transport_config = {**config, '_refresh_clock': lambda: clock_state(chain)} if transport is remote else config
     heartbeat(clock)
-    result = transport(config, host, request)
+    result = transport(transport_config, host, request)
     failures = 0
     while result['running']:
         sleep(5)
@@ -314,7 +377,7 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
             heartbeat(clock)
             request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
                        'transport_deadline_unix': stop_at + 15}
-            result = transport(config, host, request)
+            result = transport(transport_config, host, request)
             failures = 0
         except TimeoutError:
             raise  # An epoch deadline is final, unlike a missed poll.
@@ -340,6 +403,11 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         output = local / phase / name
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(raw)
+    if config.get('_continuation'):
+        from nanobody_opt.pr100_epoch_continuation import cleanup_verified
+        if not cleanup_verified(receipt):
+            raise RuntimeError('phase cleanup unverified')
+    atomic(complete, {'files': sorted(decoded)})
     if receipt.get('reason') not in (None, 'completed') and 'result.json' not in decoded:
         error = RuntimeError(f'{phase} phase produced no result')
         error.diagnostics = {'phase': phase, 'reason': receipt.get('reason'),
@@ -482,95 +550,8 @@ def publication_sequence(ordered, *, allow_marginal=True):
 
 
 def run_epoch(config, chain, clock, *, dry_run=False):
-    epoch, length = clock['epoch'], clock['epoch_length']
-    local = Path(config['state_root']) / str(epoch)
-    local.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
-    stop_at = publication_cutoff(clock, epoch, reserve=reserve, now=started)
-    phase = 'challenge'
-    diagnostics = {}
-    receipt = {'epoch': epoch, 'started_at_unix': started, 'source_sha': config['source_sha'],
-               'mac_runtime_dependency': False, 'signing_performed': False, 'dry_run': bool(dry_run),
-               'publication_cutoff_unix': stop_at, 'reserve_blocks': reserve,
-               'usable_window_seconds': max(0.0, stop_at - started), 'publications': []}
-    try:
-        block_hash = chain.determine_block_hash(epoch * length)
-        challenge = rules.challenge(rules.pinned_config(epoch), epoch, block_hash, length)
-        receipt['challenge_cell'] = {k: challenge[k] for k in ('allowed_v', 'allowed_cdr3_length')
-                                     if k in challenge}
-        phase = 'archive'
-        archive = fetch_archive(challenge['target'])
-        phase = 'sequence'
-        files = run_phase(config, challenge, phase, {'archive.csv': archive}, stop_at, chain, local,
-                          diagnostics=diagnostics)
-        validity = json.loads(files['result.json'])
-        if not validity['candidates']:
-            raise ValueError('no novel annotated candidates')
-        phase = 'native'
-        files = run_phase(config, challenge, phase,
-                          {'input.json': json.dumps(validity).encode(), 'archive.csv': archive},
-                          stop_at, chain, local, diagnostics=diagnostics)
-        validity = json.loads(files['result.json'])
-        if validity.get('status') != 'complete':
-            raise ValueError('native phase did not complete')
-        # No candidate cap: whatever the worker returns is scored.
-        allow_marginal = bool(config['worker'].get('allow_marginal', True))
-        ordered = order_candidates(validity['candidates'], allow_marginal=allow_marginal)
-        if not ordered:
-            raise ValueError('no native passing candidate')
-        # The native stage also runs novelty (only on its passers). An unchecked novelty
-        # result is never publishable.
-        if validity.get('novelty_checked') is not True:
-            raise ValueError('native stage reported no novelty check')
-        if len({r['sequence'] for r in ordered}) != len(ordered):
-            raise ValueError('duplicate sequence in native result')
-        validity['candidates'] = ordered
-        phase = 'score'
-        files = run_phase(config, challenge, phase,
-                          {'input.json': json.dumps({'sequences': [r['sequence'] for r in ordered]}).encode()},
-                          stop_at, chain, local, diagnostics=diagnostics)
-        scores, settings, scorer_hash = merge_scores(files, challenge['target'])
-        settings_hash = hashlib.sha256(files['score/scorer_settings.json']).hexdigest()
-        phase = 'publish'
-        tiers = candidate_tiers(ordered)
-        receipt['scored_candidates'] = scores['n']
-        for subset in publication_sequence(ordered, allow_marginal=allow_marginal):
-            # Only scored candidates can enter a fleet; an unscored margin-safe set is skipped.
-            scored = [r for r in subset if r['sequence'] in scores['per_nanobody_components']['0']]
-            if not scored:
-                continue
-            attempt = dict(validity, candidates=scored)
-            try:
-                outcome = publish(config, chain, challenge, attempt, scores, settings, scorer_hash,
-                                  settings_hash, local, tiers=tiers, dry_run=dry_run)
-            except Exception as error:
-                if not any(p.get('status') in ('published', 'dry_run') for p in receipt['publications']):
-                    raise
-                # An earlier attempt already published; a refused upgrade must not erase it.
-                receipt['publications'].append({'status': 'upgrade_refused',
-                                                'error_type': type(error).__name__,
-                                                'error': sanitize(str(error))})
-                continue
-            receipt['publications'].append(outcome)
-            receipt.update({k: v for k, v in outcome.items() if k != 'decision'})
-        if not receipt['publications']:
-            raise ValueError('no scored candidate to publish')
-    except Exception as error:
-        receipt.update(status='failed', stage=phase, error_type=type(error).__name__,
-                       error=sanitize(str(error)))
-        extra = getattr(error, 'diagnostics', None)
-        if isinstance(extra, dict):
-            receipt['failure_diagnostics'] = {
-                k: sanitize(v) if isinstance(v, (str, bytes)) else v for k, v in extra.items()}
-    receipt['phase_diagnostics'] = diagnostics
-    receipt['wall_seconds'] = time.time() - started
-    atomic(local / 'receipt.json', receipt)
-    # The scientific outcome is already durable. Optional diagnostics get their
-    # own short deadline and cannot delay scoring, publishing or the next epoch.
-    if 'native' in diagnostics:
-        start_native_journal_collection(config, epoch, local, stop_at)
-    return receipt
+    from nanobody_opt.pr100_epoch_continuation import run_epoch as continuation
+    return continuation(config, chain, clock, dry_run=dry_run)
 
 
 def start_native_journal_collection(config, epoch, local, stop_at):
@@ -590,8 +571,10 @@ def collect_native_journal(config, epoch, local, stop_at, *, transport=remote):
         return {'status': 'deadline_elapsed'}
     outcome = {'status': 'unavailable'}
     try:
+        attempt = config.get('_attempt')
+        suffix = '' if attempt is None else '/attempts/' + str(attempt).zfill(5)
         reply = transport({**config, 'transport_timeout_seconds': JOURNAL_COLLECTION_SECONDS}, 'master',
-            {'operation': 'journal', 'directory': f"{config['remote_root']}/{epoch}/native",
+            {'operation': 'journal', 'directory': f"{config['remote_root']}/{epoch}{suffix}/native",
              'transport_deadline_unix': deadline})
         status = reply.get('status')
         if status in ('unavailable', 'oversized', 'not_regular'):
@@ -618,7 +601,7 @@ def collect_native_journal(config, epoch, local, stop_at, *, transport=remote):
 
 
 def publish(config, chain, challenge, validity, scores, settings, scorer_hash, settings_hash, local,
-            *, tiers=None, dry_run=False):
+            *, tiers=None, dry_run=False, invalidated_sequence_hashes=()):
     from nanobody_opt.pr100_live_trial_export import build
     epoch = challenge['epoch']
     reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
@@ -644,10 +627,16 @@ def publish(config, chain, challenge, validity, scores, settings, scorer_hash, s
         previous = json.loads(destination.read_text())
         if previous.get('epoch') == epoch:
             earlier = published_quality(local, epoch)
+            invalidated = set(invalidated_sequence_hashes)
+            if earlier is not None and invalidated:
+                kept = [m for m in earlier['members'] if m['sequence_hash'] not in invalidated]
+                earlier = {**earlier, 'members': kept, 'count': len(kept),
+                           'tier_a': sum(m['tier_rank'] == TIER_RANK['A'] for m in kept)}
             if earlier is None:
                 # Nothing recorded the earlier fleet's quality (a legacy producer write, for
                 # instance), so fall back to the never-discard subset rule.
-                if not set(previous.get('sequence_pool', [])) <= set(fleet['sequence_pool']):
+                retained = {s for s in previous.get('sequence_pool', []) if rules.sequence_hash(s) not in invalidated}
+                if not retained <= set(fleet['sequence_pool']):
                     raise ValueError('cannot discard an existing valid partial fleet')
             else:
                 decision = monotone_decision(earlier, quality)
@@ -763,16 +752,10 @@ def main(argv=None):
         try:
             clock = clock_state(chain)
             epoch = clock['epoch']
-            if epoch >= config['start_epoch'] and not (root / str(epoch) / 'receipt.json').exists():
-                if admissible(clock, epoch, reserve=START_MINIMUM_BLOCKS):
+            if epoch >= config['start_epoch']:
+                if admissible(clock, epoch, reserve=config.get('reserve_blocks', RESERVE_BLOCKS)):
                     run_epoch(config, chain, clock, dry_run=args.dry_run)
                     clock = clock_state(chain)
-                else:
-                    directory = root / str(epoch)
-                    directory.mkdir(exist_ok=True)
-                    atomic(directory / 'receipt.json',
-                           {'status': 'missed_start_window', 'epoch': epoch,
-                            'blocks_remaining': blocks_remaining(clock, epoch)})
             atomic(root / 'heartbeat.json', {'status': 'watching', **clock})
         except Exception as error:
             atomic(root / 'heartbeat.json', {'status': 'failed', 'error_type': type(error).__name__,
