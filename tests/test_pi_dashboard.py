@@ -254,6 +254,7 @@ def test_replay_lease_excludes_live_gpus_and_shared_daemon(tmp_path):
     assert "--direct" not in job["command"]
     assert job["command"][job["command"].index("--gpus")+1] == "5"
     assert "CUDA_VISIBLE_DEVICES" not in job["env"]
+    assert job['command'][:3] == ['taskset', '-c', '104-111']
     assert "TOKEN" not in " ".join(job["env"])
 
 
@@ -394,3 +395,19 @@ def test_ui_separates_commit_receipts_from_api_evaluation(paths, monkeypatch):
     assert 'Pi commits 25966: 13/13' in text
     assert 'API leaderboard 25965' in text
     assert 'measured fleet pending' in text
+
+
+def test_parallel_replay_uses_only_three_distinct_background_leases(monkeypatch):
+    from nanobody_dash import replay_refresh as replay
+    seen = []
+    def choose(db, epoch, *, exclude):
+        values = [s for s in ('A', 'B', 'C', 'D') if s not in exclude]
+        return epoch-1, values[:1]
+    def run(**kwargs):
+        seen.append((kwargs['gpu'], tuple(kwargs['selection'][1])))
+        return {'ok': True, 'epoch': kwargs['epoch']-1, 'rows': 10}
+    monkeypatch.setattr(replay, 'pending', choose)
+    monkeypatch.setattr(replay, 'run', run)
+    result = replay.run_parallel(25967)
+    assert sorted(seen) == [(5, ('A',)), (6, ('B',)), (7, ('C',))]
+    assert result['ok'] and result['rows'] == 30

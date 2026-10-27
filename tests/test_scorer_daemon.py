@@ -21,6 +21,35 @@ import pytest
 from nanobody_opt import scorer_daemon as sd
 
 
+def test_model_reuse_repeats_forward_without_caching_results(monkeypatch):
+    from types import SimpleNamespace
+    from nanobody_opt import resident_scorer as resident
+    constructed, forwards = [], []
+    class Stage:
+        def __init__(self, config, overrides=None): constructed.append(config)
+        def forward(self, request):
+            forwards.append(request)
+            return len(forwards)
+    module = SimpleNamespace(ResidentStage=Stage)
+    monkeypatch.setattr(resident, '_CACHE', {})
+    monkeypatch.setattr(resident, '_INSTALLED', False)
+    assert resident.install(module)
+    first = module.ResidentStage('same-config', {'steps': 50})
+    second = module.ResidentStage('same-config', {'steps': 50})
+    assert first is second and len(constructed) == 1
+    assert first.forward('draw-one') == 1
+    assert second.forward('draw-two') == 2
+    assert forwards == ['draw-one', 'draw-two']
+
+
+def test_repeated_daemon_requests_get_distinct_observation_identity(tmp_path):
+    source = tmp_path/'input.json'; source.write_text(json.dumps({'sequences': ['AAAA']}))
+    first = sd.job_from_command(_command(source))
+    second = sd.job_from_command(_command(source))
+    assert first['sequences'] == second['sequences']
+    assert first['observation_id'] != second['observation_id']
+
+
 def _command(sequences_path: Path, **extra: str) -> list[str]:
     command = [
         "/root/release_python.sh",

@@ -17,9 +17,10 @@ def export_command(*, replay: bool = False) -> str:
         raise ValueError("dashboard_master_release_required")
     timeout = 1100 if replay else 240
     module = "replay_refresh" if replay else "master_refresh"
+    affinity = "taskset -c 104-111 " if replay else ""
     return (f"cd {shlex.quote(root)} && NOVA_LOCAL_SQLITE=1 "
             f"PYTHONPATH={shlex.quote(root)} timeout --kill-after=10 {timeout} "
-            f"/root/.pixi/envs/bgen/bin/python -m nanobody_dash.{module}")
+            f"{affinity}/root/.pixi/envs/bgen/bin/python -m nanobody_dash.{module}")
 
 
 def refresh(*, epoch: int, database: Path, output: Path) -> dict:

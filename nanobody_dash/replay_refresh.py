@@ -21,11 +21,12 @@ PASSES = 10
 TTL = 900
 
 
-def pending(database: Path, epoch: int) -> tuple[int | None, list[str]]:
+def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list[str]]:
     from nanobody_opt.rules import target_for_epoch
     from tools.collect_slave_multipass_seqs import leaderboard_sequences, pass_counts
 
     target = target_for_epoch(epoch)
+    excluded = set(exclude)
     queue_path = STATE/'pending_cohort.json'
     try:
         queued = json.loads(queue_path.read_text())
@@ -34,9 +35,12 @@ def pending(database: Path, epoch: int) -> tuple[int | None, list[str]]:
     items = queued.get('items', []) if queued.get('target') == target else []
     if items:
         counts = pass_counts([item['sequence'] for item in items], target)
-        for item in items:
-            if counts.get(item['sequence'], 0) < PASSES:
+        missing = [item for item in items if counts.get(item['sequence'], 0) < PASSES]
+        for item in missing:
+            if item['sequence'] not in excluded:
                 return int(item['epoch']), [item['sequence']]
+        if missing:
+            return None, []
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30) as db:
         epochs = [int(row[0]) for row in db.execute(
             "SELECT DISTINCT o.epoch FROM observations o JOIN nodes n ON n.id=o.node_id "
@@ -51,12 +55,12 @@ def pending(database: Path, epoch: int) -> tuple[int | None, list[str]]:
             os.replace(temporary, queue_path)
             counts = pass_counts([item['sequence'] for item in items], target)
             for item in items:
-                if counts.get(item['sequence'], 0) < PASSES:
+                if counts.get(item['sequence'], 0) < PASSES and item['sequence'] not in excluded:
                     return int(item['epoch']), [item['sequence']]
     for completed in epochs:
         sequences = sorted(set(leaderboard_sequences(completed) or []))
         counts = pass_counts(sequences, target)
-        missing = [s for s in sequences if counts.get(s, 0) < PASSES]
+        missing = [s for s in sequences if counts.get(s, 0) < PASSES and s not in excluded]
         if missing:
             return completed, missing[:1]
     return None, []
@@ -120,7 +124,8 @@ def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
             "scorer": str(ROOT/"nanobody_opt/score_boltzgen_fast_adapter.py"),
             "lock_directory": "/root/pr100-controller/gpu-locks",
             "receipt": str(directory/"lease.json"), "cwd": str(ROOT), "env": env,
-            "command": [sys.executable, "-m", "tools.slave_runtime.slave_multipass_writeback",
+            "command": ["taskset", "-c", "104-111", sys.executable,
+                        "-m", "tools.slave_runtime.slave_multipass_writeback",
                         "--sequences-json", str(directory/"sequences.json"),
                         "--config", str(directory/"config.yaml"),
                         "--field-json", str(directory/"field.json"),
@@ -132,14 +137,14 @@ def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
                         "--out-root", str(directory/"work")]}
 
 
-def run(*, epoch: int, gpu: int = 5) -> dict:
+def run(*, epoch: int, gpu: int = 5, selection=None) -> dict:
     from tools.replay_context import prepare
     from tools.ingest_slave_multipass import load_rows, validate
     from tools.collect_slave_multipass_seqs import pass_counts
     from nanobody_opt.mutation_network import update_observation_store
     from nanobody_opt.rules import target_for_epoch
 
-    selected, sequences = pending(DATABASE, epoch)
+    selected, sequences = selection if selection is not None else pending(DATABASE, epoch)
     if selected is None:
         return {"ok": True, "reason": "no_pending_published_cohort", "chain_epoch": epoch}
     batch = hashlib.sha256(json.dumps([selected, PASSES, sequences]).encode()).hexdigest()[:16]
@@ -181,6 +186,31 @@ def run(*, epoch: int, gpu: int = 5) -> dict:
             "sequences": len(sequences), "rows": written, "passes": PASSES}
 
 
+def run_parallel(epoch: int) -> dict:
+    from concurrent.futures import ThreadPoolExecutor
+    plans, assigned = [], set()
+    for gpu in (5, 6, 7):
+        selection = pending(DATABASE, epoch, exclude=assigned)
+        if selection[0] is None:
+            break
+        plans.append((gpu, selection)); assigned.update(selection[1])
+    if not plans:
+        return {'ok': True, 'reason': 'no_pending_published_cohort', 'chain_epoch': epoch}
+    with ThreadPoolExecutor(max_workers=len(plans)) as pool:
+        futures = [pool.submit(run, epoch=epoch, gpu=gpu, selection=selection)
+                   for gpu, selection in plans]
+        results = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as error:
+                results.append({'ok': False, 'reason': type(error).__name__})
+    ok = all(row['ok'] for row in results)
+    return {'ok': ok, 'reason': 'replay_verified' if ok else 'replay_pending',
+            'epoch': max(row.get('epoch', 0) for row in results),
+            'rows': sum(row.get('rows', 0) for row in results), 'batches': results}
+
+
 def main() -> int:
     STATE.mkdir(parents=True, exist_ok=True)
     with (STATE/"refresh.lock").open("a") as lock:
@@ -191,7 +221,7 @@ def main() -> int:
         try:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 epoch = int(json.loads(Path("/root/artifacts/chain_state.json").read_text())["epoch"])
-                result = run(epoch=epoch)
+                result = run_parallel(epoch)
         except Exception as error:
             result = {"ok": False, "reason": type(error).__name__}
         result["finished_at"] = time.time()
