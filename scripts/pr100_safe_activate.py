@@ -269,7 +269,7 @@ def clean_qualification(receipt):
             and cleanup.get('fixed_point_reached') is True)
 
 
-def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path=None):
+def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path=None, interleave_confirmations=False):
     stamp = read(release / 'build_stamp.json', {})
     check = stamp.get('validation', {})
     if (stamp.get('git_sha') != sha or check.get('passed') is not True
@@ -280,11 +280,15 @@ def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path
     if sha != THROUGHPUT_RELEASE:
         expected_tests.add('tests/test_pr100_fresh_native_budget.py')
         expected_tests.add('tests/test_pr100_native_execution_identity.py')
+    if interleave_confirmations:
+        expected_tests.add('tests/test_pr100_confirmation_deadline_review.py')
     if not expected_tests <= set(check.get('test_files', [])):
         raise ValueError('throughput_shipping_tests_missing')
     manifest = stamp.get('files')
     if not isinstance(manifest, dict) or not manifest:
         raise ValueError('empty_release_manifest')
+    if interleave_confirmations and 'tests/test_pr100_confirmation_deadline_review.py' not in manifest:
+        raise ValueError('confirmation_deadline_suite_not_staged')
     for name, digest in manifest.items():
         relative = Path(name)
         forbidden = {'.env', '.netrc', '.npmrc', '.git', '.ssh', '.aws', '.azure', 'credentials', 'cookies'}
@@ -330,13 +334,19 @@ def selected_mode(current, mode):
     return mode
 
 
-def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None):
+def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None, interleave_confirmations=False):
     if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
     if mode not in ('master', 'both'):
         raise ValueError('invalid_activation_mode')
+    if not isinstance(interleave_confirmations, bool):
+        raise ValueError('interleave_confirmations_must_be_boolean')
+    if interleave_confirmations and current.get('worker', {}).get('native_screen', {}).get('enabled', False):
+        raise ValueError('interleaved_confirmations_require_original_cpu_profiling')
     value = copy.deepcopy(current); previous = current['source_sha']
+    if interleave_confirmations:
+        value['worker']['native_interleave_confirmations'] = True
     if novelty_runtimes is not None:
         # This rollout repairs annotation only. Preserve qualified native
         # runtimes, worker admission, affinity, GPUs and scientific settings.
@@ -446,14 +456,15 @@ def recovery_required(sha, epoch, error, *, start_attempted):
             'scientific_ownership_must_be_checked_before_recovery': True}
 
 
-def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, clock_reader=current_clock,
+def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False, clock_reader=current_clock,
             service_factory=Service, now=time.time):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
     migration = novelty_runtimes is not None
     if not boundary(config, clock, now(), novelty_migration=migration): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
-    proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes)
+    proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
+                               interleave_confirmations=interleave_confirmations)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -524,6 +535,8 @@ def main(argv=None):
     parser.add_argument('--staging-receipt', required=True, type=Path)
     parser.add_argument('--qualification-receipt', type=Path)
     parser.add_argument('--novelty-qualification-receipt', required=True, type=Path)
+    parser.add_argument('--interleave-confirmations', action='store_true',
+                        help='Opt in to CI-qualified confirmation-first mixed native waves')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if not re.fullmatch('[0-9a-f]{40}', args.sha) or not 1 <= args.wait_seconds <= 7200:
@@ -541,10 +554,12 @@ def main(argv=None):
                 else:
                     effective_mode = selected_mode(read(BASE / 'pr100-controller.json', {}), args.mode)
                     q = verify_prerequisites(args.sha, release, args.staging_receipt,
-                        mode=effective_mode, qualification_path=args.qualification_receipt)
+                        mode=effective_mode, qualification_path=args.qualification_receipt,
+                        interleave_confirmations=args.interleave_confirmations)
                     novelty = verify_novelty_qualification(release, args.novelty_qualification_receipt)
                     try:
-                        value = handoff(BASE, args.sha, args.mode, release, q, novelty_runtimes=novelty)
+                        value = handoff(BASE, args.sha, args.mode, release, q, novelty_runtimes=novelty,
+                                        interleave_confirmations=args.interleave_confirmations)
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}
                 atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})

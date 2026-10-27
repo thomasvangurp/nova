@@ -111,6 +111,13 @@ The helper preserves the pending state unchanged and repeats the ownership proof
 under the stopped-controller lock. Missing cleanup, running work, uncollected
 requests, changed bindings, or uncertain legacy ownership still block handoff.
 
+`--interleave-confirmations` explicitly enables the independently reviewed
+confirmation-first mixed native waves. The flag defaults off and otherwise
+preserves the current worker setting. Enabling requires the deadline regression
+suite in both the passing shipping-CI test list and the hash-verified staged
+manifest. It changes only `worker.native_interleave_confirmations` and refuses
+the experimental accelerated-screen combination.
+
 Subprocess stdout/stderr is captured. Reports contain only operational status,
 release identifiers, counts and error classes. No credential values or raw
 authentication output are retained.

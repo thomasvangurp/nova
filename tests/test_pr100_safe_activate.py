@@ -590,3 +590,56 @@ def test_pending_migration_rechecks_new_owner_after_stop(deployment, novelty_rec
     assert result['status'] == 'boundary_race_old_service_restarted'
     assert a.read(base / 'pr100-controller.json') == old
     assert 'install' not in events
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_interleave_activation_is_explicit_and_changes_only_one_worker_field(deployment, novelty_receipt, enabled):
+    *_, old = deployment
+    release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(release, receipt)
+    unchanged = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', novelty_runtimes=runtimes)
+    value = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', novelty_runtimes=runtimes,
+                              interleave_confirmations=enabled)
+    if enabled: unchanged['worker']['native_interleave_confirmations'] = True
+    assert value == unchanged
+    assert 'native_interleave_confirmations' not in old['worker']
+
+
+def test_interleave_optin_refuses_accelerated_screen(deployment, novelty_receipt):
+    *_, old = deployment
+    old['worker']['native_screen'] = {'enabled': True}
+    release, receipt, _ = novelty_receipt
+    with pytest.raises(ValueError, match='original_cpu'):
+        a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve',
+            novelty_runtimes=a.verify_novelty_qualification(release, receipt), interleave_confirmations=True)
+
+
+@pytest.mark.parametrize('listed,staged', [(False, False), (True, False), (False, True), (True, True)])
+def test_interleave_requires_tested_and_hash_bound_deadline_suite(prerequisites, listed, staged):
+    release, stage_path, qualification, stamp, stage, _ = prerequisites
+    suite = 'tests/test_pr100_confirmation_deadline_review.py'
+    if listed: stamp['validation']['test_files'].append(suite)
+    if staged:
+        path = release / suite; path.parent.mkdir(); path.write_text('# inert deadline regression fixture')
+        stamp['files'][suite] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for host in stage['hosts']: host['manifest_files'] += 1
+    a.atomic(release / 'build_stamp.json', stamp); a.atomic(stage_path, stage)
+    if listed and staged:
+        a.verify_prerequisites(SHA, release, stage_path, mode='master', interleave_confirmations=True)
+    else:
+        with pytest.raises(ValueError):
+            a.verify_prerequisites(SHA, release, stage_path, mode='master', interleave_confirmations=True)
+
+
+def test_cli_forwards_optin_to_both_shipping_gate_and_handoff(deployment, monkeypatch, capsys):
+    base, *_ = deployment; stage = base / 'stage.json'; stage.write_text('{}'); calls = []
+    monkeypatch.setattr(a, 'BASE', base)
+    def verify(*args, **kwargs): calls.append(('verify', kwargs['interleave_confirmations']))
+    def handoff(*args, **kwargs):
+        calls.append(('handoff', kwargs['interleave_confirmations'])); return {'status': 'activated'}
+    monkeypatch.setattr(a, 'verify_prerequisites', verify)
+    monkeypatch.setattr(a, 'verify_novelty_qualification', lambda *_a: {})
+    monkeypatch.setattr(a, 'handoff', handoff)
+    assert a.main([SHA, 'preserve', '--staging-receipt', str(stage),
+        '--novelty-qualification-receipt', str(stage), '--interleave-confirmations']) == 0
+    assert calls == [('verify', True), ('handoff', True)]
