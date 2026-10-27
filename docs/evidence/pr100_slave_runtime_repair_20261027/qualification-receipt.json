@@ -1,0 +1,193 @@
+{
+  "schema": "pr100-native-runtime-qualification-v1",
+  "status": "passed",
+  "host": "slave",
+  "workers": 32,
+  "authoritative": false,
+  "publication_enabled": false,
+  "application_source_sha": "51688c0a458f2aa401d7b1f569b2cf364f96aebc",
+  "hard_cap_seconds": 360,
+  "started_at_unix": 1793094345.091305,
+  "release_manifest_files": 1095,
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "cpu_affinity_verified": true,
+  "runtime": {
+    "native_python": "/root/pr100-native-alt-20261027/bin/native-python",
+    "native_path": "/root/pr100-native-alt-20261027/bin:/usr/local/bin:/usr/bin:/bin",
+    "native_python_path": "/root/pr100-native-alt-20261027/shim",
+    "native_tools": "/root/pr100-native-alt-20261027/bin"
+  },
+  "returncode": 0,
+  "worker_output_bytes": {
+    "stdout": 0,
+    "stderr": 0
+  },
+  "worker_error_categories": [],
+  "runtime_identity": {
+    "manifest_sha256": "637d20c23d4a8c21f9d09331afbc543b997017e6e361c6fd5a4c0031235eaa58",
+    "scientific_sources": {
+      "builder": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+      "refine": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+      "cdr": "3b77f628bab30927b8934362c2759c06949d5393b4f5401e956334ab21033c44",
+      "surface": "71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46"
+    },
+    "model_weights": {
+      "1": "2f8f398a95e2fd3fe38527415471a60346cb131864a1a4ef081e11816d74e995",
+      "2": "41c163511ad20d1aa67fbd50f64ced9a25381d0618847b16a19d5e14df73297e",
+      "3": "8de57b3f0b6b89acb0e87fc7b647522666dd90e86ed3138417cbcd785c982c4d",
+      "4": "96f3cfba8de00e4c833bc73efa821f6022ed65e951a4289c7e3b5409527964e0"
+    },
+    "tools": {
+      "TNP": "5b1d8277c60bfe495c41021d715594ee85b28b9b3f926d9a7e0bada3c8d7c19d",
+      "NanoBodyBuilder2": "b125de7ff1aeee4f0f00a6d2477f2d566c0389245a0d83436252c3896943510d",
+      "hmmscan": "f225ab9d9c12bc2bb90b7b1994fd3de49180278df1bbe2a15002096e91cce480",
+      "psa": "9f38d64c4e533ab5da8c7d608312065e8dc0fb7b41c7dd27216ce40f6fc220e3",
+      "mkdssp": "78b27b878c13b8f14054c37f62b7e716f3438807b816a97b52801c297638da2e",
+      "aggrescan3d-rs": "9f9e8e393e8016db3749d622232606632ad96d0569fc62f8dbf5409aaff03038",
+      "freesasa": "cc53d9070c82823303fdb680ca72fa11c1a1b313c480c9da7bf537e8e870f903",
+      "native_python_wrapper": "ab23f3e807a65753207d219a323d567924f9d00c8633c6cad811981dcd6e02e8"
+    },
+    "python_binary_sha256": "c34719fad983fd4f13bd74b4187f0b44107defa81001917eea77475935d48f73",
+    "versions": {
+      "torch": "2.7.1+cu126",
+      "numpy": "1.26.4",
+      "openmm": "8.5.1",
+      "ImmuneBuilder": "1.2",
+      "theraprofnano": "0.0.1",
+      "biopython": "1.86",
+      "abnumber": "0.2.7",
+      "pdbfixer": "1.12.0"
+    },
+    "torch_libraries": {
+      "libtorch_cpu.so": "9bade79d494636a4430d48b54fd08636106a5be1bb9beef511fdf3235baa05cd",
+      "libtorch_python.so": "6d540563421ae8c19c74d8c6768680c533a0dcb2d1f96aa10b7b484105d7e89d",
+      "libc10.so": "e03523b398502fb29ac67ca0e69b5db16cae194a636d5e6dc961474839907ab6"
+    },
+    "metadata_manifest_sha256": "98989595f3f14967146e0d8f4f9e5692c37db5bba9c95d0d6b09292c0ab3364b",
+    "supplemental_manifest_sha256": "013428772117168e49e2cb3f2c82386b4f75892b70f788d11ebf903a3df6c5ca",
+    "supplemental_cpu_libraries": {
+      "/root/pr100-native-alt-20261027/lib/libmkl_avx2.so.2": "548e3fe084f4effe061c92d90ad54cad8c904f825ac9bf4b481cff321a2b019e",
+      "/root/pr100-native-alt-20261027/lib/libmkl_avx512.so.2": "55e1bf80fa085b4afaeea368c09cad6cd30cbb009e5d17608417dada782e8825",
+      "/root/pr100-native-alt-20261027/lib/libmkl_core.so.2": "54e4cb2ab39ddf43e776a9574799aa4c5af447ebc8e2a143d9dbdae143ea309b",
+      "/root/pr100-native-alt-20261027/lib/libmkl_def.so.2": "d22d75e1b9d4029d0c87971dd022d5d975d7f06b5d7ea5df385df5a5bd7f32c4",
+      "/root/pr100-native-alt-20261027/lib/libmkl_gnu_thread.so.2": "db14469c3044913828ce3bec1b4bacc9c6c48b128890dd0974b6cda34cc964b5",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_ilp64.so.2": "d74050ec1c3739168c1f7754edee93f2bd89d137deed823f42a4a52f461ab8a7",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_lp64.so.2": "55c28f7e530870d238c8b5383d22015de3908767ed8ec13cb5c5a3f0844a56d0",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_thread.so.2": "20f91d4b0cac345daefb65168d2c997120681f999c4de50cab9b71469023e6fa",
+      "/root/pr100-native-alt-20261027/lib/libmkl_mc3.so.2": "6d0484ffbc1b3b1e3067b413de1c2ac291f091bcc88f2534e5654b6490372190",
+      "/root/pr100-native-alt-20261027/lib/libmkl_sequential.so.2": "9129d657cd3dad8d25cda2ba904807f120f207eba8f44a066db2cc5b073114e3",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx2.so.2": "3bc967c8e0dd20b745902c6ebb0a08c60c0196c3dad9f9a5f1912457b768562a",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx512.so.2": "819a661f92554ffd1608ace8803ca525ba129b2f038245692e230198a18da01e",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_cmpt.so.2": "0808c5917337ebcf5f3429409754a0862ae6d4ef9d20b2563315be0ab1023371",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_def.so.2": "3a49503867b342b36aa4a8f3b20e3003500374c52d408a146c53da54c35e077c",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_mc3.so.2": "ccc83d6f177e88081e7b48aa2ec52ec9d36d1e6e552cb22df74e8e0e043c8147"
+    }
+  },
+  "runtime_identity_sha256": "6eaada274269a1e60b642240326d851830cb7dda262238ee2b9b8a3e6dc44e18",
+  "reference_runtime_identity": {
+    "manifest_sha256": "75b34070e241a95ee8155b2cb617119d3eaa82dfa252daa4fde206b4c5f84470",
+    "scientific_sources": {
+      "builder": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+      "refine": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+      "cdr": "3b77f628bab30927b8934362c2759c06949d5393b4f5401e956334ab21033c44",
+      "surface": "71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46"
+    },
+    "model_weights": {
+      "1": "2f8f398a95e2fd3fe38527415471a60346cb131864a1a4ef081e11816d74e995",
+      "2": "41c163511ad20d1aa67fbd50f64ced9a25381d0618847b16a19d5e14df73297e",
+      "3": "8de57b3f0b6b89acb0e87fc7b647522666dd90e86ed3138417cbcd785c982c4d",
+      "4": "96f3cfba8de00e4c833bc73efa821f6022ed65e951a4289c7e3b5409527964e0"
+    },
+    "tools": {
+      "TNP": "2ec53e6ebcee670d70e377ad065cdcc53293a2a99b601922d6637115a3488a98",
+      "NanoBodyBuilder2": "57864ae83969b2c0354526f7662ff64f85e13ac7a5bad9667306d5038199bdbe",
+      "hmmscan": "f225ab9d9c12bc2bb90b7b1994fd3de49180278df1bbe2a15002096e91cce480",
+      "psa": "9f38d64c4e533ab5da8c7d608312065e8dc0fb7b41c7dd27216ce40f6fc220e3",
+      "mkdssp": "78b27b878c13b8f14054c37f62b7e716f3438807b816a97b52801c297638da2e",
+      "aggrescan3d-rs": "9f9e8e393e8016db3749d622232606632ad96d0569fc62f8dbf5409aaff03038",
+      "freesasa": "cc53d9070c82823303fdb680ca72fa11c1a1b313c480c9da7bf537e8e870f903"
+    },
+    "metadata_manifest_sha256": "98989595f3f14967146e0d8f4f9e5692c37db5bba9c95d0d6b09292c0ab3364b",
+    "supplemental_cpu_libraries": {
+      "/root/pr100-native-alt-20261027/lib/libmkl_avx2.so.2": "548e3fe084f4effe061c92d90ad54cad8c904f825ac9bf4b481cff321a2b019e",
+      "/root/pr100-native-alt-20261027/lib/libmkl_avx512.so.2": "55e1bf80fa085b4afaeea368c09cad6cd30cbb009e5d17608417dada782e8825",
+      "/root/pr100-native-alt-20261027/lib/libmkl_core.so.2": "54e4cb2ab39ddf43e776a9574799aa4c5af447ebc8e2a143d9dbdae143ea309b",
+      "/root/pr100-native-alt-20261027/lib/libmkl_def.so.2": "d22d75e1b9d4029d0c87971dd022d5d975d7f06b5d7ea5df385df5a5bd7f32c4",
+      "/root/pr100-native-alt-20261027/lib/libmkl_gnu_thread.so.2": "db14469c3044913828ce3bec1b4bacc9c6c48b128890dd0974b6cda34cc964b5",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_ilp64.so.2": "d74050ec1c3739168c1f7754edee93f2bd89d137deed823f42a4a52f461ab8a7",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_lp64.so.2": "55c28f7e530870d238c8b5383d22015de3908767ed8ec13cb5c5a3f0844a56d0",
+      "/root/pr100-native-alt-20261027/lib/libmkl_intel_thread.so.2": "20f91d4b0cac345daefb65168d2c997120681f999c4de50cab9b71469023e6fa",
+      "/root/pr100-native-alt-20261027/lib/libmkl_mc3.so.2": "6d0484ffbc1b3b1e3067b413de1c2ac291f091bcc88f2534e5654b6490372190",
+      "/root/pr100-native-alt-20261027/lib/libmkl_sequential.so.2": "9129d657cd3dad8d25cda2ba904807f120f207eba8f44a066db2cc5b073114e3",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx2.so.2": "3bc967c8e0dd20b745902c6ebb0a08c60c0196c3dad9f9a5f1912457b768562a",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx512.so.2": "819a661f92554ffd1608ace8803ca525ba129b2f038245692e230198a18da01e",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_cmpt.so.2": "0808c5917337ebcf5f3429409754a0862ae6d4ef9d20b2563315be0ab1023371",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_def.so.2": "3a49503867b342b36aa4a8f3b20e3003500374c52d408a146c53da54c35e077c",
+      "/root/pr100-native-alt-20261027/lib/libmkl_vml_mc3.so.2": "ccc83d6f177e88081e7b48aa2ec52ec9d36d1e6e552cb22df74e8e0e043c8147"
+    }
+  },
+  "runtime_differences": [
+    "Python base reused from slave bgen",
+    "Torch2.7.1+cu126 reused from slave bgen",
+    "TNP and NBB2 entrypoint shebangs relocated",
+    "Native wrapper pins alternate CPU plugin and shared-library directories",
+    "MKL CPU libraries are copied byte-for-byte from the master and bound by a supplemental manifest"
+  ],
+  "runtime_manifest_verified": true,
+  "completed_profiles": 32,
+  "runtime_inconclusive_count": 0,
+  "native_wall_seconds": 69.90906076692045,
+  "python_version": [
+    3,
+    12,
+    14
+  ],
+  "openmm_platforms": [
+    "Reference",
+    "CPU"
+  ],
+  "stage": "native_profiles",
+  "cleanup": {
+    "remaining_descendants": 0,
+    "fixed_point_reached": true,
+    "freeze_scan_count": 3,
+    "killed_descendants": 0,
+    "worker_exitcodes": {
+      "3395243": 0
+    }
+  },
+  "wall_seconds": 83.41252309177071
+}

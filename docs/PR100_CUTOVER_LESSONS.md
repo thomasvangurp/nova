@@ -312,3 +312,23 @@ child environment and keep GPU visibility hidden. Qualification must use the
 same effective environment as live operation, including the native launcher.
 This finding establishes an uncontrolled thread default, not a measured
 whole-epoch speedup or equivalence to the validator's runtime.
+
+## Slave runtime repair and submission audit, 2026-10-27
+
+Static ELF dependency closure missed MKL libraries loaded through runtime
+dispatch. Qualification stopped at Torch import until the matching CPU library
+family was copied and hash-bound. The alternate slave runtime then completed
+32 concurrent profiles with finite metrics and provenance in 69.91 seconds,
+zero runtime-inconclusive results and zero remaining descendants. Root accepted
+the recorded Python/Torch differences; this was not bit identity or validator
+parity. Exact helpers, manifests, approval and measurements are retained in
+[the runtime repair record](PR100_SLAVE_RUNTIME_REPAIR_20261027.md).
+
+The same audit separated scarce eligible supply from submission failure:
+epoch 25965 committed its three available sequences across a thirteen-UID
+crew; epoch 25966 committed all thirteen UIDs from an eighteen-sequence pool.
+Both final receipts reported zero failed commits. Journal gate reasons, not
+the ambiguous Aggrescan failure label alone, distinguished measured rejection
+from execution failure. A separate focused fix removed zero-measurement retries
+of conclusively novelty-rejected checkpoints while preserving incomplete and
+unresolved-host recovery. The linked record retains counts and verification.

@@ -1,0 +1,81 @@
+{
+  "files": {
+    "/root/.pixi/envs/metanano/lib/libmkl_avx2.so.2": {
+      "bytes": 45025456,
+      "sha256": "548e3fe084f4effe061c92d90ad54cad8c904f825ac9bf4b481cff321a2b019e",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_avx2.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_avx512.so.2": {
+      "bytes": 65962176,
+      "sha256": "55e1bf80fa085b4afaeea368c09cad6cd30cbb009e5d17608417dada782e8825",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_avx512.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_core.so.2": {
+      "bytes": 70530616,
+      "sha256": "54e4cb2ab39ddf43e776a9574799aa4c5af447ebc8e2a143d9dbdae143ea309b",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_core.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_def.so.2": {
+      "bytes": 39161088,
+      "sha256": "d22d75e1b9d4029d0c87971dd022d5d975d7f06b5d7ea5df385df5a5bd7f32c4",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_def.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_gnu_thread.so.2": {
+      "bytes": 27818848,
+      "sha256": "db14469c3044913828ce3bec1b4bacc9c6c48b128890dd0974b6cda34cc964b5",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_gnu_thread.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_intel_ilp64.so.2": {
+      "bytes": 17049168,
+      "sha256": "d74050ec1c3739168c1f7754edee93f2bd89d137deed823f42a4a52f461ab8a7",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_intel_ilp64.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_intel_lp64.so.2": {
+      "bytes": 18820672,
+      "sha256": "55c28f7e530870d238c8b5383d22015de3908767ed8ec13cb5c5a3f0844a56d0",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_intel_lp64.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_intel_thread.so.2": {
+      "bytes": 39228032,
+      "sha256": "20f91d4b0cac345daefb65168d2c997120681f999c4de50cab9b71469023e6fa",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_intel_thread.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_mc3.so.2": {
+      "bytes": 46355680,
+      "sha256": "6d0484ffbc1b3b1e3067b413de1c2ac291f091bcc88f2534e5654b6490372190",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_mc3.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_sequential.so.2": {
+      "bytes": 23740152,
+      "sha256": "9129d657cd3dad8d25cda2ba904807f120f207eba8f44a066db2cc5b073114e3",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_sequential.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_vml_avx2.so.2": {
+      "bytes": 15562328,
+      "sha256": "3bc967c8e0dd20b745902c6ebb0a08c60c0196c3dad9f9a5f1912457b768562a",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx2.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_vml_avx512.so.2": {
+      "bytes": 16388848,
+      "sha256": "819a661f92554ffd1608ace8803ca525ba129b2f038245692e230198a18da01e",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_vml_avx512.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_vml_cmpt.so.2": {
+      "bytes": 8091560,
+      "sha256": "0808c5917337ebcf5f3429409754a0862ae6d4ef9d20b2563315be0ab1023371",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_vml_cmpt.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_vml_def.so.2": {
+      "bytes": 9399440,
+      "sha256": "3a49503867b342b36aa4a8f3b20e3003500374c52d408a146c53da54c35e077c",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_vml_def.so.2"
+    },
+    "/root/.pixi/envs/metanano/lib/libmkl_vml_mc3.so.2": {
+      "bytes": 13345472,
+      "sha256": "ccc83d6f177e88081e7b48aa2ec52ec9d36d1e6e552cb22df74e8e0e043c8147",
+      "target": "/root/pr100-native-alt-20261027/lib/libmkl_vml_mc3.so.2"
+    }
+  },
+  "purpose": "Exact master MKL CPU dynamic-dispatch closure; no distributed or GPU libraries",
+  "schema": "pr100-exact-cpu-library-supplement-v1"
+}

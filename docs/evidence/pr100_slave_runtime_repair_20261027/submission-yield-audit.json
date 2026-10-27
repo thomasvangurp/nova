@@ -1,0 +1,595 @@
+{
+  "audit_observed_at_unix": 1793093199.7666492,
+  "state_root": "/home/thomasg/pr100-controller-state",
+  "publication_path": "/opt/nova-submit/nanobody_result.json",
+  "consumer_log_path": "/opt/nova-submit/loop.log",
+  "crew_path": "/opt/nova-submit/crew.json",
+  "epochs": {
+    "25965": {
+      "epoch_length": 361,
+      "generated_unique": 1816,
+      "native_unique_attempted": 1396,
+      "completed_measurements": {
+        "fresh_evaluations": 1396,
+        "repeat_evaluations": 19,
+        "completed": 1415
+      },
+      "native_measurement_gate_counts": {
+        "psh_threshold": 1176,
+        "pass": 26,
+        "aggrescan_threshold": 73,
+        "developability_red_flags": 139,
+        "developability_unavailable": 1
+      },
+      "native_first_measurement_gate_counts": {
+        "psh_threshold": 1171,
+        "pass": 13,
+        "aggrescan_threshold": 72,
+        "developability_red_flags": 139,
+        "developability_unavailable": 1
+      },
+      "native_error_kinds": {
+        "none": 1414,
+        "timeout": 1
+      },
+      "post_novelty_unique_count": 3,
+      "scored_unique_count": 3,
+      "final_native_count": 3,
+      "published_pool_count": 3,
+      "published_not_in_final_native_count": 0,
+      "final_native_not_published_count": 0,
+      "published_invalidated_count": 0,
+      "quality": {
+        "count": 3,
+        "tier_a": 0
+      },
+      "final_pending_native": 403,
+      "final_pending_confirmation": 2,
+      "final_native_repeat_histogram": {
+        "3": 1,
+        "1": 2
+      },
+      "timing": {
+        "native_supervisor_seconds": 2510.9879337763414,
+        "sequence_supervisor_seconds": 147.1131463944912,
+        "score_supervisor_seconds": 287.1401208806783,
+        "attempt_wall_seconds": 3257.0458693504333,
+        "inter_attempt_gap_seconds": 85.9575445652008,
+        "gap_count": 6,
+        "final_attempt_finished_at_unix": 1793087315.4868674,
+        "publication_cutoff_unix": 1793087757.6801481,
+        "idle_to_publication_cutoff_seconds": 442.1932806968689,
+        "first_native_started_at_unix": 1793084075.0473483,
+        "last_native_finished_at_unix": 1793087192.3504455
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "no_passing_candidate",
+          "started_at_unix": 1793083972.4834535,
+          "finished_at_unix": 1793085194.0551412,
+          "fresh_evaluations": 611,
+          "repeat_evaluations": 13,
+          "native_passed_before_novelty": 4,
+          "post_novelty_count": 0,
+          "pending_native": 0,
+          "native_wall_seconds": 1109.4006502619013,
+          "sequence_wall_seconds": 49.038610682822764,
+          "scoring_wall_seconds": 0,
+          "publications": []
+        },
+        {
+          "attempt": 2,
+          "status": "no_passing_candidate",
+          "started_at_unix": 1793085208.638057,
+          "finished_at_unix": 1793085261.1937082,
+          "fresh_evaluations": 0,
+          "repeat_evaluations": 0,
+          "native_passed_before_novelty": 4,
+          "post_novelty_count": 0,
+          "pending_native": 0,
+          "native_wall_seconds": 5.016472493298352,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 0,
+          "publications": []
+        },
+        {
+          "attempt": 3,
+          "status": "published",
+          "started_at_unix": 1793085275.3291974,
+          "finished_at_unix": 1793086246.9567142,
+          "fresh_evaluations": 384,
+          "repeat_evaluations": 5,
+          "native_passed_before_novelty": 1,
+          "post_novelty_count": 1,
+          "pending_native": 210,
+          "native_wall_seconds": 755.2810979587957,
+          "sequence_wall_seconds": 50.036155527457595,
+          "scoring_wall_seconds": 96.04724027961493,
+          "publications": [
+            {
+              "count": 1,
+              "decision": "replace",
+              "tier_a_count": 0,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 4,
+          "status": "published",
+          "started_at_unix": 1793086261.6331768,
+          "finished_at_unix": 1793086553.0262682,
+          "fresh_evaluations": 192,
+          "repeat_evaluations": 0,
+          "native_passed_before_novelty": 0,
+          "post_novelty_count": 0,
+          "pending_native": 18,
+          "native_wall_seconds": 274.11374818719923,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 0,
+          "publications": [
+            {
+              "count": 1,
+              "decision": "idempotent",
+              "tier_a_count": 0,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 5,
+          "status": "published",
+          "started_at_unix": 1793086567.1350203,
+          "finished_at_unix": 1793086653.307219,
+          "fresh_evaluations": 18,
+          "repeat_evaluations": 0,
+          "native_passed_before_novelty": 0,
+          "post_novelty_count": 0,
+          "pending_native": 0,
+          "native_wall_seconds": 72.03810459002852,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 0,
+          "publications": [
+            {
+              "count": 1,
+              "decision": "idempotent",
+              "tier_a_count": 0,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 6,
+          "status": "published",
+          "started_at_unix": 1793086667.4424262,
+          "finished_at_unix": 1793087023.6012857,
+          "fresh_evaluations": 96,
+          "repeat_evaluations": 0,
+          "native_passed_before_novelty": 1,
+          "post_novelty_count": 1,
+          "pending_native": 498,
+          "native_wall_seconds": 150.06782282982022,
+          "sequence_wall_seconds": 48.03838018421084,
+          "scoring_wall_seconds": 96.04714594129473,
+          "publications": [
+            {
+              "count": 2,
+              "decision": "replace",
+              "tier_a_count": 0,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 7,
+          "status": "published",
+          "started_at_unix": 1793087037.9200034,
+          "finished_at_unix": 1793087315.4868674,
+          "fresh_evaluations": 95,
+          "repeat_evaluations": 1,
+          "native_passed_before_novelty": 1,
+          "post_novelty_count": 1,
+          "pending_native": 403,
+          "native_wall_seconds": 145.070037455298,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 95.04573465976864,
+          "publications": [
+            {
+              "count": 3,
+              "decision": "replace",
+              "tier_a_count": 0,
+              "status": "published"
+            }
+          ]
+        }
+      ]
+    },
+    "25966": {
+      "epoch_length": 361,
+      "generated_unique": 1200,
+      "native_unique_attempted": 1167,
+      "completed_measurements": {
+        "fresh_evaluations": 1167,
+        "repeat_evaluations": 59,
+        "completed": 1226
+      },
+      "native_measurement_gate_counts": {
+        "psh_threshold": 443,
+        "aggrescan_threshold": 618,
+        "developability_red_flags": 88,
+        "pass": 76,
+        "developability_unavailable": 1
+      },
+      "native_first_measurement_gate_counts": {
+        "psh_threshold": 441,
+        "aggrescan_threshold": 603,
+        "developability_red_flags": 83,
+        "pass": 39,
+        "developability_unavailable": 1
+      },
+      "native_error_kinds": {
+        "none": 1225,
+        "timeout": 1
+      },
+      "post_novelty_unique_count": 20,
+      "scored_unique_count": 20,
+      "final_native_count": 18,
+      "published_pool_count": 18,
+      "published_not_in_final_native_count": 0,
+      "final_native_not_published_count": 0,
+      "published_invalidated_count": 0,
+      "quality": {
+        "count": 18,
+        "tier_a": 5
+      },
+      "final_pending_native": 0,
+      "final_pending_confirmation": 0,
+      "final_native_repeat_histogram": {
+        "3": 16,
+        "1": 2
+      },
+      "timing": {
+        "native_supervisor_seconds": 2233.8844491997734,
+        "sequence_supervisor_seconds": 77.06677749194205,
+        "score_supervisor_seconds": 464.22187470272183,
+        "attempt_wall_seconds": 3047.2252662181854,
+        "inter_attempt_gap_seconds": 70.6621778011322,
+        "gap_count": 5,
+        "final_attempt_finished_at_unix": 1793091422.9269288,
+        "publication_cutoff_unix": 1793092091.5543766,
+        "idle_to_publication_cutoff_seconds": 668.6274478435516,
+        "first_native_started_at_unix": 1793088389.7142477,
+        "last_native_finished_at_unix": 1793091408.022001
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "published",
+          "started_at_unix": 1793088305.0394847,
+          "finished_at_unix": 1793089672.9395118,
+          "fresh_evaluations": 583,
+          "repeat_evaluations": 21,
+          "native_passed_before_novelty": 5,
+          "post_novelty_count": 4,
+          "pending_native": 0,
+          "native_wall_seconds": 1136.416968873702,
+          "sequence_wall_seconds": 39.033060224726796,
+          "scoring_wall_seconds": 110.05262093711644,
+          "publications": [
+            {
+              "count": 2,
+              "decision": "replace",
+              "tier_a_count": 2,
+              "status": "published"
+            },
+            {
+              "count": 4,
+              "decision": "replace",
+              "tier_a_count": 2,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 2,
+          "status": "published",
+          "started_at_unix": 1793089687.0447457,
+          "finished_at_unix": 1793089713.4619274,
+          "fresh_evaluations": 0,
+          "repeat_evaluations": 0,
+          "native_passed_before_novelty": 1,
+          "post_novelty_count": 0,
+          "pending_native": 0,
+          "native_wall_seconds": 3.0178983472287655,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 0,
+          "publications": [
+            {
+              "status": "upgrade_refused"
+            },
+            {
+              "count": 4,
+              "decision": "idempotent",
+              "tier_a_count": 2,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 3,
+          "status": "published",
+          "started_at_unix": 1793089727.592295,
+          "finished_at_unix": 1793090683.2881827,
+          "fresh_evaluations": 384,
+          "repeat_evaluations": 20,
+          "native_passed_before_novelty": 12,
+          "post_novelty_count": 11,
+          "pending_native": 200,
+          "native_wall_seconds": 694.2660971758887,
+          "sequence_wall_seconds": 38.03371726721525,
+          "scoring_wall_seconds": 150.0684874728322,
+          "publications": [
+            {
+              "count": 5,
+              "decision": "replace",
+              "tier_a_count": 5,
+              "status": "published"
+            },
+            {
+              "count": 15,
+              "decision": "replace",
+              "tier_a_count": 5,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 4,
+          "status": "published",
+          "started_at_unix": 1793090697.3987353,
+          "finished_at_unix": 1793091164.955318,
+          "fresh_evaluations": 188,
+          "repeat_evaluations": 10,
+          "native_passed_before_novelty": 7,
+          "post_novelty_count": 5,
+          "pending_native": 12,
+          "native_wall_seconds": 317.1257025692612,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 109.05350247677416,
+          "publications": [
+            {
+              "status": "upgrade_refused"
+            },
+            {
+              "count": 18,
+              "decision": "replace",
+              "tier_a_count": 5,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 5,
+          "status": "published",
+          "started_at_unix": 1793091179.1394732,
+          "finished_at_unix": 1793091357.4617767,
+          "fresh_evaluations": 12,
+          "repeat_evaluations": 5,
+          "native_passed_before_novelty": 1,
+          "post_novelty_count": 1,
+          "pending_native": 0,
+          "native_wall_seconds": 56.03362557198852,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 95.04726381599903,
+          "publications": [
+            {
+              "status": "upgrade_refused"
+            },
+            {
+              "count": 18,
+              "decision": "replace",
+              "tier_a_count": 5,
+              "status": "published"
+            }
+          ]
+        },
+        {
+          "attempt": 6,
+          "status": "unchanged",
+          "started_at_unix": 1793091371.5936453,
+          "finished_at_unix": 1793091422.9269288,
+          "fresh_evaluations": 0,
+          "repeat_evaluations": 3,
+          "native_passed_before_novelty": 2,
+          "post_novelty_count": 2,
+          "pending_native": 0,
+          "native_wall_seconds": 27.024156661704183,
+          "sequence_wall_seconds": 0,
+          "scoring_wall_seconds": 0,
+          "publications": [
+            {
+              "status": "upgrade_refused"
+            },
+            {
+              "status": "upgrade_refused"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "registered_crew": {
+    "count": 13,
+    "uids": [
+      7,
+      10,
+      16,
+      17,
+      19,
+      20,
+      24,
+      26,
+      28,
+      34,
+      40,
+      52,
+      59
+    ]
+  },
+  "consumer_receipts": {
+    "25965": [
+      {
+        "event": "crew_refreshed",
+        "epoch": 25965,
+        "before": 13,
+        "after": 13
+      },
+      {
+        "event": "plan",
+        "epoch": 25965,
+        "crew": 13,
+        "committing": 3
+      },
+      {
+        "event": "commit",
+        "uid": 7,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 10,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 16,
+        "rc": 0
+      },
+      {
+        "event": "done",
+        "committed": 3,
+        "failed": 0
+      }
+    ],
+    "25966": [
+      {
+        "event": "crew_refreshed",
+        "epoch": 25966,
+        "before": 13,
+        "after": 13
+      },
+      {
+        "event": "plan",
+        "epoch": 25966,
+        "crew": 13,
+        "committing": 13
+      },
+      {
+        "event": "commit",
+        "uid": 7,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 10,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 16,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 17,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 19,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 20,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 24,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 26,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 28,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 34,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 40,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 52,
+        "rc": 0
+      },
+      {
+        "event": "commit",
+        "uid": 59,
+        "rc": 0
+      },
+      {
+        "event": "done",
+        "committed": 13,
+        "failed": 0
+      }
+    ]
+  },
+  "methodology": [
+    "Only exact controller state paths, native journals, crew.json and parsed loop.log event fields were read. No secrets, raw logs, process arguments, or sequence strings were emitted.",
+    "Fresh/repeat counts sum completed worker result counters, cross-checked against repeat=1 journal observations and continuation native_attempted_hashes.",
+    "Gate reasons use native observation journals, which distinguish completed Aggrescan cap failures from tool failures. Raw worker aggrescan_unavailable_or_failed rejection labels are not interpreted as execution errors.",
+    "Counts of native_passed_before_novelty across attempts are not unique counts because confirmation carry can reclassify a previously evaluated candidate. Distinct post-novelty hashes and final continuation sets provide unique downstream counts.",
+    "Consumer commit events are associated with the most recent epoch event in the serial loop log; plan/done totals and individual uid rc values agree. Registration count is the final chain-refreshed crew snapshot, not a new independent live-chain query.",
+    "The report proves successful submit-host commit receipts. It does not claim validator acceptance, ranking, or reward."
+  ],
+  "findings": [
+    "Epoch25965 low UID count was sequence availability: pool3, registered13, planned3, committed3, failed0. Epoch25966 used full registered fleet: pool18, planned13, committed13, failed0.",
+    "No publisher correction is warranted: final native hash sets equal published pools in both epochs and contain no invalidated hashes. Final epoch25966 upgrade refusal preserved the same18 sequences.",
+    "Native execution errors were one timeout per completed epoch; the bulk loss was true native gate rejection. The gate mix differed between epoch-bound runs. Requirement changes are listed separately; the counts alone do not establish causality or justify relaxing gates.",
+    "End-of-epoch idle is deliberate admission conservatism: native continuation requires695seconds; sequence continuation755seconds with configured130second native window,10cleanup,300novelty,15setup,90score,150publish. Final remaining time was below the corresponding floor.",
+    "A small avoidable orchestration repeat occurred in attempt2 of both epochs: completed native checkpoints rejected by novelty were requeued, performed zero new measurements, and repeated novelty. Costs52.6seconds in25965 and26.4seconds in25966 plus inter-attempt polling.",
+    "Additional potential throughput work: native work is paused during GPU scoring, and worker batch barriers leave most CPU slots idle during 1-to6-candidate confirmation batches. These are design opportunities requiring separate bounded changes and tests, not evidence of stuck workers."
+  ],
+  "challenge_comparison": {
+    "challenge_keys": [
+      "allowed_cdr3_length",
+      "allowed_v",
+      "epoch",
+      "epoch_length",
+      "epoch_start_block",
+      "epoch_start_block_hash",
+      "ruleset_sha256",
+      "target"
+    ],
+    "changed_requirement_keys_65_to66": [
+      "allowed_cdr3_length",
+      "allowed_v"
+    ],
+    "changed_requirement_keys_66_to67": [
+      "allowed_cdr3_length"
+    ]
+  }
+}

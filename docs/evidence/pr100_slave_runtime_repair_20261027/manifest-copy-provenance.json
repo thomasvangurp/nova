@@ -1,0 +1,27 @@
+{
+  "schema": "pr100-public-manifest-retention-v1",
+  "transport": "read-only Pi to slave",
+  "exact_bytes_verified": true,
+  "files": {
+    "manifest.json": {
+      "bytes": 1583650,
+      "sha256": "637d20c23d4a8c21f9d09331afbc543b997017e6e361c6fd5a4c0031235eaa58"
+    },
+    "metadata-supplement.json": {
+      "bytes": 54463,
+      "sha256": "98989595f3f14967146e0d8f4f9e5692c37db5bba9c95d0d6b09292c0ab3364b"
+    },
+    "mkl-supplement-family-e.json": {
+      "bytes": 3917,
+      "sha256": "013428772117168e49e2cb3f2c82386b4f75892b70f788d11ebf903a3df6c5ca"
+    },
+    "unpack-receipt.json": {
+      "bytes": 408,
+      "sha256": "3677ac5046f683dd2173b91a565c0c95ef50df7fab1b93485d38787a7e9a2f55"
+    },
+    "reviewed-runtime-allowlist.json": {
+      "bytes": 1350441,
+      "sha256": "75b34070e241a95ee8155b2cb617119d3eaa82dfa252daa4fde206b4c5f84470"
+    }
+  }
+}

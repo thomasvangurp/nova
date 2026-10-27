@@ -1,0 +1,24 @@
+{
+  "pi_transport_exit": 0,
+  "result": {
+    "slave_transport_exit": 0,
+    "probe": {
+      "returncode": 2,
+      "output_bytes": {
+        "stdout": 249,
+        "stderr": 0
+      },
+      "missing_library_basenames": [
+        "libmkl_gnu_thread.so.2"
+      ],
+      "torch_import_ok": false,
+      "cpu_math_ok": false,
+      "openmm_ok": false,
+      "categories": [
+        "MKL",
+        "Cannot load",
+        "No such file"
+      ]
+    }
+  }
+}

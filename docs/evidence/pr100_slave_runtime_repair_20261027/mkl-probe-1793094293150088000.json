@@ -1,0 +1,18 @@
+{
+  "pi_transport_exit": 0,
+  "result": {
+    "slave_transport_exit": 0,
+    "probe": {
+      "returncode": 0,
+      "output_bytes": {
+        "stdout": 50,
+        "stderr": 0
+      },
+      "missing_library_basenames": [],
+      "torch_import_ok": true,
+      "cpu_math_ok": true,
+      "openmm_ok": true,
+      "categories": []
+    }
+  }
+}

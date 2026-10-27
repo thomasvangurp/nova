@@ -1,0 +1,21 @@
+{
+  "pi_transport_exit": 0,
+  "result": {
+    "slave_transport_exit": 0,
+    "probe": {
+      "returncode": 2,
+      "output_bytes": {
+        "stdout": 237,
+        "stderr": 0
+      },
+      "missing_library_basenames": [
+        "libmkl_core.so.2"
+      ],
+      "categories": [
+        "MKL",
+        "Cannot load",
+        "No such file"
+      ]
+    }
+  }
+}

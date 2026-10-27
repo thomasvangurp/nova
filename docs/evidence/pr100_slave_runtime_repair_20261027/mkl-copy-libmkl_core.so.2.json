@@ -1,0 +1,18 @@
+{
+  "pi_exit": 0,
+  "result": {
+    "master_exit": 0,
+    "result": {
+      "status": "verified",
+      "manifest_sha256": "cb47388b99845dedd8f71c5efe95382caa909881ae6b89563002cd3df7f13f4a",
+      "libraries": {
+        "libmkl_core.so.2": {
+          "target": "/root/pr100-native-alt-20261027/lib/libmkl_core.so.2",
+          "bytes": 70530616,
+          "sha256": "54e4cb2ab39ddf43e776a9574799aa4c5af447ebc8e2a143d9dbdae143ea309b"
+        }
+      }
+    },
+    "error_categories": []
+  }
+}

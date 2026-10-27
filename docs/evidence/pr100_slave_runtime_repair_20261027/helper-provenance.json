@@ -1,0 +1,57 @@
+{
+  "schema": "pr100-historical-helper-provenance-v1",
+  "files": {
+    "helpers/qualification-worker-e.py": {
+      "sha256": "4f273e677e470e810d0e9ef2951d36b870faf035c7c606d0cce0ef0237a165ab",
+      "byte_identical": true
+    },
+    "helpers/qualification-guard-e.py": {
+      "sha256": "35cb019f6d112ad230f46c0593978c867a22dfe52dccf6ec89b1f820120ec674",
+      "byte_identical": true
+    },
+    "helpers/qualification-service-e.py": {
+      "sha256": "577ce267e4e85fc3c9be676b7402bca463d3869b40bc87c325369eb2ea46c40c",
+      "byte_identical": true
+    },
+    "helpers/mkl-supplement-copy-e.py": {
+      "sha256": "710d4e560e3b69c4cbd84c88ccd0412a271ec5687a1428e73ec20cb6a05c4165",
+      "byte_identical": true
+    },
+    "helpers/mkl-family-master-e.py": {
+      "sha256": "016d5524b23c9466ba2683deb9445a441cb1de8bc3cd20781d3eff5cff5aae8e",
+      "byte_identical": true
+    },
+    "helpers/runtime-probe-e.py": {
+      "sha256": "385820cf433502f8cd64ae6d44e7ef9e532f80fd51f8411e332ed37e2e0d1857",
+      "byte_identical": true
+    },
+    "helpers/qualification-monitor-e.py": {
+      "sha256": "50d91f7fc365d36641818f2e8dee38ffdd00cadfc2933697d2018f27871c6bfa",
+      "byte_identical": true
+    },
+    "helpers/commit-readback.py": {
+      "sha256": "0bcda6f69fe65be5c1cc609240a0d33fae52011fd52996df342004a3e81b24db",
+      "byte_identical": true
+    },
+    "helpers/original-provisioning/pr100-native-alt-manifest.py": {
+      "sha256": "c7c8eaa69d0cb2b310860bf8dffad091379061d9546fd0cfc86cda6c6601690c",
+      "byte_identical": true
+    },
+    "helpers/original-provisioning/pr100-native-alt-pack.py": {
+      "sha256": "49f10d56206a0737b19cb8a88187edf27e989bfba062e900639a4c683eccd1f1",
+      "byte_identical": true
+    },
+    "helpers/original-provisioning/pr100-native-alt-unpack.py": {
+      "sha256": "390c4853e6a042c17ade68082b5e93eb3f0bdf2f3bb722a7f139e600a814ef27",
+      "byte_identical": true
+    },
+    "helpers/original-provisioning/pr100-native-alt-pi-service.py": {
+      "sha256": "144b2a90c825d585fcac42f047b40cb03182accca5f0e0726c4c9d9a01464b94",
+      "byte_identical": true
+    },
+    "helpers/original-provisioning/pr100-native-alt-master-runner.py": {
+      "sha256": "b38016fe455770d29838093d84c2d6221fdc183ae207cc604ece57a99db99dbc",
+      "byte_identical": true
+    }
+  }
+}
