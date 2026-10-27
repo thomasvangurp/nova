@@ -133,6 +133,7 @@ def lease_job(directory: Path, *, gpu: int, epoch: int) -> dict:
                         # The pinned scorer sets CUDA_VISIBLE_DEVICES itself,
                         # so its argument must remain the physical leased GPU.
                         "--gpus", str(gpu), "--owned-daemon", "--independent-calls",
+                        "--lease-receipt", str(directory/'lease.json'),
                         "--out", str(directory/"observations.ndjson"),
                         "--out-root", str(directory/"work")]}
 

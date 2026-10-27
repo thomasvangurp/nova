@@ -198,6 +198,45 @@ def reference_ranks(records, field):
                                for k, d in SUM_OF_TEN_DIRS.items()))) for s, r, m in records]
 
 
+def verify_owned_lease(path, gpu):
+    """Only the actual lease owner's child can replace legacy serialization."""
+    lease = json.loads(path.read_text())
+    if (gpu not in ('5', '6', '7')
+            or lease.get('schema') != 'pr100-cooperative-gpu-lease-v1'
+            or lease.get('owner_pid') != os.getppid()
+            or lease.get('gpu') != int(gpu)
+            or lease.get('status') not in ('reserved', 'running')
+            or not time.time() < lease.get('expires_unix', 0) <= time.time() + 1800):
+        raise ValueError('owned_parent_lease_required')
+    # Confirm the shared GPU lock is already held, without modifying it.
+    with open('/root/pr100-controller/gpu-locks/gpu-' + gpu + '.lock', 'r') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    raise ValueError('owned_gpu_lock_not_held')
+
+
+@contextmanager
+def worker_serialization(arguments):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--lease-receipt', type=Path)
+    parser.add_argument('--gpus')
+    parser.add_argument('--owned-daemon', action='store_true')
+    parser.add_argument('--independent-calls', action='store_true')
+    args, _ = parser.parse_known_args(arguments)
+    if args.lease_receipt is not None:
+        if not args.owned_daemon or not args.independent_calls:
+            raise ValueError('owned_lease_requires_private_independent_worker')
+        verify_owned_lease(args.lease_receipt, args.gpus)
+        yield
+        return
+    with open('/root/artifacts/rival_replicate_gpu.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def unpack(wave, sequences, passes, target):
     expected = {}
     for index, sequence in enumerate(s for s in sequences for _ in range(passes)):
@@ -237,6 +276,8 @@ def main():
                         help="collect separate ordinary calls with the registered base-v1 worker")
     parser.add_argument("--owned-daemon", action="store_true",
                         help="reuse registered models in a private daemon owned by this lease")
+    parser.add_argument('--lease-receipt', type=Path,
+                        help='verify parent-owned GPU lease before skipping legacy global serialization')
     args = parser.parse_args()
     sequences = sorted(set(json.loads(args.sequences_json.read_text())))
     if not sequences or args.passes < 2:
@@ -276,8 +317,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        with open("/root/artifacts/rival_replicate_gpu.lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with worker_serialization(sys.argv[1:]):
             raise SystemExit(main())
     except Exception as error:
         print(f"BATCHED_RIVALS_FAILED {type(error).__name__}: {error}", flush=True)

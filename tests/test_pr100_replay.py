@@ -230,3 +230,52 @@ def test_unpack_actual_registered_scorer_gpu_output():
             assert len({json.dumps(m,sort_keys=True) for _,m in rows})==2
         total+=len(records)
     assert total==10
+
+
+def test_verified_private_leases_do_not_share_legacy_serialization(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    barrier = threading.Barrier(3)
+    verified = []
+    monkeypatch.setattr(worker, 'verify_owned_lease', lambda path, gpu: verified.append(gpu))
+    def draw(gpu):
+        with worker.worker_serialization(['--lease-receipt', '/lease.json', '--gpus', gpu,
+                                          '--owned-daemon', '--independent-calls']):
+            barrier.wait(timeout=2)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(draw, ('5', '6', '7')))
+    assert sorted(verified) == ['5', '6', '7']
+
+
+def test_private_worker_refuses_unowned_or_expired_lease(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(worker.os, 'getppid', lambda: 123)
+    monkeypatch.setattr(worker.time, 'time', lambda: 100)
+    receipt = tmp_path/'lease.json'
+    for fields in ({'owner_pid': 456, 'expires_unix': 200},
+                   {'owner_pid': 123, 'expires_unix': 99},
+                   {'owner_pid': 123, 'expires_unix': 200, 'gpu': 4}):
+        receipt.write_text(json.dumps({'schema': 'pr100-cooperative-gpu-lease-v1',
+                                      'status': 'running', 'gpu': 5, **fields}))
+        with pytest.raises(ValueError, match='owned_parent_lease_required'):
+            worker.verify_owned_lease(receipt, '5')
+
+
+def test_private_worker_requires_parent_gpu_lock_to_be_held(tmp_path, monkeypatch):
+    import builtins
+    import json
+    lock_path = tmp_path/'gpu-5.lock'
+    lock_path.touch()
+    receipt = tmp_path/'lease.json'
+    receipt.write_text(json.dumps({'schema': 'pr100-cooperative-gpu-lease-v1',
+                                  'status': 'reserved', 'gpu': 5,
+                                  'owner_pid': 123, 'expires_unix': 200}))
+    monkeypatch.setattr(worker.os, 'getppid', lambda: 123)
+    monkeypatch.setattr(worker.time, 'time', lambda: 100)
+    real_open = builtins.open
+    monkeypatch.setattr(worker, 'open', lambda *a, **k: real_open(lock_path, 'r'), raising=False)
+    with real_open(lock_path, 'r') as lock:
+        worker.fcntl.flock(lock, worker.fcntl.LOCK_EX)
+        worker.verify_owned_lease(receipt, '5')
+    with pytest.raises(ValueError, match='owned_gpu_lock_not_held'):
+        worker.verify_owned_lease(receipt, '5')
