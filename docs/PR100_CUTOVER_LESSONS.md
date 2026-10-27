@@ -318,22 +318,23 @@ native worker confirmed every survivor of a fresh batch before admitting the
 next fresh batch. With one survivor, nearly the whole worker pool sat idle
 during two confirmation rounds. The opt-in `native_interleave_confirmations`
 mode gives confirmations nearest completion the first slots in each wave and fills the
-remaining slots with fresh candidates. It keeps the same original CPU calls,
+remaining slots with fresh candidates when the remaining confirmation timeout caps fit. Near the deadline, confirmation-only waves prevent a slow fresh sibling from delaying completion. It keeps the same original CPU calls,
 required observation counts, rejection rules, per-call timeout, owned cleanup,
 checkpoint bindings, and shared fresh-admission ceiling. A measured rejection
 is never erased by another draw. Experimental screening cannot
 be combined with this mode.
 
-The deadline regression uses identical 100-second inert call waves and a
-430-second phase budget: the old schedule admits three fresh candidates and
-two repeats; interleaving admits six fresh candidates and the same two repeats.
-Both finish the passing candidate's three observations before the same cutoff.
+The sparse-wave regression uses identical 100-second inert call waves and a
+1,000-second phase budget. Both schedules admit six fresh candidates and two
+repeats, completing the passing candidate in three observations; interleaving
+uses three waves instead of four. A separate 96-worker, 600-input simulation
+checks greater fresh admission without losing fully confirmed candidates.
 This demonstrates the eliminated idle slots, not a measured production speedup.
 The switch remains off unless explicitly enabled in a tested deployment.
 An independent review also caught a FIFO-backlog regression: nine carried
 candidates could all receive one more observation while none completed. Pending
 work is therefore ordered by fewest missing observations, with stable ties.
-That deadline-completion case is a required shipping regression.
+Both that backlog case and a fast-confirmation/slow-fresh deadline case are required shipping regressions. The latter forbids mixing near the cutoff when it would reduce a candidate from three completed observations to two.
 
 ## Slave runtime repair and submission audit, 2026-10-27
 

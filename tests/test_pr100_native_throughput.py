@@ -13,7 +13,7 @@ from tests.test_pr100_live_worker import observed_backend
 
 
 def interleaved_case(tmp_path, monkeypatch, *, enabled=True, fresh_limit=4800,
-                     fail_confirmation=False, phase_seconds=430, screen_enabled=False):
+                     fail_confirmation=False, phase_seconds=1000, screen_enabled=False):
     monkeypatch.setattr(worker, 'worker_count', lambda _: 3)
     monkeypatch.setattr(worker, 'native_resume_identity', lambda *a: {'resume_eligible': False})
     monkeypatch.setattr(pr100_filter, 'helper', lambda _: SimpleNamespace(tool_paths=None))
@@ -43,18 +43,18 @@ def interleaved_case(tmp_path, monkeypatch, *, enabled=True, fresh_limit=4800,
     return result, batches, counts
 
 
-@pytest.mark.parametrize('enabled,fresh', [(False, 3), (True, 6)])
+@pytest.mark.parametrize('enabled,waves', [(False, 4), (True, 3)])
 def test_confirmations_fill_spare_slots_with_fresh_work_before_same_deadline(
-        enabled, fresh, tmp_path, monkeypatch):
+        enabled, waves, tmp_path, monkeypatch):
     result, batches, counts = interleaved_case(tmp_path, monkeypatch, enabled=enabled)
-    assert result['fresh_evaluations'] == fresh and result['repeat_evaluations'] == 2
+    assert result['fresh_evaluations'] == 6 and result['repeat_evaluations'] == 2
     assert counts['A'] == 3
     assert result['candidates'][0]['repeats'] == 3
-    assert len(batches) == 3
+    assert len(batches) == waves
     if enabled:
         assert batches[1] == ['A', 'D', 'E'] and batches[2] == ['A', 'F']
     else:
-        assert batches[1:] == [['A'], ['A']]
+        assert batches[1:3] == [['A'], ['A']]
 
 
 def test_interleaved_fresh_cap_does_not_spend_repeat_budget(tmp_path, monkeypatch):

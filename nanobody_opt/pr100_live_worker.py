@@ -723,6 +723,13 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             while pending and len(batch) < workers:
                 batch.append(pending.popleft())
             capacity = min(workers - len(batch), fresh_limit - len(fresh_admitted))
+            if batch and deadline is not None:
+                # A slow fresh sibling holds the entire wave open. Mix only
+                # when the remaining confirmations can still receive their
+                # full timeout caps; otherwise use a confirmation-only wave.
+                rounds = max(needed(row) - len(measurements[row['sequence']]) for row in batch)
+                if deadline - clock() < rounds * budget + cleanup_reserve:
+                    capacity = 0
             for _ in range(min(capacity, len(fresh))):
                 batch.append(fresh.popleft())
             if not batch:

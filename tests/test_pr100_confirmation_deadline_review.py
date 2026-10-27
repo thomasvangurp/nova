@@ -39,3 +39,49 @@ def test_interleaving_does_not_leave_all_carried_confirmations_unfinished(tmp_pa
     assert interleaved['fresh_evaluations'] == legacy['fresh_evaluations'] == 0
     assert interleaved['repeat_evaluations'] == legacy['repeat_evaluations'] == 9
     assert len(interleaved['candidates']) >= len(legacy['candidates'])
+
+
+def test_fresh_wave_does_not_delay_last_confirmations_past_deadline(tmp_path, monkeypatch):
+    def run(directory, enabled):
+        directory.mkdir(); checkpoint_input(directory, monkeypatch)
+        monkeypatch.setattr(worker, 'worker_count', lambda _: 3)
+        monkeypatch.setattr(rules, 'validate_evidence', lambda *_a: None)
+        incoming = json.loads((directory / 'input.json').read_text())
+        incoming['candidates'] = [{'sequence': s, 'pr100_annotation': {}} for s in 'ABCDEF']
+        pr100_filter.atomic(directory / 'input.json', incoming)
+        now = [0.]
+        def measure(sequences, *_a, **_kw):
+            elapsed = 100. if any(sequence != 'A' for sequence in sequences) else 20.
+            now[0] += elapsed
+            return [profile(sequence, 80. if sequence == 'A' else 160.) for sequence in sequences], 0., elapsed
+        return worker.native_phase({'challenge': CHALLENGE, 'native_tools': '/tools',
+            'workers': 3, 'repeats': 3, 'phase_budget_seconds': 260, 'candidate_budget_seconds': 300,
+            'native_minimum_call_window_seconds': 130, 'native_cleanup_reserve_seconds': 10,
+            'native_interleave_confirmations': enabled}, directory, measure=measure, clock=lambda: now[0])
+    legacy = run(tmp_path / 'legacy', False)
+    interleaved = run(tmp_path / 'interleaved', True)
+    assert legacy['candidates'][0]['repeats'] == 3
+    assert interleaved['candidates'][0]['repeats'] >= legacy['candidates'][0]['repeats']
+
+
+def test_sparse_production_width_finishes_at_least_same_confirmations(tmp_path, monkeypatch):
+    def run(directory, enabled):
+        directory.mkdir(); checkpoint_input(directory, monkeypatch)
+        monkeypatch.setattr(worker, 'worker_count', lambda _: 96)
+        monkeypatch.setattr(rules, 'validate_evidence', lambda *_a: None)
+        incoming = json.loads((directory / 'input.json').read_text())
+        incoming['candidates'] = [{'sequence': str(i), 'pr100_annotation': {}} for i in range(600)]
+        pr100_filter.atomic(directory / 'input.json', incoming)
+        now = [0.]
+        def measure(sequences, *_a, **_kw):
+            now[0] += 99.
+            return [profile(s, 80. if int(s) % 96 == 0 else 160.) for s in sequences], 0., 99.
+        return worker.native_phase({'challenge': CHALLENGE, 'native_tools': '/tools',
+            'workers': 96, 'repeats': 3, 'phase_budget_seconds': 1000, 'candidate_budget_seconds': 300,
+            'native_minimum_call_window_seconds': 130, 'native_cleanup_reserve_seconds': 10,
+            'native_interleave_confirmations': enabled}, directory, measure=measure, clock=lambda: now[0])
+    legacy = run(tmp_path / 'legacy', False)
+    interleaved = run(tmp_path / 'interleaved', True)
+    assert interleaved['fresh_evaluations'] > legacy['fresh_evaluations']
+    completed = lambda r: sum(row['repeats'] >= 3 for row in r['candidates'])
+    assert completed(interleaved) >= completed(legacy)
