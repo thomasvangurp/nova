@@ -196,3 +196,41 @@ which upstream stage varies or prove parity with the remote scoring runtime.
 The available W&B package snapshot describes a log uploader; actual scoring
 worker package/source/weight/device fingerprints remain unverified. Never
 present matching rules or package names as full runtime equivalence.
+
+## Use the remaining epoch window, 2026-10-27
+
+The epoch-25961 first attempt never started native profiling: transport delay
+made its launch clock stale. The controller wrote a failed receipt and then
+treated that receipt as terminal for the whole epoch. Manual recovery started
+22 minutes 50 seconds after the original attempt. Publishing was also terminal:
+25961 and 25962 left approximately 27 and 38 minutes respectively before the
+configured publication cutoff. These are separate orchestration failures.
+
+Epoch 25963 reproduced the problem without a transport failure. Its native
+phase completed 528 fresh evaluations, found no passers, and left 58 inputs
+unstarted. The controller then waited with over 30 minutes still usable.
+An empty batch is not evidence that the remainder of the epoch has no value.
+
+The controller must persist attempt state independently of the epoch receipt.
+A published partial fleet is retained while further work continues; a failed
+attempt becomes retryable only after owned-process cleanup is verified. An
+ambiguous transport response must resume the same remote attempt and frozen
+worker configuration, rather than launch overlapping work. Refresh the chain
+clock during recovery and enforce one absolute submission cutoff.
+
+Continuation admission depends on the phases still needed. Completed valid
+work goes straight to scoring; deferred confirmations and unstarted candidates
+precede a new proposal batch. Deterministic proposal offsets and attempted-hash
+tracking prevent a retry from replaying the same batch. Cumulative raw score
+components must be reranked together, and every publication retains independent
+current-challenge and novelty checks. Legacy diagnostic journals remain
+audit-only unless their complete reusable provenance is established.
+
+Release checks must exercise repeated publications, zero-passer batches,
+ambiguous launches, cleanup failures, restarts during active work, frozen
+attempt identity, unstarted tails, and the absolute deadline. A successful
+single-pass controller test does not establish that the whole window is used.
+Verify an actual continuation attempt on the Pi after activation. Keep GPU
+screening disabled until its complete batch cost, including required CPU
+confirmation and rescue, demonstrates a benefit; a component speedup alone
+does not justify enabling it.
