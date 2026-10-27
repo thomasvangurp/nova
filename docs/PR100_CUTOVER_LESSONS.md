@@ -317,11 +317,11 @@ Sparse passing candidates also exposed an avoidable scheduling barrier. The
 native worker confirmed every survivor of a fresh batch before admitting the
 next fresh batch. With one survivor, nearly the whole worker pool sat idle
 during two confirmation rounds. The opt-in `native_interleave_confirmations`
-mode gives pending confirmations the first slots in each wave and fills the
+mode gives confirmations nearest completion the first slots in each wave and fills the
 remaining slots with fresh candidates. It keeps the same original CPU calls,
 required observation counts, rejection rules, per-call timeout, owned cleanup,
-checkpoint bindings, and shared fresh-admission ceiling. A failed observation
-never receives another chance through this queue. Experimental screening cannot
+checkpoint bindings, and shared fresh-admission ceiling. A measured rejection
+is never erased by another draw. Experimental screening cannot
 be combined with this mode.
 
 The deadline regression uses identical 100-second inert call waves and a
@@ -330,6 +330,10 @@ two repeats; interleaving admits six fresh candidates and the same two repeats.
 Both finish the passing candidate's three observations before the same cutoff.
 This demonstrates the eliminated idle slots, not a measured production speedup.
 The switch remains off unless explicitly enabled in a tested deployment.
+An independent review also caught a FIFO-backlog regression: nine carried
+candidates could all receive one more observation while none completed. Pending
+work is therefore ordered by fewest missing observations, with stable ties.
+That deadline-completion case is a required shipping regression.
 
 ## Slave runtime repair and submission audit, 2026-10-27
 

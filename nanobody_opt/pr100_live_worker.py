@@ -714,6 +714,11 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         while pending or fresh:
             if out_of_time():
                 break
+            # Finish near-complete carried work before spreading the remaining
+            # window over many still-incomplete candidates. Stable sorting
+            # retains queue order when the remaining observation count ties.
+            pending = deque(sorted(pending, key=lambda row:
+                needed(row) - len(measurements.get(row['sequence'], []))))
             batch = []
             while pending and len(batch) < workers:
                 batch.append(pending.popleft())
