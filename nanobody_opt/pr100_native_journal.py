@@ -132,6 +132,18 @@ def observation(value, requirements, sequence):
     try:
         reason = _enum(rules.developability_reason(value, requirements, sequence=sequence),
                        GATE_REASONS, "observation_unavailable")
+        if (reason == "aggrescan_unavailable_or_failed" and not error and not missing
+                and a3d.get("status") == "ok" and a3d.get("passed") is False):
+            # The publication gate checks the backend's passed flag before its
+            # numeric caps. A completed cap rejection therefore shares a reason
+            # with an unavailable tool. For diagnostics only, ask the same gate
+            # to validate provenance and caps without that early false flag.
+            # Never mutate the profile or turn this into an acceptance decision.
+            diagnostic = {**raw, "aggrescan3d": {**raw["aggrescan3d"], "passed": True}}
+            if (Decimal(a3d["a3d_maximum"]) >= 0
+                    and rules.developability_reason(
+                        diagnostic, requirements, sequence=sequence) == "aggrescan_threshold"):
+                reason = "aggrescan_threshold"
     except Exception:
         reason = "observation_unavailable"
     outcome = ("inconclusive" if error or reason not in REJECTION_REASONS | {""}
