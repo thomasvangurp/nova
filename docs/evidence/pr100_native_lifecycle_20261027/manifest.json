@@ -1,0 +1,17 @@
+{
+  "schema": "pr100-native-lifecycle-inert-evidence-v1",
+  "native_calls": 0,
+  "gpu_calls": 0,
+  "hardware_probes": 0,
+  "production_enabled": false,
+  "files": {
+    "pinned-scheduler-inert-reproduction.json": {
+      "sha256": "baf403134a7ee620ec5fda70bedf29e7b8368704f804c32d2320ce2169bf1f59",
+      "bytes": 754
+    },
+    "pinned-scheduler-inert-reproduction.py": {
+      "sha256": "f10b3919a1716264bfc74c82f18f26dee749917e52e475b9543ad6838ed84bef",
+      "bytes": 3508
+    }
+  }
+}

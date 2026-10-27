@@ -1,0 +1,22 @@
+{
+  "schema": "pr100-pinned-scheduler-inert-reproduction-v1",
+  "source_sha256": "13048ae69dcc85ae1048fff83d0e63ddd67590354478671af5aa4515dd77181a",
+  "unmodified_method_ast": [
+    "__init__",
+    "initialize",
+    "shutdown"
+  ],
+  "cross_runner": {
+    "first_runner": "completed",
+    "second_runner": "different_event_loop"
+  },
+  "concurrent_initialization": {
+    "health_tasks_created": 4,
+    "pending_after_scheduler_shutdown": 3,
+    "pending_after_runner_close": 0
+  },
+  "native_calls": 0,
+  "gpu_calls": 0,
+  "hardware_probes": 0,
+  "limitation": "Lifecycle-only reproduction; fake asynchronous discovery/register/health routines, original initialization/shutdown bodies; production phases use one Runner in separate worker interpreters."
+}

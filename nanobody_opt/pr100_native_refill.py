@@ -31,7 +31,7 @@ def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
             if timeout < call['minimum_window']:
                 return NotStarted()
         values = await develop([call['sequence']], 1,
-            task_timeout_seconds=timeout,
+            task_timeout_seconds=timeout, cpu_only_manager=True,
             on_result=call['record'], on_result_error=call['record_error'])
         if not isinstance(values, list) or len(values) != 1:
             raise ValueError('incomplete native singleton result')
@@ -41,6 +41,7 @@ def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
         pending = {}
         admitted = completed = maximum = never_started = 0
         started = clock()
+        failure = None
         try:
             while True:
                 free = workers - len(pending)
@@ -68,6 +69,9 @@ def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
                     on_result(call, value)
                     never_started += isinstance(value, NotStarted)
                     completed += not isinstance(value, NotStarted)
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             # Cancelling an original adapter call triggers ProfileExecution
             # cleanup and awaits its worker. Do not start a replacement while
@@ -75,7 +79,15 @@ def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
             for task in pending:
                 task.cancel()
             if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+                outcomes = await asyncio.gather(*pending, return_exceptions=True)
+                cleanup_errors = [value for value in outcomes
+                    if isinstance(value, BaseException)
+                    and not isinstance(value, asyncio.CancelledError)]
+                if cleanup_errors:
+                    errors = ([failure] if failure is not None else []) + cleanup_errors
+                    if len(errors) == 1:
+                        raise errors[0]
+                    raise BaseExceptionGroup('native refill and cleanup failures', errors)
         return {'admitted_calls': admitted, 'completed_calls': completed,
                 'never_started_calls': never_started, 'maximum_in_flight': maximum,
                 'elapsed_seconds': clock() - started}

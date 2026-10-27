@@ -134,9 +134,11 @@ def annotate(sequence, cache_dir):
 
 
 async def develop(sequences, concurrency, *, on_result=None, on_result_error=None,
-                  task_timeout_seconds=None):
+                  task_timeout_seconds=None, cpu_only_manager=False):
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
         raise ValueError("developability concurrency must be a positive integer")
+    if type(cpu_only_manager) is not bool:
+        raise ValueError("CPU-only native manager flag must be boolean")
     deadline = None
     if task_timeout_seconds is not None:
         if (isinstance(task_timeout_seconds, bool) or not isinstance(task_timeout_seconds, (int, float))
@@ -147,6 +149,10 @@ async def develop(sequences, concurrency, *, on_result=None, on_result_error=Non
     from metanano.services.async_manager import AsyncServiceManager
     from metanano.services.developability_service import DevelopabilityService
     config = helper("aggrescan3d").developability_config()
+    if cpu_only_manager:
+        # TNP uses only this manager's local CPU semaphore and timeout. Avoid
+        # touching the process-global GPU scheduler from independent CPU calls.
+        config.async_config.gpu_scheduler.enabled = False
     if deadline is not None:
         remaining = deadline - time.monotonic()
         if remaining < 10:
@@ -159,6 +165,7 @@ async def develop(sequences, concurrency, *, on_result=None, on_result_error=Non
     manager = AsyncServiceManager(config.async_config)
     observer_errors = []
     observer_reporting_errors = []
+    failure = None
     try:
         service = DevelopabilityService(config.developability, manager)
         if on_result is not None:
@@ -194,8 +201,17 @@ async def develop(sequences, concurrency, *, on_result=None, on_result_error=Non
         if observer_reporting_errors or (observer_errors and on_result_error is None):
             raise RuntimeError("developability observation failed")
         return result
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        await manager.shutdown()
+        try:
+            await manager.shutdown()
+        except BaseException as cleanup_error:
+            if cpu_only_manager and failure is not None:
+                raise BaseExceptionGroup('native adapter and cleanup failures',
+                                         [failure, cleanup_error]) from None
+            raise
 
 
 def cached_result(sequence, cache_dir):
