@@ -629,3 +629,122 @@ def test_paired_lease_and_all_enclosing_deadlines_allow_cleanup(paths, monkeypat
     assert pi.auxiliary('replay')['ok']
     override = Path(__file__).resolve().parents[1]/'deploy/dashboard/nova-dashboard-replay-timeout.conf'
     assert 'TimeoutStartSec=1500' in override.read_text()
+
+
+def test_replay_skips_owned_background_slot_and_keeps_other_slots_productive(tmp_path, monkeypatch):
+    import fcntl
+    from nanobody_dash import replay_refresh as replay
+    monkeypatch.setattr(replay, 'GPU_LOCKS', tmp_path)
+    seen = []
+    monkeypatch.setattr(replay, 'plan_pair_benchmark', lambda *a: None)
+    monkeypatch.setattr(replay, 'pending', lambda db, epoch, exclude: (epoch-1, [s for s in 'ABCDEF' if s not in exclude][:2]))
+    def run(**kwargs):
+        seen.append((kwargs['gpu'], kwargs['selection'][1]))
+        return {'ok': True, 'rows': 20, 'epoch': 25967}
+    monkeypatch.setattr(replay, 'run', run)
+    with (tmp_path/'gpu-5.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert replay.available_background_gpus() == [6, 7]
+        result = replay.run_parallel(25968)
+    assert sorted(seen) == [(6, ['A', 'B']), (7, ['C', 'D'])]
+    assert result['rows'] == 40
+    assert replay.available_background_gpus() == [5, 6, 7]
+
+
+def test_research_prediction_batch_four_is_explicit_and_never_replica_batching(tmp_path):
+    from tools import dashboard_batch_benchmark as experiment
+    command = experiment.research_command(tmp_path/'input.json', tmp_path/'exact_all.json',
+                                           5, tmp_path/'config.yaml', 'TARGET', 4)
+    assert command[command.index('--batch-size')+1] == '4'
+    assert command[command.index('--gpus')+1] == '5'
+    assert '--allow-replicates' not in command
+    assert '--require-structures' in command
+    with pytest.raises(ValueError, match='only_explicit'):
+        experiment.research_command(tmp_path/'i', tmp_path/'o', 5, tmp_path/'c', 'T', 8)
+
+
+def test_research_artifact_context_rejects_changed_batch_or_control(tmp_path, monkeypatch):
+    from tools import dashboard_batch_benchmark as experiment
+    from nanobody_opt import score_boltzgen_fast_adapter as adapter
+    scorer = tmp_path/'scorer.py'; scorer.write_text('fixed registered scorer')
+    monkeypatch.setattr(adapter, 'load_settings', lambda: {'scorer': str(scorer)})
+    monkeypatch.setattr(adapter, 'require_pinned_scorer', lambda *a: None)
+    config = tmp_path/'config'; config.write_text('fixed config')
+    field = tmp_path/'field'; field.write_text('fixed field')
+    output = tmp_path/'research'; controls = [tmp_path/'a', tmp_path/'b']
+    identity = experiment.prepare_context(output, ['AAA', 'BBB', 'CCC', 'DDD'], config, field, controls)
+    assert identity['canonical_import'] is False and identity['predict_batch_size'] == 4
+    assert experiment.prepare_context(output, ['AAA', 'BBB', 'CCC', 'DDD'], config, field, controls) == identity
+    config.write_text('changed config')
+    with pytest.raises(ValueError, match='context_changed'):
+        experiment.prepare_context(output, ['AAA', 'BBB', 'CCC', 'DDD'], config, field, controls)
+
+
+def test_research_result_rejects_canonical_batch_two_and_repeated_identity(tmp_path, monkeypatch):
+    from tools import dashboard_batch_benchmark as experiment
+    monkeypatch.setattr(experiment.worker, 'ordinary_records', lambda *a: [('A', 1, {})])
+    path = tmp_path/'result.json'
+    path.write_text(json.dumps({'predict_batch_size': 2, 'observation_id': 'draw'}))
+    with pytest.raises(ValueError, match='identity_mismatch'):
+        experiment.records(path, ['A'], 'T', 1, 4)
+    path.write_text(json.dumps({'predict_batch_size': 4, 'observation_id': 'draw', 'diagnostic_seed': 5}))
+    with pytest.raises(ValueError, match='identity_mismatch'):
+        experiment.records(path, ['A'], 'T', 1, 4)
+    path.write_text(json.dumps({'predict_batch_size': 4, 'observation_id': 'draw', 'diagnostic_seed': None}))
+    assert experiment.records(path, ['A'], 'T', 1, 4)[1] == 'draw'
+
+
+def test_research_distribution_comparison_requires_complete_same_inputs(monkeypatch):
+    from tools import dashboard_batch_benchmark as experiment
+    monkeypatch.setattr(experiment.worker, 'reference_ranks', lambda values, field: values)
+    control = [('AAAA', i, {}, float(i)) for i in range(1, 11)]
+    experimental = [('AAAA', i, {}, float(i)+2) for i in range(1, 11)]
+    result = experiment.comparison(experimental, control, {})
+    assert result[0]['experimental_batch4']['n'] == 10
+    assert result[0]['mean_difference'] == 2
+    with pytest.raises(ValueError, match='complete_ten'):
+        experiment.comparison(experimental[:-1], control, {})
+
+
+def test_research_ten_fresh_draws_resume_only_exact_completed_experimental_calls(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from tools import dashboard_batch_benchmark as experiment
+    from nanobody_opt import score_boltzgen_fast_adapter as adapter
+    scorer = tmp_path/'scorer.py'; scorer.write_text('registered scorer')
+    monkeypatch.setattr(adapter, 'load_settings', lambda: {'scorer': str(scorer)})
+    monkeypatch.setattr(adapter, 'require_pinned_scorer', lambda *a: None)
+    monkeypatch.setattr(experiment.worker, 'verify_owned_lease', lambda *a: None)
+    monkeypatch.setattr(experiment.worker, 'owned_daemon', nullcontext)
+    monkeypatch.setattr(experiment.worker, 'validate_context', lambda *a: 'TARGET')
+    metrics = {k: 1.0 for k in experiment.worker.SUM_OF_TEN_DIRS}
+    def payload(seqs, size, identity):
+        return {'predict_batch_size': size, 'diagnostic_seed': None, 'observation_id': identity,
+                'target': 'TARGET', 'per_nanobody_components': {'0': {s: {'TARGET': metrics} for s in seqs}}}
+    controls = []
+    for group, seqs in [('a', ['AAA', 'BBB']), ('b', ['CCC', 'DDD'])]:
+        directory = tmp_path/'epoch25967'/group; directory.mkdir(parents=True)
+        (directory/'config.yaml').write_text('{}')
+        (directory/'field.json').write_text(json.dumps({'rows': [metrics]}))
+        (directory/'sequences.json').write_text(json.dumps(seqs))
+        for replica in range(1, 11):
+            work = directory/'work/epoch25967/replicates10/group/length3'/f'pass{replica}'
+            work.mkdir(parents=True)
+            (work/'exact_all.json').write_text(json.dumps(payload(seqs, 2, f'{group}-{replica}')))
+            (work/'timing.json').write_text('{"elapsed_seconds": 10}')
+        controls.append(directory)
+    calls = []
+    def score(command, **kwargs):
+        assert command[command.index('--batch-size')+1] == '4'
+        seqs = json.loads(Path(command[command.index('--sequences')+1]).read_text())['sequences']
+        calls.append(tuple(seqs))
+        Path(command[command.index('--out')+1]).write_text(json.dumps(payload(seqs, 4, f'experiment-{len(calls)}')))
+        return subprocess.CompletedProcess(command, 0, b'')
+    monkeypatch.setattr(experiment.subprocess, 'run', score)
+    directory = tmp_path/'research'
+    first = experiment.run(directory, controls, 5, tmp_path/'lease.json')
+    assert len(calls) == first['fresh_draw_ids'] == 10
+    assert first['canonical_import'] is False
+    assert first['promotion_status'] == 'requires_separate_contract_and_parity_review'
+    assert not list(directory.glob('**/observations.ndjson'))
+    second = experiment.run(directory, controls, 5, tmp_path/'lease.json')
+    assert len(calls) == 10 and second['fresh_draw_ids'] == 10

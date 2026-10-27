@@ -21,6 +21,28 @@ PASSES = 10
 # Retain separate limits for ordinary single and distinct two-candidate jobs.
 TTL = 1050
 PAIR_TTL = 1200
+GPU_LOCKS = Path('/root/pr100-controller/gpu-locks')
+
+
+def available_background_gpus() -> list[int]:
+    """Avoid assigning a queue item to an already owned background GPU.
+
+    The actual cooperative lease remains the authoritative acquisition gate;
+    this probe only keeps the other slots productive during isolated research.
+    """
+    available = []
+    for gpu in (5, 6, 7):
+        try:
+            with (GPU_LOCKS/f'gpu-{gpu}.lock').open('r') as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        except FileNotFoundError:
+            pass
+        available.append(gpu)
+    return available
 
 
 def has_single_partial(item: dict) -> bool:
@@ -313,7 +335,7 @@ def run_parallel(epoch: int) -> dict:
     from concurrent.futures import ThreadPoolExecutor
     plan_pair_benchmark(epoch)
     plans, assigned = [], set()
-    for gpu in (5, 6, 7):
+    for gpu in available_background_gpus():
         selection = pending(DATABASE, epoch, exclude=assigned)
         if selection[0] is None:
             break
