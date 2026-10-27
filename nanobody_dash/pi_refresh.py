@@ -214,8 +214,11 @@ def status_text() -> str:
     age = int(max(0, time.time() - float(health.get("last_success_at") or 0)) / 60)
     sync = "pending" if not health else ("failed; retrying" if not health.get("ok") else f"{age}m ago")
     receipt = read_json(DATA/'dashboard_submission_status.json')
-    commits = (f" · Pi commits {receipt['epoch']}: {receipt['committed']}/{receipt['planned']}"
+    commits = (f" · Pi commits {receipt['epoch']}: {receipt['committed']}/{receipt['planned']} planned"
                if all(type(receipt.get(k)) is int for k in ('epoch', 'committed', 'planned')) else '')
+    if commits and type(receipt.get('registered')) is int and receipt['registered'] >= receipt['planned']:
+        commits = (f" · Pi commits {receipt['epoch']}: {receipt['committed']}/{receipt['registered']} registered"
+                   f" ({receipt['planned']} planned)")
     coverage = ''
     if newest is not None:
         latest = payload.get(str(newest), {})

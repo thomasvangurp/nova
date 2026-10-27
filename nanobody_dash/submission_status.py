@@ -35,6 +35,8 @@ def latest(log: Path, archives: Path) -> tuple[dict, dict]:
                     newest = ({'epoch': plan['epoch'], 'committed': row['committed'],
                                'planned': plan['committing'], 'failed': row['failed']},
                               set(successful))
+                    if type(plan.get('crew')) is int and plan['crew'] >= plan['committing']:
+                        newest[0]['registered'] = plan['crew']
             plan, successful = None, set()
     if newest is None:
         return {}, {}

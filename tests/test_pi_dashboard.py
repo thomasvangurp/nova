@@ -440,6 +440,24 @@ def test_ui_reports_chain_and_incomplete_replay_separately(paths, monkeypatch):
     assert 'measured fleet pending' in text
 
 
+def test_successful_partial_plan_does_not_hide_unfilled_registered_slots(paths):
+    from nanobody_dash.submission_status import latest
+    log = paths/'loop.log'
+    events = [{'event': 'plan', 'epoch': 25967, 'crew': 13,
+               'committing': 10, 'with_sequence': 10}]
+    events.extend({'event': 'commit', 'uid': uid, 'rc': 0, 'sequence': True}
+                  for uid in range(10))
+    events.append({'event': 'done', 'committed': 10, 'failed': 0})
+    log.write_text('\n'.join(json.dumps(row) for row in events))
+    status, sequences = latest(log, paths/'archive')
+    assert status['registered'] == 13 and status['committed'] == status['planned'] == 10
+    assert status['failed'] == 0 and sequences == {}
+    (paths/'data/dashboard_submission_status.json').write_text(json.dumps(status))
+    text = pi.status_text()
+    assert 'Pi commits 25967: 10/13 registered (10 planned)' in text
+    assert 'Pi commits 25967: 10/10' not in text
+
+
 def test_chain_status_rejects_stale_slot_record(paths, monkeypatch):
     import sqlite3
     monkeypatch.setattr(pi.time, 'time', lambda: 1000)
