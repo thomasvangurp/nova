@@ -264,6 +264,11 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     if phase in ('native', 'novelty'):
         environment['PATH'] = runtime.get('native_path', runtime['path'])
         environment['PYTHONPATH'] = release + ':' + runtime.get('native_python_path', runtime['python_path'])
+        # Modeller/PDBFixer create internal OpenMM contexts without properties.
+        # Their CPU default can be the host's logical CPU count, independently
+        # of process affinity or the explicit Threads=1 in the refinement step.
+        environment.update(OPENMM_CPU_THREADS='1', MKL_NUM_THREADS='1',
+                           HIP_VISIBLE_DEVICES='', ROCR_VISIBLE_DEVICES='')
     if runtime.get('ld_library_path'):
         environment['LD_LIBRARY_PATH'] = runtime['ld_library_path']
     job = {'challenge': challenge, 'phase': phase, 'cpu_slots': 4 if phase == 'sequence' else 8}

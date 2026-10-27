@@ -218,6 +218,24 @@ def test_host_native_overrides_do_not_change_annotation_environment(tmp_path):
     assert annotation['spec']['cpu_slots'] == 4
 
 
+@pytest.mark.parametrize('host,phase', [('master', 'native'), ('slave', 'native'), ('master', 'novelty')])
+def test_native_subprocess_inherits_one_thread_per_openmm_context(tmp_path, monkeypatch, host, phase):
+    import subprocess
+    import sys
+    from tests.test_pr100_live_controller import config, challenge, clock
+    from nanobody_opt import pr100_live_controller as c
+    monkeypatch.setenv('OPENMM_CPU_THREADS', '224')
+    cfg = {**config(tmp_path), '_native_host': host}
+    selected, request = c.phase_request(cfg, challenge(), phase, {}, time.time()+2000, clock(), cap=600)
+    assert selected == host
+    keys = ('OPENMM_CPU_THREADS', 'MKL_NUM_THREADS', 'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+            'CUDA_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES')
+    child = subprocess.run([sys.executable, '-c',
+        'import os,json; print(json.dumps({k:os.environ.get(k) for k in ' + repr(keys) + '}))'],
+        env=request['spec']['environment'], capture_output=True, text=True, check=True, timeout=5)
+    assert json.loads(child.stdout) == {key: '1' if key.endswith('THREADS') else '' for key in keys}
+
+
 def test_elapsed_host_wall_budget_retries_poll_only(tmp_path):
     from tests.test_pr100_continuation_lifecycle import config, Chain, invoke, terminal
     cfg = {**config(tmp_path), '_bounded_phase_collection': True}

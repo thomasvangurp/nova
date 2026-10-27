@@ -290,3 +290,25 @@ labels do not independently distinguish a tool failure from biological failure.
 Throughput improvement does not by itself establish a better pass rate.
 Fresh candidates, repeat measurements, unstarted work and incomplete calls must
 remain separate counters; attempted hashes alone are not completed fresh work.
+
+The continuation controller also needed an explicit epoch-wide admission limit.
+The default and maximum are 4,800 distinct fresh native candidates. Reserve the
+shared capacity durably before partitioning work across hosts; convert verified
+starts to admissions and refund only verified never-started inputs after owned
+cleanup. Unknown or interrupted admissions remain charged. Legacy attempted
+hashes are conservatively charged and labelled uncertain. Confirmations,
+scoring and publication continue after fresh capacity is exhausted. Worker
+limits provide an additional per-host fence; generated proposals and repeat
+measurements are not fresh admissions.
+
+An installed-runtime query on master found OpenMM CPU default `Threads=224`
+even with process affinity restricted to eight CPUs and OMP/OpenBLAS set to one.
+Setting `OPENMM_CPU_THREADS=1` changes that default to one. Modeller hydrogen
+addition and PDBFixer missing-atom work create internal contexts without the
+explicit thread property used by the main refinement step. Pin the OpenMM and
+MKL thread settings in every native subprocess environment; CPU affinity alone
+does not prevent nested thread oversubscription. Test the actual inherited
+child environment and keep GPU visibility hidden. Qualification must use the
+same effective environment as live operation, including the native launcher.
+This finding establishes an uncontrolled thread default, not a measured
+whole-epoch speedup or equivalence to the validator's runtime.
