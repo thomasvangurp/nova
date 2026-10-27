@@ -177,7 +177,14 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         blocked.extend(value.get('blocked_confirmations', []))
         attempted.update(value.get('attempted_sequence_hashes', []))
         rejected.update(value.get('terminal_native_outcomes', {}))
+    # The merged candidates are individually complete, even when a peer is
+    # still unresolved. Only every bound, cleaned-up host can establish that
+    # an omitted fully measured checkpoint was conclusively classified.
+    classified = (bool(results) and not pending and not blocked and all(
+        value.get('status') == 'complete' and value.get('native_classification_complete') is True
+        and value.get('novelty_checked') is True for value in results.values()))
     merged = {**incoming, 'status': 'complete', 'candidates': candidates, 'novelty_checked': True,
+              'native_classification_complete': classified,
               'deferred_candidates': deferred, 'deferred_confirmations': confirmations,
               'blocked_confirmations': blocked, 'attempted_sequence_hashes': sorted(attempted),
               'terminal_native_outcomes': rejected, 'unresolved_native_hosts': sorted(pending),

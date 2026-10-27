@@ -266,8 +266,17 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 if progress.get('challenge') == challenge:
                     records = progress.get('records', [])
                     finished = {r['sequence'] for r in value.get('candidates', [])}
+                    # A completed, archive-bound novelty rejection cannot improve
+                    # by replaying the same fully measured checkpoint. Missing or
+                    # partial classification still needs the recovery path.
+                    classified = (value.get('status') == 'complete'
+                        and value.get('native_classification_complete') is True
+                        and value.get('novelty_checked') is True
+                        and all(value.get(k) == binding[k] for k in
+                                ('challenge', 'epoch', 'target', 'archive_sha256'))
+                        and not value.get('unresolved_native_hosts'))
                     value['deferred_confirmations'] = [r for r in records if 'native_resume' in r and (
-                        r['sequence'] not in finished or len(r['native_resume']['measurements'])
+                        (r['sequence'] not in finished and not classified) or len(r['native_resume']['measurements'])
                         < r['native_resume']['required_cpu_observations'])]
                     value.setdefault('terminal_native_outcomes', {}).update({r['sequence_hash']: r['terminal_reason']
                         for r in records if r.get('terminal_reason') in ('developability_red_flags',

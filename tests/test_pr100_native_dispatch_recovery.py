@@ -1,6 +1,7 @@
 """A late peer must add evidence without replaying an already scored cohort."""
 import base64
 import json
+import pytest
 
 from nanobody_opt import pr100_epoch_continuation as continuation
 from nanobody_opt import pr100_live_controller as controller
@@ -9,6 +10,97 @@ from nanobody_opt import rules
 from tests.test_pr100_live_handoff_contract import replay
 from tests.test_pr100_epoch_continuation import legacy, score_files, write
 from tests.test_pr100_live_controller import config as route_config
+
+
+def confirmation(row, count=3):
+    return {**row, 'native_resume': {
+        'identity': {'resume_eligible': True}, 'measurements': [{}] * count,
+        'required_cpu_observations': 3}}
+
+
+def pending_native_state(x):
+    state = continuation.migrate(x.local, x.replay.challenge, x.config)
+    state.update(native_rows=[], score_rows={}, native_attempted_hashes=[],
+                 score_attempted_hashes=[], pending_native=x.rows)
+    write(x.local / 'continuation.json', state)
+
+
+@pytest.mark.parametrize('peer', ['complete', 'failed', 'incomplete', 'unresolved', 'no_novelty'])
+def test_novelty_rejection_finishes_only_after_every_native_host_is_complete(legacy, monkeypatch, peer):
+    x = legacy
+    x.config.update(native_hosts=['master', 'slave'],
+                    native_worker_overrides={'master': {'workers': 1}, 'slave': {'workers': 1}})
+    pending_native_state(x)
+
+    def phase(cfg, challenge, name, files, stop, chain, local, **kwargs):
+        assert name == 'native'
+        incoming = json.loads(files['input.json'])
+        is_peer = cfg['_native_host'] == 'slave'
+        unresolved = is_peer and peer == 'unresolved'
+        write(local / 'native-supervisor.json', {'cleanup': {
+            'fixed_point_reached': not unresolved, 'remaining_descendants': None if unresolved else 0}})
+        value = {**incoming, 'status': 'failed' if is_peer and peer == 'failed' else 'complete',
+                 'native_classification_complete': not (is_peer and peer in ('failed', 'incomplete')),
+                 'novelty_checked': not (is_peer and peer == 'no_novelty'), 'candidates': [],
+                 'attempted_sequence_hashes': [rules.sequence_hash(r['sequence']) for r in incoming['candidates']]}
+        return {'result.json': json.dumps(value).encode(),
+                'native-confirmations.json': json.dumps({'challenge': challenge,
+                    'records': [confirmation(r) for r in incoming['candidates']]}).encode()}
+
+    monkeypatch.setattr(controller, 'run_phase', phase)
+    outcome = controller.run_epoch(x.config, x.chain, controller.clock_state(x.chain))
+    assert outcome['status'] == 'no_passing_candidate'
+    saved = continuation.read(x.local / 'continuation.json')
+    merged = continuation.read(x.local / 'attempts/00001/native/result.json')
+    assert merged['native_classification_complete'] is (peer == 'complete')
+    if peer == 'complete':
+        assert saved['pending_confirmation'] == []
+        assert continuation.mode_for(saved) == 'sequence'
+    else:
+        assert {r['sequence'] for r in saved['pending_confirmation']} == {r['sequence'] for r in x.rows}
+        assert continuation.mode_for(saved) == 'native'
+    if peer == 'unresolved':
+        assert saved['active']['number'] == 1 and saved['active']['phase'] == 'native'
+        assert saved['active']['native_unresolved'] is True
+    else:
+        assert saved['active'] is None
+
+
+@pytest.mark.parametrize('uncertainty', [None, 'partial_confirmation', 'missing_classification',
+    'missing_archive', 'different_archive', 'different_challenge', 'different_epoch', 'different_target'])
+def test_checkpoint_retirement_requires_complete_current_archive_bound_classification(legacy, monkeypatch, uncertainty):
+    x = legacy
+    pending_native_state(x)
+
+    def phase(cfg, challenge, name, files, stop, chain, local, **kwargs):
+        assert name == 'native'
+        incoming = json.loads(files['input.json'])
+        value = {**incoming, 'status': 'complete', 'native_classification_complete': True,
+                 'novelty_checked': True, 'candidates': [],
+                 'attempted_sequence_hashes': [rules.sequence_hash(r['sequence']) for r in incoming['candidates']]}
+        if uncertainty == 'missing_classification':
+            value.pop('native_classification_complete')
+        elif uncertainty == 'missing_archive':
+            value.pop('archive_sha256')
+        elif uncertainty == 'different_archive':
+            value['archive_sha256'] = 'f' * 64
+        elif uncertainty == 'different_challenge':
+            value['challenge'] = {**challenge, 'epoch': challenge['epoch'] + 1}
+        elif uncertainty == 'different_epoch':
+            value['epoch'] += 1
+        elif uncertainty == 'different_target':
+            value['target'] = 'other'
+        records = [confirmation(r, 2 if uncertainty == 'partial_confirmation' else 3)
+                   for r in incoming['candidates']]
+        return {'result.json': json.dumps(value).encode(),
+                'native-confirmations.json': json.dumps({'challenge': challenge, 'records': records}).encode()}
+
+    monkeypatch.setattr(controller, 'run_phase', phase)
+    outcome = controller.run_epoch(x.config, x.chain, controller.clock_state(x.chain))
+    assert outcome['status'] == 'no_passing_candidate'
+    saved = continuation.read(x.local / 'continuation.json')
+    assert len(saved['pending_confirmation']) == (0 if uncertainty is None else len(x.rows))
+    assert continuation.mode_for(saved) == ('sequence' if uncertainty is None else 'native')
 
 
 def test_clean_score_failure_cannot_release_an_unresolved_native_peer(legacy, monkeypatch):
