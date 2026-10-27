@@ -1,0 +1,164 @@
+{
+  "schema": "pr100-inert-refill-comparison-v1",
+  "native_calls": 0,
+  "production_changes": false,
+  "simulation": true,
+  "cases": [
+    {
+      "name": "uniform_sparse",
+      "workers": 96,
+      "inputs": 600,
+      "deadline_seconds": 1000,
+      "current_interleaved": {
+        "wall_seconds": 880.0,
+        "fresh": 600,
+        "repeats": 34,
+        "fully_confirmed": 17,
+        "inconclusive": 0,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.6003787878787878,
+        "profile_calls": 634
+      },
+      "bounded_refill": {
+        "wall_seconds": 720.0,
+        "fresh": 600,
+        "repeats": 34,
+        "fully_confirmed": 17,
+        "inconclusive": 0,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.7337962962962963,
+        "profile_calls": 634
+      }
+    },
+    {
+      "name": "stragglers_master",
+      "workers": 96,
+      "inputs": 600,
+      "deadline_seconds": 1000,
+      "current_interleaved": {
+        "wall_seconds": 990.0,
+        "fresh": 285,
+        "repeats": 12,
+        "fully_confirmed": 6,
+        "inconclusive": 1,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.19675925925925927,
+        "profile_calls": 297
+      },
+      "bounded_refill": {
+        "wall_seconds": 750.0,
+        "fresh": 600,
+        "repeats": 34,
+        "fully_confirmed": 17,
+        "inconclusive": 0,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.5520833333333334,
+        "profile_calls": 634
+      }
+    },
+    {
+      "name": "stragglers_slave",
+      "workers": 32,
+      "inputs": 600,
+      "deadline_seconds": 1000,
+      "current_interleaved": {
+        "wall_seconds": 990.0,
+        "fresh": 95,
+        "repeats": 4,
+        "fully_confirmed": 2,
+        "inconclusive": 1,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.2152777777777778,
+        "profile_calls": 99
+      },
+      "bounded_refill": {
+        "wall_seconds": 990.0,
+        "fresh": 416,
+        "repeats": 21,
+        "fully_confirmed": 10,
+        "inconclusive": 1,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.9160353535353535,
+        "profile_calls": 437
+      }
+    },
+    {
+      "name": "heterogeneous_sparse",
+      "workers": 96,
+      "inputs": 600,
+      "deadline_seconds": 1000,
+      "current_interleaved": {
+        "wall_seconds": 936.0,
+        "fresh": 189,
+        "repeats": 12,
+        "fully_confirmed": 6,
+        "inconclusive": 0,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.3107750178062678,
+        "profile_calls": 201
+      },
+      "bounded_refill": {
+        "wall_seconds": 990.0,
+        "fresh": 600,
+        "repeats": 26,
+        "fully_confirmed": 11,
+        "inconclusive": 13,
+        "maximum_in_flight": 96,
+        "slot_utilization": 0.9152041245791246,
+        "profile_calls": 626
+      }
+    },
+    {
+      "name": "partial_failure",
+      "workers": 32,
+      "inputs": 150,
+      "deadline_seconds": 1000,
+      "current_interleaved": {
+        "wall_seconds": 990.0,
+        "fresh": 96,
+        "repeats": 96,
+        "fully_confirmed": 0,
+        "inconclusive": 32,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.49558080808080807,
+        "profile_calls": 192
+      },
+      "bounded_refill": {
+        "wall_seconds": 990.0,
+        "fresh": 150,
+        "repeats": 150,
+        "fully_confirmed": 0,
+        "inconclusive": 50,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.7888257575757576,
+        "profile_calls": 300
+      }
+    },
+    {
+      "name": "late_fast_confirmation",
+      "workers": 32,
+      "inputs": 180,
+      "deadline_seconds": 430,
+      "current_interleaved": {
+        "wall_seconds": 360.0,
+        "fresh": 95,
+        "repeats": 4,
+        "fully_confirmed": 2,
+        "inconclusive": 0,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.8107638888888888,
+        "profile_calls": 99
+      },
+      "bounded_refill": {
+        "wall_seconds": 360.0,
+        "fresh": 99,
+        "repeats": 6,
+        "fully_confirmed": 3,
+        "inconclusive": 0,
+        "maximum_in_flight": 32,
+        "slot_utilization": 0.8489583333333334,
+        "profile_calls": 105
+      }
+    }
+  ]
+}

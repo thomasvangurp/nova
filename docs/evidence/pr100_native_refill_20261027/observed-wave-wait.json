@@ -1,0 +1,232 @@
+{
+  "schema": "pr100-observed-wave-wait-v1",
+  "source_sha256": "9ab08c61d007238fa1a8ab9bdd2b9cc77c960d436c179d1693d334a932e52d8d",
+  "method": "For complete full-width waves only, sum(last journal completion timestamp - each completion timestamp). These are asynchronous persistence timestamps, not exact call-start/duration measurements.",
+  "hosts": [
+    {
+      "epoch": 25968,
+      "host": "master",
+      "workers": 96,
+      "waves": [
+        {
+          "index": 0,
+          "completed": 96,
+          "first_to_last_completion_seconds": 42.251,
+          "journal_implied_slot_wait_seconds": 2304.881,
+          "equivalent_all_worker_wait_seconds": 24.00917708333333
+        },
+        {
+          "index": 2,
+          "completed": 96,
+          "first_to_last_completion_seconds": 69.595,
+          "journal_implied_slot_wait_seconds": 4122.632,
+          "equivalent_all_worker_wait_seconds": 42.94408333333333
+        },
+        {
+          "index": 5,
+          "completed": 96,
+          "first_to_last_completion_seconds": 139.207,
+          "journal_implied_slot_wait_seconds": 9058.351999999999,
+          "equivalent_all_worker_wait_seconds": 94.35783333333332
+        },
+        {
+          "index": 8,
+          "completed": 96,
+          "first_to_last_completion_seconds": 79.251,
+          "journal_implied_slot_wait_seconds": 5128.512000000001,
+          "equivalent_all_worker_wait_seconds": 53.422000000000004
+        }
+      ],
+      "excluded_partial_or_small_waves": [
+        {
+          "index": 1,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 3,
+          "admitted": 3,
+          "observed": 3
+        },
+        {
+          "index": 4,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 6,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 7,
+          "admitted": 1,
+          "observed": 1
+        },
+        {
+          "index": 9,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 10,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 11,
+          "admitted": 58,
+          "observed": 58
+        },
+        {
+          "index": 12,
+          "admitted": 2,
+          "observed": 2
+        },
+        {
+          "index": 13,
+          "admitted": 1,
+          "observed": 1
+        }
+      ],
+      "total_equivalent_all_worker_wait_seconds": 214.73309375
+    },
+    {
+      "epoch": 25968,
+      "host": "slave",
+      "workers": 32,
+      "waves": [
+        {
+          "index": 0,
+          "completed": 32,
+          "first_to_last_completion_seconds": 55.837,
+          "journal_implied_slot_wait_seconds": 1552.981,
+          "equivalent_all_worker_wait_seconds": 48.53065625
+        },
+        {
+          "index": 1,
+          "completed": 32,
+          "first_to_last_completion_seconds": 23.209,
+          "journal_implied_slot_wait_seconds": 591.543,
+          "equivalent_all_worker_wait_seconds": 18.48571875
+        },
+        {
+          "index": 4,
+          "completed": 32,
+          "first_to_last_completion_seconds": 24.663,
+          "journal_implied_slot_wait_seconds": 609.428,
+          "equivalent_all_worker_wait_seconds": 19.044625
+        },
+        {
+          "index": 5,
+          "completed": 32,
+          "first_to_last_completion_seconds": 70.485,
+          "journal_implied_slot_wait_seconds": 1975.298,
+          "equivalent_all_worker_wait_seconds": 61.7280625
+        }
+      ],
+      "excluded_partial_or_small_waves": [
+        {
+          "index": 2,
+          "admitted": 1,
+          "observed": 1
+        },
+        {
+          "index": 3,
+          "admitted": 1,
+          "observed": 1
+        },
+        {
+          "index": 6,
+          "admitted": 1,
+          "observed": 1
+        },
+        {
+          "index": 7,
+          "admitted": 19,
+          "observed": 19
+        }
+      ],
+      "total_equivalent_all_worker_wait_seconds": 147.7890625
+    },
+    {
+      "epoch": 25969,
+      "host": "master",
+      "workers": 96,
+      "waves": [
+        {
+          "index": 0,
+          "completed": 96,
+          "first_to_last_completion_seconds": 72.71,
+          "journal_implied_slot_wait_seconds": 4009.2239999999993,
+          "equivalent_all_worker_wait_seconds": 41.76274999999999
+        },
+        {
+          "index": 1,
+          "completed": 96,
+          "first_to_last_completion_seconds": 66.367,
+          "journal_implied_slot_wait_seconds": 4152.118,
+          "equivalent_all_worker_wait_seconds": 43.25122916666667
+        },
+        {
+          "index": 2,
+          "completed": 96,
+          "first_to_last_completion_seconds": 86.456,
+          "journal_implied_slot_wait_seconds": 4824.934,
+          "equivalent_all_worker_wait_seconds": 50.259729166666666
+        }
+      ],
+      "excluded_partial_or_small_waves": [
+        {
+          "index": 3,
+          "admitted": 96,
+          "observed": 41
+        }
+      ],
+      "total_equivalent_all_worker_wait_seconds": 135.27370833333333
+    },
+    {
+      "epoch": 25969,
+      "host": "slave",
+      "workers": 32,
+      "waves": [
+        {
+          "index": 0,
+          "completed": 32,
+          "first_to_last_completion_seconds": 25.515,
+          "journal_implied_slot_wait_seconds": 592.977,
+          "equivalent_all_worker_wait_seconds": 18.53053125
+        },
+        {
+          "index": 1,
+          "completed": 32,
+          "first_to_last_completion_seconds": 74.822,
+          "journal_implied_slot_wait_seconds": 2133.56,
+          "equivalent_all_worker_wait_seconds": 66.67375
+        },
+        {
+          "index": 2,
+          "completed": 32,
+          "first_to_last_completion_seconds": 43.605,
+          "journal_implied_slot_wait_seconds": 1111.088,
+          "equivalent_all_worker_wait_seconds": 34.7215
+        },
+        {
+          "index": 3,
+          "completed": 32,
+          "first_to_last_completion_seconds": 43.856,
+          "journal_implied_slot_wait_seconds": 1121.861,
+          "equivalent_all_worker_wait_seconds": 35.05815625
+        }
+      ],
+      "excluded_partial_or_small_waves": [
+        {
+          "index": 4,
+          "admitted": 21,
+          "observed": 21
+        }
+      ],
+      "total_equivalent_all_worker_wait_seconds": 154.9839375
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "base_source_sha": "4cec2deeca89dfa1a22ad65477fc631eeaff63a8",
+  "files": {
+    "inert-comparison.json": {
+      "bytes": 4237,
+      "sha256": "6d6945d7296d7d81f57b1351010fb9b1a90929df9928e787026e4af67f0ffa2b"
+    },
+    "observed-wave-wait.json": {
+      "bytes": 6395,
+      "sha256": "e29fcd6083e0f806ae0b813f8ac0c7e05d9b3e83f185a0894c29acce1a1f7a74"
+    },
+    "wave-journal-timing.json": {
+      "bytes": 31785,
+      "sha256": "9ab08c61d007238fa1a8ab9bdd2b9cc77c960d436c179d1693d334a932e52d8d"
+    }
+  },
+  "schema": "pr100-sanitized-evidence-manifest-v1"
+}

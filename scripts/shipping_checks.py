@@ -31,6 +31,7 @@ TEST_FILES = (
     'tests/test_pr100_native_execution_identity.py',
     'tests/test_pr100_safe_activate.py',
     'tests/test_pr100_native_throughput.py',
+    'tests/test_pr100_native_refill.py',
     'tests/test_pr100_confirmation_deadline_review.py',
     'tests/test_pr100_native_dispatch_recovery.py',
     'tests/test_pr100_transport_compression.py',
