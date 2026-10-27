@@ -1,0 +1,348 @@
+"""Run on Pi: stamped release handoff at a verified continuation boundary.
+
+Usage: python3 SCRIPT SHA master|both|preserve --staging-receipt PATH
+Both mode additionally requires --qualification-receipt PATH.
+All subprocess output is captured; only allowlisted operational status is emitted.
+"""
+from __future__ import annotations
+import argparse
+import copy
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+
+OLD = 'b294f7f06b6f3c1efd05961f9a1365645af60410'
+THROUGHPUT_RELEASE = '036a6c48c32b762b3f803ffa920eaf3cf66d454a'
+APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE})
+BASE = Path('/home/thomasg')
+PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
+UNIT_NAME = 'nova-pr100-controller.service'
+UNIT = Path('/etc/systemd/system') / UNIT_NAME
+NATIVE_PREFIX = '/root/.pixi/envs/metanano'
+NATIVE = {'native_python': NATIVE_PREFIX + '/bin/python3.12',
+          'native_path': NATIVE_PREFIX + '/bin:/usr/local/bin:/usr/bin:/bin',
+          'native_python_path': '/root/metanano_shim'}
+ALTERNATE_PREFIX = '/root/pr100-native-alt-20261027'
+NATIVE_WRAPPER_SHA256 = 'ab23f3e807a65753207d219a323d567924f9d00c8633c6cad811981dcd6e02e8'
+NATIVE_ALTERNATE = {'native_python': ALTERNATE_PREFIX + '/bin/native-python',
+                    'native_path': ALTERNATE_PREFIX + '/bin:/usr/local/bin:/usr/bin:/bin',
+                    'native_python_path': ALTERNATE_PREFIX + '/shim'}
+
+
+def read(path, default=None):
+    try:
+        return json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return default
+
+
+def atomic(path, value, *, raw=False):
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(value if raw else json.dumps(value, allow_nan=False).encode())
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        try: os.unlink(name)
+        except FileNotFoundError: pass
+
+
+def ready_for_activation(clock, heartbeat, state, now, *, heartbeat_max_age=30):
+    """A receipt says nothing about current continuation ownership."""
+    if not all(isinstance(v, dict) for v in (clock, heartbeat, state)):
+        return False
+    epoch = clock.get('epoch'); length = clock.get('epoch_length'); block = clock.get('block')
+    # Deployment itself performs no scientific work. The controller enforces
+    # submission/admission cutoffs; the quiet gap is a useful handoff window.
+    return (type(epoch) is int and type(length) is int and length > 0 and type(block) is int
+        and block // length == epoch
+        and heartbeat.get('epoch') == epoch and heartbeat.get('status') == 'watching'
+        and isinstance(heartbeat.get('updated_at_unix'), (float, int))
+        and 0 <= now - heartbeat['updated_at_unix'] <= heartbeat_max_age
+        and state.get('challenge', {}).get('epoch') == epoch
+        and 'active' in state and state['active'] is None
+        and not state.get('legacy_uncertain_phase'))
+
+
+def qualification_identity_verified(receipt):
+    """Application scheduling revisions may differ; scientific identity may not drift silently."""
+    actual = receipt.get('runtime_identity', {})
+    reference = receipt.get('reference_runtime_identity', {})
+    source = receipt.get('application_source_sha', receipt.get('source_sha', ''))
+    if not isinstance(source, str) or not re.fullmatch('[0-9a-f]{40}', source):
+        return False
+    def valid(identity):
+        if not isinstance(identity, dict) or not re.fullmatch('[0-9a-f]{64}', str(identity.get('manifest_sha256', ''))):
+            return False
+        for name in ('scientific_sources', 'model_weights', 'tools'):
+            values = identity.get(name)
+            if not isinstance(values, dict) or not values or not all(
+                    isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in values.values()):
+                return False
+        return len(identity['model_weights']) >= 4
+    if not valid(actual) or not valid(reference):
+        return False
+    if actual == reference:
+        return True
+    approval = receipt.get('root_runtime_difference_approval', {})
+    identity_hash = hashlib.sha256(json.dumps(actual, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return (approval.get('approved') is True and approval.get('runtime_identity_sha256') == identity_hash
+            and isinstance(receipt.get('runtime_differences'), list) and bool(receipt['runtime_differences']))
+
+
+def qualified_native_paths(receipt):
+    runtime = receipt.get('runtime', {})
+    for allowed in (NATIVE, NATIVE_ALTERNATE):
+        if all(runtime.get(k) == v for k, v in allowed.items()):
+            if allowed is NATIVE_ALTERNATE and receipt.get('runtime_identity', {}).get('tools', {}).get(
+                    'native_python_wrapper') != NATIVE_WRAPPER_SHA256:
+                raise ValueError('native_wrapper_identity_unverified')
+            if allowed is NATIVE_ALTERNATE and runtime.get('native_tools') != ALTERNATE_PREFIX + '/bin':
+                raise ValueError('alternate_native_tools_path_mismatch')
+            return dict(allowed)
+    raise ValueError('unapproved_native_runtime_layout')
+
+
+def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path=None):
+    stamp = read(release / 'build_stamp.json', {})
+    check = stamp.get('validation', {})
+    if (stamp.get('git_sha') != sha or check.get('passed') is not True
+            or check.get('failures') != 0 or check.get('errors') != 0
+            or check.get('skipped') != 0 or check.get('tests', 0) <= 0):
+        raise ValueError('shipping_ci_not_verified')
+    expected_tests = {'tests/test_pr100_native_throughput.py', 'tests/test_pr100_native_dispatch_recovery.py'}
+    if sha != THROUGHPUT_RELEASE:
+        expected_tests.add('tests/test_pr100_fresh_native_budget.py')
+        expected_tests.add('tests/test_pr100_native_execution_identity.py')
+    if not expected_tests <= set(check.get('test_files', [])):
+        raise ValueError('throughput_shipping_tests_missing')
+    manifest = stamp.get('files')
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError('empty_release_manifest')
+    for name, digest in manifest.items():
+        relative = Path(name)
+        forbidden = {'.env', '.netrc', '.npmrc', '.git', '.ssh', '.aws', '.azure', 'credentials', 'cookies'}
+        if (relative.is_absolute() or '..' in relative.parts or not relative.parts
+                or any(part in forbidden or part.startswith('.env.') for part in relative.parts)
+                or relative.suffix in ('.pem', '.key')
+                or not (release / name).resolve().is_relative_to(release.resolve())):
+            raise ValueError('invalid_release_manifest_path')
+        if hashlib.sha256((release / name).read_bytes()).hexdigest() != digest:
+            raise ValueError('release_manifest_mismatch')
+    stage = read(staging_path, {})
+    hosts = stage.get('hosts', [])
+    if (stage.get('source_sha') != sha or len(hosts) != 3
+            or {h.get('host') for h in hosts} != {'pi', 'master', 'slave'}
+            or not all(h.get('source_sha') == sha and h.get('manifest_files') == len(manifest)
+                       and h.get('mismatch_files') == [] for h in hosts)):
+        raise ValueError('three_host_staging_not_verified')
+    if mode == 'both':
+        q = read(qualification_path, {}) if qualification_path else {}
+        if (q.get('schema') != 'pr100-native-runtime-qualification-v1' or q.get('status') != 'passed'
+                or q.get('host') != 'slave' or not qualification_identity_verified(q)
+                or q.get('runtime_manifest_verified') is not True or q.get('cpu_affinity_verified') is not True
+                or type(q.get('workers')) is not int or q['workers'] < 32
+                or type(q.get('completed_profiles')) is not int or q['completed_profiles'] < 32
+                or not str(q.get('runtime', {}).get('native_tools', '')).startswith('/')):
+            raise ValueError('slave_runtime_not_qualified')
+        qualified_native_paths(q)
+        return q
+    return None
+
+
+def selected_mode(current, mode):
+    existing = current.get('native_hosts', ['master'])
+    if mode == 'preserve':
+        if existing == ['master']:
+            return 'master'
+        if set(existing) == {'master', 'slave'} and len(existing) == 2:
+            return 'both'
+        raise ValueError('cannot_infer_existing_native_mode')
+    if mode == 'master' and 'slave' in existing:
+        raise ValueError('code_rollout_cannot_disable_qualified_slave')
+    return mode
+
+
+def proposed_config(current, sha, epoch, mode, qualification=None):
+    if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
+        raise ValueError('unexpected_current_release')
+    mode = selected_mode(current, mode)
+    if mode not in ('master', 'both'):
+        raise ValueError('invalid_activation_mode')
+    value = copy.deepcopy(current); previous = current['source_sha']
+    value.update(source_sha=sha, start_epoch=epoch, native_hosts=['master'] if mode == 'master' else ['master', 'slave'])
+    if sha != THROUGHPUT_RELEASE:
+        value['epoch_fresh_native_limit'] = current.get('epoch_fresh_native_limit', 4800)
+    value['native_worker_overrides'] = {
+        'master': {'workers': 96, 'max_workers': 96, 'cpu_slots': 104},
+        'slave': {'workers': 32, 'max_workers': 32, 'cpu_slots': 32}}
+    value['worker'].update(native_minimum_call_window_seconds=130, native_cleanup_reserve_seconds=10,
+                           native_screen={'enabled': False, 'backend': 'resident_cpu'})
+    for host in ('master', 'slave'):
+        runtime = value['hosts'][host]
+        if not runtime['release'].endswith('/' + previous):
+            raise ValueError('unexpected_host_release')
+        runtime['release'] = runtime['release'][:-len(previous)] + sha
+    if mode == 'both':
+        if qualification is None:
+            raise ValueError('slave_runtime_not_qualified')
+        value['hosts']['slave'].update(qualified_native_paths(qualification))
+        value['hosts']['slave']['native_tools'] = qualification['runtime']['native_tools']
+    return value
+
+
+def command(args, *, cwd=None, timeout=30):
+    result = subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError('subprocess_failed')
+    return result.stdout
+
+
+class ClockUnavailable(RuntimeError):
+    pass
+
+
+def current_clock():
+    code = ('import bittensor as bt,json;c=bt.Subtensor(network="finney");'
+            'b=int(c.get_current_block());n=int(c.tempo(68))+1;'
+            'print(json.dumps({"epoch":b//n,"block":b,"epoch_length":n}))')
+    try:
+        raw = command([PYTHON, '-B', '-c', code], timeout=25)
+        value = json.loads(raw.splitlines()[-1])
+        return {k: value[k] for k in ('epoch', 'block', 'epoch_length')}
+    except Exception as error:
+        raise ClockUnavailable('fresh_clock_unavailable') from error
+
+
+class Service:
+    def __init__(self, release, config_path, backup, unit=UNIT):
+        self.release, self.config_path, self.backup, self.unit = release, config_path, backup, unit
+    def validate(self, candidate):
+        command([PYTHON, '-B', '-c', 'import json,sys;from nanobody_opt.pr100_live_controller import validate_config;'
+                 'validate_config(json.load(open(sys.argv[1])))', str(candidate)], cwd=self.release)
+    def stop(self): command(['sudo', '-n', 'systemctl', 'stop', UNIT_NAME], timeout=120)
+    def start(self): command(['sudo', '-n', 'systemctl', 'start', UNIT_NAME])
+    def install(self, staged):
+        command(['sudo', '-n', 'install', '-o', 'root', '-g', 'root', '-m', '0644', str(staged), str(self.unit)])
+        command(['sudo', '-n', 'systemctl', 'daemon-reload'])
+    def verify(self):
+        raw = command(['systemctl', 'show', UNIT_NAME, '--property=ActiveState,UnitFileState,MainPID'])
+        fields = dict(line.split('=', 1) for line in raw.decode().splitlines())
+        pid = int(fields['MainPID'])
+        if fields['ActiveState'] != 'active' or fields['UnitFileState'] != 'enabled' or pid <= 0:
+            raise RuntimeError('service_not_running')
+        if Path('/proc', str(pid), 'cwd').resolve() != self.release:
+            raise RuntimeError('service_release_mismatch')
+
+
+def boundary(config, clock, now, *, heartbeat_max_age=30):
+    root = Path(config['state_root'])
+    return ready_for_activation(clock, read(root / 'heartbeat.json', {}),
+                                read(root / str(clock['epoch']) / 'continuation.json', {}), now,
+                                heartbeat_max_age=heartbeat_max_age)
+
+
+def handoff(base, sha, mode, release, qualification, *, clock_reader=current_clock,
+            service_factory=Service, now=time.time):
+    path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
+    clock = clock_reader()
+    if not boundary(config, clock, now()): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
+    candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
+    proposal = proposed_config(config, sha, clock['epoch'], mode, qualification)
+    if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
+            {k: v for k, v in config.items() if k != 'start_epoch'}
+            and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
+        return {'status': 'already_configured', 'epoch': clock['epoch']}
+    backup = base / 'pr100-staging' / ('throughput-backup-' + sha + '-' + mode + '-' + str(time.time_ns()))
+    backup.mkdir(parents=True, exist_ok=False)
+    service = service_factory(release, path, backup)
+    atomic(candidate, proposal); service.validate(candidate)
+    atomic(backup / 'config.json', original, raw=True)
+    atomic(backup / 'controller.service', service.unit.read_bytes(), raw=True)
+    unit = (release / 'deploy/submit_host' / UNIT_NAME).read_text()
+    unit = unit.replace('<RELEASE_DIR>', str(release)).replace('<CONFIG_PATH>', str(path)).replace('<CONTROLLER_PYTHON>', PYTHON)
+    staged_unit = backup / 'new-controller.service'; atomic(staged_unit, unit.encode(), raw=True)
+    changed = False
+    # Keep the short pause between attempts free of another slow chain RPC.
+    # The fresh chain check under the lock below still precedes any install.
+    if path.read_bytes() != original or not boundary(config, clock, now()):
+        return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
+    # The prepared config must use the same current epoch as the final check.
+    if proposal['start_epoch'] != clock['epoch']:
+        return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
+    try:
+        service.stop()
+        # Obtain the same lock as the controller after stop has completed.
+        with (Path(config['state_root']) / 'controller.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fresh = clock_reader()
+            raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
+                     or not boundary(config, fresh, now(), heartbeat_max_age=90))
+            if not raced:
+                # Do not rewrite continuation state or the publication artifact.
+                changed = True
+                os.replace(candidate, path)
+                service.install(staged_unit)
+        if raced:
+            service.start()
+            return {'status': 'boundary_race_old_service_restarted', 'epoch': fresh['epoch']}
+        service.start(); service.verify()
+        return {'status': 'activated', 'epoch': fresh['epoch'], 'native_hosts': proposal['native_hosts'],
+                'source_sha': sha, 'state_preserved': True, 'publication_preserved': True}
+    except Exception:
+        if changed:
+            atomic(path, original, raw=True)
+            service.install(backup / 'controller.service')
+        service.start()
+        raise
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('sha'); parser.add_argument('mode', choices=('master', 'both', 'preserve'))
+    parser.add_argument('--staging-receipt', required=True, type=Path)
+    parser.add_argument('--qualification-receipt', type=Path)
+    parser.add_argument('--wait-seconds', type=int, default=5400)
+    args = parser.parse_args(argv)
+    if not re.fullmatch('[0-9a-f]{40}', args.sha) or not 1 <= args.wait_seconds <= 7200:
+        raise ValueError('invalid_arguments')
+    release = BASE / 'pr100-releases' / args.sha
+    report = BASE / 'pr100-staging' / ('throughput-activation-' + args.sha + '-' + args.mode + '.json')
+    end = time.monotonic() + args.wait_seconds
+    lock_path = BASE / 'pr100-staging/throughput-activation.lock'; lock_path.parent.mkdir(exist_ok=True)
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            while time.monotonic() < end:
+                if not args.staging_receipt.is_file():
+                    value = {'status': 'waiting_for_verified_staging'}
+                else:
+                    effective_mode = selected_mode(read(BASE / 'pr100-controller.json', {}), args.mode)
+                    q = verify_prerequisites(args.sha, release, args.staging_receipt,
+                        mode=effective_mode, qualification_path=args.qualification_receipt)
+                    try:
+                        value = handoff(BASE, args.sha, args.mode, release, q)
+                    except ClockUnavailable:
+                        value = {'status': 'waiting_for_fresh_clock'}
+                atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})
+                if value['status'] in ('activated', 'already_configured'):
+                    print(json.dumps(value)); return 0
+                time.sleep(5)
+            atomic(report, {'status': 'timed_out', 'source_sha': args.sha, 'mode': args.mode})
+            print(json.dumps({'status': 'timed_out'})); return 1
+        except Exception as error:
+            value = {'status': 'failed', 'error_type': type(error).__name__, 'source_sha': args.sha, 'mode': args.mode}
+            atomic(report, value); print(json.dumps(value)); return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

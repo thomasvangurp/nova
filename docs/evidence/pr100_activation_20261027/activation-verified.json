@@ -1,0 +1,19 @@
+{
+  "status": "activated",
+  "epoch": 25967,
+  "source_sha": "22407a4ae6324b8c051ef89f738eb74fddaad978",
+  "mode": "both",
+  "native_hosts": [
+    "master",
+    "slave"
+  ],
+  "state_preserved": true,
+  "publication_preserved": true,
+  "updated_at_unix": 1793094925.0615563,
+  "unit": {
+    "ActiveState": "inactive",
+    "ExecMainStatus": "0",
+    "Result": "success",
+    "SubState": "dead"
+  }
+}

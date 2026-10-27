@@ -1,0 +1,10 @@
+{
+  "source_release": "22407a4ae6324b8c051ef89f738eb74fddaad978",
+  "historical_script_sha256": "11b3a180783015ade0786a8a2b183e940ea5f7018cf2ca9d4f1ce43cf3748e93",
+  "historical_tests_sha256": "a902da37d5c1b3c16f34f3696aef155c1182c12154d91124e8a9b6f009529657",
+  "historical_script_retained_byte_identical": true,
+  "historical_tests_retained_byte_identical": true,
+  "historical_tests": 36,
+  "successor_script": "scripts/pr100_safe_activate.py",
+  "successor_tests": "tests/test_pr100_safe_activate.py"
+}

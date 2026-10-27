@@ -26,6 +26,7 @@ SOURCE_PATHS = (
     'docs/PR100_NATIVE_REVIEW_RESPONSE.md',
     'docs/PR100_MOLECULE_GATE.md',
     'docs/experiments/pr100-native-reuse-v1.population.json',
+    'docs/pr100-safe-activation.md', 'docs/evidence/pr100_activation_20261027',
 )
 RESEARCH_FILES = frozenset({
     'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
@@ -48,6 +49,7 @@ CONTROL_FILES = frozenset({
     'scripts/pi_shadow_receipt.py', 'scripts/export_promotion_evidence.py',
     'scripts/control_release.py', 'scripts/replay_handoff.py',
     'scripts/pi_control_agent.py',
+    'scripts/pr100_safe_activate.py',
 })
 
 

@@ -1,0 +1,86 @@
+{
+  "observed_at_unix": 1793095649.3063426,
+  "source_sha": "22407a4ae6324b8c051ef89f738eb74fddaad978",
+  "epoch_fresh_native_limit": 4800,
+  "native_hosts": [
+    "master",
+    "slave"
+  ],
+  "native_worker_overrides": {
+    "master": {
+      "workers": 96,
+      "max_workers": 96,
+      "cpu_slots": 104
+    },
+    "slave": {
+      "workers": 32,
+      "max_workers": 32,
+      "cpu_slots": 32
+    }
+  },
+  "heartbeat": {
+    "epoch": 25967,
+    "work_epoch": 25967,
+    "status": "running",
+    "phase": "native",
+    "block": 9374338,
+    "epoch_length": 361,
+    "updated_at_unix": 1793095646.0896637
+  },
+  "attempt": 6,
+  "active_phase": "native",
+  "pending_native": 459,
+  "pending_confirmation": 9,
+  "native_attempted_unique": 1301,
+  "native_eligible": 22,
+  "scored_candidates": 22,
+  "completed_attempt_totals": {
+    "fresh_evaluations": 1301,
+    "repeat_evaluations": 53,
+    "completed": 1354,
+    "native_passed": 26
+  },
+  "fresh_native_budget": {
+    "limit": 4800,
+    "admitted_unique": 238,
+    "legacy_charged_unique": 1063,
+    "reservation_count": 3
+  },
+  "hosts": {
+    "master": {
+      "job": {
+        "exists": false
+      },
+      "result": {
+        "exists": false
+      },
+      "progress": {
+        "exists": false
+      },
+      "supervisor": {
+        "exists": false
+      }
+    },
+    "slave": {
+      "job": {
+        "workers": 32,
+        "max_workers": 32,
+        "cpu_slots": 32,
+        "phase_budget_seconds": 155.0,
+        "candidate_budget_seconds": 300,
+        "native_minimum_call_window_seconds": 130,
+        "native_cleanup_reserve_seconds": 10,
+        "native_host": "slave"
+      },
+      "result": {
+        "exists": false
+      },
+      "progress": {
+        "exists": false
+      },
+      "supervisor": {
+        "exists": false
+      }
+    }
+  }
+}

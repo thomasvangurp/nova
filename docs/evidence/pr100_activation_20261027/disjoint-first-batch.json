@@ -1,0 +1,28 @@
+{
+  "epoch": 25967,
+  "attempt": 5,
+  "observed_at_unix": 1793095737.09301,
+  "shared_inputs": 0,
+  "hosts": {
+    "master": {
+      "completed": 96,
+      "distinct_inputs": 440,
+      "fresh_evaluations": 96,
+      "fresh_inputs": 440,
+      "input_count": 440,
+      "native_passed": 7,
+      "observation_errors": 0,
+      "repeat_evaluations": 0
+    },
+    "slave": {
+      "completed": 32,
+      "distinct_inputs": 147,
+      "fresh_evaluations": 32,
+      "fresh_inputs": 147,
+      "input_count": 147,
+      "native_passed": 2,
+      "observation_errors": 0,
+      "repeat_evaluations": 0
+    }
+  }
+}
