@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DATABASE = Path("/root/artifacts/nanobody_mutations.sqlite")
 STATE = Path("/root/artifacts/dashboard_replay")
 PASSES = 10
-TTL = 900
+# Ten concurrent ordinary draws can exceed 900s. Keep the complete batch
+# within the existing 1100s remote command and 1150s Pi transport deadlines.
+TTL = 1050
 
 
 def pending(database: Path, epoch: int, *, exclude=()) -> tuple[int | None, list[str]]:

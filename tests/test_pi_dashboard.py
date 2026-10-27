@@ -249,7 +249,7 @@ def test_replay_lease_excludes_live_gpus_and_shared_daemon(tmp_path):
         with pytest.raises(ValueError, match="background_pool"):
             replay.lease_job(tmp_path, gpu=gpu, epoch=25965)
     job = replay.lease_job(tmp_path, gpu=5, epoch=25965)
-    assert job["gpu"] == 5 and job["ttl_seconds"] == 900
+    assert job["gpu"] == 5 and job["ttl_seconds"] == 1050
     assert job["lock_directory"] == "/root/pr100-controller/gpu-locks"
     assert "--owned-daemon" in job["command"]
     assert "--direct" not in job["command"]
