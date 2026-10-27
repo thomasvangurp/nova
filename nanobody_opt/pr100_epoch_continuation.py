@@ -372,7 +372,12 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 admitted = partial.get('attempted_sequence_hashes',
                     [rules.sequence_hash(r['sequence']) for r in state['native_rows']])
                 state['score_attempted_hashes'] = sorted(set(state['score_attempted_hashes']) | set(admitted))
-            state['active'] = None
+            if active.get('native_unresolved'):
+                # Cleaning up a downstream job cannot release a different
+                # host's still-owned native batch.
+                active['phase'] = 'native'
+            else:
+                state['active'] = None
         save()
     receipt.update(phase_diagnostics=diagnostics, publication_cutoff_unix=stop_at,
                    wall_seconds=time.time() - receipt['started_at_unix'],
