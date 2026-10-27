@@ -31,6 +31,16 @@ PSH_LOWER_BOUND = 73.4
 PSH_UPPER_BOUND = 89.0
 
 
+def authoritative_cpu_measurement(value):
+    """Legacy native profiles remain valid; explicitly accelerated data never is.
+
+    Warm CPU and CUDA screening are both separate numerical protocols. Even a
+    caller-supplied ``authoritative=True`` cannot bless their observations.
+    """
+    from nanobody_opt import rules
+    return rules.authoritative_cpu_measurement(value)
+
+
 def margin_settings(supplied=None):
     """Merge supplied margin parameters over the audit defaults."""
     merged = dict(DEFAULT_MARGIN)
@@ -112,7 +122,7 @@ def mean_and_sd(values):
 
 
 def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS,
-           margin=None, reason_for=None):
+           margin=None, reason_for=None, cpu_confirmation_minimum=0):
     """Classify a candidate from its raw repeat measurements.
 
     Returns a dict with the tier ('A', 'B' or None), every raw measurement, the
@@ -125,6 +135,9 @@ def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS
     ``rules.developability_reason``); this function never re-implements a gate.
     """
     settings = margin_settings(margin)
+    if (isinstance(cpu_confirmation_minimum, bool)
+            or not isinstance(cpu_confirmation_minimum, int) or cpu_confirmation_minimum < 0):
+        raise ValueError('CPU confirmation minimum must be a nonnegative integer')
     if reason_for is None:
         from nanobody_opt import rules
         reason_for = lambda value: rules.developability_reason(
@@ -134,9 +147,13 @@ def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS
                'tier': None, 'margin_safe': False, 'psh_values': [],
                'psh_mean': None, 'psh_sd': None,
                'margin_threshold': None, 'margin_lower_threshold': None,
-               'psh_boundary_margin': None, 'reason': ''}
+               'psh_boundary_margin': None, 'reason': '',
+               'cpu_confirmation_minimum': cpu_confirmation_minimum}
     if not measurements:
         verdict['reason'] = 'not_run'
+        return verdict
+    if any(not authoritative_cpu_measurement(value) for value in measurements):
+        verdict['reason'] = 'non_authoritative_measurement'
         return verdict
     # Every gate must pass on every repeat, per existing rule semantics.
     for value in measurements:
@@ -155,6 +172,10 @@ def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS
     verdict['margin_threshold'] = threshold
     verdict['margin_lower_threshold'] = lower_threshold
     verdict['psh_boundary_margin'] = psh_margin(mean)
+    if len(measurements) < cpu_confirmation_minimum:
+        # This is not tier B: marginal fallback cannot waive CPU confirmation.
+        verdict['reason'] = 'cpu_confirmation_required'
+        return verdict
     enough = len(measurements) >= settings['min_repeats'] and len(measurements) >= min(repeats, settings['min_repeats'])
     if enough and lower_threshold <= mean <= threshold:
         verdict.update(tier='A', margin_safe=True)
@@ -171,7 +192,16 @@ def order_candidates(candidates, *, allow_marginal=True):
         return (0 if row.get('tier') == 'A' else 1,
                 -margin if margin is not None else math.inf,
                 str(row.get('sequence_hash') or ''))
-    ordered = sorted((r for r in candidates if r.get('tier') in ('A', 'B')), key=key)
+    def publishable(row):
+        measurements = row.get('measurements', [])
+        if (row.get('tier') not in ('A', 'B') or not isinstance(measurements, list)
+                or any(not authoritative_cpu_measurement(m) for m in measurements)):
+            return False
+        if row.get('accelerated_screen'):
+            minimum = row.get('cpu_confirmation_minimum')
+            return type(minimum) is int and minimum >= 2 and len(measurements) >= minimum
+        return True
+    ordered = sorted((r for r in candidates if publishable(r)), key=key)
     if not allow_marginal:
         ordered = [r for r in ordered if r.get('tier') == 'A']
     return ordered

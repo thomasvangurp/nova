@@ -393,3 +393,49 @@ def test_real_consumer_rejects_a_changed_archive_after_export(replay):
     rejected = verify(fleet, replay.challenge)
     assert rejected['sequence_pool'] == []
     assert rejected['handoff_diagnostics']['reason_counts'] == {'novelty_archive_mismatch': 2}
+
+
+@pytest.mark.parametrize('markers', [
+    {'evidence_backend': 'cuda_refine', 'authoritative': False},
+    {'evidence_backend': 'resident_cpu', 'authoritative': False},
+    {'evidence_backend': 'cuda_refine', 'authoritative': True},
+    {'authoritative': False},
+])
+@pytest.mark.parametrize('tier', ['A', 'B'])
+def test_export_and_pi_reject_screen_evidence_despite_forged_tier(replay, markers, tier):
+    fleet = build(replay)
+    row = replay.validity['candidates'][0]
+    row['tier'] = tier
+    row['pr100_evidence']['developability'].update(markers)
+    with pytest.raises(ValueError, match='non_authoritative_measurement'):
+        build(replay)
+    checkpoint = fleet['sequence_pool_checkpoints'][row['sequence']]
+    checkpoint['pr100_evidence']['developability'].update(markers)
+    rejected = verify(fleet, replay.challenge)
+    assert row['sequence'] not in rejected['sequence_pool']
+    assert rejected['handoff_diagnostics']['reason_counts'] == {'non_authoritative_measurement': 1}
+
+
+@pytest.mark.parametrize('fault', ['missing_repeat', 'screen_repeat', 'failed_repeat'])
+def test_export_and_pi_recheck_assisted_cpu_confirmation(replay, fault):
+    row = replay.validity['candidates'][0]
+    evidence = row['pr100_evidence']
+    evidence['native_screen_confirmation'] = {
+        'minimum': 3, 'measurements': [copy.deepcopy(evidence['developability']) for _ in range(3)]}
+    fleet = build(replay)
+    assert row['sequence'] in verify(fleet, replay.challenge)['sequence_pool']
+    measurement = evidence['native_screen_confirmation']['measurements']
+    if fault == 'missing_repeat':
+        measurement.pop(); reason = 'cpu_confirmation_required'
+    elif fault == 'screen_repeat':
+        measurement[-1].update(evidence_backend='resident_cpu', authoritative=False)
+        reason = 'non_authoritative_measurement'
+    else:
+        measurement[-1]['surface_hydrophobic_patches'] = 90.
+        reason = 'psh_threshold'
+    with pytest.raises(ValueError, match=reason):
+        build(replay)
+    fleet['sequence_pool_checkpoints'][row['sequence']]['pr100_evidence'] = evidence
+    rejected = verify(fleet, replay.challenge)
+    assert row['sequence'] not in rejected['sequence_pool']
+    assert rejected['handoff_diagnostics']['reason_counts'] == {reason: 1}

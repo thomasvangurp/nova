@@ -228,12 +228,36 @@ def developability_reason(result, requirements, *, sequence=None):
     return ""
 
 
+def authoritative_cpu_measurement(value):
+    """Reject explicit screen evidence while retaining legacy CPU profiles."""
+    return (isinstance(value, dict)
+            and ("authoritative" not in value or value["authoritative"] is True)
+            and value.get("evidence_backend") in (None, "cpu_native"))
+
+
 def validate_evidence(evidence, sequence, expected, config):
     if not isinstance(evidence, dict) or evidence.get("challenge") != expected:
         raise ValueError("missing or mismatched current-challenge evidence")
     if evidence.get("filter_sha") != FILTER_SHA:
         raise ValueError("filter version mismatch")
+    if (isinstance(evidence.get("developability"), dict)
+            and not authoritative_cpu_measurement(evidence["developability"])):
+        raise ValueError("non_authoritative_measurement")
     requirements = config["nanobody_requirements"]
+    if "native_screen_confirmation" in evidence:
+        confirmation = evidence["native_screen_confirmation"]
+        if not isinstance(confirmation, dict):
+            raise ValueError("cpu_confirmation_required")
+        minimum, measurements = confirmation.get("minimum"), confirmation.get("measurements")
+        if (type(minimum) is not int or minimum < 2 or not isinstance(measurements, list)
+                or len(measurements) < minimum or measurements[0] != evidence["developability"]):
+            raise ValueError("cpu_confirmation_required")
+        for measurement in measurements:
+            if not authoritative_cpu_measurement(measurement):
+                raise ValueError("non_authoritative_measurement")
+            reason = developability_reason(measurement, requirements, sequence=sequence)
+            if reason:
+                raise ValueError(reason)
     reason = annotation_reason(evidence.get("annotation"), requirements,
                                sequence=sequence, epoch_challenge=expected)
     reason = reason or developability_reason(evidence.get("developability"), requirements,
@@ -255,6 +279,7 @@ HANDOFF_REJECTION_CODES = frozenset({
     "human_j_identity", "annotation_reference_missing", "annotation_reference_mismatch",
     "cdr3_length_unavailable", "wrong_epoch_v_gene", "wrong_epoch_cdr3_length",
     "developability_unavailable", "developability_red_flags", "psh_unavailable",
+    "non_authoritative_measurement", "cpu_confirmation_required",
     "psh_threshold", "aggrescan_unavailable_or_failed", "aggrescan_sequence_mismatch",
     "aggrescan_provenance_mismatch", "aggrescan_threshold", "developability_failed",
 })
