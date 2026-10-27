@@ -170,9 +170,13 @@ POLL_FAILURE_LIMIT = 8
 
 
 def remote(config, host, request, *, sleep=time.sleep):
+    runtime = config['hosts'][host]
+    identity = []
+    if runtime.get('host_key_alias'):
+        identity = ['-oHostKeyAlias=' + runtime['host_key_alias']]
     command = ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
-               '-oConnectTimeout=8', '-p', str(config['hosts'][host]['port']),
-               config['hosts'][host]['address'], 'python3', '-c', shlex.quote(TRANSPORT)]
+               '-oConnectTimeout=8', *identity, '-p', str(runtime['port']),
+               runtime['address'], 'python3', '-c', shlex.quote(TRANSPORT)]
     # Retries share one epoch deadline, including every attempt and backoff.
     deadline = request.get('transport_deadline_unix')
     end = (time.monotonic() + max(0.0, float(deadline) - time.time())
@@ -694,6 +698,10 @@ def validate_config(config):
         port = runtime['port']
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError(f'hosts.{name}.port must be a tcp port')
+        alias = runtime.get('host_key_alias')
+        if alias is not None and (not isinstance(alias, str) or not re.fullmatch(
+                r'(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[A-Za-z0-9_.:-]+\]:[0-9]{1,5})', alias)):
+            raise ValueError(f'hosts.{name}.host_key_alias must identify a known SSH host')
         if not str(runtime['release']).startswith('/'):
             raise ValueError(f'hosts.{name}.release must be an absolute path')
     reserve = config.get('reserve_blocks', RESERVE_BLOCKS)

@@ -637,6 +637,32 @@ def test_remote_retries_connection_level_ssh_failures(tmp_path, monkeypatch):
     assert result == {'running': True} and len(calls) == 3
 
 
+def test_direct_endpoint_preserves_trusted_host_identity(tmp_path, monkeypatch):
+    value = config(tmp_path)
+    value['hosts']['master'].update(address='root@192.0.2.10', port=40096,
+                                    host_key_alias='[relay.example]:10616')
+    calls = []
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return _completed(0, stdout=b'{"running": true}\n')
+    monkeypatch.setattr(controller.subprocess, 'run', fake_run)
+    assert controller.remote(value, 'master', {'operation': 'poll'}) == {'running': True}
+    command = calls[0]
+    assert '-oStrictHostKeyChecking=yes' in command
+    assert '-oHostKeyAlias=[relay.example]:10616' in command
+    assert command[command.index('-p') + 1] == '40096'
+    assert 'root@192.0.2.10' in command
+
+
+@pytest.mark.parametrize('alias', ['', '-oStrictHostKeyChecking=no', 'host\nother', 7])
+def test_host_identity_alias_rejects_invalid_config(tmp_path, monkeypatch, alias):
+    value = config(tmp_path)
+    value['hosts']['master']['host_key_alias'] = alias
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='host_key_alias'):
+        controller.validate_config(value)
+
+
 def test_remote_does_not_retry_a_remote_command_failure(tmp_path, monkeypatch):
     calls = []
 
