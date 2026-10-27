@@ -56,7 +56,7 @@ def runtime_identity():
             packages[name] = None
     assets = {}
     prefix = Path(sys.prefix).resolve()
-    for name in ('assets-manifest.json', 'pydantic-assets-manifest.json'):
+    for name in ('assets-manifest.json', 'pydantic-assets-manifest.json', 'hmmer-assets-manifest.json'):
         raw = (prefix / name).read_bytes()
         manifest = json.loads(raw)
         if manifest.get('schema') != 'pr100-public-novelty-assets-v1' or not manifest.get('files'):
@@ -82,6 +82,9 @@ def runtime_identity():
             'packages': packages, 'assets': assets, 'sources': sources,
             'python_version': list(sys.version_info[:3]),
             'python_binary_sha256': hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
+            'execution_environment_sha256': rules.digest({key: os.environ.get(key) for key in (
+                'LD_LIBRARY_PATH', 'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'CUDA_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES')}),
             'archive_batch_worker_limit': min(8, max(1, (os.cpu_count() or 1) // 2))}
 
 
