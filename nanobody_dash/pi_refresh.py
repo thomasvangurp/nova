@@ -115,15 +115,16 @@ def accept_comparison(pending: Path) -> int:
 
 
 def multipass() -> dict:
+    from .master_refresh import export_command
+
     host, port = master_endpoint()
     options = ["-i", str(IDENTITY), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-               "-o", "ConnectTimeout=12", "-o", "StrictHostKeyChecking=accept-new"]
+               "-o", "ConnectTimeout=12", "-o", "StrictHostKeyChecking=yes"]
     outcomes_ok = submission_outcomes(host, port, options)
     # timeout runs remotely too: losing SSH must not leave an unbounded export.
     try:
         exported = run(["ssh", *options, "-p", str(port), "root@" + host,
-                        "cd /root && timeout --kill-after=10 240 "
-                        "/root/.pixi/envs/bgen/bin/python -m tools.build_multipass_comparison --recent 6"], 270)
+                        export_command()], 270)
         export_code = exported.returncode
     except subprocess.TimeoutExpired:
         export_code = 124
@@ -179,6 +180,26 @@ def status_text() -> str:
 
 
 def auxiliary(job: str) -> dict:
+    if job == "replay":
+        from .master_refresh import export_command
+        host, port = master_endpoint()
+        command = ["ssh", "-i", str(IDENTITY), "-o", "IdentitiesOnly=yes",
+                   "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                   "-o", "ConnectTimeout=12", "-p", str(port), "root@" + host,
+                   export_command(replay=True)]
+        completed = run(command, 1150)
+        try:
+            body = json.loads(completed.stdout)
+        except (ValueError, TypeError):
+            return {"ok": False, "reason": "replay_result_unavailable"}
+        if not isinstance(body, dict):
+            return {"ok": False, "reason": "replay_result_unavailable"}
+        # The remote process emits only these operational fields. Do not pass
+        # through arbitrary output, even from a future or mismatched release.
+        return {"ok": completed.returncode == 0 and body.get("ok") is True,
+                "epoch": body.get("epoch") if type(body.get("epoch")) is int else None,
+                "rows": body.get("rows") if type(body.get("rows")) is int else None,
+                "reason": "replay_verified" if body.get("ok") is True else "replay_pending"}
     if job == "compound":
         ok = module("nanobody_dash.compound", 1200)
         state = read_json(DATA / "compound_status.json")
@@ -198,7 +219,7 @@ def auxiliary(job: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("job", choices=("refresh", "publish", "multipass", "compound", "money", "proxy"))
+    parser.add_argument("job", choices=("refresh", "publish", "multipass", "replay", "compound", "money", "proxy"))
     job = parser.parse_args().job
     if os.environ.get("NOVA_DASH_LOCAL_PI") != "1":
         print(json.dumps({"ok": False, "reason": "pi_mode_required"}))

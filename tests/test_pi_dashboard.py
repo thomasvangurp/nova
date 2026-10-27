@@ -17,6 +17,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(pi, "DATA", tmp_path / "data")
     monkeypatch.setattr(pi, "COMPARISON", tmp_path / "comparison.json")
     monkeypatch.setenv("NOVA_DASH_LOCAL_PI", "1")
+    monkeypatch.setenv("NOVA_DASH_MASTER_RELEASE_DIR", "/root/releases/" + "a" * 40)
     return tmp_path
 
 
@@ -205,3 +206,122 @@ def test_aws_collector_rejects_mutation_before_starting_cli(monkeypatch):
     monkeypatch.setattr(infra.subprocess, "run", unexpected)
     with pytest.raises(infra.InfraError):
         infra._aws_json(["ec2", "run-instances"], profile="nova-dashboard")
+
+
+def test_master_export_requires_pinned_release_and_local_store(monkeypatch):
+    from nanobody_dash.master_refresh import export_command
+    for value in ("", "/root", "/root/releases/current", "/root/releases/" + "a" * 40 + ";bad"):
+        monkeypatch.setenv("NOVA_DASH_MASTER_RELEASE_DIR", value)
+        with pytest.raises(ValueError, match="release_required"):
+            export_command()
+    monkeypatch.setenv("NOVA_DASH_MASTER_RELEASE_DIR", "/root/dashboard-releases/" + "a" * 40)
+    command = export_command()
+    assert "NOVA_LOCAL_SQLITE=1" in command
+    assert "-m nanobody_dash.master_refresh" in command
+    assert "cd /root &&" not in command
+    assert "timeout --kill-after=10 1100" in export_command(replay=True)
+
+
+def test_master_reference_sync_precedes_export_and_excludes_current_epoch(monkeypatch, tmp_path):
+    from nanobody_dash import master_refresh
+    from nanobody_opt import rules, seed_mutation_database as seed, mutation_network
+    calls = []
+    def fetch(epochs, **kwargs):
+        assert list(epochs) == list(range(rules.ACTIVATION_EPOCH, rules.ACTIVATION_EPOCH + 3))
+        assert kwargs["target"] == rules.target_for_epoch(rules.ACTIVATION_EPOCH + 3)
+        calls.append("fetch")
+        return [{"observation_id": "fixture"}]
+    monkeypatch.setattr(seed, "fetch_observations", fetch)
+    monkeypatch.setattr(mutation_network, "update_observation_store", lambda *a: calls.append("store") or 1)
+    monkeypatch.setattr(builder, "build", lambda *a, **k: calls.append("export") or {
+        str(rules.ACTIVATION_EPOCH + 2): {"ours": {"mean": None}}})
+    result = master_refresh.refresh(epoch=rules.ACTIVATION_EPOCH + 3,
+                                    database=tmp_path/"db", output=tmp_path/"out")
+    assert calls == ["fetch", "store", "export"]
+    assert result["reference_rows"] == 1
+    assert result["multipass_epoch"] == rules.ACTIVATION_EPOCH + 2
+
+
+def test_replay_lease_excludes_live_gpus_and_shared_daemon(tmp_path):
+    from nanobody_dash import replay_refresh as replay
+    for gpu in (True, -1, 0, 1, 2, 3, 4, 8):
+        with pytest.raises(ValueError, match="background_pool"):
+            replay.lease_job(tmp_path, gpu=gpu, epoch=25965)
+    job = replay.lease_job(tmp_path, gpu=5, epoch=25965)
+    assert job["gpu"] == 5 and job["ttl_seconds"] == 900
+    assert job["lock_directory"] == "/root/pr100-controller/gpu-locks"
+    assert "--direct" in job["command"]
+    assert job["command"][job["command"].index("--gpus")+1] == "5"
+    assert "CUDA_VISIBLE_DEVICES" not in job["env"]
+    assert "TOKEN" not in " ".join(job["env"])
+
+
+def test_replay_pending_uses_same_target_and_missing_depth(monkeypatch, tmp_path):
+    import sqlite3
+    from nanobody_dash import replay_refresh as replay
+    from nanobody_opt import rules
+    from tools import collect_slave_multipass_seqs as collector
+    db = tmp_path/"data.sqlite"
+    with sqlite3.connect(db) as connection:
+        connection.executescript("CREATE TABLE nodes(id INTEGER,target TEXT);"
+                                 "CREATE TABLE observations(node_id INTEGER,epoch INTEGER,source TEXT);")
+        connection.executemany("INSERT INTO nodes VALUES (?,?)", [(1, rules.TARGET), (2, "OLD")])
+        connection.executemany("INSERT INTO observations VALUES (?,?,?)", [
+            (1, 25965, "public_validator_api"), (1, 25967, "public_validator_api"),
+            (2, 25966, "public_validator_api")])
+    monkeypatch.setattr(collector, "leaderboard_sequences", lambda epoch: ["COVERED", "MISSING"] if epoch == 25965 else pytest.fail("wrong epoch"))
+    monkeypatch.setattr(collector, "pass_counts", lambda seqs, target: {"COVERED": 10, "MISSING": 9})
+    assert replay.pending(db, 25967) == (25965, ["MISSING"])
+
+
+def test_failed_replay_never_imports_rows(monkeypatch, tmp_path):
+    from nanobody_dash import replay_refresh as replay
+    from tools import replay_context, ingest_slave_multipass
+    monkeypatch.setattr(replay, "STATE", tmp_path)
+    monkeypatch.setattr(replay, "pending", lambda *a: (25965, ["FIXTURE"]))
+    monkeypatch.setattr(replay_context, "prepare", lambda *a, **k: None)
+    monkeypatch.setattr(ingest_slave_multipass, "load_rows", lambda *a: pytest.fail("failed lease must not import"))
+    def launch(command, **kwargs):
+        job = json.loads(Path(command[-1]).read_text())
+        Path(job["receipt"]).write_text(json.dumps({"status": "contention_abort", "child_exit_code": None}))
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(replay.subprocess, "run", launch)
+    assert replay.run(epoch=25967)["reason"] == "replay_contention_abort"
+
+
+def test_pi_replay_does_not_forward_remote_strings(paths, monkeypatch):
+    monkeypatch.setattr(pi, "master_endpoint", lambda: ("host", 22))
+    monkeypatch.setattr(pi, "run", lambda *a: subprocess.CompletedProcess([], 1,
+        json.dumps({"ok": False, "epoch": "PRIVATE", "rows": "PRIVATE", "reason": "PRIVATE"}).encode()))
+    assert pi.auxiliary("replay") == {"ok": False, "epoch": None, "rows": None, "reason": "replay_pending"}
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_replay_import_requires_all_distinct_passes(monkeypatch, tmp_path, duplicate):
+    from nanobody_dash import replay_refresh as replay
+    from tools import replay_context, ingest_slave_multipass, collect_slave_multipass_seqs as collector
+    from nanobody_opt import mutation_network, rules
+    monkeypatch.setattr(replay, "STATE", tmp_path)
+    monkeypatch.setattr(replay, "pending", lambda *a: (25965, ["FIXTURE"]))
+    monkeypatch.setattr(replay_context, "prepare", lambda *a, **k: None)
+    rows = [{"sequence": "FIXTURE", "epoch": 25965, "target": rules.TARGET,
+             "metrics": {"fixture": 1}, "allow_replicates": True,
+             "observation_id": str(n), "pass_index": 1 if duplicate else n}
+            for n in range(1, 11)]
+    monkeypatch.setattr(ingest_slave_multipass, "load_rows", lambda *a: rows)
+    monkeypatch.setattr(ingest_slave_multipass, "validate", lambda rows: [])
+    imported = []
+    monkeypatch.setattr(mutation_network, "update_observation_store", lambda db, value: imported.extend(value) or len(value))
+    monkeypatch.setattr(collector, "pass_counts", lambda *a: {"FIXTURE": 10})
+    def launch(command, **kwargs):
+        job = json.loads(Path(command[-1]).read_text())
+        Path(job["receipt"]).write_text(json.dumps({"status": "process_finished", "child_exit_code": 0}))
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(replay.subprocess, "run", launch)
+    if duplicate:
+        with pytest.raises(ValueError, match="duplicate_passes"):
+            replay.run(epoch=25967)
+        assert imported == []
+    else:
+        assert replay.run(epoch=25967)["rows"] == 10
+        assert imported == rows

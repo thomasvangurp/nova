@@ -13,14 +13,15 @@ import subprocess
 import shutil
 import sys
 
-sys.path.insert(0, "/root")
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 from nanobody_opt.rules import target_for_epoch
 from nanobody_opt.simulate_round import METRICS as SUM_OF_TEN_DIRS
 import yaml
 
 
 def replicate_command(inp, out_dir, gpus, config, target):
-    return [sys.executable, '/root/nanobody_opt/score_boltzgen_fast_adapter.py',
+    return [sys.executable, str(ROOT/'nanobody_opt/score_boltzgen_fast_adapter.py'),
             '--sequences', str(inp), '--config', str(config), '--target', target,
             '--gpus', gpus, '--shards-per-gpu', '1', '--batch-size', '2',
             '--work-root', str(out_dir/'work'), '--out', str(out_dir/'exact_all.json'),
@@ -46,18 +47,50 @@ def validate_context(epoch, config, field):
     return target
 
 
-def score_group(sequences, passes, root, gpus, config, target):
+def score_group(sequences, passes, root, gpus, config, target, *, daemon=True,
+                independent_calls=False):
     # Replicate keys are indexed within a single length group. The ordinary
     # waves wrapper deduplicates inputs, so replicate batches use the adapter.
     records = []
     for length in sorted({len(s) for s in sequences}):
         group = [s for s in sequences if len(s) == length]
+        if independent_calls:
+            # Keep the master's registered base-v1 runtime: independent
+            # ordinary calls need no replica-batching capability or new pin.
+            for replica in range(1, passes + 1):
+                work = root / f'length{length}' / f'pass{replica}'
+                work.mkdir(parents=True, exist_ok=True)
+                inp = work/'input.json'
+                inp.write_text(json.dumps({'sequences': [{'sequence': s} for s in group]}))
+                command = replicate_command(inp, work, gpus, config, target)
+                command.remove('--allow-replicates')
+                if not daemon:
+                    command.append('--no-daemon')
+                env = dict(os.environ, NANOBODY_SCORER_DAEMON='1' if daemon else '0')
+                result = subprocess.run(command, env=env, capture_output=True, timeout=14400)
+                if result.returncode:
+                    raise RuntimeError(f'independent scorer failed rc={result.returncode}; output withheld')
+                payload = json.loads((work/'exact_all.json').read_text())
+                if payload.get('target', target) != target:
+                    raise ValueError('independent result target mismatch')
+                wave = payload['per_nanobody_components']['0']
+                if set(wave) != set(group):
+                    raise ValueError('independent result cardinality mismatch')
+                for sequence in group:
+                    records.append((sequence, replica, _metrics(wave[sequence].get(target, {}), replica)))
+                shutil.rmtree(work/'work', ignore_errors=True)
+                shutil.rmtree(work/'structures', ignore_errors=True)
+            continue
         work = root / f'length{length}'
         work.mkdir(parents=True, exist_ok=True)
         inp = work / 'input.json'
         inp.write_text(json.dumps({'sequences': [{'sequence': s} for s in group for _ in range(passes)]}))
-        env = dict(os.environ, NANOBODY_SCORER_DAEMON='1', NANOBODY_SCORER_SOCKET='/root/artifacts/nanobody_scorer.sock')
-        result = subprocess.run(replicate_command(inp, work, gpus, config, target),
+        env = dict(os.environ, NANOBODY_SCORER_DAEMON='1' if daemon else '0',
+                   NANOBODY_SCORER_SOCKET='/root/artifacts/nanobody_scorer.sock')
+        command = replicate_command(inp, work, gpus, config, target)
+        if not daemon:
+            command.append('--no-daemon')
+        result = subprocess.run(command,
                                 env=env, capture_output=True, timeout=14400)
         if result.returncode:
             raise RuntimeError(f'replicate scorer failed rc={result.returncode}; output withheld')
@@ -85,15 +118,18 @@ def unpack(wave, sequences, passes, target):
         raise ValueError(f"replicate cardinality mismatch: expected={len(expected)} actual={len(wave)}")
     records = []
     for key, (sequence, replicate) in expected.items():
-        values = wave[key].get(target, {})
-        metrics = {}
-        for metric in SUM_OF_TEN_DIRS:
-            value = values.get(metric)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError(f"replicate {replicate} missing finite metric {metric}")
-            metrics[metric] = float(value)
-        records.append((sequence, replicate, metrics))
+        records.append((sequence, replicate, _metrics(wave[key].get(target, {}), replicate)))
     return records
+
+
+def _metrics(values, replicate):
+    metrics = {}
+    for metric in SUM_OF_TEN_DIRS:
+        value = values.get(metric)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"replicate {replicate} missing finite metric {metric}")
+        metrics[metric] = float(value)
+    return metrics
 
 
 def main():
@@ -106,6 +142,10 @@ def main():
     parser.add_argument("--gpus", default="0,1,2,3")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--out-root", default="/root/slave_multipass_work", type=Path)
+    parser.add_argument("--direct", action="store_true",
+                        help="use only the caller's leased GPU, bypassing the shared daemon")
+    parser.add_argument("--independent-calls", action="store_true",
+                        help="collect separate ordinary calls with the registered base-v1 worker")
     args = parser.parse_args()
     sequences = sorted(set(json.loads(args.sequences_json.read_text())))
     if not sequences or args.passes < 2:
@@ -116,7 +156,8 @@ def main():
     job_id = hashlib.sha256(json.dumps([args.passes, sequences]).encode()).hexdigest()[:16]
     root = args.out_root / f"epoch{args.epoch}" / f"replicates{args.passes}" / job_id
     root.mkdir(parents=True, exist_ok=True)
-    records = score_group(sequences, args.passes, root, args.gpus, args.config, target)
+    records = score_group(sequences, args.passes, root, args.gpus, args.config, target,
+                          daemon=not args.direct, independent_calls=args.independent_calls)
     rows = []
     for sequence, replicate, metrics, score in reference_ranks(records, field):
         rows.append(dict(observation_id=f"slave_batched:epoch{args.epoch}:{sequence}:pass{replicate}",

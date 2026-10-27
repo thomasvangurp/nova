@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule bounded Nova dashboard replay on an idle background GPU
+
+[Timer]
+OnBootSec=120
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=nova-dashboard@replay.service
+
+[Install]
+WantedBy=timers.target

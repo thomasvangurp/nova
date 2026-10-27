@@ -136,6 +136,41 @@ def test_master_rejects_old_slave_target_after_boundary():
     assert any('target' in s for s in validate([row]))
     row['target'] = rules.TARGET
     assert validate([row]) == []
+
+
+def test_direct_replay_uses_release_adapter_and_bypasses_shared_daemon(tmp_path, monkeypatch):
+    from pathlib import Path
+    def fail_after_verifying(command, **kwargs):
+        assert command[1] == str(Path(worker.__file__).resolve().parents[2]/"nanobody_opt/score_boltzgen_fast_adapter.py")
+        assert kwargs["env"]["NANOBODY_SCORER_DAEMON"] == "0"
+        assert command[command.index("--gpus")+1] == "5"
+        assert "--no-daemon" in command
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setattr(worker.subprocess, "run", fail_after_verifying)
+    with pytest.raises(RuntimeError, match="output withheld"):
+        worker.score_group(["FIXTURE"], 10, tmp_path/"work", "5", tmp_path/"config.yaml",
+                           rules.TARGET, daemon=False)
+
+
+def test_registered_base_worker_uses_separate_ordinary_calls(tmp_path, monkeypatch):
+    from pathlib import Path
+    commands = []
+    def score(command, **kwargs):
+        commands.append(command)
+        assert '--allow-replicates' not in command and '--no-daemon' in command
+        inp = Path(command[command.index('--sequences')+1])
+        out = Path(command[command.index('--out')+1])
+        items = json.loads(inp.read_text())['sequences']
+        assert len(items) == 1
+        out.write_text(json.dumps({'target': rules.TARGET, 'per_nanobody_components': {'0': {
+            items[0]['sequence']: {rules.TARGET: {m: float(len(commands)) for m in worker.SUM_OF_TEN_DIRS}}}}}))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(worker.subprocess, 'run', score)
+    rows = worker.score_group(['FIXTURE'], 10, tmp_path/'work', '5', tmp_path/'config.yaml',
+                               rules.TARGET, daemon=False, independent_calls=True)
+    assert len(commands) == 10
+    assert {r for _, r, _ in rows} == set(range(1, 11))
+    assert len({json.dumps(m, sort_keys=True) for _, _, m in rows}) == 10
 def test_unpack_actual_registered_scorer_gpu_output():
     """Recorded real folds, not a payload manufactured from unpack's key rule."""
     import json

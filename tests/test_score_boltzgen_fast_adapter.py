@@ -103,6 +103,25 @@ def test_box_settings_enable_daemon_without_launcher_environment(tmp_path, monke
     assert jobs == [{"worker_argument_schema": "base-v1"}]
 
 
+def test_no_daemon_keeps_leased_work_in_owned_process_tree(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    source = tmp_path/"input.json"
+    source.write_text(json.dumps({"sequences": ["AAAA"]}))
+    monkeypatch.setattr(adapter, "load_settings", lambda *a: {"use_daemon": True})
+    monkeypatch.setattr(adapter, "_scorer_daemon", SimpleNamespace(
+        ENABLED=True, available=lambda: pytest.fail("lease must bypass daemon")))
+    commands = []
+    monkeypatch.setattr(adapter.subprocess, "run", lambda command: commands.append(command) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(sys, "argv", ["adapter", "--sequences", str(source),
+        "--config", "unused.yaml", "--target", "P20809", "--work-root", str(tmp_path/"work"),
+        "--out", str(tmp_path/"out.json"), "--gpus", "5", "--no-daemon"])
+    with pytest.raises(SystemExit) as exited:
+        adapter.main()
+    assert exited.value.code == 0
+    assert commands[0][commands[0].index("--gpus")+1] == "5"
+
+
 @pytest.mark.parametrize("settings", [
     {"synth_reference": "/unregistered.cif"},
     {"synth_reference": "/wrong-length.cif", "synth_reference_length": 127,

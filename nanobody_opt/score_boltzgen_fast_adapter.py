@@ -181,6 +181,8 @@ def main() -> None:
     parser.add_argument("--structure-dir", type=Path)
     parser.add_argument("--require-structures", action="store_true")
     parser.add_argument("--allow-replicates", action="store_true")
+    parser.add_argument("--no-daemon", action="store_true",
+                        help="keep scoring in the caller's supervised process tree")
     parser.add_argument(
         "--settings",
         type=Path,
@@ -213,7 +215,8 @@ def main() -> None:
     # runs the same shards, the same chunk composition and the same merge --
     # the metric is unchanged, and a daemon fault falls back to this very
     # subprocess rather than losing the wave.
-    if _scorer_daemon is not None and (_scorer_daemon.ENABLED or settings.get("use_daemon") is True):
+    if (not args.no_daemon and _scorer_daemon is not None
+            and (_scorer_daemon.ENABLED or settings.get("use_daemon") is True)):
         try:
             if _scorer_daemon.available():
                 job = _scorer_daemon.job_from_command(command)
