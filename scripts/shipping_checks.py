@@ -34,6 +34,7 @@ TEST_FILES = (
     'tests/test_pr100_confirmation_deadline_review.py',
     'tests/test_pr100_native_dispatch_recovery.py',
     'tests/test_pr100_transport_compression.py',
+    'tests/test_pr100_archive_cache.py',
     'tests/test_pr100_live_supervisor.py',
     'tests/test_pr100_live_worker.py',
     'tests/test_pr100_novelty_runtime_adversarial.py',

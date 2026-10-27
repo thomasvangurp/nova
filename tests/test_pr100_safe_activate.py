@@ -592,6 +592,28 @@ def test_pending_migration_rechecks_new_owner_after_stop(deployment, novelty_rec
     assert 'install' not in events
 
 
+def test_same_novelty_identity_code_upgrade_cannot_claim_pending_migration_exception(deployment, novelty_receipt):
+    base, release, unit, root, old = deployment; events = []
+    pending_migration(deployment)
+    native_release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(native_release, receipt)
+    for host in old['hosts']: old['hosts'][host]['novelty_runtime'] = runtimes[host]
+    a.atomic(base / 'pr100-controller.json', old)
+    result = a.handoff(base, SHA, 'preserve', release, None, novelty_runtimes=runtimes,
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'waiting_for_clean_attempt'
+    assert events == [] and a.read(base / 'pr100-controller.json') == old
+
+
+def test_qualified_novelty_release_is_approved_predecessor(deployment, novelty_receipt):
+    *_, old = deployment
+    old['source_sha'] = a.QUALIFIED_NOVELTY_RELEASE
+    for host in old['hosts'].values(): host['release'] = '/root/releases/' + a.QUALIFIED_NOVELTY_RELEASE
+    release, receipt, _ = novelty_receipt
+    value = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', novelty_runtimes=a.verify_novelty_qualification(release, receipt))
+    assert value['source_sha'] == SHA
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_interleave_activation_is_explicit_and_changes_only_one_worker_field(deployment, novelty_receipt, enabled):
     *_, old = deployment

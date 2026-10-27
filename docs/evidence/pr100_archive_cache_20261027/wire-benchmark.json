@@ -1,0 +1,51 @@
+{
+  "inert_read_only": true,
+  "scientific_calls": 0,
+  "remote_files_written": 0,
+  "archive_bytes": 2316063,
+  "archive_sha256": "ab5dcb8e376f42920b96177e04174bae6a57222b23416099873a575679ab0acb",
+  "hosts": {
+    "master": {
+      "full_upload": {
+        "wire_bytes": 1171384,
+        "wall_seconds": 6.024586833023932,
+        "exit_code": 0,
+        "remote": {
+          "bytes": 1171384,
+          "read_seconds": 2.1376919876784086
+        }
+      },
+      "cache_reference": {
+        "wire_bytes": 516,
+        "wall_seconds": 4.0598516130121425,
+        "exit_code": 0,
+        "remote": {
+          "bytes": 516,
+          "read_seconds": 0.2749731261283159
+        }
+      }
+    },
+    "slave": {
+      "full_upload": {
+        "wire_bytes": 1171384,
+        "wall_seconds": 37.53459140297491,
+        "exit_code": 0,
+        "remote": {
+          "bytes": 1171384,
+          "read_seconds": 31.22885835915804
+        }
+      },
+      "cache_reference": {
+        "wire_bytes": 516,
+        "wall_seconds": 9.17192467104178,
+        "exit_code": 0,
+        "remote": {
+          "bytes": 516,
+          "read_seconds": 4.077661486342549
+        }
+      }
+    }
+  },
+  "fixture_origin": "Public Metanova Submission-Archive snapshot retained in the epoch25969 request",
+  "measurement_scope": "One paired read-only SSH upload to an in-memory byte counter per host; excludes launch/source verification/cache filesystem work and science."
+}

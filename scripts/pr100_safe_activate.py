@@ -21,7 +21,8 @@ import time
 OLD = 'b294f7f06b6f3c1efd05961f9a1365645af60410'
 THROUGHPUT_RELEASE = '036a6c48c32b762b3f803ffa920eaf3cf66d454a'
 QUALIFIED_BOTH_RELEASE = '22407a4ae6324b8c051ef89f738eb74fddaad978'
-APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEASE})
+QUALIFIED_NOVELTY_RELEASE = '4cec2deeca89dfa1a22ad65477fc631eeaff63a8'
+APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEASE, QUALIFIED_NOVELTY_RELEASE})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -460,7 +461,9 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
             service_factory=Service, now=time.time):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
-    migration = novelty_runtimes is not None
+    migration = (novelty_runtimes is not None and any(
+        config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
+        != runtime.get('identity_sha256') for host, runtime in novelty_runtimes.items()))
     if not boundary(config, clock, now(), novelty_migration=migration): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,

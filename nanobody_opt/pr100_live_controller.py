@@ -23,6 +23,7 @@ import time
 import urllib.request
 
 from nanobody_opt import pr100_filter, rules
+from nanobody_opt import pr100_archive_cache
 
 BLOCK_SECONDS = 12.0
 # Publication cutoff reserve (offset ~315 of 361); the Pi export path itself refuses to
@@ -54,10 +55,10 @@ _SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?k
                      r'(\s*[:=]\s*|\s+)\S+')
 _LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
 
-TRANSPORT = r'''
+TRANSPORT = pr100_archive_cache.RECEIVER + r'''
 import base64,gzip,hashlib,json,os,pathlib,re,stat,subprocess,sys,time
 raw=sys.stdin.buffer.read()
-r=json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw);d=pathlib.Path(r['directory'])
+r=json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw);d=pathlib.Path(r['directory']);cache_result=None
 if r['operation']=='journal':
  out={'status':'unavailable'}
  try:
@@ -93,6 +94,9 @@ if r['operation']=='start':
   old=json.loads((d/'launch.json').read_text())
   if old['identity']!=identity:raise ValueError('different existing job')
  else:
+  cache_result=hydrate_archive(r)
+  if cache_result and cache_result.get('miss'):
+   print(json.dumps({'running':False,'archive_cache_miss':cache_result['miss']}));sys.exit(0)
   for name,raw in r['files'].items():
    if name not in ('input.json','archive.csv','job.json','gpu-job.json'):raise ValueError('file name')
    (d/name).write_bytes(base64.b64decode(raw,validate=True))
@@ -103,6 +107,7 @@ if r['operation']=='start':
    stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
   atom(d/'launch.json',{'identity':identity,'pid':p.pid})
 out={'running':not(d/'supervisor-receipt.json').exists()}
+if cache_result and cache_result.get('verified'):out['archive_cache_verified_sha256']=cache_result['verified']
 if not out['running']:
  out['receipt']=json.loads((d/'supervisor-receipt.json').read_text());out['files']={}
  for name in ('result.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
@@ -184,6 +189,7 @@ POLL_FAILURE_LIMIT = 8
 
 def remote(config, host, request, *, sleep=time.sleep):
     runtime = config['hosts'][host]
+    cache = pr100_archive_cache.prepare(config, host, request)
     identity = []
     if runtime.get('host_key_alias'):
         identity = ['-oHostKeyAlias=' + runtime['host_key_alias']]
@@ -214,7 +220,7 @@ def remote(config, host, request, *, sleep=time.sleep):
                 raise TimeoutError('remote transport epoch cutoff')
             request = {**request, 'clock': current}
         try:
-            payload = json.dumps(request).encode()
+            payload = json.dumps(pr100_archive_cache.wire_request(request, cache)).encode()
             if len(payload) > 8192:
                 payload = gzip.compress(payload, compresslevel=1, mtime=0)
             result = subprocess.run(command, input=payload,
@@ -239,12 +245,22 @@ def remote(config, host, request, *, sleep=time.sleep):
     try:
         # A login banner or rc-file echo may precede the reply; the reply is the last line.
         lines = [line for line in result.stdout.splitlines() if line.strip()]
-        return json.loads(lines[-1])
+        reply = json.loads(lines[-1])
     except (ValueError, IndexError) as cause:
         error = RuntimeError('remote transport returned no result')
         error.diagnostics = {'stdout_tail': sanitize(result.stdout),
                              'stderr_tail': sanitize(result.stderr)}
         raise error from cause
+    if reply.get('archive_cache_miss') is not None:
+        if (cache is None or not cache['reference_only']
+                or reply['archive_cache_miss'] != cache['descriptor']['sha256']):
+            raise RuntimeError('unexpected archive cache miss')
+        # Same durable launch identity and absolute deadline. A miss proves
+        # no new spec/launch was created; ordinary owner guards still apply.
+        pr100_archive_cache.invalidate(cache)
+        return remote({**config, '_archive_force_upload': True}, host, request, sleep=sleep)
+    pr100_archive_cache.acknowledge(cache, reply)
+    return reply
 
 
 def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
@@ -724,6 +740,8 @@ def validate_config(config):
     if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
         raise ValueError('worker must be an object including native_tools')
     from nanobody_opt.pr100_fresh_budget import validate_limit, DEFAULT_LIMIT
+    if type(config.get('archive_cache_enabled', True)) is not bool:
+        raise ValueError('archive_cache_enabled must be a boolean')
     validate_limit(config.get('epoch_fresh_native_limit', DEFAULT_LIMIT))
     native_hosts = config.get('native_hosts', ['master'])
     if (not isinstance(native_hosts, list) or not native_hosts or len(native_hosts) != len(set(native_hosts))
