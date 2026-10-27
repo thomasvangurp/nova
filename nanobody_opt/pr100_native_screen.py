@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import importlib
 import importlib.metadata
@@ -26,6 +27,14 @@ PINNED_SOURCES = {
 }
 PINNED_VERSIONS = {'torch': '2.7.1', 'openmm': '8.5.1', 'pdbfixer': '1.12.0', 'numpy': '1.26.4'}
 _STATE = {}
+
+@lru_cache(maxsize=1)
+def profile_sanitizer():
+    # Installed runtimes may own a regular `scripts` package, which shadows
+    # this repository's namespace directory. Use the existing pinned-path
+    # loader rather than importing through that ambiguous package name.
+    from nanobody_opt.pr100_live_gpu import _controller
+    return _controller().safe_profile
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
@@ -221,7 +230,7 @@ def _screen_one(sequence):
             raise RuntimeError('accelerator_initialization_failed')
         from metanano.utils.tnp_wrapper import ProfileExecution
         from nanobody_opt import rules
-        from scripts.pr100_native_probe import safe_profile
+        safe_profile = profile_sanitizer()
         execution = ProfileExecution(timeout=request['candidate_timeout_seconds'])
         profiler, evidence = _STATE['profiler'], _STATE['evidence']
         evidence['calls'].clear(); evidence['platforms'].clear()

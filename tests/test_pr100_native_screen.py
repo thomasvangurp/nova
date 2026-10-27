@@ -1,8 +1,47 @@
 import copy
 import hashlib
+import json
+import sys
+import types
 from types import SimpleNamespace
 import pytest
 from nanobody_opt import pr100_native_screen as screen
+
+def test_screen_profile_survives_installed_scripts_package(tmp_path,monkeypatch):
+    from nanobody_opt import rules
+    from nanobody_opt.pr100_native_benchmark import FIELDS,A3D_FIELDS
+    sequence='A'*100
+    evidence={'calls':[],'platforms':[]}
+    measured={**dict.fromkeys(FIELDS,1.0),'surface_hydrophobic_patches':80.0,'passed':True,
+        'aggrescan3d':{**dict.fromkeys(A3D_FIELDS,1.0),'status':'ok','passed':True,
+            'input_structure_sha256':'b'*64,'normalized_structure_sha256':'c'*64,
+            'sequence_hash':hashlib.sha256(sequence.encode()).hexdigest(),
+            'ph_scale':'default-scale','surface_method':'FreeSASA-2.0.1-NACCESS-LR100',
+            'mode':'static-no-minimization','radius_angstrom':10}}
+    def profile_one(*_):
+        evidence['calls'].append({'native_success':True})
+        evidence['platforms'].append({'name':'CPU'})
+        return measured
+    wrapper=types.ModuleType('metanano.utils.tnp_wrapper')
+    wrapper.ProfileExecution=lambda **_:SimpleNamespace(remaining=lambda:1)
+    monkeypatch.setitem(sys.modules,'metanano.utils.tnp_wrapper',wrapper)
+    monkeypatch.setitem(sys.modules,'scripts',types.ModuleType('scripts'))
+    monkeypatch.delitem(sys.modules,'scripts.pr100_native_probe',raising=False)
+    monkeypatch.setattr(rules,'developability_reason',lambda *a,**k:None)
+    request={'settings':{'backend':'resident_cpu'},'challenge':{'epoch':25962},
+        'request_sha256':'a'*64,'candidate_timeout_seconds':30,'requirements':{},
+        'results_directory':str(tmp_path)}
+    monkeypatch.setattr(screen,'_STATE',{'request':request,'profiler':SimpleNamespace(profile_one=profile_one),
+        'evidence':evidence,'scorer':SimpleNamespace(profile=lambda *a:None),'identity':{},
+        'analyzer':SimpleNamespace(analyze_profile=lambda seq,value:SimpleNamespace(to_dict=lambda:value))})
+    screen.profile_sanitizer.cache_clear()
+    try:
+        key=screen._screen_one(sequence)
+        record=json.loads((tmp_path/(key+'.json')).read_text())
+        assert record['screen_outcome']=='passed'
+        assert record['profile']['surface_hydrophobic_patches']==80.0
+        assert record['authoritative'] is False
+    finally:screen.profile_sanitizer.cache_clear()
 
 def fixture(backend='resident_cpu'):
     sequence = 'A' * 100
