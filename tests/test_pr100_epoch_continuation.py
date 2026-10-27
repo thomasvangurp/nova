@@ -174,3 +174,24 @@ def test_score_shard_limit_defers_unstarted_tail_and_unavailable_lease(tmp_path)
         write(Path(item['receipt']), {'status': 'unavailable'})
     report = worker.collect_scores(Path(job['output_directory']), jobs)
     assert report['attempted_sequence_hashes'] == []
+
+def test_terminal_novelty_failure_retries_publication_without_new_scientific_calls(legacy, monkeypatch):
+    x = legacy; state = continuation.migrate(x.local, x.replay.challenge, x.config)
+    state['active'] = {'number': 1, 'phase': 'publish', 'proposal_offset': 600}
+    state['next_attempt'] = 2
+    write(x.local / 'continuation.json', state)
+    monkeypatch.setattr(c, 'fetch_archive', lambda _: x.replay.archive + b'\n')
+    calls = []
+    def phase(cfg, challenge, name, files, stop, chain, local, **kw):
+        calls.append((name, cfg['_attempt'])); assert name == 'novelty'
+        if len(calls) == 1:
+            write(local / 'novelty-supervisor.json', {'reason': 'nonzero_exit',
+                'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}})
+            raise RuntimeError('bounded novelty failure')
+        return {'result.json': files['input.json']}
+    monkeypatch.setattr(c, 'run_phase', phase)
+    assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'recoverable_failure'
+    pending = continuation.read(x.local / 'continuation.json')
+    assert pending['active'] is None and continuation.mode_for(pending) == 'publish'
+    assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'published'
+    assert calls == [('novelty', 1), ('novelty', 2)]

@@ -104,6 +104,8 @@ def migrate(local, challenge, config, *, ownership_verified=False):
     return state
 
 def mode_for(state):
+    if state.get('pending_publication'):
+        return 'publish'
     scored, attempted = set(state['score_rows']), set(state['score_attempted_hashes'])
     if any(r['sequence'] not in scored and rules.sequence_hash(r['sequence']) not in attempted
            for r in state['native_rows']):
@@ -117,6 +119,8 @@ def mode_for(state):
 
 def required_seconds(mode, config):
     from nanobody_opt import pr100_live_controller as c
+    if mode == 'publish':
+        return c.PUBLISH_RESERVE_SECONDS + float(config.get('novelty_reserve_seconds', c.NOVELTY_RESERVE_SECONDS))
     required = c.PUBLISH_RESERVE_SECONDS + c.PHASE_FLOORS['score']
     if mode in ('native', 'sequence'):
         required += float(config['worker'].get('candidate_budget_seconds', 300))
@@ -190,6 +194,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         phase_config, phase_local = attempt_config, attempt_dir
         if name == 'novelty':
             operation = hashlib.sha256(payload['archive.csv']).hexdigest()
+            active['novelty_operation'] = operation; save()
             phase_config = {**attempt_config, '_phase_operation': operation}
             phase_local = attempt_dir / 'novelty-rechecks' / operation
             phase_local.mkdir(parents=True, exist_ok=True)
@@ -314,11 +319,16 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                                  else 'unchanged')
         else:
             receipt['status'] = 'no_passing_candidate'
+        state.pop('pending_publication', None)
         state['active'] = None; save()
     except Exception as error:
         receipt.update(status='recoverable_failure', stage=active['phase'], error_type=type(error).__name__)
-        terminal = read(attempt_dir / (active['phase'] + '-supervisor.json'), {})
+        terminal_dir = (attempt_dir / 'novelty-rechecks' / active['novelty_operation']
+                        if active['phase'] == 'novelty' and active.get('novelty_operation') else attempt_dir)
+        terminal = read(terminal_dir / (active['phase'] + '-supervisor.json'), {})
         if cleanup_verified(terminal):
+            if active['phase'] in ('novelty', 'publish'):
+                state['pending_publication'] = True
             if active['phase'] == 'native':
                 partial = read(attempt_dir / 'native/result.json', {})
                 attempted = partial.get('attempted_sequence_hashes')
