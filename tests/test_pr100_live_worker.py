@@ -8,6 +8,7 @@ import sys
 import types
 import pytest
 from nanobody_opt import pr100_filter, pr100_live_worker as worker
+from nanobody_opt.pr100_live_selection import decide as real_decide
 
 def test_real_upstream_batch_loop_never_starts_more_timeouts_than_slots(monkeypatch):
     source = Path(__file__).resolve().parents[1] / 'NOVA-nanobody-filter/metanano/services/developability_service.py'
@@ -300,16 +301,16 @@ class TestRepeatsAndTiers:
         assert [r['tier'] for r in result['candidates']] == ['B']
 
     def test_results_are_ordered_by_margin_tier_a_first(self, native_env):
-        table = {'A': [86, 86, 86], 'B': [75, 75, 75], 'C': [80, 80, 80]}
+        table = {'A': [86, 86, 86], 'B': [78, 78, 78], 'C': [80, 80, 80]}
         write_input(native_env, ['A', 'B', 'C'])
         result = worker.native_phase(native_job(repeats=3), native_env,
                                      measure=self.measure_for(table))
-        assert [r['sequence'] for r in result['candidates']] == ['B', 'C', 'A']
+        assert [r['sequence'] for r in result['candidates']] == ['C', 'B', 'A']
         assert [r['tier'] for r in result['candidates']] == ['A', 'A', 'B']
         assert result['tier_counts'] == {'A': 2, 'B': 1}
 
     def test_allow_marginal_false_withholds_tier_b(self, native_env):
-        table = {'A': [86, 86, 86], 'B': [75, 75, 75]}
+        table = {'A': [86, 86, 86], 'B': [78, 78, 78]}
         write_input(native_env, ['A', 'B'])
         result = worker.native_phase(native_job(repeats=3, allow_marginal=False),
                                      native_env, measure=self.measure_for(table))
@@ -426,3 +427,110 @@ def test_retry_measures_fresh_and_preserves_old_attempt(native_env):
     assert calls == [1, 1]
     assert first['observation_journal']['attempt_id'] != second['observation_journal']['attempt_id']
     assert (native_env / 'native-observations.jsonl').read_bytes().startswith(old_bytes)
+
+
+def complete_native_profile(sequence, psh=81.0):
+    """Inert measured profile with provenance for the real numeric gate logic."""
+    return {'passed': True, 'red_flags': [], 'surface_hydrophobic_patches': psh,
+            'total_cdr_length': 33, 'cdr3_length': 17, 'cdr3_compactness': 1.35,
+            'positive_charge_patches': .1, 'negative_charge_patches': .1,
+            'aggrescan3d': {'status': 'ok', 'passed': True,
+                'sequence_hash': worker.rules.sequence_hash(sequence),
+                'residue_count': len(sequence), 'a3d_average': -.75, 'a3d_maximum': 1.5,
+                'input_structure_sha256': 'a' * 64, 'normalized_structure_sha256': 'b' * 64,
+                'ph_scale': 'default-scale', 'surface_method': 'FreeSASA-2.0.1-NACCESS-LR100',
+                'mode': 'static-no-minimization', 'radius_angstrom': 10}}
+
+
+def test_25959_sized_scan_confirms_survivors_before_fresh_scan_exhausts_window(native_env, monkeypatch):
+    # Actual incident dimensions and admission budget; inert synthetic profiles
+    # exercise real gate decisions without executing any biological models.
+    monkeypatch.setattr(worker.selection, 'decide', real_decide)
+    monkeypatch.setattr(worker, 'available_cores', lambda: 224)
+    monkeypatch.setattr(worker, 'available_memory_bytes', lambda: 160 * 1024 ** 3)
+    sequences = [f'S{i}' for i in range(595)]
+    write_input(native_env, sequences)
+    first_passers = {f'S{i}' for i in (0, 96, 192, 288, 384)}
+    now, observations, calls = [0.0], {}, []
+    def clock():
+        return now[0]
+    def measure(batch, workers, *, clock):
+        assert len(batch) <= workers == 48
+        assert now[0] + 300 <= 1487.4123007059097
+        is_repeat = all(observations.get(s, 0) for s in batch)
+        assert is_repeat or all(s not in observations for s in batch)
+        calls.append((now[0], list(batch), is_repeat))
+        acquired = now[0]
+        elapsed = 25.0 if is_repeat else 123.0
+        now[0] += elapsed
+        for s in batch:
+            observations[s] = observations.get(s, 0) + 1
+        return [complete_native_profile(s, 81 if s in first_passers else 100) for s in batch], acquired, elapsed
+    result = worker.native_phase(native_job(workers=48, max_workers=48, repeats=3,
+        candidate_budget_seconds=300, phase_budget_seconds=1487.4123007059097),
+        native_env, clock=clock, measure=measure)
+    # Before the second fresh batch, the first survivor already has three
+    # observations. The old all-fresh-first implementation got zero repeats.
+    assert calls[1][1:] == (['S0'], True)
+    assert calls[2][1:] == (['S0'], True)
+    assert calls[3][1][0] == 'S48'
+    rows = {r['sequence']: r for r in result['candidates']}
+    assert all(rows[s]['repeats'] == 3 and rows[s]['tier'] == 'A'
+               for s in ('S0', 'S96', 'S192', 'S288'))
+    assert rows['S384']['repeats'] == 1 and rows['S384']['tier'] == 'B'
+    assert rows['S384']['selection_reason'] == 'insufficient_repeats'
+    assert result['rejection_counts']['insufficient_repeats'] == 1
+    assert result['fresh_evaluations'] == 432
+    assert result['repeat_evaluations'] == 8
+    assert result['completed'] == result['fresh_evaluations'] + result['repeat_evaluations']
+    assert result['not_run'] == 163
+    assert now[0] <= 1487.4123007059097
+
+
+@pytest.mark.parametrize('field,value,reason', [
+    ('surface_hydrophobic_patches', 72.9, 'developability_red_flags'),
+    ('surface_hydrophobic_patches', 90.0, 'psh_threshold'),
+    ('cdr3_compactness', 1.62, 'developability_red_flags'),
+    ('a3d_average', -.679, 'aggrescan_threshold'),
+    ('a3d_maximum', 1.581, 'aggrescan_threshold'),
+])
+def test_failing_confirmation_rechecks_full_gate_and_never_gets_third_call(
+        native_env, monkeypatch, field, value, reason):
+    monkeypatch.setattr(worker.selection, 'decide', real_decide)
+    write_input(native_env, ['A'])
+    calls = []
+    def measure(batch, workers, *, clock):
+        calls.append(list(batch))
+        measured = complete_native_profile('A')
+        if len(calls) == 2:
+            target = measured['aggrescan3d'] if field.startswith('a3d_') else measured
+            target[field] = value
+        return [measured], 0.0, 1.0
+    result = worker.native_phase(native_job(repeats=3), native_env, measure=measure)
+    assert calls == [['A'], ['A']]
+    assert result['candidates'] == []
+    assert result['rejection_counts'][reason] == 1
+    assert result['fresh_evaluations'] == 1 and result['repeat_evaluations'] == 1
+
+
+def test_deadline_keeps_valid_partial_fallback_honest(native_env, monkeypatch):
+    monkeypatch.setattr(worker.selection, 'decide', real_decide)
+    write_input(native_env, ['A', 'B'])
+    now, calls = [0.0], []
+    def measure(batch, workers, *, clock):
+        calls.append(list(batch))
+        acquired = now[0]
+        now[0] += 123
+        return [complete_native_profile(s) for s in batch], acquired, 123.0
+    result = worker.native_phase(native_job(workers=1, repeats=3,
+        candidate_budget_seconds=300, phase_budget_seconds=350), native_env,
+        clock=lambda: now[0], measure=measure)
+    assert calls == [['A']]
+    assert result['not_run'] == 1
+    assert result['native_passed'] == 1
+    assert result['candidates'][0]['tier'] == 'B'
+    assert result['candidates'][0]['margin_safe'] is False
+    assert result['candidates'][0]['selection_reason'] == 'insufficient_repeats'
+    assert result['rejection_counts']['insufficient_repeats'] == 1
+    assert 'margin_missed' not in result['rejection_counts']
+    assert result['repeat_evaluations'] == 0

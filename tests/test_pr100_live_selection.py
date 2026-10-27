@@ -43,6 +43,10 @@ class TestThreshold:
     def test_counts_above_the_table_reuse_the_largest_entry(self):
         assert selection.margin_threshold(5) == 82
 
+    def test_lower_margin_tracks_the_validator_lower_boundary(self):
+        assert selection.margin_lower_threshold(2) == pytest.approx(73.4 + 1.3 * 4.4 / math.sqrt(2))
+        assert selection.margin_lower_threshold(3) == pytest.approx(73.4 + 1.3 * 4.4 / math.sqrt(3))
+
     @pytest.mark.parametrize('bad', [{'min_repeats': 1}, {'sigma': float('nan')},
                                      {'z': -1}, {'nonsense': 1}, {'hard_margin': {}}])
     def test_invalid_margin_parameters_refuse(self, bad):
@@ -74,6 +78,19 @@ class TestTiers:
         assert verdict['tier'] == 'B'
         assert verdict['margin_safe'] is False
         assert verdict['reason'] == 'margin_missed'
+
+    @pytest.mark.parametrize('psh', [73.5184, 74.4958, 75.0])
+    def test_repeated_lower_boundary_passes_are_not_margin_safe(self, psh):
+        verdict = decide([psh, psh, psh])
+        assert verdict['tier'] == 'B'
+        assert verdict['margin_safe'] is False
+        assert verdict['reason'] == 'margin_missed'
+        assert verdict['margin_lower_threshold'] > psh
+
+    def test_two_measurements_can_still_qualify_inside_both_margins(self):
+        verdict = decide([78.0, 80.0])
+        assert verdict['tier'] == 'A'
+        assert verdict['psh_boundary_margin'] == pytest.approx(5.6)
 
     def test_any_repeat_failing_a_gate_rejects_outright(self):
         verdict = selection.decide(
@@ -120,19 +137,24 @@ class TestOrdering:
 
     def test_tier_a_first_then_margin_order(self):
         ordered = selection.order_candidates(self.rows())
-        assert [r['sequence_hash'] for r in ordered] == ['c', 'a', 'b']
+        assert [r['sequence_hash'] for r in ordered] == ['a', 'c', 'b']
 
     def test_rejected_rows_are_never_published(self):
         assert all(r['tier'] in ('A', 'B') for r in selection.order_candidates(self.rows()))
 
     def test_allow_marginal_false_drops_tier_b(self):
         ordered = selection.order_candidates(self.rows(), allow_marginal=False)
-        assert [r['sequence_hash'] for r in ordered] == ['c', 'a']
+        assert [r['sequence_hash'] for r in ordered] == ['a', 'c']
 
-    def test_prefix_is_monotonic_in_mean_psh_within_tier(self):
+    def test_prefix_is_monotonic_in_two_sided_margin_within_tier(self):
         ordered = selection.order_candidates(self.rows())
-        a_means = [r['psh_mean'] for r in ordered if r['tier'] == 'A']
-        assert a_means == sorted(a_means)
+        margins = [selection.psh_margin(r['psh_mean']) for r in ordered if r['tier'] == 'A']
+        assert margins == sorted(margins, reverse=True)
+
+    def test_both_lower_and_upper_cap_huggers_lose_to_interior(self):
+        rows = [{'sequence_hash': str(value), 'tier': 'B', 'psh_mean': value}
+                for value in (73.5184, 88.5286, 81.2, None)]
+        assert [r['psh_mean'] for r in selection.order_candidates(rows)] == [81.2, 88.5286, 73.5184, None]
 
 
 class TestShard:

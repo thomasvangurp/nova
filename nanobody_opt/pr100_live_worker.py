@@ -174,10 +174,12 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     result = {k: incoming[k] for k in ('challenge', 'target', 'epoch', 'archive_sha256',
                                        'archive_checked_at_unix')}
     result.update(status='running', input_count=len(rows), completed=0,
+                  fresh_evaluations=0, repeat_evaluations=0,
                   not_started=len(rows), not_completed=len(rows), in_flight=0,
                   candidates=[], rejection_counts={}, cache_hits=0, workers=workers,
                   candidate_budget_seconds=budget, repeats=repeats, allow_marginal=allow_marginal,
-                  margin={**margin, 'threshold_at_k': selection.margin_threshold(repeats, margin)},
+                  margin={**margin, 'threshold_at_k': selection.margin_threshold(repeats, margin),
+                          'lower_threshold_at_k': selection.margin_lower_threshold(repeats, margin)},
                   novelty_checked=False, native_classification_complete=False,
                   observation_errors=0,
                   measurement_outcomes={'passed': 0, 'rejected': 0, 'inconclusive': 0})
@@ -223,12 +225,15 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 return
             measurements.setdefault(key, []).append(value)
             result['completed'] += 1
+            counter = 'fresh_evaluations' if expected[key] == 1 else 'repeat_evaluations'
+            result[counter] += 1
             result['not_completed'] = len(rows) - len(measurements)
             result['in_flight'] -= 1
             try:
                 observed = journal_module.observation(value, requirements, key)
                 result['measurement_outcomes'][observed['outcome']] += 1
                 progress = {k: result[k] for k in ('status', 'input_count', 'completed',
+                    'fresh_evaluations', 'repeat_evaluations',
                     'not_started', 'not_completed', 'in_flight', 'native_classification_complete',
                     'observation_errors')}
                 progress['measurement_outcomes'] = dict(result['measurement_outcomes'])
@@ -247,42 +252,34 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         return acquired, elapsed
 
     def collect_measurements():
-        # Pass 1: one measurement each. Never enqueue more profiles than can start,
-        # so a candidate's budget is never consumed waiting for a cpu slot.
+        # Confirm each batch's survivors before spending the remaining window on
+        # another fresh batch. A global first pass exhausted the admission window
+        # before any repeats, leaving repeats=3 effectively at one observation.
+        # Every admission still reserves the original full candidate timeout.
+        measured_rows = []
         for offset in range(0, len(rows), workers):
             batch = rows[offset:offset + workers]
             if out_of_time():
                 break
-            acquired, elapsed = measure_and_record(batch)
+            _acquired, elapsed = measure_and_record(batch)
+            measured_rows.extend(batch)
             result['last_batch_seconds'] = elapsed
             flush()
-
-        survivors = []
-        for row in rows:
-            key = row['sequence']
-            if key not in measurements:
-                continue
-            first = selection.decide(measurements[key], requirements, sequence=key,
-                                     repeats=repeats, margin=margin)
-            # A failing first measurement is a real rejection; do not pay for repeats.
-            if first['tier'] is None and first['reason'] not in ('insufficient_repeats', 'not_run'):
-                record(first['reason'])
-            else:
-                survivors.append(row)
-        # Pass 2: k-1 further independent measurements for first-pass survivors only.
-        for _ in range(max(0, repeats - 1)):
-            pending = [r for r in survivors if len(measurements[r['sequence']]) < repeats]
-            if not pending:
-                break
-            for offset in range(0, len(pending), workers):
-                batch = pending[offset:offset + workers]
-                if out_of_time():
+            pending = batch
+            for _ in range(max(0, repeats - 1)):
+                # Recheck the full native gate after every observation. Once a
+                # candidate fails, a later lucky draw cannot restore eligibility.
+                pending = [row for row in pending if selection.decide(
+                    measurements[row['sequence']], requirements, sequence=row['sequence'],
+                    repeats=repeats, margin=margin)['tier'] is not None]
+                if not pending or out_of_time():
                     break
-                _acquired, elapsed = measure_and_record(batch)
+                _acquired, elapsed = measure_and_record(pending)
                 result['last_batch_seconds'] = elapsed
                 flush()
-
-        return survivors
+        # Include measured failures so the final classification counts each
+        # candidate exactly once, including failures on confirmation passes.
+        return measured_rows
 
     try:
         survivors = collect_measurements()
@@ -300,7 +297,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         if verdict['tier'] is None:
             record(verdict['reason'] or 'rejected')
             continue
-        record('passed' if verdict['tier'] == 'A' else 'margin_missed')
+        record('passed' if verdict['tier'] == 'A' else verdict['reason'])
         evidence = {'challenge': job['challenge'], 'filter_sha': rules.FILTER_SHA,
                     'annotation': row['pr100_annotation'],
                     'developability': verdict['measurements'][0]}
@@ -310,7 +307,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                         'measurements': verdict['measurements'],
                         'psh_values': verdict['psh_values'], 'psh_mean': verdict['psh_mean'],
                         'psh_sd': verdict['psh_sd'], 'repeats': verdict['repeats'],
-                        'margin_threshold': verdict['margin_threshold']})
+                         'margin_threshold': verdict['margin_threshold'],
+                         'margin_lower_threshold': verdict['margin_lower_threshold'],
+                         'psh_boundary_margin': verdict['psh_boundary_margin'],
+                         'selection_reason': verdict['reason']})
     result['native_passed'] = len(passers)
     result['native_classification_complete'] = True
     flush()
