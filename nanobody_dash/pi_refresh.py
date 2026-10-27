@@ -53,6 +53,17 @@ def latest_leaderboard() -> int | None:
         return None
 
 
+def latest_chain_epoch() -> int | None:
+    try:
+        with sqlite3.connect(f"file:{DATA / 'nanobody_dash.sqlite'}?mode=ro", uri=True) as db:
+            row = db.execute("SELECT epoch,time FROM slots ORDER BY time DESC LIMIT 1").fetchone()
+        if row and type(row[0]) is int and 0 <= time.time() - row[1] <= 600:
+            return row[0]
+    except (sqlite3.Error, TypeError):
+        pass
+    return None
+
+
 def latest_multipass(payload: dict) -> int | None:
     return max((int(k) for k in payload if k.isdecimal()), default=None)
 
@@ -185,6 +196,7 @@ def submission_status() -> dict:
         status, sequences = latest(Path('/opt/nova-submit/loop.log'), Path('/opt/nova-submit/archive'))
         if status:
             save(DATA/'dashboard_submission_status.json', status)
+        if sequences:
             save(DATA/'dashboard_committed_sequences.json', sequences)
         return status
     except (OSError, ValueError, KeyError, TypeError):
@@ -204,7 +216,17 @@ def status_text() -> str:
     receipt = read_json(DATA/'dashboard_submission_status.json')
     commits = (f" · Pi commits {receipt['epoch']}: {receipt['committed']}/{receipt['planned']}"
                if all(type(receipt.get(k)) is int for k in ('epoch', 'committed', 'planned')) else '')
-    return (f" · updates from Pi · multipass export {newest or 'pending'}"
+    coverage = ''
+    if newest is not None:
+        latest = payload.get(str(newest), {})
+        ours = latest.get('ours') or {}
+        rivals = [v for v in (latest.get('rivals') or {}).values() if isinstance(v, dict)]
+        if all(type(ours.get(k)) is int for k in ('scored_sequences', 'fleet_size')):
+            coverage = (f" · replay {newest}: own {ours['scored_sequences']}/{ours['fleet_size']}"
+                        f"; rivals {sum(v.get('scored_sequences', 0) for v in rivals)}/"
+                        f"{sum(v.get('fleet_size', 0) for v in rivals)} sequences at ≥10 passes")
+    return (f" · updates from Pi · chain {latest_chain_epoch() or 'unavailable'}"
+            f" · multipass export {newest or 'pending'}{coverage}"
             f" · measured fleet {measured or 'pending'} · multipass refresh {sync}"
             f"{commits} · API leaderboard {latest_leaderboard() or 'pending'}")
 

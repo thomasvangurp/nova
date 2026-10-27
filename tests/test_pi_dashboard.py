@@ -411,3 +411,42 @@ def test_parallel_replay_uses_only_three_distinct_background_leases(monkeypatch)
     result = replay.run_parallel(25967)
     assert sorted(seen) == [(5, ('A',)), (6, ('B',)), (7, ('C',))]
     assert result['ok'] and result['rows'] == 30
+
+
+def test_commit_receipts_survive_uid_independent_archive(tmp_path):
+    from nanobody_dash.submission_status import latest
+    archive = tmp_path/'archive/epoch25966'
+    archive.mkdir(parents=True)
+    (archive/'nanobody_result.json').write_text(json.dumps({'epoch': 25966, 'pool': []}))
+    log = tmp_path/'loop.log'
+    log.write_text('\n'.join(json.dumps(v) for v in [
+        {'event': 'plan', 'epoch': 25966, 'committing': 1, 'with_sequence': 1},
+        {'event': 'commit', 'uid': 1, 'rc': 0, 'sequence': True},
+        {'event': 'done', 'committed': 1, 'failed': 0}]))
+    status, sequences = latest(log, tmp_path/'archive')
+    assert status['committed'] == status['planned'] == 1
+    assert sequences == {}
+
+
+def test_ui_reports_chain_and_incomplete_replay_separately(paths, monkeypatch):
+    monkeypatch.setattr(pi, 'latest_chain_epoch', lambda: 25967)
+    monkeypatch.setattr(pi, 'latest_leaderboard', lambda: 25966)
+    pi.COMPARISON.write_text(json.dumps({'25966': {
+        'ours': {'mean': None, 'scored_sequences': 1, 'fleet_size': 13},
+        'rivals': {'rival': {'scored_sequences': 0, 'fleet_size': 4}}}}))
+    text = pi.status_text()
+    assert 'chain 25967' in text and 'API leaderboard 25966' in text
+    assert 'replay 25966: own 1/13; rivals 0/4 sequences at ≥10 passes' in text
+    assert 'measured fleet pending' in text
+
+
+def test_chain_status_rejects_stale_slot_record(paths, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(pi.time, 'time', lambda: 1000)
+    with sqlite3.connect(pi.DATA/'nanobody_dash.sqlite') as db:
+        db.executescript('CREATE TABLE slots(epoch INTEGER,time REAL);'
+                         'INSERT INTO slots VALUES (25967,399);')
+    assert pi.latest_chain_epoch() is None
+    with sqlite3.connect(pi.DATA/'nanobody_dash.sqlite') as db:
+        db.execute('UPDATE slots SET time=999')
+    assert pi.latest_chain_epoch() == 25967

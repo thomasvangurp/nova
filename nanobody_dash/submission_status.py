@@ -39,15 +39,21 @@ def latest(log: Path, archives: Path) -> tuple[dict, dict]:
     if newest is None:
         return {}, {}
     status, uids = newest
-    artifact = json.loads((archives/f"epoch{status['epoch']}"/'nanobody_result.json').read_text())
+    status = {**status, 'source': 'pi_commit_receipts'}
+    # Successful transaction receipts are valid independently of replay input
+    # reconstruction. PR100 archives contain a UID-independent candidate pool.
+    try:
+        artifact = json.loads((archives/f"epoch{status['epoch']}"/'nanobody_result.json').read_text())
+    except (OSError, ValueError):
+        return status, {}
     target = target_for_epoch(status['epoch'])
     if artifact.get('epoch') != status['epoch'] or artifact.get('target') != target:
-        return {}, {}
+        return status, {}
     submissions = [row for row in artifact.get('submissions', [])
                    if isinstance(row, dict) and row.get('uid') in uids
                    and isinstance(row.get('sequence'), str) and row['sequence']]
     if len({row['uid'] for row in submissions}) != status['committed']:
-        return {}, {}
-    return ({**status, 'source': 'pi_commit_receipts'},
+        return status, {}
+    return (status,
             {'epoch': status['epoch'], 'target': target,
              'submissions': [{'uid': row['uid'], 'sequence': row['sequence']} for row in submissions]})
