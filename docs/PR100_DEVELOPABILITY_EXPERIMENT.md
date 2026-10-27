@@ -185,3 +185,105 @@ Cheap annotation/sequence rejection remains first. An optional TNP-before-A3D
 short circuit could save only measured A3D time, not model/refinement work.
 Changing order changes first-failure counts; retain all failing gates to compare
 such a follow-up. Eligible entries always require full native measurements.
+
+## Offline proxy baseline evaluation, 2026-10-26
+
+The user authorized exploring an approximate first filter. The completed local
+experiment in `scripts/pr100_proxy_evaluate.py` is a negative result for four
+cheap baselines, not evidence against all proxies. It performed no native
+inference, generator changes, production writes, or deployment. A proxy can
+prioritize work but cannot supply TNP measurements or replace final validation.
+
+Verified sequence-hash joins recovered all 4,080 census and 351 pilot sequences.
+The census bank's whole-file digest matches its measurement receipt. The pilot
+input's whole-file digest does not match its receipt; all 351 individual sequence
+hashes and arm memberships do match. This provenance limitation remains explicit.
+Both reports have `annotation_runtime_qualified: false`; labels describe historical
+native screening, not current end-to-end validator eligibility.
+
+The experiment conservatively censors six census and 65 pilot records labelled
+`aggrescan_unavailable_or_failed`. Their summary values are finite, but these
+summary files do not carry status fields sufficient to independently verify the
+earlier document's statement that all were measured threshold rejections. Do not
+reinterpret missing/error observations as biological failures. This leaves
+4,074 training rows with 73 passers and 286 external rows with five passers.
+Results and call savings below are conditional on these complete cases.
+
+Features are sequence length, 20 amino-acid fractions, and 400 adjacent-pair
+fractions. Models are regularized logistic regression, ExtraTrees, histogram
+gradient boosting, and ridge regression of measured PSH. Fixed hyperparameters
+and seeds are in the script. Feature extraction for all 4,360 usable sequences
+took 0.14 seconds locally. No embeddings, model downloads, GPUs, or biological
+generation were used.
+
+Whole-sequence approximate 90% identity components keep close relatives together
+in five-fold holdout. These are leakage controls, not verified lineage labels.
+Sixty-five of 73 training passers occupy one component; 68 occupy IGHV3-23:18,
+and five IGHV3-23:16. The two largest components have 2,036 and 2,005 members,
+so independent support is much smaller than the row count. Cell holdout excludes
+the ten multi-cell rows entirely (4,064 rows, still 73 passers). Rankings spend
+the budget separately within each held-out fold and challenge cell; raw score
+scales from separately trained models are never pooled for AP/AUC.
+
+| Requested TNP calls saved | Family-held-out passers retained, range across models | Cell-held-out passers retained | External pilot passers retained |
+| --- | --- | --- | --- |
+| 80% | 17–22 / 73 (23.3–30.1%) | 16–21 / 73 (21.9–28.8%) | 0–2 / 5 |
+| 90% | 8–14 / 73 (11.0–19.2%) | 7–12 / 73 (9.6–16.4%) | 0–1 / 5 |
+| 95% | 4–9 / 73 (5.5–12.3%) | 3–5 / 73 (4.1–6.8%) | 0–1 / 5 |
+
+Integer cell budgets cause small differences between requested and actual
+savings; the JSON contains exact counts. These models are not supported as hard
+rejection filters at any of these budgets. They can discard most real passers.
+Average accuracy is an unsuitable success metric at this class imbalance.
+At approximately 80% savings, the family-held-out rankings deliver 1.16–1.50
+times the passers per TNP call of an unfiltered population. That modest observed
+enrichment could warrant a prospective soft-ranking comparison when proposals
+are cheap, but it does not establish reliable high-recall rejection or transfer
+to new epochs. The external pilot's five positives are insufficient to resolve
+the utility of these rankings.
+
+An exploratory logistic policy retaining the best 20% within known cells and
+abstaining on unseen IGHV3-23:5 and IGHV3-7:16 retains 5/5 external passers while
+saving 55.6% of calls among the 286 complete cases. Four of those five passers
+are protected by abstention, leaving only one positive testing the ranking.
+If the 65 censored cases were also retained, the accounting would be 192/351
+calls, or 45.3% savings; this is a denominator sensitivity, not an executable
+policy because censored outcomes are unknown before profiling. Even a fixed
+policy's one-sided IID 95% recall lower bound for 5/5 is only 54.9%. Here the
+policy was selected after comparing models/budgets and observations are related,
+so that bound is descriptive, not confirmatory coverage.
+
+Next useful work is to journal every actual measurement, including failures,
+execution errors, censoring, timings, sequence hash, challenge cell, generation
+lineage, and exact source/runtime/config provenance. Keep current-eligibility
+labels separate from older native outcomes and preserve repeated draws. The
+interrupted epoch 25958 run supplies no finalized negative labels. The current
+worker's running result has empty candidates/rejection counts, and completion
+persists passers while failure detail becomes aggregate counts; this loses the
+training data needed here.
+
+With prospective journals, compare richer locally available representations or
+cheap intermediate features in shadow mode against a random within-cell baseline.
+Freeze policies before held-out epochs/families, retain exploration and OOD
+fallback, and measure true passers per wall-time/TNP budget rather than pass/fail
+accuracy. These baseline results do not predict what richer features will do.
+No high-confidence rejection model has been qualified by this experiment.
+
+Reproduction used Python 3.14.6, NumPy 2.4.3, SciPy 1.17.1, scikit-learn 1.7.2,
+joblib 1.5.2, threadpoolctl 3.6.0, and one BLAS/OpenMP thread. Optional analysis
+dependencies remain outside production requirements. Twelve focused guards pass;
+the suite skips when optional SciPy/scikit-learn are absent. Run from the repo:
+
+```sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+python3 -B scripts/pr100_proxy_evaluate.py \
+  --readiness /Users/tvgdeena/nova-reports/pr100-readiness-20261026 \
+  --backup /Users/tvgdeena/nova-reports/pr100-audit-20261026/master-evidence/master/pr100-qualification-20261026 \
+  --output /Users/tvgdeena/nova-reports/pr100-proxy-20261026
+python3 -B tests/test_pr100_proxy_evaluate.py
+```
+
+The output `report.json` pins input/report and script digests, software versions,
+per-fold evidence, denominators, precision, recall, AP/AUC, timings, and all
+limitations. `external_predictions.json` stores only hashes and scores, not raw
+sequences. Private source data and generated outputs remain outside the repo.
