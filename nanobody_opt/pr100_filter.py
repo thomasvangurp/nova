@@ -132,7 +132,7 @@ def annotate(sequence, cache_dir):
     return result
 
 
-async def develop(sequences, concurrency):
+async def develop(sequences, concurrency, *, on_result=None, on_result_error=None):
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
         raise ValueError("developability concurrency must be a positive integer")
     activate_filter()
@@ -144,10 +144,42 @@ async def develop(sequences, concurrency):
     # enqueue more profiles than can start, or waiting consumes science time.
     config.async_config.batch_size = max(1, min(concurrency, len(sequences)))
     manager = AsyncServiceManager(config.async_config)
+    observer_errors = []
+    observer_reporting_errors = []
     try:
-        result = await DevelopabilityService(config.developability, manager).analyze_batch_async(sequences)
+        service = DevelopabilityService(config.developability, manager)
+        if on_result is not None:
+            # Observe completions before gather waits for the slowest profile.
+            # Keep pinned batch admission, ordering and exception representation.
+            analyze = service.analyze_async
+
+            async def observed(sequence):
+                try:
+                    value = await analyze(sequence)
+                except Exception as error:
+                    value = {"passed": False, "error": True,
+                             "error_kind": "timeout" if isinstance(error, TimeoutError) else "profile_exception",
+                             "sequence_sha256": hashlib.sha256(sequence.encode("utf-8")).hexdigest(),
+                             "reason": "Failed to compute TNP profile."}
+                try:
+                    on_result(sequence, value)
+                except Exception as error:
+                    # Observation failure must never become a scientific failure
+                    # through upstream gather(return_exceptions=True).
+                    observer_errors.append(type(error).__name__)
+                    if on_result_error is not None:
+                        try:
+                            on_result_error(type(error).__name__)
+                        except Exception as reporting_error:
+                            observer_reporting_errors.append(type(reporting_error).__name__)
+                return value
+
+            service.analyze_async = observed
+        result = await service.analyze_batch_async(sequences)
         if not isinstance(result, list) or len(result) != len(sequences):
             raise ValueError("incomplete developability result batch")
+        if observer_reporting_errors or (observer_errors and on_result_error is None):
+            raise RuntimeError("developability observation failed")
         return result
     finally:
         await manager.shutdown()

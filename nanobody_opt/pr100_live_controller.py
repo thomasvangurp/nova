@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -37,6 +38,7 @@ PUBLISH_RESERVE_SECONDS = 150.0
 PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'score': 1.0}
 PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'score': 90.0}
 TAIL_BYTES = 2048
+_JOURNAL_COLLECTOR = None
 # Wall reserved at the end of the native phase for the archive novelty pass (234 s in 25956).
 NOVELTY_RESERVE_SECONDS = 300.0
 ACTIVATION_EPOCH = 25957
@@ -48,8 +50,23 @@ _SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?k
 _LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
 
 TRANSPORT = r'''
-import base64,hashlib,json,os,pathlib,re,subprocess,sys,time
-r=json.load(sys.stdin);d=pathlib.Path(r['directory']);d.mkdir(parents=True,exist_ok=True)
+import base64,hashlib,json,os,pathlib,re,stat,subprocess,sys,time
+r=json.load(sys.stdin);d=pathlib.Path(r['directory'])
+if r['operation']=='journal':
+ out={'status':'unavailable'}
+ try:
+  fd=os.open(d/'native-observations.jsonl',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+  with os.fdopen(fd,'rb') as stream:
+   info=os.fstat(stream.fileno())
+   if not stat.S_ISREG(info.st_mode):out={'status':'not_regular'}
+   elif info.st_size>4*1024*1024:out={'status':'oversized'}
+   else:
+    raw=stream.read(4*1024*1024+1)
+    if len(raw)>4*1024*1024:out={'status':'oversized'}
+    else:out={'status':'collected','sha256':hashlib.sha256(raw).hexdigest(),'data':base64.b64encode(raw).decode()}
+ except OSError:pass
+ print(json.dumps(out));sys.exit(0)
+d.mkdir(parents=True,exist_ok=True)
 def atom(p,v):
  t=p.with_name('.'+p.name+'.tmp');t.write_text(json.dumps(v,allow_nan=False));os.replace(t,p)
 atom(d/'clock.json',r['clock'])
@@ -260,10 +277,19 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
 
 def run_phase(config, challenge, phase, files, stop_at, chain, local,
               *, transport=remote, sleep=time.sleep, diagnostics=None):
+    def heartbeat(clock):
+        try:
+            atomic(Path(config['state_root']) / 'heartbeat.json',
+                   {'status': 'running', 'phase': phase, 'work_epoch': challenge['epoch'], **clock})
+        except OSError:
+            if diagnostics is not None:
+                diagnostics['heartbeat_write_errors'] = diagnostics.get('heartbeat_write_errors', 0) + 1
+
     clock = clock_state(chain)
     if not admissible(clock, challenge['epoch']) or time.time() >= stop_at:
         raise TimeoutError('epoch cutoff before launch')
     host, request = phase_request(config, challenge, phase, files, stop_at, clock)
+    heartbeat(clock)
     result = transport(config, host, request)
     failures = 0
     while result['running']:
@@ -271,7 +297,9 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
         if time.time() > stop_at + 15:
             raise TimeoutError('remote receipt deadline')
         try:
-            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock_state(chain),
+            clock = clock_state(chain)
+            heartbeat(clock)
+            request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
                        'transport_deadline_unix': stop_at + 15}
             result = transport(config, host, request)
             failures = 0
@@ -513,7 +541,55 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     receipt['phase_diagnostics'] = diagnostics
     receipt['wall_seconds'] = time.time() - started
     atomic(local / 'receipt.json', receipt)
+    # The scientific outcome is already durable. Optional diagnostics get their
+    # own short deadline and cannot delay scoring, publishing or the next epoch.
+    if 'native' in diagnostics:
+        start_native_journal_collection(config, epoch, local, stop_at)
     return receipt
+
+
+def start_native_journal_collection(config, epoch, local, stop_at):
+    """At most one optional daemon; even stalled disk I/O cannot hold the controller."""
+    global _JOURNAL_COLLECTOR
+    if _JOURNAL_COLLECTOR is not None and _JOURNAL_COLLECTOR.is_alive():
+        return False
+    _JOURNAL_COLLECTOR = threading.Thread(target=collect_native_journal,
+        args=(config, epoch, local, stop_at), daemon=True, name='pr100-journal-collector')
+    _JOURNAL_COLLECTOR.start()
+    return True
+
+
+def collect_native_journal(config, epoch, local, stop_at, *, transport=remote):
+    deadline = min(stop_at, time.time() + 3.0)
+    if deadline <= time.time():
+        return {'status': 'deadline_elapsed'}
+    outcome = {'status': 'unavailable'}
+    try:
+        reply = transport({**config, 'transport_timeout_seconds': 3.0}, 'master',
+            {'operation': 'journal', 'directory': f"{config['remote_root']}/{epoch}/native",
+             'transport_deadline_unix': deadline})
+        status = reply.get('status')
+        if status in ('unavailable', 'oversized', 'not_regular'):
+            outcome = {'status': status}
+        elif status == 'collected':
+            encoded = reply.get('data', '')
+            if not isinstance(encoded, str) or len(encoded) > 6 * 1024 * 1024:
+                raise ValueError('journal size')
+            raw = base64.b64decode(encoded, validate=True)
+            digest = hashlib.sha256(raw).hexdigest()
+            if len(raw) > 4 * 1024 * 1024 or digest != reply.get('sha256'):
+                raise ValueError('journal integrity')
+            path = local / 'native' / 'native-observations.jsonl'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+            outcome = {'status': 'collected', 'bytes': len(raw), 'sha256': digest}
+    except Exception:
+        outcome = {'status': 'collection_failed'}
+    try:
+        atomic(local / 'journal-receipt.json', outcome)
+    except OSError:
+        pass
+    return outcome
 
 
 def publish(config, chain, challenge, validity, scores, settings, scorer_hash, settings_hash, local,
@@ -650,6 +726,7 @@ def main(argv=None):
             if epoch >= config['start_epoch'] and not (root / str(epoch) / 'receipt.json').exists():
                 if admissible(clock, epoch, reserve=START_MINIMUM_BLOCKS):
                     run_epoch(config, chain, clock, dry_run=args.dry_run)
+                    clock = clock_state(chain)
                 else:
                     directory = root / str(epoch)
                     directory.mkdir(exist_ok=True)

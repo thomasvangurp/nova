@@ -60,7 +60,8 @@ def candidate_budget(job):
     return float(budget)
 
 
-def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None):
+def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
+                  on_result=None, on_result_error=None):
     """Profile a batch and report wall measured from slot acquisition.
 
     The upstream ProfileExecution timeout starts before the semaphore is
@@ -70,7 +71,9 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None):
     """
     develop = develop or pr100_filter.develop
     acquired = clock()
-    values = asyncio.run(develop(list(sequences), workers))
+    callbacks = ({'on_result': on_result, 'on_result_error': on_result_error}
+                 if on_result is not None else {})
+    values = asyncio.run(develop(list(sequences), workers, **callbacks))
     return values, acquired, clock() - acquired
 
 
@@ -147,7 +150,8 @@ def check_novelty(rows, archive, *, novelty=None):
     return kept, len(frame)
 
 
-def native_phase(job, directory, *, clock=time.monotonic, measure=measure_batch, novelty=None):
+def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=None):
+    from nanobody_opt import pr100_native_journal as journal_module
     incoming = json.loads((directory / 'input.json').read_text())
     if incoming['challenge'] != job['challenge']:
         raise ValueError('native input challenge mismatch')
@@ -165,18 +169,24 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=measure_batch,
     config = rules.pinned_config(job['challenge']['epoch'])
     requirements = config['nanobody_requirements']
     rows = incoming['candidates']
+    if len({r['sequence'] for r in rows}) != len(rows):
+        raise ValueError('duplicate sequence in native input')
     result = {k: incoming[k] for k in ('challenge', 'target', 'epoch', 'archive_sha256',
                                        'archive_checked_at_unix')}
-    result.update(status='running', input_count=len(rows), completed=0, not_run=len(rows),
+    result.update(status='running', input_count=len(rows), completed=0,
+                  not_started=len(rows), not_completed=len(rows), in_flight=0,
                   candidates=[], rejection_counts={}, cache_hits=0, workers=workers,
                   candidate_budget_seconds=budget, repeats=repeats, allow_marginal=allow_marginal,
                   margin={**margin, 'threshold_at_k': selection.margin_threshold(repeats, margin)},
-                  novelty_checked=False)
+                  novelty_checked=False, native_classification_complete=False,
+                  observation_errors=0,
+                  measurement_outcomes={'passed': 0, 'rejected': 0, 'inconclusive': 0})
 
     def record(reason):
         result['rejection_counts'][reason] = result['rejection_counts'].get(reason, 0) + 1
 
     def flush():
+        result['observation_journal'] = journal.progress()
         pr100_filter.atomic(directory / 'result.json', result)
 
     phase_budget = job.get('phase_budget_seconds')
@@ -193,49 +203,93 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=measure_batch,
 
     measurements = {}
     started = set()
-    # Pass 1: one measurement each. Never enqueue more profiles than can start,
-    # so a candidate's budget is never consumed waiting for a cpu slot.
-    for offset in range(0, len(rows), workers):
-        batch = rows[offset:offset + workers]
-        if out_of_time():
-            break
-        values, acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
-        for row, value in zip(batch, values, strict=True):
-            key = row['sequence']
-            started.add(key)
-            measurements[key] = [value]
-            result['completed'] += 1
-        result['not_run'] = len(rows) - len(started)
-        result['last_batch_seconds'] = elapsed
-        flush()
+    journal = journal_module.AsyncJournal(directory, job, requirements)
+    result['observation_journal'] = journal.progress()
+    flush()
 
-    survivors, verdicts = [], {}
-    for row in rows:
-        key = row['sequence']
-        if key not in measurements:
-            continue
-        first = selection.decide(measurements[key], requirements, sequence=key,
-                                 repeats=repeats, margin=margin)
-        # A failing first measurement is a real rejection; do not pay for repeats.
-        if first['tier'] is None and first['reason'] not in ('insufficient_repeats', 'not_run'):
-            record(first['reason'])
+    def observation_error(_error_type):
+        # Diagnostics cannot convert a valid scientific result to failure.
+        result['observation_errors'] += 1
+
+    def measure_and_record(batch):
+        by_sequence = {row['sequence']: row for row in batch}
+        expected = {key: len(measurements.get(key, [])) + 1 for key in by_sequence}
+        started.update(by_sequence)
+        result['not_started'] = len(rows) - len(started)
+        result['in_flight'] += len(batch)
+
+        def completed(key, value):
+            if len(measurements.get(key, [])) >= expected[key]:
+                return
+            measurements.setdefault(key, []).append(value)
+            result['completed'] += 1
+            result['not_completed'] = len(rows) - len(measurements)
+            result['in_flight'] -= 1
+            try:
+                observed = journal_module.observation(value, requirements, key)
+                result['measurement_outcomes'][observed['outcome']] += 1
+                progress = {k: result[k] for k in ('status', 'input_count', 'completed',
+                    'not_started', 'not_completed', 'in_flight', 'native_classification_complete',
+                    'observation_errors')}
+                progress['measurement_outcomes'] = dict(result['measurement_outcomes'])
+                journal.save(by_sequence[key], expected[key], observed, progress=progress)
+            except Exception as error:
+                observation_error(type(error).__name__)
+
+        if measure is None:
+            values, acquired, elapsed = measure_batch(
+                [r['sequence'] for r in batch], workers, clock=clock,
+                on_result=completed, on_result_error=observation_error)
         else:
-            survivors.append(row)
-    # Pass 2: k-1 further independent measurements for first-pass survivors only.
-    for _ in range(max(0, repeats - 1)):
-        pending = [r for r in survivors if len(measurements[r['sequence']]) < repeats]
-        if not pending:
-            break
-        for offset in range(0, len(pending), workers):
-            batch = pending[offset:offset + workers]
+            values, acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
+        for row, value in zip(batch, values, strict=True):
+            completed(row['sequence'], value)
+        return acquired, elapsed
+
+    def collect_measurements():
+        # Pass 1: one measurement each. Never enqueue more profiles than can start,
+        # so a candidate's budget is never consumed waiting for a cpu slot.
+        for offset in range(0, len(rows), workers):
+            batch = rows[offset:offset + workers]
             if out_of_time():
                 break
-            values, _acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
-            for row, value in zip(batch, values, strict=True):
-                measurements[row['sequence']].append(value)
-                result['completed'] += 1
+            acquired, elapsed = measure_and_record(batch)
             result['last_batch_seconds'] = elapsed
             flush()
+
+        survivors = []
+        for row in rows:
+            key = row['sequence']
+            if key not in measurements:
+                continue
+            first = selection.decide(measurements[key], requirements, sequence=key,
+                                     repeats=repeats, margin=margin)
+            # A failing first measurement is a real rejection; do not pay for repeats.
+            if first['tier'] is None and first['reason'] not in ('insufficient_repeats', 'not_run'):
+                record(first['reason'])
+            else:
+                survivors.append(row)
+        # Pass 2: k-1 further independent measurements for first-pass survivors only.
+        for _ in range(max(0, repeats - 1)):
+            pending = [r for r in survivors if len(measurements[r['sequence']]) < repeats]
+            if not pending:
+                break
+            for offset in range(0, len(pending), workers):
+                batch = pending[offset:offset + workers]
+                if out_of_time():
+                    break
+                _acquired, elapsed = measure_and_record(batch)
+                result['last_batch_seconds'] = elapsed
+                flush()
+
+        return survivors
+
+    try:
+        survivors = collect_measurements()
+    finally:
+        journal.close(timeout=1.0)
+        result['observation_journal'] = journal.progress()
+    verdicts = {}
 
     passers = []
     for row in survivors:
@@ -258,6 +312,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=measure_batch,
                         'psh_sd': verdict['psh_sd'], 'repeats': verdict['repeats'],
                         'margin_threshold': verdict['margin_threshold']})
     result['native_passed'] = len(passers)
+    result['native_classification_complete'] = True
     flush()
 
     # Funnel order: annotation -> native developability -> archive novelty.

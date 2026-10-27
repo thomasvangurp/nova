@@ -165,6 +165,102 @@ def fake_transport(responses):
     return transport
 
 
+def test_heartbeat_advances_during_long_native_phase(tmp_path):
+    chain = Chain()
+    snapshots = []
+    state = tmp_path / 'state' / 'heartbeat.json'
+    local = tmp_path / 'local'
+    local.mkdir()
+    def transport(cfg, host, request):
+        snapshots.append(json.loads(state.read_text()))
+        if len(snapshots) < 3:
+            return {'running': True}
+        return {'running': False, 'receipt': {'reason': 'completed'}, 'files': {}}
+    def advance(_seconds):
+        chain.block += 1
+    controller.run_phase(config(tmp_path), challenge(), 'native', {},
+                         time.time() + 2000, chain, local,
+                         transport=transport, sleep=advance)
+    assert [s['block'] for s in snapshots] == [EPOCH * LENGTH + i for i in range(3)]
+    assert all(s['status'] == 'running' and s['phase'] == 'native' and
+               s['work_epoch'] == EPOCH for s in snapshots)
+
+
+def test_real_transport_returns_journal_after_interruption(tmp_path):
+    import base64
+    import sys
+    directory = tmp_path / 'native'
+    directory.mkdir()
+    journal = b'{"kind":"context"}\n{"kind":"observation"}\n'
+    (directory / 'native-observations.jsonl').write_bytes(journal)
+    (directory / 'supervisor-receipt.json').write_text(json.dumps({'reason': 'terminated'}))
+    result = subprocess.run([sys.executable, '-c', controller.TRANSPORT],
+                            input=json.dumps({'operation': 'journal', 'directory': str(directory)}), capture_output=True, text=True,
+                            timeout=5, check=True)
+    returned = json.loads(result.stdout)
+    assert returned['status'] == 'collected'
+    assert base64.b64decode(returned['data']) == journal
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'directory', 'oversized'])
+def test_optional_transport_refuses_unsafe_journal_without_affecting_results(tmp_path, kind):
+    import sys
+    path = tmp_path / 'native-observations.jsonl'
+    if kind == 'symlink':
+        target = tmp_path / 'unrelated'
+        target.write_text('unrelated-inert-data')
+        path.symlink_to(target)
+    elif kind == 'directory':
+        path.mkdir()
+    else:
+        with path.open('wb') as stream:
+            stream.truncate(4 * 1024 * 1024 + 1)
+    (tmp_path / 'supervisor-receipt.json').write_text('{"reason":"completed"}')
+    (tmp_path / 'result.json').write_text('{"status":"complete"}')
+    for operation in ('journal', 'poll'):
+        result = subprocess.run([sys.executable, '-c', controller.TRANSPORT],
+            input=json.dumps({'operation': operation, 'directory': str(tmp_path), 'clock': clock()}),
+            capture_output=True, text=True, timeout=5, check=True)
+        data = json.loads(result.stdout)
+        assert 'unrelated-inert-data' not in result.stdout
+        if operation == 'journal':
+            assert data['status'] in ('unavailable', 'not_regular', 'oversized')
+            assert 'data' not in data
+        else:
+            assert 'result.json' in data['files']
+            assert 'native-observations.jsonl' not in data['files']
+
+
+def test_optional_collection_timeout_does_not_raise_or_oversubscribe_deadline(tmp_path):
+    def timeout(cfg, host, request):
+        assert cfg['transport_timeout_seconds'] == 3.0
+        assert request['transport_deadline_unix'] <= time.time() + 3.0
+        raise TimeoutError('inert diagnostic timeout')
+    result = controller.collect_native_journal(config(tmp_path), EPOCH, tmp_path,
+        time.time() + 300, transport=timeout)
+    assert result['status'] == 'collection_failed'
+
+
+def test_stalled_diagnostic_collection_never_blocks_next_epoch(tmp_path, monkeypatch):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    def stalled(*args):
+        entered.set()
+        release.wait(5)
+    monkeypatch.setattr(controller, 'collect_native_journal', stalled)
+    monkeypatch.setattr(controller, '_JOURNAL_COLLECTOR', None)
+    started = time.monotonic()
+    try:
+        assert controller.start_native_journal_collection(config(tmp_path), EPOCH, tmp_path, time.time() + 100)
+        assert time.monotonic() - started < 1
+        assert entered.wait(1)
+        assert controller._JOURNAL_COLLECTOR.daemon
+        assert controller.start_native_journal_collection(config(tmp_path), EPOCH + 1, tmp_path, time.time() + 100) is False
+    finally:
+        release.set()
+        controller._JOURNAL_COLLECTOR.join(2)
+
+
 def test_run_phase_polls_until_the_receipt_appears_and_records_diagnostics(tmp_path):
     import base64
     result = base64.b64encode(json.dumps({'candidates': []}).encode()).decode()

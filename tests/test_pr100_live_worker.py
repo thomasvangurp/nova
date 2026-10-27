@@ -52,6 +52,102 @@ def test_bad_concurrency_rejected_without_backend(value):
     with pytest.raises(ValueError): asyncio.run(pr100_filter.develop(['A'], value))
 
 
+@pytest.fixture
+def observed_backend(monkeypatch):
+    """Use the exact pinned batch loop with controllable, inert profile tasks."""
+    source = pr100_filter.ROOT / 'NOVA-nanobody-filter/metanano/services/developability_service.py'
+    tree = ast.parse(source.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'DevelopabilityService')
+    method = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'analyze_batch_async')
+    method.returns = None
+    for arg in method.args.args:
+        arg.annotation = None
+    scope = {'asyncio': asyncio, 'hashlib': hashlib}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(source), 'exec'), scope)
+    state = types.SimpleNamespace(shutdowns=0)
+
+    class Manager:
+        def __init__(self, config):
+            self.batch_size = config.batch_size
+        async def shutdown(self):
+            state.shutdowns += 1
+
+    class Service:
+        analyze_batch_async = scope['analyze_batch_async']
+        def __init__(self, config, manager):
+            self.manager = manager
+        async def analyze_async(self, sequence):
+            return await state.analyze(sequence)
+
+    for name, cls in [('async_manager', Manager), ('developability_service', Service)]:
+        module = types.ModuleType('metanano.services.' + name)
+        setattr(module, 'AsyncServiceManager' if name == 'async_manager' else 'DevelopabilityService', cls)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(pr100_filter, 'activate_filter', lambda: None)
+    config = types.SimpleNamespace(async_config=types.SimpleNamespace(), developability=object())
+    monkeypatch.setattr(pr100_filter, 'helper', lambda _: types.SimpleNamespace(developability_config=lambda: config))
+    return state
+
+
+def test_observations_arrive_before_slowest_profile_and_results_keep_input_order(observed_backend):
+    async def check():
+        release = asyncio.Event()
+        seen = []
+        async def analyze(sequence):
+            if sequence == 'A':
+                await release.wait()
+            if sequence == 'C':
+                raise TimeoutError('inert failure')
+            return {'sequence': sequence, 'passed': True}
+        def sink(sequence, value):
+            seen.append((sequence, value))
+            if sequence == 'C':
+                assert not release.is_set()
+                assert [s for s, _ in seen] == ['B', 'C']
+                release.set()
+        observed_backend.analyze = analyze
+        result = await asyncio.wait_for(pr100_filter.develop(['A', 'B', 'C'], 3, on_result=sink), 2)
+        assert [v.get('sequence') for v in result] == ['A', 'B', None]
+        assert result[2]['error_kind'] == 'timeout'
+        assert [s for s, _ in seen] == ['B', 'C', 'A']
+    asyncio.run(check())
+    assert observed_backend.shutdowns == 1
+
+
+def test_observer_io_error_never_relabels_success_as_scientific_failure(observed_backend):
+    async def analyze(sequence):
+        return {'passed': True, 'sequence': sequence}
+    def broken_sink(*args):
+        raise OSError('inert disk failure')
+    observed_backend.analyze = analyze
+    errors = []
+    result = asyncio.run(pr100_filter.develop(['A', 'B'], 2, on_result=broken_sink,
+                                             on_result_error=errors.append))
+    assert all(v['passed'] is True and 'error' not in v for v in result)
+    assert errors == ['OSError', 'OSError']
+    with pytest.raises(RuntimeError, match='observation failed'):
+        asyncio.run(pr100_filter.develop(['A'], 1, on_result=broken_sink))
+
+
+def test_cancelled_unfinished_profile_is_not_recorded_as_failure(observed_backend):
+    async def check():
+        began = asyncio.Event()
+        seen = []
+        async def analyze(sequence):
+            began.set()
+            await asyncio.Event().wait()
+        observed_backend.analyze = analyze
+        task = asyncio.create_task(pr100_filter.develop(['A'], 1,
+                                   on_result=lambda *args: seen.append(args)))
+        await asyncio.wait_for(began.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert seen == []
+    asyncio.run(check())
+    assert observed_backend.shutdowns == 1
+
+
 class StubNovelty:
     """Archive novelty stand-in; records what it was asked to search."""
     def __init__(self, novel=True):
@@ -271,3 +367,62 @@ class TestFunnelOrder:
         result = worker.native_phase(job, native_env, measure=measure,
                                      novelty=StubNovelty(novel=False))
         assert result['candidates'] == []
+
+
+def test_interrupted_batch_preserves_completed_observation(native_env, monkeypatch):
+    write_input(native_env, ['A', 'B'])
+    def interrupted(sequences, workers, *, clock, on_result, on_result_error):
+        on_result('B', profile(70))
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(worker, 'measure_batch', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        worker.native_phase(native_job(repeats=3), native_env)
+    assert (native_env / 'native-observations.jsonl').stat().st_size > 0
+    running = json.loads((native_env / 'native-progress.json').read_text())
+    assert running['status'] == 'running' and running['completed'] == 1
+    assert running['observation_journal']['observations_durable'] == 1
+    assert running['native_classification_complete'] is False
+    assert running['not_started'] == 0 and running['not_completed'] == 1 and running['in_flight'] == 1
+    assert 'native_passed' not in running and 'not_run' not in running
+
+
+def test_out_of_order_callbacks_and_batch_fallback_count_each_repeat_once(native_env, monkeypatch):
+    write_input(native_env, ['A', 'B', 'C'])
+    def complete(sequences, workers, *, clock, on_result, on_result_error):
+        for sequence in reversed(sequences):
+            on_result(sequence, profile(70))
+        return [profile(70) for _ in sequences], 0.0, 1.0
+    monkeypatch.setattr(worker, 'measure_batch', complete)
+    result = worker.native_phase(native_job(repeats=3), native_env)
+    assert result['completed'] == 9
+    assert result['observation_journal']['observations_durable'] == 9
+    assert result['native_passed'] == 3
+    assert result['native_classification_complete'] is True
+    assert all(r['repeats'] == 3 for r in result['candidates'])
+
+
+def test_journal_failure_does_not_block_passing_candidates(native_env, monkeypatch):
+    from nanobody_opt import pr100_native_journal
+    def broken_save(*args):
+        raise OSError('inert journal failure')
+    monkeypatch.setattr(pr100_native_journal.Journal, 'save', broken_save)
+    write_input(native_env, ['A'])
+    result = worker.native_phase(native_job(repeats=1), native_env,
+                                 measure=lambda *a, **k: ([profile(70)], 0.0, 1.0))
+    assert result['completed'] == 1 and result['native_passed'] == 1
+    assert result['observation_journal']['status'] == 'degraded'
+    assert result['status'] == 'complete'
+
+
+def test_retry_measures_fresh_and_preserves_old_attempt(native_env):
+    write_input(native_env, ['A'])
+    calls = []
+    def measure(*args, **kwargs):
+        calls.append(1)
+        return [profile(70)], 0.0, 1.0
+    first = worker.native_phase(native_job(repeats=1), native_env, measure=measure)
+    old_bytes = (native_env / 'native-observations.jsonl').read_bytes()
+    second = worker.native_phase(native_job(repeats=1), native_env, measure=measure)
+    assert calls == [1, 1]
+    assert first['observation_journal']['attempt_id'] != second['observation_journal']['attempt_id']
+    assert (native_env / 'native-observations.jsonl').read_bytes().startswith(old_bytes)

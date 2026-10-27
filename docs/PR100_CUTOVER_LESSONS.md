@@ -123,3 +123,37 @@ Required regression coverage includes deadline exhaustion during transport retri
 service termination, failure after process launch, detached descendants on Linux, and
 real exporter/verifier contract checks. Future deployment receipts must distinguish
 committed source, passing CI, installed hashes, enabled services, and actual submissions.
+
+## Preserve completed observations, 2026-10-27
+
+Epoch 25959 demonstrated actual partial-fleet publication and five independently
+verified commitments. This proves that the Pi-owned path works; it does not
+guarantee a passing fleet for every future challenge or a competitive score.
+
+An interrupted native phase previously retained only a completed-count summary.
+Its empty candidate list was not a measured zero-pass result: classification ran
+after all batches and the individual outcomes could be lost with the process.
+The worker now observes each completed profile before the pinned batch gather
+finishes and queues allowlisted measurements including failures and missing results
+to a bounded diagnostic writer. Only fsynced records count as durable; pending and
+dropped records remain explicit. A separate native-progress file reports completed,
+in-flight and never-started work while final classification is pending. The Pi
+retrieves a bounded journal snapshot separately, after saving the scientific outcome.
+
+Each attempt and repeat has its own identity. Source, input, challenge, requirements,
+tool and observed runtime identities are recorded, but model-weight identity is
+explicitly incomplete. These records are diagnostic evidence, not a reusable cache,
+independent new evaluations, novelty clearance or publication authorization. A retry
+still performs fresh measurements. Unknown computation and provenance failures remain
+censored rather than becoming biological negative labels.
+
+Diagnostic storage failures must not convert a valid scientific result into an
+upstream profile exception or block publication. The writer and collector are bounded
+daemon workers so stalled disk I/O cannot hold the event loop or next epoch. Failed
+writes are reported, lock acquisition is nonblocking, unfinished cancelled work is not recorded as a failure,
+and completed callbacks retain input/repeat identity despite out-of-order completion.
+CI exercises these cases, stalled writers, abrupt process exit, torn records, unchanged
+handoff validation, and optional transfer failures including symlinks and oversized
+files. The controller also refreshes its
+heartbeat during phase polling instead of displaying the previous epoch throughout
+a long native run. Publishing rules, scoring settings and admission budgets are unchanged.
