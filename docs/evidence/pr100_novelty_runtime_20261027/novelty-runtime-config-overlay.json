@@ -1,0 +1,20 @@
+{
+  "hosts": {
+    "master": {
+      "novelty_runtime": {
+        "python": "/root/pr100-novelty-runtime-20261027/bin/novelty-python",
+        "path": "/root/pr100-novelty-runtime-20261027/bin:/usr/local/bin:/usr/bin:/bin",
+        "python_path": "/root/pr100-novelty-runtime-20261027/shim",
+        "identity_sha256": "f6f27ad1bec8edaa47d61dbd1f444eb3e4fb9a3107589f5d903e1248f544ea30"
+      }
+    },
+    "slave": {
+      "novelty_runtime": {
+        "python": "/root/pr100-novelty-runtime-20261027/bin/novelty-python",
+        "path": "/root/pr100-novelty-runtime-20261027/bin:/usr/local/bin:/usr/bin:/bin",
+        "python_path": "/root/pr100-novelty-runtime-20261027/shim",
+        "identity_sha256": "9851767c681498521c7e86cc0f46159d32e1115acf674c71f1f9ada863d22fb9"
+      }
+    }
+  }
+}

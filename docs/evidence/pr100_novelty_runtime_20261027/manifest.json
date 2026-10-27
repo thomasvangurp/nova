@@ -1,0 +1,77 @@
+{
+  "files": {
+    "README.md": {
+      "bytes": 5712,
+      "sha256": "60e292e259c948d70e48c83c8ebc1f55e16a244e11b5442ade3b323010c24d8f"
+    },
+    "helpers/pr100-build-novelty-assets-20261027.py": {
+      "bytes": 2296,
+      "sha256": "29885fc1c786fc08ee1f768f555794c7118a02713e58f94a089960987295fc79"
+    },
+    "helpers/pr100-build-novelty-hmmer-20261027.py": {
+      "bytes": 1464,
+      "sha256": "acee00f3ec5a606093268cca3f09bd935ab130fd1a7263c40de185badf8f719d"
+    },
+    "helpers/pr100-build-novelty-pydantic-20261027.py": {
+      "bytes": 2040,
+      "sha256": "c929873b6e8d8a2ba890cbe9cbc044de86dfa5903bc490f8bd770bdc35cc8649"
+    },
+    "helpers/pr100-copy-hmmer-assets-20261027.py": {
+      "bytes": 2489,
+      "sha256": "7a87089d124828e9deac5539190c876f7533b5f607f08269dfb107c6ce55db0d"
+    },
+    "helpers/pr100-install-novelty-assets-local-20261027.py": {
+      "bytes": 1265,
+      "sha256": "5952e9616f8567183f6232a715efa382124e8094aa6ea1c06adc09af3d15a308"
+    },
+    "helpers/pr100-install-novelty-pydantic-20261027.py": {
+      "bytes": 1379,
+      "sha256": "8c76b85e89d0140b4df50302a7d34e95503407d756ccdee26b2b45ab2f666917"
+    },
+    "helpers/pr100-launch-qualified-novelty-replay-20261027.py": {
+      "bytes": 4095,
+      "sha256": "b2a2e08880e620edbc5793d3f6aaea2ccbd0fbc74f3519ba95e9618f75e95fdf"
+    },
+    "helpers/pr100-launch-reused-qualified-replay-20261027.py": {
+      "bytes": 1759,
+      "sha256": "45afcf37ceac8cc937581079b1f6eef31422dd33ce91a7a8c0a7d330d3303db7"
+    },
+    "helpers/pr100-novelty-remote.py": {
+      "bytes": 2146,
+      "sha256": "389660762bb180fccb853a2c1cd8d3c006f150b85a4568680c5b955d31d36e55"
+    },
+    "helpers/pr100-poll-qualified-novelty-replay-20261027.py": {
+      "bytes": 1406,
+      "sha256": "a27641245f200a6a330ff483826bd39346ee137802a9f4267b20302d4ea8cd55"
+    },
+    "helpers/pr100-prepare-novelty-qualification-20261027.py": {
+      "bytes": 2756,
+      "sha256": "c0e4b3a25ab59e000cf53714cd0c4bce727c444ecc1c0d3b845c6b813e5bf768"
+    },
+    "helpers/pr100-provision-novelty-runtime-20261027.py": {
+      "bytes": 3812,
+      "sha256": "1a55c47a7c3a872e3a0c3f51660692df7eb6626d456df88ce6a70b1f4c5b8f91"
+    },
+    "helpers/pr100-qualified-novelty-replay-worker-20261027.py": {
+      "bytes": 1630,
+      "sha256": "d4d739a67af3006e523142f9b6ca7c33fcfd1ad424ccf694991fb85649112460"
+    },
+    "helpers/pr100-resume-novelty-provision-20261027.py": {
+      "bytes": 1861,
+      "sha256": "b200623fe2b79724eece0810ddabe1393032114ac7ed02bfa0a7df3db019ccea"
+    },
+    "novelty-qualification.json": {
+      "bytes": 36534,
+      "sha256": "111f07c9d07ea8e86091c7e23da80e6ab1d8a8f412fa2b45c9ecf73c3d98f8c2"
+    },
+    "novelty-runtime-config-overlay.json": {
+      "bytes": 791,
+      "sha256": "07e5ee93cc0d43e319e8bebab2ea1c4da886015658f149c2d38e5d93c4e832f5"
+    },
+    "shipping-validation.json": {
+      "bytes": 583,
+      "sha256": "f8a77aaf3c71680a1db90ff44a6729983152f72bfd09420ff8bb2a382e9697cf"
+    }
+  },
+  "schema": "pr100-sanitized-evidence-manifest-v1"
+}

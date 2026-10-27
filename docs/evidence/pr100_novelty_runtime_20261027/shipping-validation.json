@@ -1,0 +1,24 @@
+[
+  {
+    "git_sha": "b5554b97f75aadb87a6a32539cd3963ae89d6779",
+    "build_stamp_sha256": "da896b6765f509750cc0729090e345b68facaefb1e4cce2c4bc4ef0146934bdd",
+    "validation": {
+      "passed": true,
+      "tests": 1591,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  {
+    "git_sha": "663723dc5e627ec313ead74828eaebcda6fd9927",
+    "build_stamp_sha256": "7b7e06eb42fc3e14bca94c8fc0792ef192f5f744662356ae08ec4295342ea25d",
+    "validation": {
+      "passed": true,
+      "tests": 1591,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  }
+]

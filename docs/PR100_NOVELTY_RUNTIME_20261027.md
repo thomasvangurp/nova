@@ -24,6 +24,12 @@ Annotation uses abnumber 0.4.4, ANARCI 2026.2.13.2, ANARCII metadata 2.0.5, BioP
 
 Approval requires a complete replay of both original archive snapshots, an actual positive batch annotation, numerical verdicts, archive CDR coverage, measured elapsed time within the owned deadline, and zero remaining descendants. Python binary differences produce distinct host identities even when the scientific asset manifests agree. Do not approve an identity from dependency metadata alone.
 
+Both hosts passed the actual replay. All 22 inputs passed against both the old 8,553-row archive and the fresh 8,575-row archive; every archive entry had CDR annotation. The complete numerical verdict arrays matched between hosts. The master took 105.88 and 106.09 seconds per archive; the slave took 159.50 and 156.48 seconds. Both supervisors completed with exit code zero, reached a cleanup fixed point, and left zero descendants. The slowest individual check fits the existing 300-second novelty reserve. Combined two-snapshot times are 212.09 seconds on master and 317.16 seconds on slave.
+
+This resolves the specific 12-candidate discrepancy: those candidates pass the unchanged pinned rules with qualified annotation against both captured snapshots. It does not certify an arbitrary later archive or external validator implementation. Every new publication still needs its own current archive and runtime-bound check.
+
+The [sanitized qualification evidence](evidence/pr100_novelty_runtime_20261027/README.md) retains the exact helper sources, per-host runtime identities, full hash/numerical verdicts, cleanup receipts, config overlay and shipping validation. No sequences, raw library streams, authentication values or complete process environments are included.
+
 ## Cutover recovery
 
 A one-time migration is keyed by the configured runtime identities. It polls and collects existing old-code requests without relaunching them, waits for verified cleanup, and restores reusable evidence from retained native results and dedicated confirmation checkpoints. Audit journals never become reusable evidence. Completed checkpoints are reclassified with zero fresh or repeat native draws; incomplete checkpoints retain their missing-confirmation requirement and original execution host.

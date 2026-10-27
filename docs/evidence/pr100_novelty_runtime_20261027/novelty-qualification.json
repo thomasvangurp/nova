@@ -1,0 +1,821 @@
+{
+  "schema": "pr100-novelty-runtime-qualification-v1",
+  "artifact_hash_encoding": "canonical-json-v1",
+  "candidate_source_commit": "663723dc5e627ec313ead74828eaebcda6fd9927",
+  "qualified_at_unix": 1793099948.476295,
+  "qualification_helper_sha256": {
+    "worker": "d4d739a67af3006e523142f9b6ca7c33fcfd1ad424ccf694991fb85649112460"
+  },
+  "hosts": {
+    "master": {
+      "runtime": {
+        "python": "/root/pr100-novelty-runtime-20261027/bin/novelty-python",
+        "path": "/root/pr100-novelty-runtime-20261027/bin:/usr/local/bin:/usr/bin:/bin",
+        "python_path": "/root/pr100-novelty-runtime-20261027/shim",
+        "identity_sha256": "f6f27ad1bec8edaa47d61dbd1f444eb3e4fb9a3107589f5d903e1248f544ea30"
+      },
+      "identity": {
+        "schema": "pr100-qualified-novelty-v1",
+        "annotation_identity": "e153985994c071b7ed383372199c7e4af3d2f8fada6d001cfe6227bdad99af4f",
+        "packages": {
+          "abnumber": "0.4.4",
+          "anarci": "2026.2.13.2",
+          "anarcii": "2.0.5",
+          "biopython": "1.86",
+          "numpy": "2.0.2",
+          "pandas": "2.2.3",
+          "pydantic": "2.13.5",
+          "pydantic_core": "2.46.5",
+          "annotated-types": "0.8.0",
+          "typing_extensions": "4.16.0",
+          "typing-inspection": "0.4.4",
+          "parasail": null
+        },
+        "assets": {
+          "assets-manifest.json": "a7dfc8aa900ab17ae09d68fc174da463776eebed650527ada677d34089dd8daa",
+          "pydantic-assets-manifest.json": "69a292ead64e21d4bcb7f9f84501f6c75017ed1323b67138505e4a275f6c7ab8",
+          "hmmer-assets-manifest.json": "3c9277ee4b98b9f0e6939bc5afbbc0cc5713366cef741b33be7bd00a1fcae477"
+        },
+        "sources": {
+          "nanobody_opt/check_validator_novelty.py": "9b1f8803dd87bb1cdc50dc084654052daba18a14fc3e9357b356d4d180018a9f",
+          "nanobody_opt/pr100_novelty_runtime.py": "d5c6411dbe8806ce78d2102434e24b8301733e8ad3d52b7a87776f3dc28ffe6d",
+          "NOVA-nanobody-filter/metanano/config.py": "00e8cba1b69ffdac9294b114a173b37353ee547687bdd00c042cc1cc9bab55ce",
+          "NOVA-nanobody-filter/metanano/search/search_engine.py": "16bd888225fac3878b85bd67298b34318305564f467659040ab2f037c5e2323c",
+          "NOVA-nanobody-filter/metanano/search/index_manager.py": "032f9be8c65455d84fa28cd0f46b1a0246d764265ae981456453044d2806fe23",
+          "NOVA-nanobody-filter/metanano/utils/alignment.py": "852e073da766f665aab02c34f2f9d7ada5f7ecc010c4e7be98ee10e4442689a9",
+          "NOVA-nanobody-filter/metanano/utils/cdr_utils.py": "92633529c4cf4109fcb9985b57940c357d633a6f70f0df53326de8a51cb55d10",
+          "NOVA-nanobody-filter/metanano/utils/kmer.py": "32af38e005667d02b3d6d857648e59cc8644e2b4f74c41429643cdc4d9385863"
+        },
+        "python_version": [
+          3,
+          12,
+          14
+        ],
+        "python_binary_sha256": "8d520ffeb3f6028a6ed827273e6b03b00bae1962f20b20ca69dec0489f3fc28b",
+        "execution_environment_sha256": "9d837339573b3b062ac2d9f36606e4a454a15b2f1b523d14e344e85fae5195c7",
+        "archive_batch_worker_limit": 8
+      },
+      "result": {
+        "status": "complete",
+        "runtime_sha256": "f6f27ad1bec8edaa47d61dbd1f444eb3e4fb9a3107589f5d903e1248f544ea30",
+        "input_count": 22,
+        "input_sha256": "47940cc481d43ab28650f1c4cfc0d1155426973ec764337d1dec4e849d887905",
+        "snapshots": {
+          "old": {
+            "archive_sha256": "2e426028e1bb34b0d14ba17759c539fc91f7a825c9b7e5fe4f9ec5c3618ba260",
+            "archive_rows": 8553,
+            "archive_cdr_available": 8553,
+            "kept_count": 22,
+            "elapsed_seconds": 105.87726468034089,
+            "verdicts": [
+              {
+                "sequence_hash": "52003c01e9ddf698d66ff7b1dcff2ba574621b613d566c695967da6b218b9d1b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "70a633b3859058249e34f680bc0804195965fa724621cd2509b058e5711e368c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "07ba8e05156c6746b82a61797ca28c3e19dab817bde33b853b30b184e31b64a9",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4fe0912844c0d12b2bddbbec01bc3d2efe82d2997e7ecc4d2a9403bb43fb30c6",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "da9da480bedeca1d5b7641b32aad4ec15278ee377f27965fd07b74a59c00c8bb",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "0fbda2597e8a51efa90d55aba634939a1bd7f6400464f4ceaf26dd620b18198a",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "c35a2330c62f0dcc9b0fde7776a5fffbb56c2ddf742b75b9f502b69858526625",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e3c2eddb152f4c96e1eb67e9d9420228f161c5cd1d947c76b8c40b94780f2acd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5bdcc43936fefaeac56710b410dfebff36110ad514b8d2ccce9148ec3088f0ab",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4a49d874177ca6a0a65f6b37a4889503508a80fb5cf60515ca435e716e5102fd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "a937996bf9db26613faf245e7cbca6c94ee77776bc17cacd4c1678d5a62af10c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e0cb61030f55c050a3433c6132fa0b902920fd3f6a40ca07a2b4b7e146f7ab52",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5210dfe99185c5489e22f8a751ffe54fcf55b62c5736bd9b323680bba0c01fda",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "47a7049e87617daa6f016449c379d7f4d947043a87e3d5c3650284cb8bb61a0b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "ba0d044209cc3053d4ad224001b4952d2767e839a8d87894d38eda9cb064e10f",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "14420e42a98451838a5f3f2b7472fa05498da17da55b541e95709a53ff450255",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "f76a9c4873e7fc3af9753f79eab77964b1e00b6ca4338934fed7836dd02ca303",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "bfe9468d56e3fa73c50f847d937230851834d97d98ab0f582cbfd85b084429cf",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "d3afb053b889a9b191ff759b5fb7ea4a6024f5aa6d7a0db19fb164f6f2a8fe91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5f59b60bd6da81dfdf7d2ea1fd8dfe772d9d24a29195c7c9d6d750a15853c1f4",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "13c3ce09fa310a5f45412e7f3262a7500f1a3d14f9dd9ec2b2c51dedec1e749d",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "b9be9ebd0da33c5d6c9128d22f1a889ee2374e37679f6fcf226ed2a91c99bb91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              }
+            ]
+          },
+          "new": {
+            "archive_sha256": "faa66bc72600e2fd4979754ab02c2637ef7d8725ee487fb5cd48cfa260b7eb2e",
+            "archive_rows": 8575,
+            "archive_cdr_available": 8575,
+            "kept_count": 22,
+            "elapsed_seconds": 106.08500022627413,
+            "verdicts": [
+              {
+                "sequence_hash": "52003c01e9ddf698d66ff7b1dcff2ba574621b613d566c695967da6b218b9d1b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "70a633b3859058249e34f680bc0804195965fa724621cd2509b058e5711e368c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "07ba8e05156c6746b82a61797ca28c3e19dab817bde33b853b30b184e31b64a9",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "4fe0912844c0d12b2bddbbec01bc3d2efe82d2997e7ecc4d2a9403bb43fb30c6",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "da9da480bedeca1d5b7641b32aad4ec15278ee377f27965fd07b74a59c00c8bb",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "0fbda2597e8a51efa90d55aba634939a1bd7f6400464f4ceaf26dd620b18198a",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "c35a2330c62f0dcc9b0fde7776a5fffbb56c2ddf742b75b9f502b69858526625",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e3c2eddb152f4c96e1eb67e9d9420228f161c5cd1d947c76b8c40b94780f2acd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5bdcc43936fefaeac56710b410dfebff36110ad514b8d2ccce9148ec3088f0ab",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4a49d874177ca6a0a65f6b37a4889503508a80fb5cf60515ca435e716e5102fd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "a937996bf9db26613faf245e7cbca6c94ee77776bc17cacd4c1678d5a62af10c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e0cb61030f55c050a3433c6132fa0b902920fd3f6a40ca07a2b4b7e146f7ab52",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5210dfe99185c5489e22f8a751ffe54fcf55b62c5736bd9b323680bba0c01fda",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "47a7049e87617daa6f016449c379d7f4d947043a87e3d5c3650284cb8bb61a0b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "ba0d044209cc3053d4ad224001b4952d2767e839a8d87894d38eda9cb064e10f",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "14420e42a98451838a5f3f2b7472fa05498da17da55b541e95709a53ff450255",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "f76a9c4873e7fc3af9753f79eab77964b1e00b6ca4338934fed7836dd02ca303",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "bfe9468d56e3fa73c50f847d937230851834d97d98ab0f582cbfd85b084429cf",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "d3afb053b889a9b191ff759b5fb7ea4a6024f5aa6d7a0db19fb164f6f2a8fe91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5f59b60bd6da81dfdf7d2ea1fd8dfe772d9d24a29195c7c9d6d750a15853c1f4",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "13c3ce09fa310a5f45412e7f3262a7500f1a3d14f9dd9ec2b2c51dedec1e749d",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "b9be9ebd0da33c5d6c9128d22f1a889ee2374e37679f6fcf226ed2a91c99bb91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              }
+            ]
+          }
+        }
+      },
+      "supervisor": {
+        "reason": "completed",
+        "exit_code": 0,
+        "elapsed_seconds": 212.09173170942813,
+        "cleanup": {
+          "fixed_point_reached": true,
+          "freeze_scan_count": 3,
+          "killed_descendants": 0,
+          "remaining_descendants": 0,
+          "worker_exitcodes": {
+            "3077596": 0
+          }
+        },
+        "error_type": null
+      },
+      "artifact_sha256": {
+        "identity": "f6f27ad1bec8edaa47d61dbd1f444eb3e4fb9a3107589f5d903e1248f544ea30",
+        "result": "b64cab3bba927b3d4e04f00f3696e28394e5415d69b838d2a4e70038c062a7ef",
+        "supervisor": "636d96f0a092287270cb5845be3456a8461c364202ccb348bd5cb2b40b0842a2"
+      }
+    },
+    "slave": {
+      "runtime": {
+        "python": "/root/pr100-novelty-runtime-20261027/bin/novelty-python",
+        "path": "/root/pr100-novelty-runtime-20261027/bin:/usr/local/bin:/usr/bin:/bin",
+        "python_path": "/root/pr100-novelty-runtime-20261027/shim",
+        "identity_sha256": "9851767c681498521c7e86cc0f46159d32e1115acf674c71f1f9ada863d22fb9"
+      },
+      "identity": {
+        "schema": "pr100-qualified-novelty-v1",
+        "annotation_identity": "e153985994c071b7ed383372199c7e4af3d2f8fada6d001cfe6227bdad99af4f",
+        "packages": {
+          "abnumber": "0.4.4",
+          "anarci": "2026.2.13.2",
+          "anarcii": "2.0.5",
+          "biopython": "1.86",
+          "numpy": "2.0.2",
+          "pandas": "2.2.3",
+          "pydantic": "2.13.5",
+          "pydantic_core": "2.46.5",
+          "annotated-types": "0.8.0",
+          "typing_extensions": "4.16.0",
+          "typing-inspection": "0.4.4",
+          "parasail": null
+        },
+        "assets": {
+          "assets-manifest.json": "a7dfc8aa900ab17ae09d68fc174da463776eebed650527ada677d34089dd8daa",
+          "pydantic-assets-manifest.json": "69a292ead64e21d4bcb7f9f84501f6c75017ed1323b67138505e4a275f6c7ab8",
+          "hmmer-assets-manifest.json": "3c9277ee4b98b9f0e6939bc5afbbc0cc5713366cef741b33be7bd00a1fcae477"
+        },
+        "sources": {
+          "nanobody_opt/check_validator_novelty.py": "9b1f8803dd87bb1cdc50dc084654052daba18a14fc3e9357b356d4d180018a9f",
+          "nanobody_opt/pr100_novelty_runtime.py": "d5c6411dbe8806ce78d2102434e24b8301733e8ad3d52b7a87776f3dc28ffe6d",
+          "NOVA-nanobody-filter/metanano/config.py": "00e8cba1b69ffdac9294b114a173b37353ee547687bdd00c042cc1cc9bab55ce",
+          "NOVA-nanobody-filter/metanano/search/search_engine.py": "16bd888225fac3878b85bd67298b34318305564f467659040ab2f037c5e2323c",
+          "NOVA-nanobody-filter/metanano/search/index_manager.py": "032f9be8c65455d84fa28cd0f46b1a0246d764265ae981456453044d2806fe23",
+          "NOVA-nanobody-filter/metanano/utils/alignment.py": "852e073da766f665aab02c34f2f9d7ada5f7ecc010c4e7be98ee10e4442689a9",
+          "NOVA-nanobody-filter/metanano/utils/cdr_utils.py": "92633529c4cf4109fcb9985b57940c357d633a6f70f0df53326de8a51cb55d10",
+          "NOVA-nanobody-filter/metanano/utils/kmer.py": "32af38e005667d02b3d6d857648e59cc8644e2b4f74c41429643cdc4d9385863"
+        },
+        "python_version": [
+          3,
+          12,
+          14
+        ],
+        "python_binary_sha256": "c34719fad983fd4f13bd74b4187f0b44107defa81001917eea77475935d48f73",
+        "execution_environment_sha256": "9d837339573b3b062ac2d9f36606e4a454a15b2f1b523d14e344e85fae5195c7",
+        "archive_batch_worker_limit": 8
+      },
+      "result": {
+        "status": "complete",
+        "runtime_sha256": "9851767c681498521c7e86cc0f46159d32e1115acf674c71f1f9ada863d22fb9",
+        "input_count": 22,
+        "input_sha256": "47940cc481d43ab28650f1c4cfc0d1155426973ec764337d1dec4e849d887905",
+        "snapshots": {
+          "old": {
+            "archive_sha256": "2e426028e1bb34b0d14ba17759c539fc91f7a825c9b7e5fe4f9ec5c3618ba260",
+            "archive_rows": 8553,
+            "archive_cdr_available": 8553,
+            "kept_count": 22,
+            "elapsed_seconds": 159.5017622038722,
+            "verdicts": [
+              {
+                "sequence_hash": "52003c01e9ddf698d66ff7b1dcff2ba574621b613d566c695967da6b218b9d1b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "70a633b3859058249e34f680bc0804195965fa724621cd2509b058e5711e368c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "07ba8e05156c6746b82a61797ca28c3e19dab817bde33b853b30b184e31b64a9",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4fe0912844c0d12b2bddbbec01bc3d2efe82d2997e7ecc4d2a9403bb43fb30c6",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "da9da480bedeca1d5b7641b32aad4ec15278ee377f27965fd07b74a59c00c8bb",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "0fbda2597e8a51efa90d55aba634939a1bd7f6400464f4ceaf26dd620b18198a",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "c35a2330c62f0dcc9b0fde7776a5fffbb56c2ddf742b75b9f502b69858526625",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e3c2eddb152f4c96e1eb67e9d9420228f161c5cd1d947c76b8c40b94780f2acd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5bdcc43936fefaeac56710b410dfebff36110ad514b8d2ccce9148ec3088f0ab",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4a49d874177ca6a0a65f6b37a4889503508a80fb5cf60515ca435e716e5102fd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "a937996bf9db26613faf245e7cbca6c94ee77776bc17cacd4c1678d5a62af10c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e0cb61030f55c050a3433c6132fa0b902920fd3f6a40ca07a2b4b7e146f7ab52",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5210dfe99185c5489e22f8a751ffe54fcf55b62c5736bd9b323680bba0c01fda",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "47a7049e87617daa6f016449c379d7f4d947043a87e3d5c3650284cb8bb61a0b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "ba0d044209cc3053d4ad224001b4952d2767e839a8d87894d38eda9cb064e10f",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "14420e42a98451838a5f3f2b7472fa05498da17da55b541e95709a53ff450255",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "f76a9c4873e7fc3af9753f79eab77964b1e00b6ca4338934fed7836dd02ca303",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "bfe9468d56e3fa73c50f847d937230851834d97d98ab0f582cbfd85b084429cf",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "d3afb053b889a9b191ff759b5fb7ea4a6024f5aa6d7a0db19fb164f6f2a8fe91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "5f59b60bd6da81dfdf7d2ea1fd8dfe772d9d24a29195c7c9d6d750a15853c1f4",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "13c3ce09fa310a5f45412e7f3262a7500f1a3d14f9dd9ec2b2c51dedec1e749d",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "b9be9ebd0da33c5d6c9128d22f1a889ee2374e37679f6fcf226ed2a91c99bb91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              }
+            ]
+          },
+          "new": {
+            "archive_sha256": "faa66bc72600e2fd4979754ab02c2637ef7d8725ee487fb5cd48cfa260b7eb2e",
+            "archive_rows": 8575,
+            "archive_cdr_available": 8575,
+            "kept_count": 22,
+            "elapsed_seconds": 156.48028579726815,
+            "verdicts": [
+              {
+                "sequence_hash": "52003c01e9ddf698d66ff7b1dcff2ba574621b613d566c695967da6b218b9d1b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "70a633b3859058249e34f680bc0804195965fa724621cd2509b058e5711e368c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "07ba8e05156c6746b82a61797ca28c3e19dab817bde33b853b30b184e31b64a9",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "4fe0912844c0d12b2bddbbec01bc3d2efe82d2997e7ecc4d2a9403bb43fb30c6",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "da9da480bedeca1d5b7641b32aad4ec15278ee377f27965fd07b74a59c00c8bb",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "0fbda2597e8a51efa90d55aba634939a1bd7f6400464f4ceaf26dd620b18198a",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "c35a2330c62f0dcc9b0fde7776a5fffbb56c2ddf742b75b9f502b69858526625",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e3c2eddb152f4c96e1eb67e9d9420228f161c5cd1d947c76b8c40b94780f2acd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5bdcc43936fefaeac56710b410dfebff36110ad514b8d2ccce9148ec3088f0ab",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "4a49d874177ca6a0a65f6b37a4889503508a80fb5cf60515ca435e716e5102fd",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "a937996bf9db26613faf245e7cbca6c94ee77776bc17cacd4c1678d5a62af10c",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "e0cb61030f55c050a3433c6132fa0b902920fd3f6a40ca07a2b4b7e146f7ab52",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5210dfe99185c5489e22f8a751ffe54fcf55b62c5736bd9b323680bba0c01fda",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "47a7049e87617daa6f016449c379d7f4d947043a87e3d5c3650284cb8bb61a0b",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "ba0d044209cc3053d4ad224001b4952d2767e839a8d87894d38eda9cb064e10f",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "14420e42a98451838a5f3f2b7472fa05498da17da55b541e95709a53ff450255",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "f76a9c4873e7fc3af9753f79eab77964b1e00b6ca4338934fed7836dd02ca303",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "bfe9468d56e3fa73c50f847d937230851834d97d98ab0f582cbfd85b084429cf",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              },
+              {
+                "sequence_hash": "d3afb053b889a9b191ff759b5fb7ea4a6024f5aa6d7a0db19fb164f6f2a8fe91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "5f59b60bd6da81dfdf7d2ea1fd8dfe772d9d24a29195c7c9d6d750a15853c1f4",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "13c3ce09fa310a5f45412e7f3262a7500f1a3d14f9dd9ec2b2c51dedec1e749d",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.9
+              },
+              {
+                "sequence_hash": "b9be9ebd0da33c5d6c9128d22f1a889ee2374e37679f6fcf226ed2a91c99bb91",
+                "validator_novel": true,
+                "exact_historical": false,
+                "coarse_candidates": 500,
+                "maximum_identity": 0.8833333333333333
+              }
+            ]
+          }
+        }
+      },
+      "supervisor": {
+        "reason": "completed",
+        "exit_code": 0,
+        "elapsed_seconds": 317.16129757091403,
+        "cleanup": {
+          "fixed_point_reached": true,
+          "freeze_scan_count": 3,
+          "killed_descendants": 0,
+          "remaining_descendants": 0,
+          "worker_exitcodes": {
+            "3428673": 0
+          }
+        },
+        "error_type": null
+      },
+      "artifact_sha256": {
+        "identity": "9851767c681498521c7e86cc0f46159d32e1115acf674c71f1f9ada863d22fb9",
+        "result": "8a4c3049add4eba6f48227070d51eaa5a29766b3c972c17e01f2c91143b272ad",
+        "supervisor": "09b4649f80f476cc3f645987bccb0ad29cf27ecadaa3f89f09e85d28562e083c"
+      }
+    }
+  },
+  "cross_host_verdicts_equal": {
+    "old": true,
+    "new": true
+  }
+}
