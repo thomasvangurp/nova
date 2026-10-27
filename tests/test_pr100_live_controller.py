@@ -147,6 +147,8 @@ def test_native_phase_carries_the_archive_so_the_worker_can_check_novelty(tmp_pa
 @pytest.mark.parametrize('backend', ['resident_cpu', 'cuda_refine'])
 def test_native_screen_job_has_lease_context_but_keeps_cpu_confirmation_environment(tmp_path, backend):
     import base64
+    from nanobody_opt.pr100_native_screen import settings
+    from nanobody_opt.pr100_live_worker import screen_settings
     value = config(tmp_path, native_gpu=[5, 6, 7])
     value['worker']['native_screen'] = {'enabled': True, 'backend': backend}
     host, request = controller.phase_request(value, challenge(), 'native',
@@ -158,6 +160,9 @@ def test_native_screen_job_has_lease_context_but_keeps_cpu_confirmation_environm
     assert job['release'] == '/release' and job['source_sha'] == value['source_sha']
     assert job['scorer'] == 'registered' and job['gpu_lock_directory'] == '/remote/gpu-locks'
     assert job['native_screen'] == value['worker']['native_screen']
+    assert settings(job)['gpus'] == [5, 6, 7]
+    assert settings(job)['backend'] == backend
+    assert screen_settings(job)['enabled'] is True
     _, scoring = controller.phase_request(value, challenge(), 'score', {},
                                           time.time() + 2000, clock())
     assert scoring['spec']['environment']['CUDA_VISIBLE_DEVICES'] == '0,1'

@@ -28,6 +28,8 @@ TEST_FILES = (
     'tests/test_pr100_live_supervisor.py',
     'tests/test_pr100_live_worker.py',
     'tests/test_pr100_native_journal.py',
+    'tests/test_pr100_native_screen.py',
+    'tests/test_pr100_native_screen_integration.py',
     'tests/test_pr100_live_gpu.py',
     'tests/test_pr100_live_selection.py',
     'tests/test_pr100_handoff_diagnostics.py',
