@@ -45,6 +45,8 @@ def config(tmp_path, **overrides):
     host = {'address': 'host.invalid', 'port': 2222, 'release': '/release',
             'annotation_python': '/py/annotation', 'native_python': '/py/native',
             'scoring_python': '/py/scoring', 'python_path': '/extra', 'path': '/bin',
+            'novelty_runtime': {'python': '/py/novelty', 'path': '/novelty/bin:/bin',
+                'python_path': '/novelty/shim', 'identity_sha256': 'b' * 64},
             'references': '/bank.json', 'scorer': 'registered', 'scorer_settings': '/settings.json'}
     value = {'start_epoch': EPOCH, 'source_sha': 'a' * 40, 'state_root': str(tmp_path / 'state'),
              'publication_path': str(tmp_path / 'nanobody_result.json'),

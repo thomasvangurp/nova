@@ -35,6 +35,7 @@ TEST_FILES = (
     'tests/test_pr100_transport_compression.py',
     'tests/test_pr100_live_supervisor.py',
     'tests/test_pr100_live_worker.py',
+    'tests/test_pr100_novelty_runtime_adversarial.py',
     'tests/test_pr100_native_journal.py',
     'tests/test_pr100_native_screen.py',
     'tests/test_pr100_native_screen_integration.py',

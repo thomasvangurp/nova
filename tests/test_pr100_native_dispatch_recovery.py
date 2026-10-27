@@ -151,9 +151,11 @@ def test_peer_recovery_scores_each_new_cohort_once_and_publishes_cumulative_unio
         native_calls.append(cfg['_attempt'])
         recovered = len(native_calls) == 2
         rows = x.rows if recovered else x.rows[:1]
+        identity = cfg['hosts']['master']['novelty_runtime']['identity_sha256']
+        rows = [{**row, 'novelty': {**row['novelty'], 'runtime_sha256': identity}} for row in rows]
         write(local / 'native-supervisor.json', {'reason': 'completed', 'cleanup': {
             'fixed_point_reached': recovered, 'remaining_descendants': 0 if recovered else None}})
-        value = {**x.replay.validity, 'candidates': rows,
+        value = {**x.replay.validity, 'candidates': rows, 'novelty_runtime_sha256': identity,
                  'attempted_sequence_hashes': [rules.sequence_hash(r['sequence']) for r in rows],
                  'unresolved_native_hosts': [] if recovered else ['slave']}
         return {'result.json': json.dumps(value).encode()}

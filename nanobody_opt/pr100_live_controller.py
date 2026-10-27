@@ -275,6 +275,9 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     # New worker knobs (proposals, workers, repeats, margin, allow_marginal, ...) pass
     # through unchanged; the controller never second-guesses them.
     job.update(config['worker'])
+    if phase in ('native', 'novelty') and runtime.get('novelty_runtime') is not None:
+        from nanobody_opt.pr100_novelty_runtime import validate_config
+        job['novelty_runtime'] = dict(validate_config(runtime['novelty_runtime']))
     if phase == 'native':
         job.update(config.get('native_worker_overrides', {}).get(host, {}))
         job['native_host'] = host
@@ -762,6 +765,9 @@ def validate_config(config):
             raise ValueError(f'hosts.{name}.host_key_alias must identify a known SSH host')
         if not str(runtime['release']).startswith('/'):
             raise ValueError(f'hosts.{name}.release must be an absolute path')
+        if name == 'master' or name in native_hosts:
+            from nanobody_opt.pr100_novelty_runtime import validate_config as validate_novelty
+            validate_novelty(runtime.get('novelty_runtime'))
     reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve <= MINIMUM_RESERVE_BLOCKS:
         raise ValueError(f'reserve_blocks must be an integer greater than {MINIMUM_RESERVE_BLOCKS}')

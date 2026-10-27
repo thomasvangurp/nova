@@ -192,6 +192,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
               'fresh_admission_uncertain_sequence_hashes': sorted(fresh_uncertain),
               'verified_fresh_never_started_sequence_hashes': sorted(never_started),
               'native_host_status': {host: {'status': value.get('status'), 'ownership_unresolved': host in pending,
+                   'novelty_runtime_sha256': value.get('novelty_runtime_sha256'),
                    **{key: value.get(key, 0) for key in COUNTERS}} for host, value in results.items()},
               **{key: sum(v.get(key, 0) for v in results.values()) for key in COUNTERS}}
     merged['input_count'] = len(incoming['candidates'])

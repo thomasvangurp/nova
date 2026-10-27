@@ -51,6 +51,303 @@ def cleanup_verified(receipt):
     cleanup = receipt.get('cleanup', {})
     return cleanup.get('remaining_descendants') == 0 and cleanup.get('fixed_point_reached') is True
 
+def novelty_runtime_ids(config):
+    """Qualified annotation identities, independent of native CPU identity."""
+    result = {}
+    for host, runtime in config.get('hosts', {}).items():
+        value = runtime.get('novelty_runtime', {}).get('identity_sha256')
+        if value is not None:
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                raise ValueError('invalid novelty runtime identity')
+            result[host] = value
+    return result
+
+def qualified_novelty_result(value, config, *, final=False):
+    expected = novelty_runtime_ids(config)
+    if not expected:
+        return True  # Legacy/inert callers; real novelty execution requires qualification.
+    if final:
+        identity = expected.get('master')
+        return (identity is not None and value.get('novelty_runtime_sha256') == identity
+                and all(row.get('novelty', {}).get('runtime_sha256') == identity
+                        for row in value.get('candidates', [])))
+    hosts = value.get('native_host_status')
+    if hosts:
+        return all(host in expected and detail.get('novelty_runtime_sha256') == expected[host]
+                   and detail.get('ownership_unresolved') is not True for host, detail in hosts.items())
+    return value.get('novelty_runtime_sha256') in expected.values()
+
+def novelty_proof_reusable(row, archive_sha256, config):
+    expected = novelty_runtime_ids(config).get('master')
+    return (row.get('_novelty_archive_sha256') == archive_sha256
+            and (expected is None or row.get('novelty', {}).get('runtime_sha256') == expected))
+
+def recover_owned_attempt_for_novelty(state, local, config, chain, stop_at):
+    """Poll the exact old launches; never restart old-code scientific work."""
+    from nanobody_opt import pr100_live_controller as c
+    import base64
+    active = state.get('active')
+    if not active:
+        return True
+    def charge_uncertain(intent, request, phase, receipt):
+        if (phase != 'native' or receipt.get('reason') == 'not_launched'
+                or (intent.parent / 'native/result.json').is_file()):
+            return
+        incoming = json.loads(base64.b64decode(request['files']['input.json'], validate=True))
+        uncertain = {rules.sequence_hash(row['sequence']) for row in incoming.get('candidates', [])
+                     if row.get('native_resume') is None}
+        state['native_attempted_hashes'] = sorted(set(state.get('native_attempted_hashes', [])) | uncertain)
+        state['migration_uncertain_native_admissions'] = sorted(
+            set(state.get('migration_uncertain_native_admissions', [])) | uncertain)
+    directory = Path(local) / 'attempts' / str(active['number']).zfill(5)
+    requests = [directory / (phase + '-request.json') for phase in ('sequence', 'native', 'score')]
+    requests += [directory / 'native-hosts' / host / 'native-request.json' for host in ('master', 'slave')]
+    for group, phase in (('novelty-rechecks', 'novelty'), ('score-batches', 'score')):
+        requests.extend((directory / group).glob('*/' + phase + '-request.json'))
+    for intent in requests:
+        if not intent.is_file():
+            continue
+        saved = read(intent); request = saved['request']; phase = intent.name.removesuffix('-request.json')
+        if request['spec']['epoch'] != state['challenge']['epoch']:
+            raise ValueError('old novelty migration owner epoch mismatch')
+        terminal_path = intent.parent / (phase + '-supervisor.json')
+        terminal = read(terminal_path, {})
+        if cleanup_verified(terminal) and (intent.parent / (phase + '-collected.json')).is_file():
+            charge_uncertain(intent, request, phase, terminal)
+            continue
+        clock = c.clock_state(chain)
+        answer = c.remote({**config, '_refresh_clock': lambda: c.clock_state(chain)}, saved['host'],
+            {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
+             'transport_deadline_unix': stop_at})
+        if answer.get('running') or not cleanup_verified(answer.get('receipt', {})):
+            return False
+        c.atomic(terminal_path, answer['receipt'])
+        names = []
+        for name, encoded in answer.get('files', {}).items():
+            if name not in ('result.json', 'worker-receipt.json', 'native-confirmations.json',
+                            'score/report.json', 'score/scorer_settings.json') and not c.re.fullmatch(
+                    r'score/gpu-[0-9]+/length[0-9]+/exact_all[.]json', name):
+                raise ValueError('unexpected old owner artifact')
+            output = intent.parent / phase / name
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(base64.b64decode(encoded, validate=True)); names.append(name)
+        c.atomic(intent.parent / (phase + '-collected.json'), {'files': sorted(names)})
+        # No result does not prove no admission, including cached collections.
+        charge_uncertain(intent, request, phase, answer['receipt'])
+    # This local transition occurs only after every recorded owner is clean.
+    state['active'] = None
+    return True
+
+def restore_for_qualified_novelty(state, local, config):
+    """Restore native evidence hidden by old novelty, only after owner cleanup.
+
+    Journals never supply reusable evidence. Full checkpoints return to their
+    original native host for classification with zero new draws; partial ones
+    retain their original missing-confirmation requirement.
+    """
+    expected = novelty_runtime_ids(config)
+    if not expected:
+        return True
+    migration_key = rules.digest(expected)
+    if state.get('qualified_novelty_migration', {}).get('identity_sha256') == migration_key:
+        return True
+    if state.get('active') or state.get('legacy_uncertain_phase'):
+        return False
+    from nanobody_opt import pr100_live_selection as selection
+    from nanobody_opt import pr100_live_controller as c
+    from nanobody_opt.pr100_native_journal import REJECTION_REASONS
+    challenge = state['challenge']
+    pinned = rules.pinned_config(challenge['epoch'])
+    requirements = pinned['nanobody_requirements']
+    sources = [Path(local)]
+    attempt_numbers = {}
+    for attempt in sorted((Path(local) / 'attempts').glob('[0-9][0-9][0-9][0-9][0-9]')):
+        sources.append(attempt)
+        attempt_numbers[attempt] = int(attempt.name)
+        for host in ('master', 'slave'):
+            directory = attempt / 'native-hosts' / host
+            sources.append(directory); attempt_numbers[directory] = int(attempt.name)
+    for directory in sources:
+        if ((directory / 'native-request.json').exists()
+                and not cleanup_verified(read(directory / 'native-supervisor.json', {}))):
+            return False
+    # Reconcile completed phases that may have finished between the final
+    # old-controller write and cutover. These are collected results, not reruns.
+    pending = list(state.get('pending_native', []))
+    for directory in sources:
+        value = read(directory / 'sequence/result.json', {})
+        if (cleanup_verified(read(directory / 'sequence-supervisor.json', {}))
+                and value.get('challenge') == challenge and value.get('status') == 'complete'):
+            pending = union_rows(pending, value.get('candidates', []))
+            state['generated_hashes'] = sorted(set(state.get('generated_hashes', [])) |
+                set(value.get('generated_sequence_hashes', [])))
+        score_dirs = [directory] + list((directory / 'score-batches').glob('*'))
+        for score_dir in score_dirs:
+            report = read(score_dir / 'score/score/report.json')
+            if report is None or not cleanup_verified(read(score_dir / 'score-supervisor.json', {})):
+                continue
+            names = ['score/report.json', 'score/scorer_settings.json']
+            names += ['score/' + group['file'] for group in report.get('groups', [])
+                      if group.get('valid') is True and c.re.fullmatch(
+                          r'gpu-[0-9]+/length[0-9]+/exact_all[.]json', str(group.get('file', '')))]
+            files = {name: (score_dir / 'score' / name).read_bytes() for name in names
+                     if (score_dir / 'score' / name).is_file()}
+            scores, settings, scorer_hash = c.merge_scores(files, challenge['target'])
+            merge_scoring(state, scores, settings, scorer_hash,
+                          hashlib.sha256(files['score/scorer_settings.json']).hexdigest())
+    rows = list(state.get('native_rows', []))
+    novelty_rejected = set()
+    for directory in sources:
+        for operation in [directory] + list((directory / 'novelty-rechecks').glob('*')):
+            try:
+                if not cleanup_verified(read(operation / 'novelty-supervisor.json', {})):
+                    continue
+                value = read(operation / 'novelty/result.json', {})
+                if (value.get('challenge') != challenge or value.get('status') != 'complete'
+                        or value.get('novelty_checked') is not True
+                        or qualified_novelty_result(value, config, final=True)):
+                    continue
+                intent = read(operation / 'novelty-request.json', {})
+                import base64
+                incoming = json.loads(base64.b64decode(intent['request']['files']['input.json'], validate=True))
+                if any(incoming.get(k) != value.get(k) for k in ('challenge', 'epoch', 'target', 'archive_sha256')):
+                    continue
+                original = valid_rows(incoming, challenge)
+                original_hashes = {rules.sequence_hash(row['sequence']) for row in original}
+                kept = {rules.sequence_hash(row['sequence']) for row in value['candidates']}
+                if not kept <= original_hashes:
+                    continue
+                novelty_rejected.update(original_hashes - kept)
+                rows.extend(original)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+    records = list(state.get('pending_confirmation', []))
+    rejected, attempted, checked, unusable = set(), set(), 0, 0
+    for directory in sources:
+        try:
+            if not cleanup_verified(read(directory / 'native-supervisor.json', {})):
+                if (directory / 'native-request.json').exists():
+                    return False
+                continue
+            value = read(directory / 'native/result.json', {})
+            if any(value.get(k) != challenge.get(k) for k in ('epoch', 'target')) or value.get('challenge') != challenge:
+                continue
+            intent = read(directory / 'native-request.json')
+            if intent is not None:
+                import base64
+                incoming = json.loads(base64.b64decode(intent['request']['files']['input.json'], validate=True))
+            else:
+                incoming = read(directory / 'native-input.json')
+            if incoming is not None:
+                if any(incoming.get(k) != value.get(k) for k in ('challenge', 'epoch', 'target', 'archive_sha256')):
+                    raise ValueError('migration native input binding mismatch')
+                assigned = {rules.sequence_hash(row['sequence']) for row in incoming['candidates']}
+            else:
+                assigned = set(state.get('native_attempted_hashes', []))
+            if (any(rules.sequence_hash(row['sequence']) not in assigned for row in value.get('candidates', []))
+                    or set(value.get('attempted_sequence_hashes', [])) - assigned):
+                raise ValueError('migration native result outside assigned cohort')
+            if (any(set(value.get(key, [])) - assigned for key in (
+                    'fresh_admitted_sequence_hashes', 'fresh_never_started_sequence_hashes',
+                    'verified_fresh_never_started_sequence_hashes', 'fresh_admission_uncertain_sequence_hashes'))
+                    or any(rules.sequence_hash(row['sequence']) not in assigned
+                           for row in value.get('deferred_candidates', []))):
+                raise ValueError('migration admission proof outside assigned cohort')
+            if state.get('fresh_native_budget') is not None and directory in attempt_numbers:
+                fresh_budget.reconcile(state['fresh_native_budget'], attempt_numbers[directory], value,
+                                       cleanup_verified=True)
+            checked += 1
+            attempted.update(value.get('attempted_sequence_hashes', []))
+            rejected.update(key for key, reason in value.get('terminal_native_outcomes', {}).items()
+                            if reason in REJECTION_REASONS and key in assigned and isinstance(key, str)
+                            and len(key) == 64 and all(c in '0123456789abcdef' for c in key))
+            # Old novelty is only a source of validated native gate evidence;
+            # its scientific verdict is never promoted to the new identity.
+            for row in value.get('candidates', []):
+                try:
+                    rows.extend(valid_rows({**value, 'candidates': [row]}, challenge))
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    unusable += 1
+            progress = read(directory / 'native/native-confirmations.json', {})
+            if progress.get('challenge') == challenge:
+                qualified_classification = (value.get('status') == 'complete'
+                    and value.get('native_classification_complete') is True
+                    and value.get('novelty_checked') is True
+                    and qualified_novelty_result(value, config))
+                kept = {row['sequence'] for row in value.get('candidates', [])}
+                for record in progress.get('records', []):
+                    key = record.get('sequence_hash')
+                    record_hash = rules.sequence_hash(record['sequence']) if 'sequence' in record else key
+                    if record_hash not in assigned:
+                        unusable += 1
+                        continue
+                    if (record.get('terminal_reason') in REJECTION_REASONS and isinstance(key, str)
+                            and len(key) == 64 and all(c in '0123456789abcdef' for c in key)):
+                        rejected.add(key)
+                    elif 'native_resume' in record:
+                        saved = record['native_resume']
+                        if (qualified_classification and record.get('sequence') not in kept
+                                and len(saved.get('measurements', [])) >= saved.get('required_cpu_observations', 65)):
+                            continue
+                        records.append(record)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            unusable += 1
+    # An old positive cannot erase an unexplained invalidation. Only a bound
+    # old novelty operation proves that this specific rejection needs repair.
+    rejected.update(set(state.get('invalidated_native_hashes', [])) - novelty_rejected)
+    recovered = []
+    for row in rows:
+        try:
+            key = rules.sequence_hash(row['sequence'])
+            if key in rejected or row.get('layer2_passed') is not True:
+                continue
+            rules.validate_evidence(row.get('pr100_evidence'), row['sequence'], challenge, pinned)
+            recovered.append(row)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            unusable += 1
+    checkpoints = {}
+    for row in records:
+        try:
+            sequence = row['sequence']; key = rules.sequence_hash(sequence)
+            saved = row['native_resume']; identity = saved['identity']; values = saved['measurements']
+            required = saved['required_cpu_observations']
+            if (key in rejected or saved.get('schema') != 'pr100-native-confirmation-checkpoint-v1'
+                    or saved.get('sequence_hash') != key or identity.get('resume_eligible') is not True
+                    or identity.get('challenge_sha256') != rules.digest(challenge)
+                    or identity.get('filter_sha') != rules.FILTER_SHA
+                    or identity.get('requirements_sha256') != rules.digest(requirements)
+                    or not isinstance(values, list) or type(required) is not int
+                    or not 1 <= len(values) <= required <= 64):
+                continue
+            for measurement in values:
+                if not selection.authoritative_cpu_measurement(measurement):
+                    raise ValueError('non-authoritative checkpoint')
+                rules.validate_evidence({'challenge': challenge, 'filter_sha': rules.FILTER_SHA,
+                    'annotation': row['pr100_annotation'], 'developability': measurement},
+                    sequence, challenge, pinned)
+            previous = checkpoints.get(sequence)
+            if previous is None or len(values) >= len(previous['native_resume']['measurements']):
+                checkpoints[sequence] = row
+        except (ValueError, TypeError, KeyError, AttributeError):
+            unusable += 1
+    state['native_rows'] = union_rows([], recovered)
+    state['pending_confirmation'] = list(checkpoints.values())
+    restored = {rules.sequence_hash(row['sequence']) for row in recovered} | {
+        rules.sequence_hash(sequence) for sequence in checkpoints}
+    state['invalidated_native_hashes'] = sorted(
+        (set(state.get('invalidated_native_hashes', [])) - novelty_rejected) | rejected)
+    state['native_attempted_hashes'] = sorted(set(state.get('native_attempted_hashes', [])) | restored | attempted)
+    state['pending_native'] = [row for row in pending if rules.sequence_hash(row['sequence'])
+                               not in set(state['native_attempted_hashes'])]
+    if any(row['sequence'] in state['score_rows'] for row in state['native_rows']):
+        state['pending_publication'] = True
+    state['qualified_novelty_migration'] = {'identity_sha256': migration_key,
+        'runtime_identities': expected, 'checked_artifacts': checked, 'unusable_artifacts_or_rows': unusable,
+        'restored_native_rows': len(state['native_rows']), 'retained_checkpoints': len(checkpoints),
+        'terminal_or_unexplained_invalidations': len(rejected),
+        'old_novelty_rejections_reopened': len(novelty_rejected - rejected), 'completed_at_unix': time.time()}
+    return True
+
 def migrate(local, challenge, config, *, ownership_verified=False):
     """Import completed legacy artifacts, never raw journal measurements."""
     from nanobody_opt import pr100_live_controller as c
@@ -171,6 +468,13 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 output.write_bytes(base64.b64decode(encoded, validate=True))
         state = migrate(local, challenge, config, ownership_verified=True)
         c.atomic(path, state)
+    expected = novelty_runtime_ids(config)
+    if (expected and state.get('qualified_novelty_migration', {}).get('identity_sha256') != rules.digest(expected)
+            and not recover_owned_attempt_for_novelty(state, local, config, chain, stop_at)):
+        return {'status': 'qualified_novelty_migration_waiting_for_ownership', 'epoch': epoch}
+    if not restore_for_qualified_novelty(state, local, config):
+        return {'status': 'qualified_novelty_migration_waiting_for_ownership', 'epoch': epoch}
+    c.atomic(path, state)
     budget = fresh_budget.ensure(state, config)
     c.atomic(path, state)
     mode = state['active']['phase'] if state.get('active') else mode_for(state)
@@ -209,6 +513,12 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         phase_config, phase_local = native_config, attempt_dir
         if name == 'novelty':
             operation = hashlib.sha256(payload['archive.csv']).hexdigest()
+            identity = novelty_runtime_ids(config).get('master')
+            if identity is not None:
+                bound_input = json.loads(payload['input.json'])
+                bound_input.pop('archive_checked_at_unix', None)
+                operation = rules.digest({'archive_sha256': operation, 'novelty_runtime_sha256': identity,
+                                          'input_sha256': rules.digest(bound_input)})
             active['novelty_operation'] = operation; save()
             phase_config = {**attempt_config, '_phase_operation': operation}
             phase_local = attempt_dir / 'novelty-rechecks' / operation
@@ -275,6 +585,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                         and all(value.get(k) == binding[k] for k in
                                 ('challenge', 'epoch', 'target', 'archive_sha256'))
                         and not value.get('unresolved_native_hosts'))
+                    classified = classified and qualified_novelty_result(value, config)
                     value['deferred_confirmations'] = [r for r in records if 'native_resume' in r and (
                         (r['sequence'] not in finished and not classified) or len(r['native_resume']['measurements'])
                         < r['native_resume']['required_cpu_observations'])]
@@ -319,10 +630,16 @@ def run_epoch(config, chain, clock, *, dry_run=False):
             rows = [r for r in state['native_rows'] if r['sequence'] in state['score_rows']]
             validity = {**binding, 'archive_sha256': digest, 'status': 'complete', 'novelty_checked': True,
                         'candidates': rows}
-            if any(r.get('_novelty_archive_sha256') != digest for r in rows):
+            if any(not novelty_proof_reusable(r, digest, config) for r in rows):
                 novelty_snapshot.write_bytes(archive)
                 value = json.loads(phase('novelty', {'archive.csv': archive,
                     'input.json': json.dumps(validity).encode()})['result.json'])
+                if (value.get('challenge') != challenge or value.get('epoch') != epoch
+                        or value.get('target') != challenge['target'] or value.get('archive_sha256') != digest
+                        or value.get('status') != 'complete' or value.get('novelty_checked') is not True):
+                    raise ValueError('novelty recheck binding mismatch')
+                if not qualified_novelty_result(value, config, final=True):
+                    raise ValueError('unqualified novelty recheck result')
                 validity = value
                 accepted = {r['sequence']: r for r in valid_rows(value, challenge)}
                 rejected = {rules.sequence_hash(r['sequence']) for r in rows if r['sequence'] not in accepted}

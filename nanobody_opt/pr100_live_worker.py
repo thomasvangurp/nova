@@ -202,11 +202,13 @@ def sequence_phase(job, directory):
     return result
 
 
-def check_novelty(rows, archive, *, novelty=None):
+def check_novelty(rows, archive, *, novelty=None, runtime=None):
     """Archive novelty, run only on candidates that already passed native."""
-    import pandas as pd
     if novelty is None:
-        from nanobody_opt import check_validator_novelty as novelty
+        from nanobody_opt.pr100_novelty_runtime import check
+        return check(rows, archive, runtime=runtime)
+    # Explicit dependency injection is used by the scheduling unit tests.
+    import pandas as pd
     frame = pd.read_csv(archive)
     novelty._init_worker(frame, set(frame.sequence.dropna().astype(str).str.strip().str.upper()),
                          all_archive=True)
@@ -232,10 +234,12 @@ def novelty_phase(job, directory, *, novelty=None):
         if row.get('layer2_passed') is not True:
             raise ValueError('missing completed native gate')
         rules.validate_evidence(row.get('pr100_evidence'), row['sequence'], job['challenge'], config)
-    kept, archive_rows = check_novelty(incoming['candidates'], archive, novelty=novelty)
+    kept, archive_rows = check_novelty(incoming['candidates'], archive, novelty=novelty,
+                                       runtime=job.get('novelty_runtime'))
     result = {**incoming, 'candidates': kept, 'novelty_checked': True, 'status': 'complete',
               'archive_rows': archive_rows, 'archive_sha256': job['archive_sha256'],
-              'archive_checked_at_unix': job['archive_fetched_at']}
+              'archive_checked_at_unix': job['archive_fetched_at'],
+              'novelty_runtime_sha256': (job.get('novelty_runtime') or {}).get('identity_sha256')}
     pr100_filter.atomic(directory / 'result.json', result)
     return result
 
@@ -281,6 +285,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     incoming = json.loads((directory / 'input.json').read_text())
     if incoming['challenge'] != job['challenge']:
         raise ValueError('native input challenge mismatch')
+    if novelty is None and (directory / 'archive.csv').is_file():
+        from nanobody_opt.pr100_novelty_runtime import validate_config
+        validate_config(job.get('novelty_runtime'))
     tools = Path(job['native_tools'])
     pr100_filter.helper('aggrescan3d').tool_paths = lambda: (tools / 'aggrescan3d-rs', tools / 'freesasa')
     workers = worker_count(job)
@@ -733,8 +740,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     if passers and archive.is_file():
         if file_digest(archive) != job['archive_sha256']:
             raise ValueError('archive snapshot changed')
-        passers, archive_rows = check_novelty(passers, archive, novelty=novelty)
-        result.update(novelty_checked=True, archive_rows=archive_rows)
+        passers, archive_rows = check_novelty(passers, archive, novelty=novelty,
+                                             runtime=job.get('novelty_runtime'))
+        result.update(novelty_checked=True, archive_rows=archive_rows,
+                      novelty_runtime_sha256=(job.get('novelty_runtime') or {}).get('identity_sha256'))
     result['candidates'] = selection.order_candidates(passers, allow_marginal=allow_marginal)
     result['tier_counts'] = {tier: sum(1 for r in result['candidates'] if r['tier'] == tier)
                              for tier in ('A', 'B')}

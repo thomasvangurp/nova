@@ -49,8 +49,12 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
                for v in metrics.values()):
             raise ValueError("non-finite measured metrics")
         novelty = {key: row["novelty"][key] for key in
-                   ("validator_novel", "exact_historical", "coarse_candidates", "maximum_identity")
+                   ("validator_novel", "exact_historical", "coarse_candidates", "maximum_identity", "runtime_sha256")
                    if key in row["novelty"]}
+        runtime_identity = novelty.get('runtime_sha256')
+        if runtime_identity is not None and (not isinstance(runtime_identity, str)
+                or len(runtime_identity) != 64 or any(c not in '0123456789abcdef' for c in runtime_identity)):
+            raise ValueError('invalid novelty runtime identity')
         novelty.update(sequence_hash=rules.sequence_hash(sequence), target=target,
                        archive_sha256=validity["archive_sha256"])
         reason = rules.novelty_reason(novelty, sequence, target)

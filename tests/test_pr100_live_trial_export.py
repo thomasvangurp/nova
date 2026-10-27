@@ -51,6 +51,20 @@ def test_valid_but_unscored_candidate_is_not_exported(inputs):
     assert export(inputs)["sequence_pool_size"] == 1
 
 
+def test_qualified_novelty_identity_survives_publication(inputs):
+    for row in inputs[0]['candidates']:
+        row['novelty']['runtime_sha256'] = 'e' * 64
+    fleet = export(inputs)
+    assert all(checkpoint['validation']['layer_1']['novelty']['runtime_sha256'] == 'e' * 64
+               for checkpoint in fleet['sequence_pool_checkpoints'].values())
+
+
+def test_malformed_novelty_runtime_identity_is_not_exported(inputs):
+    inputs[0]['candidates'][0]['novelty']['runtime_sha256'] = 'unqualified'
+    with pytest.raises(ValueError, match='novelty runtime identity'):
+        export(inputs)
+
+
 @pytest.mark.parametrize("fault", ["target", "novelty", "duplicate", "nonfinite", "incomplete", "empty"])
 def test_bad_or_missing_evidence_refuses_export(inputs, fault):
     validity, scores, _ = inputs

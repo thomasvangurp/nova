@@ -108,6 +108,8 @@ def _pr100_archive_cdrs(records):
     import os
     from abnumber import Chain
 
+    if not callable(getattr(Chain, 'batch', None)):
+        raise RuntimeError('novelty runtime requires abnumber Chain.batch')
     if not records:
         return {}
     workers = min(8, max(1, (os.cpu_count() or 1)//2),

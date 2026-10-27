@@ -7,7 +7,10 @@
   "remote_root": "/<PLACEHOLDER_ABSOLUTE_REMOTE_WORK_ROOT>",
   "reserve_blocks": 46,
   "transport_timeout_seconds": 120,
-  "gpu": [0, 1],
+  "gpu": [
+    0,
+    1
+  ],
   "worker": {
     "native_tools": "/<PLACEHOLDER_ABSOLUTE_NATIVE_TOOLS_DIR>",
     "proposals": 600,
@@ -22,7 +25,10 @@
       "z": 1.3,
       "sigma": 4.4,
       "min_repeats": 2,
-      "hard_margin": {"2": 80, "3": 82}
+      "hard_margin": {
+        "2": 80,
+        "3": 82
+      }
     }
   },
   "hosts": {
@@ -38,7 +44,13 @@
       "ld_library_path": "/<PLACEHOLDER_ABSOLUTE_LD_LIBRARY_PATH_OR_OMIT>",
       "references": "/<PLACEHOLDER_ABSOLUTE_REFERENCE_BANK_JSON>",
       "scorer": "<PLACEHOLDER_REGISTERED_SCORER_NAME>",
-      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>"
+      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>",
+      "novelty_runtime": {
+        "python": "/root/QUALIFIED_NOVELTY_RUNTIME/bin/python",
+        "path": "/root/QUALIFIED_NOVELTY_RUNTIME/bin:/usr/bin:/bin",
+        "python_path": "/root/QUALIFIED_NOVELTY_RUNTIME/shim",
+        "identity_sha256": "QUALIFIED_NOVELTY_IDENTITY_PLACEHOLDER"
+      }
     },
     "slave": {
       "address": "<PLACEHOLDER_SLAVE_HOST>",
@@ -51,7 +63,13 @@
       "path": "/<PLACEHOLDER_ABSOLUTE_BIN_DIR>:/usr/bin:/bin",
       "references": "/<PLACEHOLDER_ABSOLUTE_REFERENCE_BANK_JSON>",
       "scorer": "<PLACEHOLDER_REGISTERED_SCORER_NAME>",
-      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>"
+      "scorer_settings": "/<PLACEHOLDER_ABSOLUTE_SCORER_SETTINGS_JSON>",
+      "novelty_runtime": {
+        "python": "/root/QUALIFIED_NOVELTY_RUNTIME/bin/python",
+        "path": "/root/QUALIFIED_NOVELTY_RUNTIME/bin:/usr/bin:/bin",
+        "python_path": "/root/QUALIFIED_NOVELTY_RUNTIME/shim",
+        "identity_sha256": "QUALIFIED_NOVELTY_IDENTITY_PLACEHOLDER"
+      }
     }
   }
 }
