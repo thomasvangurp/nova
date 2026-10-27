@@ -259,6 +259,12 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks',
                    output_directory=directory + '/score')
         job['cpu_slots'] = max(2, len(config['gpu']))
+    if phase == 'native' and config['worker'].get('native_screen', {}).get('enabled') is True:
+        # The parent and all authoritative confirmations remain CPU-only.
+        # The screen helper exposes one leased device inside each owned child.
+        job.update(gpus=list(config.get('native_gpu', config['gpu'])), release=release,
+                   scorer=runtime['scorer'], source_sha=config['source_sha'],
+                   gpu_lock_directory=config['remote_root'] + '/gpu-locks')
     cap = phase_cap(phase, stop_at) if cap is None else cap
     if phase == 'native' and 'phase_budget_seconds' not in config['worker']:
         # Without this the worker measures until the supervisor kills it, and a killed
@@ -679,6 +685,11 @@ def validate_config(config):
         raise ValueError('gpu must be a non-empty list of non-negative gpu ids')
     if len(set(gpus)) != len(gpus):
         raise ValueError('gpu list contains a duplicate id')
+    native_gpus = config.get('native_gpu')
+    if 'native_gpu' in config and (not isinstance(native_gpus, list) or not 1 <= len(native_gpus) <= 4
+            or any(type(g) is not int or g < 0 for g in native_gpus)
+            or len(set(native_gpus)) != len(native_gpus)):
+        raise ValueError('native_gpu must contain one to four distinct non-negative gpu ids')
     for key in ('state_root', 'publication_path'):
         if not Path(config[key]).is_absolute():
             raise ValueError(f'{key} must be an absolute path')
@@ -688,6 +699,12 @@ def validate_config(config):
         raise ValueError('source_sha must be a 40-character git revision')
     if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
         raise ValueError('worker must be an object including native_tools')
+    screen = config['worker'].get('native_screen', {})
+    if (not isinstance(screen, dict) or type(screen.get('enabled', False)) is not bool
+            or screen.get('backend', 'resident_cpu') not in ('resident_cpu', 'cuda_refine')):
+        raise ValueError('worker.native_screen must specify a boolean enabled and supported backend')
+    if screen.get('enabled') is True and len(config.get('native_gpu', gpus)) > 4:
+        raise ValueError('native_gpu must select at most four devices for screening')
     hosts = config['hosts']
     if not isinstance(hosts, dict) or not {'master', 'slave'} <= set(hosts):
         raise ValueError('hosts must define both master and slave')

@@ -144,6 +144,39 @@ def test_native_phase_carries_the_archive_so_the_worker_can_check_novelty(tmp_pa
     assert 'archive_fetched_at' in job and job['native_tools'] == '/tools'
 
 
+@pytest.mark.parametrize('backend', ['resident_cpu', 'cuda_refine'])
+def test_native_screen_job_has_lease_context_but_keeps_cpu_confirmation_environment(tmp_path, backend):
+    import base64
+    value = config(tmp_path, native_gpu=[5, 6, 7])
+    value['worker']['native_screen'] = {'enabled': True, 'backend': backend}
+    host, request = controller.phase_request(value, challenge(), 'native',
+                                             {'archive.csv': b'x'}, time.time() + 2000, clock())
+    job = json.loads(base64.b64decode(request['files']['job.json']))
+    assert host == 'master' and request['python'] == '/py/native'
+    assert request['spec']['environment']['CUDA_VISIBLE_DEVICES'] == ''
+    assert job['gpus'] == [5, 6, 7]
+    assert job['release'] == '/release' and job['source_sha'] == value['source_sha']
+    assert job['scorer'] == 'registered' and job['gpu_lock_directory'] == '/remote/gpu-locks'
+    assert job['native_screen'] == value['worker']['native_screen']
+    _, scoring = controller.phase_request(value, challenge(), 'score', {},
+                                          time.time() + 2000, clock())
+    assert scoring['spec']['environment']['CUDA_VISIBLE_DEVICES'] == '0,1'
+
+
+@pytest.mark.parametrize('devices', [[], [1, 1], [True], [-1], [0, 1, 2, 3, 4], '5,6,7'])
+def test_native_screen_rejects_invalid_device_allocation(tmp_path, monkeypatch, devices):
+    value = config(tmp_path, native_gpu=devices)
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='native_gpu'):
+        controller.validate_config(value)
+
+
+def test_disabled_screen_does_not_limit_existing_target_scoring_gpu_fleet(tmp_path, monkeypatch):
+    value = config(tmp_path, gpu=list(range(8)))
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    assert controller.validate_config(value) is value
+
+
 def test_sequence_phase_runs_on_the_slave_with_the_reference_bank(tmp_path):
     import base64
     host, request = controller.phase_request(config(tmp_path), challenge(), 'sequence',
