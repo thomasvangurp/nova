@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 import threading
-from nanobody_opt import rules
+from nanobody_opt import rules, pr100_fresh_budget as fresh_budget
 
 COUNTERS = ('completed', 'fresh_evaluations', 'repeat_evaluations', 'native_passed',
             'total_profile_evaluations', 'carried_cpu_observations')
@@ -26,6 +26,12 @@ def host_artifacts(files, incoming, rows, terminal, owned, detail):
                 raise ValueError('host candidate outside assigned batch')
         if set(value.get('attempted_sequence_hashes', [])) - hashes:
             raise ValueError('host attempt outside assigned batch')
+        fresh = {rules.sequence_hash(r['sequence']) for r in rows if r.get('native_resume') is None}
+        for name in ('fresh_admitted_sequence_hashes', 'fresh_never_started_sequence_hashes'):
+            if set(value.get(name, [])) - fresh:
+                raise ValueError('host fresh admission outside assigned fresh batch')
+        if set(value.get('fresh_admitted_sequence_hashes', [])) & set(value.get('fresh_never_started_sequence_hashes', [])):
+            raise ValueError('contradictory fresh admission result')
         if set(value.get('terminal_native_outcomes', {})) - hashes:
             raise ValueError('host rejection outside assigned batch')
         if any(type(value.get(k, 0)) is not int or value.get(k, 0) < 0 for k in COUNTERS):
@@ -89,6 +95,9 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         raise ValueError('native dispatch challenge mismatch')
     if len({r['sequence'] for r in incoming['candidates']}) != len(incoming['candidates']):
         raise ValueError('duplicate native dispatch candidate')
+    cap = fresh_budget.validate_limit(config['worker'].get('fresh_admission_limit', fresh_budget.DEFAULT_LIMIT), allow_zero=True)
+    if sum(r.get('native_resume') is None for r in incoming['candidates']) > cap:
+        raise ValueError('native hosts exceed shared fresh admission reservation')
     hosts = config.get('native_hosts', ['master'])
     overrides = config.get('native_worker_overrides', {})
     capacities = {host: overrides.get(host, {}).get('workers', config['worker'].get('workers', 48)) for host in hosts}
@@ -112,6 +121,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         child = local / 'native-hosts' / host
         child.mkdir(parents=True, exist_ok=True)
         worker = {**config['worker'], **overrides.get(host, {})}
+        worker['fresh_admission_limit'] = sum(r.get('native_resume') is None for r in rows)
         selected = {**config, 'worker': worker, '_native_host': host, '_bounded_phase_collection': True}
         host_payload = {**payload, 'input.json': json.dumps({**incoming, 'candidates': rows}).encode()}
         detail = {}
@@ -149,7 +159,17 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
             results[host] = value; records.extend(observed); host_diagnostics[host] = detail
             if owned: pending.append(host)
     candidates, deferred, confirmations, attempted, rejected = [], [], [], set(), {}
+    fresh_admitted, fresh_uncertain, never_started = set(), set(), set()
     for host, value in results.items():
+        fresh = {rules.sequence_hash(r['sequence']) for r in groups[host] if r.get('native_resume') is None}
+        if 'fresh_admitted_sequence_hashes' in value:
+            fresh_admitted.update(value['fresh_admitted_sequence_hashes'])
+        else:
+            fresh_uncertain.update(set(value.get('attempted_sequence_hashes', [])) & fresh)
+        if host not in pending:
+            never_started.update(set(value.get('fresh_never_started_sequence_hashes', [])) & fresh)
+            never_started.update(rules.sequence_hash(r['sequence']) for r in value.get('deferred_candidates', [])
+                                 if r.get('native_resume') is None)
         if value.get('status') == 'complete' and value.get('novelty_checked') is True:
             candidates.extend(value.get('candidates', []))
         deferred.extend(value.get('deferred_candidates', []))
@@ -161,6 +181,9 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
               'deferred_candidates': deferred, 'deferred_confirmations': confirmations,
               'blocked_confirmations': blocked, 'attempted_sequence_hashes': sorted(attempted),
               'terminal_native_outcomes': rejected, 'unresolved_native_hosts': sorted(pending),
+              'fresh_admitted_sequence_hashes': sorted(fresh_admitted),
+              'fresh_admission_uncertain_sequence_hashes': sorted(fresh_uncertain),
+              'verified_fresh_never_started_sequence_hashes': sorted(never_started),
               'native_host_status': {host: {'status': value.get('status'), 'ownership_unresolved': host in pending,
                    **{key: value.get(key, 0) for key in COUNTERS}} for host, value in results.items()},
               **{key: sum(v.get(key, 0) for v in results.values()) for key in COUNTERS}}

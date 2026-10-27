@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import time
 from nanobody_opt import rules, pr100_filter, pr100_live_selection as selection
+from nanobody_opt import pr100_fresh_budget as fresh_budget
 
 DEFAULT_WORKERS = 48
 DEFAULT_MAX_WORKERS = 64
@@ -272,6 +273,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     tools = Path(job['native_tools'])
     pr100_filter.helper('aggrescan3d').tool_paths = lambda: (tools / 'aggrescan3d-rs', tools / 'freesasa')
     workers = worker_count(job)
+    fresh_limit = fresh_budget.validate_limit(job.get('fresh_admission_limit', fresh_budget.DEFAULT_LIMIT), allow_zero=True)
     budget = candidate_budget(job)
     timed_admission = 'native_minimum_call_window_seconds' in job
     minimum_window = job.get('native_minimum_call_window_seconds', budget)
@@ -320,6 +322,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'psh_rescue_margin': screening['psh_rescue_margin'],
                     'recall_guarantee': False, 'authoritative': False},
                   measurement_outcomes={'passed': 0, 'rejected': 0, 'inconclusive': 0})
+    result['fresh_admission_limit'] = fresh_limit
     result['native_admission'] = {'deadline_clamped': timed_admission,
         'minimum_call_window_seconds': minimum_window, 'cleanup_reserve_seconds': cleanup_reserve,
         'candidate_timeout_cap_seconds': budget, 'allocations': []}
@@ -343,6 +346,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         result['observation_journal'] = journal.progress()
         admitted = started | screened | screen_admitted
         result['attempted_sequence_hashes'] = sorted(rules.sequence_hash(s) for s in admitted)
+        result['fresh_admitted_sequence_hashes'] = sorted(rules.sequence_hash(s) for s in fresh_admitted)
+        result['fresh_admitted_unique'] = len(fresh_admitted)
+        result['fresh_never_started_sequence_hashes'] = sorted(rules.sequence_hash(r['sequence']) for r in rows
+            if r.get('native_resume') is None and r['sequence'] not in fresh_admitted)
         result['deferred_candidates'] = [r for r in rows if r['sequence'] not in admitted]
         result['deferred_confirmations'] = []
         for row in rows:
@@ -374,6 +381,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     measurements = {}
     confirmation_progress = {}
     started = set()
+    fresh_admitted = set()
     screened = set()
     screen_evidence = {}
     screen_admitted = set()
@@ -420,6 +428,12 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         # Diagnostics cannot convert a valid scientific result to failure.
         result['observation_errors'] += 1
 
+    def admit_fresh(batch):
+        added = {r['sequence'] for r in batch if r['sequence'] not in resumed_required} - fresh_admitted
+        if len(fresh_admitted) + len(added) > fresh_limit:
+            raise ValueError('fresh native admission budget exceeded')
+        fresh_admitted.update(added)
+
     def measure_and_record(batch):
         allocated = min(budget, deadline - clock() - cleanup_reserve) if deadline is not None else budget
         if timed_admission and allocated < minimum_window:
@@ -428,6 +442,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             'timeout_seconds': allocated if timed_admission else budget,
             'deadline_limited': timed_admission and allocated < budget})
         by_sequence = {row['sequence']: row for row in batch}
+        admit_fresh(batch)
         expected = {key: len(measurements.get(key, [])) + 1 for key in by_sequence}
         started.update(by_sequence)
         result['not_started'] = result['input_count'] - len(started)
@@ -509,6 +524,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             return batch, []
         state['attempted_batches'] += 1
         batch_dir = directory / 'native-screen' / f'batch-{index:05d}'
+        admit_fresh(batch)
         screen_admitted.update(r['sequence'] for r in batch)
         flush()
         try:
@@ -599,6 +615,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 break
             carry = [r for r in original_batch if r['sequence'] in resumed_required]
             fresh = [r for r in original_batch if r['sequence'] not in resumed_required]
+            fresh = fresh[:max(0, fresh_limit - len(fresh_admitted))]
+            if not fresh and not carry:
+                continue  # Confirmation rows in later batches still get a turn.
             batch, held = screen_batch_rows(fresh, offset // workers) if fresh else ([], [])
             batch = carry + batch
             if not batch or out_of_time():

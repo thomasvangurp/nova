@@ -715,6 +715,8 @@ def validate_config(config):
         raise ValueError('source_sha must be a 40-character git revision')
     if not isinstance(config['worker'], dict) or 'native_tools' not in config['worker']:
         raise ValueError('worker must be an object including native_tools')
+    from nanobody_opt.pr100_fresh_budget import validate_limit, DEFAULT_LIMIT
+    validate_limit(config.get('epoch_fresh_native_limit', DEFAULT_LIMIT))
     native_hosts = config.get('native_hosts', ['master'])
     if (not isinstance(native_hosts, list) or not native_hosts or len(native_hosts) != len(set(native_hosts))
             or any(host not in ('master', 'slave') for host in native_hosts)):

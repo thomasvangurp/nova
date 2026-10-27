@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
-from nanobody_opt import rules
+from nanobody_opt import rules, pr100_fresh_budget as fresh_budget
 
 SCHEMA = 'pr100-epoch-continuation-v1'
 
@@ -112,6 +112,8 @@ def mode_for(state):
         return 'score'
     if state.get('pending_confirmation'):
         return 'native'
+    if state.get('fresh_native_budget') and fresh_budget.summary(state['fresh_native_budget'])['remaining'] == 0:
+        return 'fresh_budget_exhausted'
     seen = set(state['native_attempted_hashes'])
     if any(rules.sequence_hash(r['sequence']) not in seen for r in state['pending_native']):
         return 'native'
@@ -169,9 +171,13 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 output.write_bytes(base64.b64decode(encoded, validate=True))
         state = migrate(local, challenge, config, ownership_verified=True)
         c.atomic(path, state)
+    budget = fresh_budget.ensure(state, config)
+    c.atomic(path, state)
     mode = state['active']['phase'] if state.get('active') else mode_for(state)
     if not c.admissible(clock, epoch, reserve=config.get('reserve_blocks', c.RESERVE_BLOCKS)):
         return {'status': 'epoch_cutoff', 'epoch': epoch}
+    if mode == 'fresh_budget_exhausted':
+        return {'status': mode, 'epoch': epoch, 'fresh_native_budget': fresh_budget.summary(budget)}
     if not state.get('active') and stop_at - time.time() < required_seconds(mode, config):
         return {'status': 'insufficient_remaining_window', 'epoch': epoch, 'next_phase': mode}
     if not state.get('active'):
@@ -194,11 +200,13 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     def save(): c.atomic(path, state)
     def phase(name, payload):
         active['phase'] = name; save()
+        native_config = {**attempt_config, 'worker': {**worker,
+            'fresh_admission_limit': fresh_budget.planned_fresh_count(budget, active['number'])}} if name == 'native' else attempt_config
         if name == 'native' and 'native_hosts' in config:
             from nanobody_opt.pr100_native_dispatch import run as dispatch
-            return dispatch(attempt_config, challenge, payload, stop_at, chain, attempt_dir,
+            return dispatch(native_config, challenge, payload, stop_at, chain, attempt_dir,
                             diagnostics=diagnostics)
-        phase_config, phase_local = attempt_config, attempt_dir
+        phase_config, phase_local = native_config, attempt_dir
         if name == 'novelty':
             operation = hashlib.sha256(payload['archive.csv']).hexdigest()
             active['novelty_operation'] = operation; save()
@@ -237,12 +245,19 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 native_input = attempt_dir / 'native-input.json'
                 if native_input.is_file():
                     native_payload = native_input.read_bytes()
+                    fresh_budget.reserve_saved_input(budget, active['number'], json.loads(native_payload)['candidates'])
                 else:
+                    rows = fresh_budget.reserve(budget, active['number'], rows)
+                    save()  # Reserve shared capacity before any remote launch.
                     native_payload = json.dumps({**binding, 'candidates': rows}).encode()
                     c.atomic(native_input, json.loads(native_payload))
+                save()
                 files = phase('native', {'archive.csv': archive,
                     'input.json': native_payload})
                 value = json.loads(files['result.json'])
+                fresh_budget.reconcile(budget, active['number'], value,
+                    cleanup_verified=cleanup_verified(read(attempt_dir / 'native-supervisor.json', {})))
+                save()
                 active['native_unresolved'] = bool(value.get('unresolved_native_hosts'))
                 state['blocked_confirmations'] = union_rows(state.get('blocked_confirmations', []),
                                                             value.get('blocked_confirmations', []))
@@ -361,6 +376,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 state['pending_publication'] = True
             if active['phase'] == 'native':
                 partial = read(attempt_dir / 'native/result.json', {})
+                fresh_budget.reconcile(budget, active['number'], partial, cleanup_verified=True)
                 attempted = partial.get('attempted_sequence_hashes')
                 if attempted is None:
                     attempted = [rules.sequence_hash(r['sequence']) for r in state['pending_native']]
@@ -382,6 +398,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     receipt.update(phase_diagnostics=diagnostics, publication_cutoff_unix=stop_at,
                    wall_seconds=time.time() - receipt['started_at_unix'],
                    continuation_pending=True, cumulative_scored_candidates=len(state['score_rows']))
+    receipt['fresh_native_budget'] = fresh_budget.summary(budget)
     c.atomic(attempt_dir / 'receipt.json', receipt)
     c.atomic(local / 'receipt.json', receipt)
     if 'native' in diagnostics:

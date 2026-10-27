@@ -66,6 +66,7 @@ def test_legacy_fleet_continues_fresh_and_reranks_union_without_old_rescore(lega
         if name == 'native':
             assert [r['sequence'] for r in json.loads(files['input.json'])['candidates']] == [x.rows[1]['sequence']]
             return {'result.json': json.dumps({**x.replay.validity, 'candidates': [x.rows[1]],
+                'fresh_admitted_sequence_hashes': [rules.sequence_hash(x.rows[1]['sequence'])],
                 'attempted_sequence_hashes': [rules.sequence_hash(x.rows[1]['sequence'])]}).encode()}
         assert name == 'score' and json.loads(files['input.json'])['sequences'] == [x.rows[1]['sequence']]
         return score_files(x.replay, [r for r in x.replay.data['rows'] if r['sequence'] == x.rows[1]['sequence']])
