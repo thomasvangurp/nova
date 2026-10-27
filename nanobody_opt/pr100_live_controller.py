@@ -10,6 +10,7 @@ least as good: tier first, then margin (see docs/PR100_LIVE_CONTRACT.md).
 from __future__ import annotations
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import math
@@ -54,8 +55,9 @@ _SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?k
 _LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
 
 TRANSPORT = r'''
-import base64,hashlib,json,os,pathlib,re,stat,subprocess,sys,time
-r=json.load(sys.stdin);d=pathlib.Path(r['directory'])
+import base64,gzip,hashlib,json,os,pathlib,re,stat,subprocess,sys,time
+raw=sys.stdin.buffer.read()
+r=json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw);d=pathlib.Path(r['directory'])
 if r['operation']=='journal':
  out={'status':'unavailable'}
  try:
@@ -212,7 +214,10 @@ def remote(config, host, request, *, sleep=time.sleep):
                 raise TimeoutError('remote transport epoch cutoff')
             request = {**request, 'clock': current}
         try:
-            result = subprocess.run(command, input=json.dumps(request).encode(),
+            payload = json.dumps(request).encode()
+            if len(payload) > 8192:
+                payload = gzip.compress(payload, compresslevel=1, mtime=0)
+            result = subprocess.run(command, input=payload,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     timeout=min(config.get('transport_timeout_seconds', 120), remaining()))
         except subprocess.TimeoutExpired as cause:
