@@ -4,6 +4,7 @@ import asyncio
 import errno
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 import subprocess
 import sys
@@ -91,6 +92,74 @@ def test_unknown_result_and_bad_provenance_are_not_measured_rejections():
     assert result["outcome"] == "inconclusive"
     assert result["aggrescan3d"]["mode"] == "unknown"
     assert SENTINEL not in json.dumps(result)
+
+
+@pytest.mark.parametrize("average,maximum", [
+    ("-0.49695852943914703", "2.3138981898258155"),  # both caps, live incident
+    ("-0.5540617053334963", "1.5485080163280531"),  # average only
+    ("-0.7380241848048523", "1.584922997654891"),  # maximum only
+    (str(rules.MAX_AVERAGE + Decimal("0.000000000000000001")), str(rules.MAX_PEAK)),
+    (str(rules.MAX_AVERAGE), str(rules.MAX_PEAK + Decimal("0.000000000000000001"))),
+])
+def test_completed_a3d_cap_failure_is_rejected_without_changing_acceptance(
+        tmp_path, cheap_context, average, maximum):
+    value = profile()
+    value["passed"] = False
+    value["aggrescan3d"].update(passed=False, a3d_average=average, a3d_maximum=maximum)
+    before = copy.deepcopy(value)
+    assert rules.developability_reason(value, REQ, sequence=SEQUENCE) == "aggrescan_unavailable_or_failed"
+
+    observed = journal.observation(value, REQ, SEQUENCE)
+    assert observed["outcome"] == "rejected"
+    assert observed["gate_reason"] == "aggrescan_threshold"
+    assert observed["execution_censored"] is False
+    assert observed["backend_passed"] is False
+    assert observed["aggrescan3d"]["passed"] is False
+    assert value == before
+    assert rules.developability_reason(value, REQ, sequence=SEQUENCE) == "aggrescan_unavailable_or_failed"
+
+    sink = journal.Journal(tmp_path, {}, REQ)
+    assert sink.save(row(), 1, observed)
+    saved = records(tmp_path)[-1]["observation"]
+    assert saved["outcome"] == "rejected"
+    assert saved["gate_reason"] == "aggrescan_threshold"
+    assert sink.progress()["outcomes"] == {"passed": 0, "rejected": 1, "inconclusive": 0}
+
+
+@pytest.mark.parametrize("changes", [
+    {"status": "error"}, {"status": "disabled"},
+    {"sequence_hash": "f" * 64}, {"residue_count": len(SEQUENCE) + 1},
+    {"mode": "unknown"}, {"surface_method": "unknown"}, {"ph_scale": "unknown"},
+    {"radius_angstrom": "9"}, {"input_structure_sha256": "invalid"},
+    {"normalized_structure_sha256": "invalid"},
+    {"a3d_average": None}, {"a3d_maximum": "NaN"}, {"a3d_maximum": "-1"},
+])
+def test_unverifiable_a3d_failure_stays_inconclusive(changes):
+    value = profile()
+    value["passed"] = False
+    value["aggrescan3d"].update({"passed": False, "a3d_average": "-0.4", **changes})
+    observed = journal.observation(value, REQ, SEQUENCE)
+    assert observed["outcome"] == "inconclusive"
+    assert observed["execution_censored"] is True
+
+
+@pytest.mark.parametrize("error_kind", ["timeout", "no_profile", "profile_exception"])
+def test_a3d_metrics_do_not_hide_execution_errors(error_kind):
+    value = {**profile(), "error": True, "error_kind": error_kind}
+    value["aggrescan3d"].update(passed=False, a3d_average="-0.4")
+    observed = journal.observation(value, REQ, SEQUENCE)
+    assert observed["outcome"] == "inconclusive"
+    assert observed["error_kind"] == error_kind
+
+
+def test_false_a3d_flag_with_no_cap_failure_is_not_reclassified():
+    value = profile()
+    value["passed"] = False
+    value["aggrescan3d"].update(passed=False, a3d_average=str(rules.MAX_AVERAGE),
+                               a3d_maximum=str(rules.MAX_PEAK))
+    observed = journal.observation(value, REQ, SEQUENCE)
+    assert observed["outcome"] == "inconclusive"
+    assert observed["gate_reason"] == "aggrescan_unavailable_or_failed"
 
 
 def test_contradictory_error_kind_is_censored_even_with_passed_flag():
