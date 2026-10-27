@@ -7,12 +7,19 @@ import sqlite3
 import time
 
 from nanobody_opt.publication_ledger import SCHEMA, identity, save
+from nanobody_opt.rules import target_for_epoch
 
 
-def export(database: Path, archives: Path, output: Path, *, target="P20809", now=None):
+def export(database: Path, archives: Path, output: Path, *, target=None, now=None):
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
         rows = db.execute("SELECT epoch,sequence FROM entries WHERE sequence IS NOT NULL").fetchall()
     finalized = {int(epoch) for epoch, _ in rows}
+    if target is None:
+        if not finalized:
+            raise ValueError("no finalized submission epochs")
+        target = target_for_epoch(max(finalized))
+    # Keep the existing conservative all-row exclusions. Only the proof's
+    # target and matching archived coverage follow the latest finalized epoch.
     blocked = {identity(sequence) for _, sequence in rows if sequence}
     archived = set()
     for folder in Path(archives).glob("epoch[0-9]*"):

@@ -115,6 +115,28 @@ def test_pi_export_protects_entire_inputs_and_requires_finalized_archives(tmp_pa
     assert "UNUSED" not in output.read_text()
 
 
+def test_pi_export_infers_current_target_coverage_but_preserves_all_row_exclusions(tmp_path):
+    from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET
+    database = tmp_path/'dashboard.sqlite'
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE entries(epoch INTEGER,sequence TEXT)')
+        db.executemany('INSERT INTO entries VALUES(?,?)', [
+            (ACTIVATION_EPOCH-1, 'OLD_API'), (ACTIVATION_EPOCH, 'CURRENT_API')])
+    archives = tmp_path/'archive'
+    ledger.save(archives/f'epoch{ACTIVATION_EPOCH-1}/nanobody_result.json', {
+        'epoch': ACTIVATION_EPOCH-1, 'target': 'P20809', 'sequence_pool': ['OLD_POOL']})
+    ledger.save(archives/f'epoch{ACTIVATION_EPOCH}/nanobody_result.json', {
+        'epoch': ACTIVATION_EPOCH, 'target': TARGET, 'sequence_pool': ['CURRENT_POOL']})
+    output = tmp_path/'proof.json'
+    result = export(database, archives, output)
+    proof = ledger.read(output)
+    assert proof['target'] == TARGET
+    assert proof['covered_epochs'] == [ACTIVATION_EPOCH]
+    assert result['latest_finalized_epoch'] == ACTIVATION_EPOCH
+    assert set(proof['possibly_submitted_hashes']) == {
+        ledger.identity(s) for s in ('OLD_API', 'CURRENT_API', 'CURRENT_POOL')}
+
+
 def test_pi_job_pushes_atomically_and_does_not_promote_a_failed_transfer(tmp_path, monkeypatch):
     from nanobody_dash import pi_refresh, submission_outcomes
     monkeypatch.setattr(pi_refresh, "DATA", tmp_path)
