@@ -39,6 +39,9 @@ PHASE_SHARES = {'sequence': 0.25, 'native': 0.5, 'score': 1.0}
 PHASE_FLOORS = {'sequence': 60.0, 'native': 90.0, 'score': 90.0}
 TAIL_BYTES = 2048
 _JOURNAL_COLLECTOR = None
+# Direct worker SSH setup alone measured about four seconds. Collection is
+# already asynchronous, so allow a bounded transfer without delaying epochs.
+JOURNAL_COLLECTION_SECONDS = 20.0
 # Wall reserved at the end of the native phase for the archive novelty pass (234 s in 25956).
 NOVELTY_RESERVE_SECONDS = 300.0
 ACTIVATION_EPOCH = 25957
@@ -576,12 +579,12 @@ def start_native_journal_collection(config, epoch, local, stop_at):
 
 
 def collect_native_journal(config, epoch, local, stop_at, *, transport=remote):
-    deadline = min(stop_at, time.time() + 3.0)
+    deadline = min(stop_at, time.time() + JOURNAL_COLLECTION_SECONDS)
     if deadline <= time.time():
         return {'status': 'deadline_elapsed'}
     outcome = {'status': 'unavailable'}
     try:
-        reply = transport({**config, 'transport_timeout_seconds': 3.0}, 'master',
+        reply = transport({**config, 'transport_timeout_seconds': JOURNAL_COLLECTION_SECONDS}, 'master',
             {'operation': 'journal', 'directory': f"{config['remote_root']}/{epoch}/native",
              'transport_deadline_unix': deadline})
         status = reply.get('status')

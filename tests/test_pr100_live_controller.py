@@ -233,12 +233,24 @@ def test_optional_transport_refuses_unsafe_journal_without_affecting_results(tmp
 
 def test_optional_collection_timeout_does_not_raise_or_oversubscribe_deadline(tmp_path):
     def timeout(cfg, host, request):
-        assert cfg['transport_timeout_seconds'] == 3.0
-        assert request['transport_deadline_unix'] <= time.time() + 3.0
+        assert cfg['transport_timeout_seconds'] == controller.JOURNAL_COLLECTION_SECONDS
+        assert request['transport_deadline_unix'] <= time.time() + controller.JOURNAL_COLLECTION_SECONDS
         raise TimeoutError('inert diagnostic timeout')
     result = controller.collect_native_journal(config(tmp_path), EPOCH, tmp_path,
         time.time() + 300, transport=timeout)
     assert result['status'] == 'collection_failed'
+
+
+def test_optional_collection_allows_realistic_ssh_setup_within_epoch_deadline(tmp_path, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(controller.time, 'time', lambda: now[0])
+    def delayed(cfg, host, request):
+        now[0] += 8.0
+        assert now[0] < request['transport_deadline_unix'] <= 1012.0
+        return {'status': 'unavailable'}
+    result = controller.collect_native_journal(config(tmp_path), EPOCH, tmp_path,
+                                               1012.0, transport=delayed)
+    assert result['status'] == 'unavailable'
 
 
 def test_stalled_diagnostic_collection_never_blocks_next_epoch(tmp_path, monkeypatch):
