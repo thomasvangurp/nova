@@ -20,6 +20,14 @@ DEFAULT_PROPOSALS = 600
 DEFAULT_REFERENCE_SLOTS = 16
 WORKER_RSS_BYTES = 1.4 * 1024 ** 3
 SCREEN_BACKENDS = frozenset({'resident_cpu', 'cuda_refine'})
+# Only execution settings that can change the numerical backend are bound.
+# Release paths, worker counts and other scheduling settings stay portable.
+NATIVE_EXECUTION_ENV_KEYS = (
+    'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENMM_CPU_THREADS',
+    'NUMEXPR_NUM_THREADS', 'OMP_DYNAMIC', 'MKL_DYNAMIC',
+    'CUDA_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES',
+    'OPENMM_PLUGIN_DIR', 'OPENMM_DEFAULT_PLATFORM', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
+)
 
 
 def screen_settings(job):
@@ -257,6 +265,9 @@ def native_resume_identity(job, directory, requirements):
                 and all(runtime['packages'][name]['version_sha256'] for name in ('torch', 'numpy', 'openmm'))
                 and all(runtime['tools'][name]['sha256'] for name in ('aggrescan3d-rs', 'freesasa', 'TNP')))
     return {'challenge_sha256': rules.digest(job['challenge']), 'resume_eligible': bool(complete),
+            # Raw environment values must never enter evidence or diagnostics.
+            'execution_environment_sha256': rules.digest({key: os.environ.get(key)
+                                                          for key in NATIVE_EXECUTION_ENV_KEYS}),
             'requirements_sha256': rules.digest(requirements), 'filter_sha': rules.FILTER_SHA,
             'runtime': runtime, 'sources': {k: v for k, v in context['source_sha256'].items()
                 if k not in ('worker', 'journal', 'rules')},
