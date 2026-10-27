@@ -386,15 +386,26 @@ def candidate_tiers(candidates):
             for row in candidates}
 
 
+def _psh_boundary_margin(value):
+    try:
+        from nanobody_opt.pr100_live_selection import psh_margin
+    except ImportError:
+        # Preserve the existing local ordering fallback during a missing-module
+        # failure; these are the same pinned PR100 PSH eligibility boundaries.
+        margin = min(value - 73.4, 89.0 - value) if _finite(value) else None
+    else:
+        margin = psh_margin(value)
+    return -math.inf if margin is None else margin
+
+
 def order_candidates(candidates, *, allow_marginal=True):
-    """Worker order (tier A by ascending mean PSH, then tier B) with a local fallback."""
+    """Worker order: tier first, then distance from either PSH rejection bound."""
     try:
         from nanobody_opt.pr100_live_selection import order_candidates as ordered
     except ImportError:
         def key(row):
-            mean = row.get('psh_mean')
             return (TIER_RANK.get(row.get('tier'), len(TIER_RANK)),
-                    mean if _finite(mean) else math.inf,
+                    -_psh_boundary_margin(row.get('psh_mean')),
                     str(row.get('sequence_hash') or ''))
         rows = sorted((r for r in candidates if r.get('tier') in TIER_RANK), key=key)
         return rows if allow_marginal else [r for r in rows if r.get('tier') == 'A']
@@ -409,7 +420,7 @@ def fleet_quality(fleet, tiers):
         members.append({'sequence_hash': rules.sequence_hash(sequence),
                         'tier_rank': TIER_RANK.get(info.get('tier'), len(TIER_RANK)),
                         'psh_mean': info.get('psh_mean')})
-    members.sort(key=lambda m: (m['tier_rank'], math.inf if m['psh_mean'] is None else m['psh_mean']))
+    members.sort(key=lambda m: (m['tier_rank'], -_psh_boundary_margin(m['psh_mean'])))
     return {'tier_a': sum(1 for m in members if m['tier_rank'] == TIER_RANK['A']),
             'count': len(members), 'members': members}
 
@@ -417,10 +428,11 @@ def fleet_quality(fleet, tiers):
 def quality_key(quality):
     """Higher is strictly better, so a lexicographic comparison is the monotone rule."""
     def member(entry):
-        mean = entry['psh_mean']
-        return (-entry['tier_rank'], -(math.inf if mean is None else mean))
+        return (-entry['tier_rank'], _psh_boundary_margin(entry.get('psh_mean')))
     return (quality['tier_a'], quality['count'],
-            tuple(member(entry) for entry in quality['members']))
+            # Re-sort persisted records too: older releases stored members in
+            # ascending PSH order, which incorrectly rewards the lower boundary.
+            tuple(sorted((member(entry) for entry in quality['members']), reverse=True)))
 
 
 def monotone_decision(previous_quality, quality):

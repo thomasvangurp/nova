@@ -364,6 +364,40 @@ def test_quality_orders_by_tier_then_margin():
     assert controller.monotone_decision(None, one) == 'replace'
 
 
+def test_quality_prefers_distance_from_both_psh_boundaries():
+    rows = [candidate('LOW', 'B', 73.5), candidate('HIGH', 'B', 88.9),
+            candidate('CENTER', 'B', 81.2)]
+    tiers = controller.candidate_tiers(rows)
+    qualities = {name: controller.fleet_quality({'sequence_pool': [name]}, tiers)
+                 for name in ('LOW', 'HIGH', 'CENTER')}
+    for edge in ('LOW', 'HIGH'):
+        assert controller.monotone_decision(qualities[edge], qualities['CENTER']) == 'replace'
+        assert controller.monotone_decision(qualities['CENTER'], qualities[edge]) == 'rejected'
+    assert controller.order_candidates(rows)[0]['sequence'] == 'CENTER'
+
+
+def test_quality_reinterprets_legacy_member_order_with_current_boundary_metric():
+    legacy = {'tier_a': 0, 'count': 2, 'members': [
+        {'tier_rank': 1, 'psh_mean': 73.5}, {'tier_rank': 1, 'psh_mean': 81.2}]}
+    reordered = {**legacy, 'members': list(reversed(legacy['members']))}
+    assert controller.monotone_decision(legacy, reordered) == 'idempotent'
+
+
+def test_local_ordering_fallback_keeps_both_psh_boundaries(monkeypatch):
+    import builtins
+    original = builtins.__import__
+
+    def unavailable(name, *args, **kwargs):
+        if name == 'nanobody_opt.pr100_live_selection':
+            raise ImportError('selection module unavailable')
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', unavailable)
+    rows = [candidate('LOW', 'B', 73.5), candidate('CENTER', 'B', 81.2),
+            candidate('HIGH', 'B', 88.9)]
+    assert controller.order_candidates(rows)[0]['sequence'] == 'CENTER'
+
+
 # --- publication -------------------------------------------------------------------
 
 @pytest.fixture

@@ -157,3 +157,42 @@ handoff validation, and optional transfer failures including symlinks and oversi
 files. The controller also refreshes its
 heartbeat during phase polling instead of displaying the previous epoch throughout
 a long native run. Publishing rules, scoring settings and admission budgets are unchanged.
+
+
+## Epoch 25959: confirmation must precede more exploration
+
+All five submitted sequence hashes reached the validator. Its retained W&B
+epoch log rejected UIDs 1, 7, and 20 for PSH above 89, and UID 17 for
+Aggrescan maximum 1.679168 exceeding 1.580231. UID 16 passed. This was not a
+commitment or decryption failure. Primary evidence is W&B run
+`metanova-labs/SN68_validator/2dsp5tj4`, history step 26242, artifact
+`media/html/validation_round_26242_52428a5c1c1f5afb7156.html`.
+
+The first-scan loop consumed the admission window before the repeat loop
+started. All five candidates consequently had one native observation, although
+three were requested. A later loop with the same admission guard cannot
+recover time already consumed. Confirm survivors after each first-pass batch
+before admitting another fresh batch, stop a candidate after any failed native
+gate, and retain the existing deadline and explicitly labelled partial fallback.
+Do not count cached structures or repeated arithmetic on one structure as fresh
+independent native measurements. Track fresh and repeat evaluations separately;
+`insufficient_repeats` must not be mislabeled `margin_missed`.
+
+PSH eligibility is two-sided: 73.4 through 89. Lower is not universally safer.
+Order equal-tier candidates by distance from the closest boundary and apply
+both mean-margin heuristics before assigning tier A. These heuristics are not
+calibrated probabilities of validator acceptance. A single passed observation
+remains a permitted tier B fallback, never evidence of repeated confirmation.
+
+CI now exercises an advancing clock with the real 595-candidate workload shape
+and three requested observations, confirmation failures in every native gate,
+both PSH boundaries, truthful counters, partial publication, and persisted
+quality ordering. Activate this policy at a fresh epoch so old one-sided tier
+labels are not used as current confirmation evidence.
+
+Local repeated CLI measurements establish end-to-end variability, while fixed
+PDB re-evaluation reproduced identical surface metrics. This does not establish
+which upstream stage varies or prove parity with the remote scoring runtime.
+The available W&B package snapshot describes a log uploader; actual scoring
+worker package/source/weight/device fingerprints remain unverified. Never
+present matching rules or package names as full runtime equivalence.
