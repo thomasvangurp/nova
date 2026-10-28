@@ -192,6 +192,67 @@ def test_sequence_phase_runs_on_the_slave_with_the_reference_bank(tmp_path):
     assert host == 'slave' and job['references'] == '/bank.json'
 
 
+def test_safe_activate_canary_config_validates_and_reaches_only_selected_host(tmp_path, monkeypatch):
+    import base64
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('canary_activation',
+        Path(__file__).resolve().parents[1] / 'scripts/pr100_safe_activate.py')
+    activation = importlib.util.module_from_spec(spec); spec.loader.exec_module(activation)
+    value = config(tmp_path, source_sha=activation.TERMINAL_INVALIDATION_RELEASE,
+                   native_hosts=['master', 'slave'], epoch_fresh_native_limit=4800,
+                   native_worker_overrides={
+                       'master': {'workers': 96, 'max_workers': 96, 'cpu_slots': 104},
+                       'slave': {'workers': 32, 'max_workers': 32, 'cpu_slots': 32}})
+    value['worker'].update(native_interleave_confirmations=True, repeats=3,
+                           native_screen={'enabled': False})
+    for runtime in value['hosts'].values():
+        runtime['release'] = '/root/releases/' + value['source_sha']
+    runtimes = {host: {**activation.NOVELTY_PATHS, 'identity_sha256': 'b' * 64}
+                for host in ('master', 'slave')}
+    canary = activation.proposed_config(value, 'c' * 40, EPOCH, 'preserve', {},
+        novelty_runtimes=runtimes, native_refill_hosts=['slave'], missing_cell_donors=True)
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    assert controller.validate_config(canary) is canary
+    jobs = {}
+    for host in ('master', 'slave'):
+        _, request = controller.phase_request({**canary, '_native_host': host}, challenge(),
+            'native', {}, time.time() + 2000, clock())
+        jobs[host] = json.loads(base64.b64decode(request['files']['job.json']))
+    assert jobs['slave']['native_work_conserving'] is True
+    assert jobs['master'].get('native_work_conserving', False) is False
+    assert jobs['slave']['workers'] == 32 and jobs['master']['workers'] == 96
+    assert all(job['repeats'] == 3 and job['missing_cell_donor_fallback'] for job in jobs.values())
+    assert canary['epoch_fresh_native_limit'] == 4800
+
+
+@pytest.mark.parametrize('setting', [1, 'true', None, [], {}])
+def test_refill_override_rejects_nonboolean_values(tmp_path, monkeypatch, setting):
+    value = config(tmp_path, native_hosts=['master', 'slave'],
+                   native_worker_overrides={'slave': {'native_work_conserving': setting}})
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='override must be a boolean'):
+        controller.validate_config(value)
+
+
+@pytest.mark.parametrize('interleave,screen', [(False, False), (True, True)])
+def test_refill_override_requires_original_cpu_interleaving(tmp_path, monkeypatch, interleave, screen):
+    value = config(tmp_path, native_hosts=['master', 'slave'],
+                   native_worker_overrides={'slave': {'native_work_conserving': True}})
+    value['worker'].update(native_interleave_confirmations=interleave, native_screen={'enabled': screen})
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='requires original CPU interleaving'):
+        controller.validate_config(value)
+
+
+def test_refill_override_cannot_enable_an_unowned_host(tmp_path, monkeypatch):
+    value = config(tmp_path, native_hosts=['master'],
+                   native_worker_overrides={'slave': {'native_work_conserving': True}})
+    value['worker']['native_interleave_confirmations'] = True
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='host must be enabled'):
+        controller.validate_config(value)
+
+
 def test_missing_cell_donor_opt_in_is_validated_and_forwarded_without_budget_changes(tmp_path, monkeypatch):
     import base64
     value = config(tmp_path)

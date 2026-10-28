@@ -750,20 +750,32 @@ def validate_config(config):
             or any(host not in ('master', 'slave') for host in native_hosts)):
         raise ValueError('native_hosts must name distinct master/slave hosts')
     overrides = config.get('native_worker_overrides', {})
-    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools'}
+    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools', 'native_work_conserving'}
     if not isinstance(overrides, dict) or set(overrides) - {'master', 'slave'}:
         raise ValueError('invalid native worker host overrides')
-    for value in overrides.values():
+    for host, value in overrides.items():
         if not isinstance(value, dict) or set(value) - allowed:
             raise ValueError('unsupported native worker override')
-        if any(type(v) is not int or not 1 <= v <= 256 for k, v in value.items() if k != 'native_tools'):
+        if any(type(v) is not int or not 1 <= v <= 256 for k, v in value.items()
+               if k not in ('native_tools', 'native_work_conserving')):
             raise ValueError('invalid native worker resource bound')
+        if 'native_work_conserving' in value and type(value['native_work_conserving']) is not bool:
+            raise ValueError('native_work_conserving override must be a boolean')
+        if value.get('native_work_conserving') is True and host not in native_hosts:
+            raise ValueError('refill host must be enabled for native work')
         if 'native_tools' in value and not str(value['native_tools']).startswith('/'):
             raise ValueError('native tools must be an absolute path')
     screen = config['worker'].get('native_screen', {})
     if (not isinstance(screen, dict) or type(screen.get('enabled', False)) is not bool
             or screen.get('backend', 'resident_cpu') not in ('resident_cpu', 'cuda_refine')):
         raise ValueError('worker.native_screen must specify a boolean enabled and supported backend')
+    refill = config['worker'].get('native_work_conserving', False)
+    interleave = config['worker'].get('native_interleave_confirmations', False)
+    if type(refill) is not bool or type(interleave) is not bool:
+        raise ValueError('native scheduling policies must be booleans')
+    if (refill or any(value.get('native_work_conserving') for value in overrides.values())) and (
+            not interleave or screen.get('enabled', False)):
+        raise ValueError('native refill requires original CPU interleaving')
     if screen.get('enabled') is True and len(config.get('native_gpu', gpus)) > 4:
         raise ValueError('native_gpu must select at most four devices for screening')
     hosts = config['hosts']
