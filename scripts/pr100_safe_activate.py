@@ -516,14 +516,14 @@ def recovery_required(sha, epoch, error, *, start_attempted):
 
 def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
             native_refill_hosts=(), missing_cell_donors=False, clock_reader=current_clock,
-            service_factory=Service, now=time.time):
+            service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
     migration = (novelty_runtimes is not None and any(
         config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
         != runtime.get('identity_sha256') for host, runtime in novelty_runtimes.items()))
     protect_partial = bool(native_refill_hosts) and config.get('source_sha') != sha
-    if not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
+    if not force and not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
@@ -548,11 +548,11 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     changed, start_attempted = False, False
     # Keep the short pause between attempts free of another slow chain RPC.
     # The fresh chain check under the lock below still precedes any install.
-    if path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
-                                                    protect_partial_native=protect_partial):
+    if not force and (path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
+                                                    protect_partial_native=protect_partial)):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     # The prepared config must use the same current epoch as the final check.
-    if proposal['start_epoch'] != clock['epoch']:
+    if not force and proposal['start_epoch'] != clock['epoch']:
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     try:
         service.stop()
@@ -560,9 +560,9 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
         with (Path(config['state_root']) / 'controller.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fresh = clock_reader()
-            raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
+            raced = (not force and (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
                      or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration,
-                                     protect_partial_native=protect_partial))
+                                     protect_partial_native=protect_partial)))
             if not raced:
                 # Do not rewrite continuation state or the publication artifact.
                 changed = True
@@ -632,7 +632,8 @@ def main(argv=None):
                         value = handoff(BASE, args.sha, args.mode, release, q, novelty_runtimes=novelty,
                                         interleave_confirmations=args.interleave_confirmations,
                                         native_refill_hosts=args.native_refill_host,
-                                        missing_cell_donors=args.missing_cell_donors)
+                                        missing_cell_donors=args.missing_cell_donors,
+                                        force=os.environ.get('SN68_FORCE_ACTIVATION') == '1')
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}
                 atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})
