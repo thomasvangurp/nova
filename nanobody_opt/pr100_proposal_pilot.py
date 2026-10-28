@@ -12,22 +12,30 @@ import random
 
 AMINO_ACIDS = 'ADEFGHIKLMNPQRSTVWY'  # Do not introduce an extra cysteine.
 
-# Hydrophilicity-biased residue weights for CDR sampling. The previous uniform
-# alphabet fill produced ~47% hydrophobic loops and pushed fresh Q9NZQ7
-# candidates over the native PSH gate. The top miners keep CDR3 at ~31% and
-# CDR2 at ~28% hydrophobic: rich in D/R/Q/K/N/T/S while still presenting
-# aromatic contacts. These weights keep every residue available (aromatics and
-# charged residues stay in play for contacts) but move the expected hydrophobic
-# fraction of a fully sampled CDR3 loop to ~30%.
+# CDR3 residue weights derived from the measured winning distribution of the
+# dominant Q9NZQ7 rival (uid 8, coldkey 5EHS..., leaderboard epochs 25979-25997,
+# 16 winning CDR3s / 201 residues). Their winning recipe concentrates on
+# aromatic F/Y stacking contacts and charged D/R salt bridges, plus H/P, keeps
+# Q/S/K/G moderate, and leaves the aliphatics (L/I/V/M/W) and N/A/T/E at or
+# near zero. Measured fractions: Y .159, R .134, F .129, D .124, P .090,
+# S .080, K .060, H .055, Q .050, A .040, G .040, E .025, T .015, and 0 for
+# N/L/I/V/M/W. H and P are lifted above their raw frequency because histidine
+# adds aromatic stacking plus H-bonds and proline breaks the loop for paratope
+# exposure; every residue keeps a floor so no option is removed from sampling.
+# Expected CDR3 hydrophobic fraction is 8.3/25.0 ~= 0.33 -- matching the rival's
+# ~33% surface hydrophobicity and safely below the 0.44 sequence pre-screen
+# ceiling, which trims any overshoot.
 AMINO_ACID_WEIGHTS = {
-    # Hydrophilic: favour, strongest top-miner enrichment first.
-    'D': 3.0, 'R': 3.0,
-    'Q': 2.0, 'K': 2.0, 'N': 2.0, 'T': 2.0, 'S': 2.0,
-    'E': 1.5, 'H': 1.5, 'P': 1.5,
-    # Hydrophobic: deprioritise; F/W/Y aromatics stay available for contacts.
-    'A': 1.1, 'M': 1.1, 'V': 1.1,
-    'F': 1.2, 'Y': 1.2,
-    'I': 0.9, 'L': 0.8, 'G': 0.7, 'W': 0.7,
+    # Favour: aromatic F/Y stacking contacts and charged D/R salt bridges.
+    'F': 3.0, 'Y': 3.0, 'D': 3.0, 'R': 3.0,
+    # H/P: contact chemistry, lifted above their raw frequency.
+    'H': 2.0, 'P': 2.0,
+    # Moderate: solubility and framework compatibility (S/K/Q/G).
+    'S': 1.6, 'K': 1.4, 'Q': 1.2, 'G': 1.0,
+    # Deprioritised: A/T/N/E (rival uses sparsely) and the aliphatics
+    # L/I/V/M/W (rival uses not at all); the floor keeps them available.
+    'A': 0.8, 'E': 0.6, 'T': 0.5, 'N': 0.4,
+    'L': 0.3, 'I': 0.3, 'V': 0.3, 'M': 0.3, 'W': 0.3,
 }
 STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
