@@ -31,7 +31,13 @@ class EpochDeadline:
             current = int(state['epoch'])
             if length <= 0 or current != block // length or current != self.epoch:
                 raise EpochDeadlineExceeded('epoch changed; old work cancelled')
-            if not 0 <= age <= self.maximum_state_age:
+            # A timestamp in the near future is wall-clock jitter (an NTP step,
+            # or the reader clock running a touch ahead of the writer), not a
+            # stale chain. Clamp it — the same convention as the controller's
+            # blocks_remaining() — so a transient backward clock step cannot
+            # cancel work spuriously, and the deadline stays conservative.
+            age = max(0.0, age)
+            if age > self.maximum_state_age:
                 raise EpochDeadlineExceeded('chain clock is stale; work cancelled')
             seconds = (length - block % length - self.reserve_blocks) * 12.0 - age
             if seconds <= 0:

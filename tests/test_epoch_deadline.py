@@ -155,6 +155,17 @@ def test_handoff_reserve_refuses_to_start_and_stale_clock_fails_closed(tmp_path)
         EpochDeadline(state, 72).remaining()
 
 
+def test_future_timestamp_is_jitter_not_staleness(tmp_path):
+    state = tmp_path / 'clock.json'
+    clock(state)
+    data = json.loads(state.read_text())
+    data['updated_at_unix'] += 5  # reader clock a few seconds behind the writer
+    state.write_text(json.dumps(data))
+    # A near-future stamp is wall-clock jitter, not a stale chain: clamp to
+    # zero and keep the deadline conservative rather than cancelling work.
+    assert EpochDeadline(state, 72).remaining() >= 0
+
+
 def test_publisher_thin_strict_pool_never_expands_to_entire_screen(monkeypatch, tmp_path):
     publisher = import_shipping('tools.publish_current_nanobody', monkeypatch)
     def rank(command):
