@@ -21,6 +21,10 @@ from nanobody_opt.competitor_position_lane import (
     competitor_position_candidates,
 )
 
+# Pre-correction P20809 top-15 edit set; stale for Q9NZQ7 (positions 121-127 are
+# past the modal length). main() consumes only positions[0] (=1) plus the first
+# residue at that position, so the C-tail entries here are inert. The residue
+# order is imported from competitor_lane.POSITION_RESIDUE_ORDER (Q9NZQ7-remapped).
 HOT_POSITIONS = [1, 3, 114, 122, 121, 124, 116, 123, 31, 100, 126, 111, 73, 127]
 
 

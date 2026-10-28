@@ -71,25 +71,48 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
     # Best (lowest validator final_score) first, so --pool-limit keeps the top.
     return [s for s, _ in sorted(best.items(), key=lambda kv: kv[1])]
 
-# 1-indexed hot positions, from the measured edit-position distribution (see
-# analysis/nanobody-gap/parent-selection-20260929/reconstruct_results.json).
-# Codex-corrected 2026-10-21: framework/C-tail only -- N-term 1/3 and the
-# C-tail 113-126 band. CDR3-adjacent positions 114/116 and the interior
-# 31/73/100/111/127 are removed (they land in or too near the CDR3).
+# 1-indexed framework/C-tail positions the competitor lane single-edits.
 #
-# PROVISIONAL / UNVERIFIED (2026-10-28): remapped for the Q9NZQ7 modal length
-# (~120) by shifting the C-tail positions -7. This assumes the C-terminus is the
-# 7 residues that shrink; it has NOT been re-derived from Q9NZQ7 leaderboard
-# history. Re-run competitor_position_lane.learn_hot_positions over Q9NZQ7
-# submissions before trusting these positions.
+# P20809 provenance (modal length 127): the N-term 1/3 and C-tail 113-126 band
+# come from the measured edit-position distribution of the elite rival
+# (analysis/nanobody-gap/parent-selection-20260929/reconstruct_results.json;
+# walk-forward recall 84% at top-10 / 94% at top-15). CDR3-adjacent 114/116 and
+# interior 31/73/100/111/127 were removed 2026-10-21.
+#
+# Q9NZQ7 remap (2026-10-28), kept as a labelled fallback -- NOT re-derived from
+# Q9NZQ7 edit data, because none exists yet:
+#   * N-term 1/3 are N-anchored and unchanged.
+#   * C-tail positions shift -7: FR4 (11 residues) is C-terminally anchored in
+#     both targets and Q9NZQ7 is 7 residues shorter than P20809. Pairwise
+#     alignment of a P20809 len-127 sequence vs a Q9NZQ7 len-120 sequence
+#     confirms FR4 117..127 -> 110..120. (The 7-residue gap is NOT "entirely in
+#     CDR3" as the migration commit claimed: the aligned regions decompose as
+#     FR3 -7, CDR1 +3, CDR3 -3. That does not change the C-tail shift, but the
+#     CDR3-tail entries 106/108 are C-anchor-mapped, not CDR3-length-mapped.)
+#   * The position SET and residue order below stay unverified against Q9NZQ7
+#     because (a) leaderboard edit-frequency is empty -- 523 distinct Q9NZQ7
+#     sequences over epochs 25959-25994 contain exactly one same-length
+#     distance-1 edit to a prior public sequence, so learn_hot_positions has no
+#     signal; (b) /root/artifacts/nanobody_mutations.sqlite has 523 Q9NZQ7 nodes
+#     but 0 lineage_edges and 0 mutation_effects for Q9NZQ7 (P20809-only);
+#     (c) scoring_backfill/exhaustive_ranking.json is P20809-only -- no Q9NZQ7
+#     exhaustive single-edit sweep exists.
+# To replace these values, re-run learn_hot_positions over Q9NZQ7 submissions
+# once a rival is doing local distance-1 search, or run an exhaustive single-
+# edit sweep on Q9NZQ7 parents.
 HOT_POSITIONS = [1, 3, 106, 108, 113, 114, 115, 116, 117, 118, 119]
 
-# 1-indexed position -> residues in descending measured quality, from the
-# exhaustive 8x single-edit sweep (scoring_backfill/exhaustive_ranking.json).
-# The sweep scored 4,738 edits (13 positions x 19 residues x 20 parents) 8x and
-# found Alanine best/tied at 7/13 positions. Best residue first; pos 115 was a
-# DUD (dropped). Positions 31/100 were outside the sweep and keep the rival's
-# frequency order. PROVISIONAL / UNVERIFIED: same -7 C-tail shift as above.
+# 1-indexed position -> residues in descending measured single-edit quality,
+# from the P20809 exhaustive 8x sweep (scoring_backfill/exhaustive_ranking.json:
+# 4,738 edits = 13 positions x 19 residues x 20 parents, scored 8x; Alanine
+# best/tied at 7/13 positions; the P20809 pos-115 DUD was dropped).
+#
+# SAME Q9NZQ7 CAVEAT, and stronger: these preferences are P20809-framework-
+# specific. The P20809 sweep's best-substitution residues at the mapped
+# positions (A/A/V/A/G) were ranked against P20809's different FR4, while
+# Q9NZQ7 FR4 ("WGQGTLVTVSS") carries 114=T, 115=L, 116=V, 117=T, 119=S. The
+# "best first" order below therefore does not transfer to Q9NZQ7; keep until a
+# Q9NZQ7 exhaustive sweep supplies a real order.
 POSITION_RESIDUE_ORDER = {
     1: ["A", "D"],
     3: ["A", "M"],
