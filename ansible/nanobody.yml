@@ -113,7 +113,7 @@
       c758628fa67c2a36d0cf6b73cd5d40e1eb1eb3a7a15f89d17de90d977844375e
     nanobody_fast_scorer_root: /root/fastscore
     nanobody_fast_scorer_reference: >-
-      0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif
+      0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_Q9NZQ7_input.cif
     nanobody_fast_scorer_tuning: {}
     ckpts:
       - name: boltzgen1_diverse.ckpt
