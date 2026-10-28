@@ -23,8 +23,10 @@ THROUGHPUT_RELEASE = '036a6c48c32b762b3f803ffa920eaf3cf66d454a'
 QUALIFIED_BOTH_RELEASE = '22407a4ae6324b8c051ef89f738eb74fddaad978'
 QUALIFIED_NOVELTY_RELEASE = '4cec2deeca89dfa1a22ad65477fc631eeaff63a8'
 ARCHIVE_CACHE_RELEASE = '98ef1cba2511bf71786d9dd7a3e732828272d154'
+TERMINAL_INVALIDATION_RELEASE = 'd9b13d773651066b396fcd52835b9f48456b6408'
 APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEASE,
-                                    QUALIFIED_NOVELTY_RELEASE, ARCHIVE_CACHE_RELEASE})
+                                    QUALIFIED_NOVELTY_RELEASE, ARCHIVE_CACHE_RELEASE,
+                                    TERMINAL_INVALIDATION_RELEASE})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -272,7 +274,8 @@ def clean_qualification(receipt):
             and cleanup.get('fixed_point_reached') is True)
 
 
-def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path=None, interleave_confirmations=False):
+def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path=None,
+                         interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False):
     stamp = read(release / 'build_stamp.json', {})
     check = stamp.get('validation', {})
     if (stamp.get('git_sha') != sha or check.get('passed') is not True
@@ -285,11 +288,22 @@ def verify_prerequisites(sha, release, staging_path, *, mode, qualification_path
         expected_tests.add('tests/test_pr100_native_execution_identity.py')
     if interleave_confirmations:
         expected_tests.add('tests/test_pr100_confirmation_deadline_review.py')
+    feature_tests = set()
+    if native_refill_hosts:
+        feature_tests.update({'tests/test_pr100_native_refill.py',
+                              'tests/test_pr100_native_lifecycle.py',
+                              'tests/test_pr100_safe_activate.py'})
+    if missing_cell_donors:
+        feature_tests.update({'tests/test_pr100_reference_donors.py',
+                              'tests/test_pr100_safe_activate.py'})
+    expected_tests.update(feature_tests)
     if not expected_tests <= set(check.get('test_files', [])):
         raise ValueError('throughput_shipping_tests_missing')
     manifest = stamp.get('files')
     if not isinstance(manifest, dict) or not manifest:
         raise ValueError('empty_release_manifest')
+    if not feature_tests <= set(manifest):
+        raise ValueError('rollout_feature_suites_not_staged')
     if interleave_confirmations and 'tests/test_pr100_confirmation_deadline_review.py' not in manifest:
         raise ValueError('confirmation_deadline_suite_not_staged')
     for name, digest in manifest.items():
@@ -337,7 +351,31 @@ def selected_mode(current, mode):
     return mode
 
 
-def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None, interleave_confirmations=False):
+def rollout_options(value, *, native_refill_hosts=(), missing_cell_donors=False):
+    """Enable explicitly selected policies without widening worker allocation."""
+    if (not isinstance(native_refill_hosts, (tuple, list))
+            or any(host not in ('master', 'slave') for host in native_refill_hosts)
+            or len(set(native_refill_hosts)) != len(native_refill_hosts)):
+        raise ValueError('invalid_native_refill_hosts')
+    if type(missing_cell_donors) is not bool:
+        raise ValueError('missing_cell_donors_must_be_boolean')
+    worker = value['worker']
+    if native_refill_hosts:
+        if (worker.get('native_interleave_confirmations') is not True
+                or worker.get('native_screen', {}).get('enabled', False)):
+            raise ValueError('refill_requires_original_cpu_interleaving')
+        if not set(native_refill_hosts) <= set(value.get('native_hosts', ['master'])):
+            raise ValueError('refill_host_not_enabled')
+        for host in native_refill_hosts:
+            override = value.setdefault('native_worker_overrides', {}).setdefault(host, {})
+            override['native_work_conserving'] = True
+    if missing_cell_donors:
+        worker['missing_cell_donor_fallback'] = True
+    return value
+
+
+def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None,
+                    interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False):
     if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
@@ -365,7 +403,8 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
                 raise ValueError('unexpected_host_release')
             runtime['release'] = runtime['release'][:-len(previous)] + sha
             runtime['novelty_runtime'] = runtimes[host]
-        return value
+        return rollout_options(value, native_refill_hosts=native_refill_hosts,
+                               missing_cell_donors=missing_cell_donors)
     value.update(source_sha=sha, start_epoch=epoch, native_hosts=['master'] if mode == 'master' else ['master', 'slave'])
     if sha != THROUGHPUT_RELEASE:
         value['epoch_fresh_native_limit'] = current.get('epoch_fresh_native_limit', 4800)
@@ -384,7 +423,8 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
             raise ValueError('slave_runtime_not_qualified')
         value['hosts']['slave'].update(qualified_native_paths(qualification))
         value['hosts']['slave']['native_tools'] = qualification['runtime']['native_tools']
-    return value
+    return rollout_options(value, native_refill_hosts=native_refill_hosts,
+                           missing_cell_donors=missing_cell_donors)
 
 
 def command(args, *, cwd=None, timeout=30):
@@ -431,9 +471,17 @@ class Service:
             raise RuntimeError('service_release_mismatch')
 
 
-def boundary(config, clock, now, *, heartbeat_max_age=30, novelty_migration=False):
+def boundary(config, clock, now, *, heartbeat_max_age=30, novelty_migration=False,
+             protect_partial_native=False):
     root = Path(config['state_root'])
     state = read(root / str(clock['epoch']) / 'continuation.json', {})
+    if protect_partial_native and state.get('pending_confirmation'):
+        from nanobody_opt.pr100_live_controller import admissible, RESERVE_BLOCKS
+        # A changed adapter identity must not strand confirmations that can
+        # still finish this epoch. Expired evidence stays retained on disk.
+        if admissible({**clock, 'updated_at_unix': now}, clock['epoch'],
+                      reserve=config.get('reserve_blocks', RESERVE_BLOCKS), now=now):
+            return False
     recoverable = novelty_migration and clean_pending_novelty_migration(config, clock, state)
     return ready_for_activation(clock, read(root / 'heartbeat.json', {}),
                                 state, now, heartbeat_max_age=heartbeat_max_age,
@@ -459,17 +507,21 @@ def recovery_required(sha, epoch, error, *, start_attempted):
             'scientific_ownership_must_be_checked_before_recovery': True}
 
 
-def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False, clock_reader=current_clock,
+def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
+            native_refill_hosts=(), missing_cell_donors=False, clock_reader=current_clock,
             service_factory=Service, now=time.time):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
     migration = (novelty_runtimes is not None and any(
         config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
         != runtime.get('identity_sha256') for host, runtime in novelty_runtimes.items()))
-    if not boundary(config, clock, now(), novelty_migration=migration): return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
+    protect_partial = bool(native_refill_hosts) and config.get('source_sha') != sha
+    if not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
+        return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
-                               interleave_confirmations=interleave_confirmations)
+                               interleave_confirmations=interleave_confirmations,
+                               native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -489,7 +541,8 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     changed, start_attempted = False, False
     # Keep the short pause between attempts free of another slow chain RPC.
     # The fresh chain check under the lock below still precedes any install.
-    if path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration):
+    if path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
+                                                    protect_partial_native=protect_partial):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     # The prepared config must use the same current epoch as the final check.
     if proposal['start_epoch'] != clock['epoch']:
@@ -501,7 +554,8 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fresh = clock_reader()
             raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
-                     or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration))
+                     or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration,
+                                     protect_partial_native=protect_partial))
             if not raced:
                 # Do not rewrite continuation state or the publication artifact.
                 changed = True
@@ -542,6 +596,10 @@ def main(argv=None):
     parser.add_argument('--novelty-qualification-receipt', required=True, type=Path)
     parser.add_argument('--interleave-confirmations', action='store_true',
                         help='Opt in to CI-qualified confirmation-first mixed native waves')
+    parser.add_argument('--native-refill-host', action='append', choices=('master', 'slave'), default=[],
+                        help='Enable bounded slot refill only on this qualified native host')
+    parser.add_argument('--missing-cell-donors', action='store_true',
+                        help='Enable bounded missing-cell donors with unchanged validation and unseeded controls')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if not re.fullmatch('[0-9a-f]{40}', args.sha) or not 1 <= args.wait_seconds <= 7200:
@@ -560,11 +618,14 @@ def main(argv=None):
                     effective_mode = selected_mode(read(BASE / 'pr100-controller.json', {}), args.mode)
                     q = verify_prerequisites(args.sha, release, args.staging_receipt,
                         mode=effective_mode, qualification_path=args.qualification_receipt,
-                        interleave_confirmations=args.interleave_confirmations)
+                        interleave_confirmations=args.interleave_confirmations,
+                        native_refill_hosts=args.native_refill_host, missing_cell_donors=args.missing_cell_donors)
                     novelty = verify_novelty_qualification(release, args.novelty_qualification_receipt)
                     try:
                         value = handoff(BASE, args.sha, args.mode, release, q, novelty_runtimes=novelty,
-                                        interleave_confirmations=args.interleave_confirmations)
+                                        interleave_confirmations=args.interleave_confirmations,
+                                        native_refill_hosts=args.native_refill_host,
+                                        missing_cell_donors=args.missing_cell_donors)
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}
                 atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})

@@ -605,7 +605,8 @@ def test_same_novelty_identity_code_upgrade_cannot_claim_pending_migration_excep
     assert events == [] and a.read(base / 'pr100-controller.json') == old
 
 
-@pytest.mark.parametrize('predecessor', [a.QUALIFIED_NOVELTY_RELEASE, a.ARCHIVE_CACHE_RELEASE])
+@pytest.mark.parametrize('predecessor', [a.QUALIFIED_NOVELTY_RELEASE, a.ARCHIVE_CACHE_RELEASE,
+                                        a.TERMINAL_INVALIDATION_RELEASE])
 def test_qualified_novelty_release_is_approved_predecessor(deployment, novelty_receipt, predecessor):
     *_, old = deployment
     old['source_sha'] = predecessor
@@ -635,6 +636,98 @@ def test_interleave_optin_refuses_accelerated_screen(deployment, novelty_receipt
     with pytest.raises(ValueError, match='original_cpu'):
         a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve',
             novelty_runtimes=a.verify_novelty_qualification(release, receipt), interleave_confirmations=True)
+
+
+def test_slave_refill_and_donors_preserve_other_qualified_settings(deployment, novelty_receipt):
+    *_, old = deployment
+    old['source_sha'] = a.TERMINAL_INVALIDATION_RELEASE
+    for host in old['hosts'].values():
+        host['release'] = '/root/releases/' + old['source_sha']
+    old.update(native_hosts=['master', 'slave'], epoch_fresh_native_limit=4800,
+               native_worker_overrides={'master': {'workers': 96, 'max_workers': 96, 'cpu_slots': 104},
+                                        'slave': {'workers': 32, 'max_workers': 32, 'cpu_slots': 32}})
+    old['worker'].update(native_interleave_confirmations=True, native_screen={'enabled': False})
+    release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(release, receipt)
+    baseline = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', {}, novelty_runtimes=runtimes)
+    canary = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', {}, novelty_runtimes=runtimes,
+                               native_refill_hosts=['slave'], missing_cell_donors=True)
+    baseline['native_worker_overrides']['slave']['native_work_conserving'] = True
+    baseline['worker']['missing_cell_donor_fallback'] = True
+    assert canary == baseline
+    assert 'native_work_conserving' not in old['native_worker_overrides']['slave']
+    assert 'missing_cell_donor_fallback' not in old['worker']
+
+
+@pytest.mark.parametrize('hosts', ['slave', ['unknown'], ['slave', 'slave'], [True]])
+def test_refill_host_selection_rejects_ambiguous_requests(hosts):
+    with pytest.raises(ValueError, match='invalid_native_refill_hosts'):
+        a.rollout_options({'worker': {}}, native_refill_hosts=hosts)
+
+
+@pytest.mark.parametrize('interleave,screen,hosts,match', [
+    (False, False, ['master'], 'original_cpu'),
+    (True, True, ['master'], 'original_cpu'),
+    (True, False, ['slave'], 'host_not_enabled'),
+])
+def test_refill_requires_existing_native_ownership(interleave, screen, hosts, match):
+    value = {'native_hosts': ['master'], 'worker': {
+        'native_interleave_confirmations': interleave, 'native_screen': {'enabled': screen}}}
+    with pytest.raises(ValueError, match=match):
+        a.rollout_options(value, native_refill_hosts=hosts)
+
+
+def test_donor_activation_requires_boolean():
+    with pytest.raises(ValueError, match='must_be_boolean'):
+        a.rollout_options({'worker': {}}, missing_cell_donors=1)
+
+
+@pytest.mark.parametrize('expired', [False, True])
+def test_refill_adapter_cutover_preserves_live_partial_confirmations(deployment, expired):
+    base, release, unit, root, old = deployment
+    events = []
+    old['worker']['native_interleave_confirmations'] = True
+    a.atomic(base / 'pr100-controller.json', old)
+    state = {**STATE, 'pending_confirmation': [{'sequence_hash': 'retained-inert-checkpoint'}]}
+    a.atomic(root / str(CLOCK['epoch']) / 'continuation.json', state)
+    clock = {**CLOCK, 'block': (CLOCK['epoch'] + 1) * CLOCK['epoch_length'] - 20} if expired else CLOCK
+    a.atomic(root / 'heartbeat.json', {**HEARTBEAT, **clock})
+    before = (root / str(CLOCK['epoch']) / 'continuation.json').read_bytes()
+    result = a.handoff(base, SHA, 'master', release, None, native_refill_hosts=['master'],
+        clock_reader=lambda: clock, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == ('activated' if expired else 'waiting_for_clean_attempt')
+    assert (root / str(CLOCK['epoch']) / 'continuation.json').read_bytes() == before
+    if not expired:
+        assert events == [] and a.read(base / 'pr100-controller.json') == old
+
+
+@pytest.mark.parametrize('feature', ['refill', 'donors'])
+@pytest.mark.parametrize('listed,staged', [(False, False), (True, False), (False, True), (True, True)])
+def test_rollout_requires_executed_and_staged_feature_suites(prerequisites, feature, listed, staged):
+    release, stage_path, qualification, stamp, stage, _ = prerequisites
+    suites = {'tests/test_pr100_safe_activate.py'}
+    kwargs = {'mode': 'both', 'qualification_path': qualification}
+    if feature == 'refill':
+        suites.update({'tests/test_pr100_native_refill.py', 'tests/test_pr100_native_lifecycle.py'})
+        kwargs['native_refill_hosts'] = ['slave']
+    else:
+        suites.add('tests/test_pr100_reference_donors.py')
+        kwargs['missing_cell_donors'] = True
+    if listed:
+        stamp['validation']['test_files'].extend(sorted(suites))
+    if staged:
+        for name in suites:
+            path = release / name; path.parent.mkdir(exist_ok=True)
+            path.write_text('# inert rollout suite fixture')
+            stamp['files'][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for host in stage['hosts']:
+            host['manifest_files'] = len(stamp['files'])
+    a.atomic(release / 'build_stamp.json', stamp); a.atomic(stage_path, stage)
+    if listed and staged:
+        assert a.verify_prerequisites(SHA, release, stage_path, **kwargs)
+    else:
+        with pytest.raises(ValueError, match='shipping_tests_missing|feature_suites_not_staged'):
+            a.verify_prerequisites(SHA, release, stage_path, **kwargs)
 
 
 @pytest.mark.parametrize('listed,staged', [(False, False), (True, False), (False, True), (True, True)])
