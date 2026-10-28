@@ -109,27 +109,42 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
 # edit sweep on Q9NZQ7 parents.
 HOT_POSITIONS = [1, 3, 107, 108, 109, 110, 111, 112, 113]
 
-# 1-indexed position -> residues in descending measured single-edit quality,
-# from the P20809 exhaustive 8x sweep (scoring_backfill/exhaustive_ranking.json:
-# 4,738 edits = 13 positions x 19 residues x 20 parents, scored 8x; Alanine
-# best/tied at 7/13 positions; the P20809 pos-115 DUD was dropped). The
-# positions are re-anchored for the Q9NZQ7 114-length FR4 (104..114); the
-# VALUES remain P20809-framework-specific and unverified against Q9NZQ7.
+# 1-indexed position -> residues in descending emission priority, re-derived
+# 2026-10-28 from the Q9NZQ7 public field rather than the P20809 exhaustive 8x
+# sweep the prior values came from. The prior "Alanine best at 7/13 positions"
+# preference is exactly wrong for Q9NZQ7: Alanine is hydrophobic, and every hot
+# position is a surface-exposed FR1 (1, 3) or FR4 (107..113) residue, so the
+# validator's surface_hydrophobic_patches gate (reject > 89) rewards the
+# hydrophilic substitutions the top miners actually make and punishes the A /
+# F,L,I,V,M,W,Y substitutions our P20809-order was emitting first.
 #
-# SAME Q9NZQ7 CAVEAT, and stronger: these preferences are P20809-framework-
-# specific. The P20809 sweep's best-substitution residues at the mapped
-# positions (A/A/V/A/G) were ranked against P20809's different FR4, while
-# Q9NZQ7 FR4 ("WGQGTLVTVSS") carries 108=T, 109=L, 110=V, 111=T, 113=S. The
-# "best first" order below therefore does not transfer to Q9NZQ7; keep until a
-# Q9NZQ7 exhaustive sweep supplies a real order.
+# Source: leaderboard-backed public_validator_api/validator_final_rank_sum
+# (540 unique Q9NZQ7 sequences; top-100 by final score), C-terminally-anchored
+# FR4/N-term residue usage -- measured per FR4 offset, independent of the
+# absolute 114 vs 120 length question, then applied to the lane's 114-length
+# FR4 (104..114) numbering:
+#   FR4 offset 6 (=pos 109, germline L): L 53% / T 36% / M 8% / Q 2%
+#        (top-20 winners: T 14/20) -- the one clear hydrophobic->hydrophilic edit
+#   FR4 offset 7 (=pos 110, germline V): V 99% / E 1%   (keep V, E is the alt)
+#   FR4 offset 8 (=pos 111, germline T): T 98% / S 2%
+#   FR4 offset 9 (=pos 112, germline V): V 99% / A 1%
+#   FR4 offsets 4,5,10 (pos 107,108,113): 100% germline G, T, S
+#   FR1 pos 1 (germline E): E 72% / Q 21% / D 7%
+#   FR1 pos 3 (germline Q): Q 99% (essentially never mutated)
+# Each list leads with the observed hydrophilic substitution (or the conserved
+# germline residue, which the emitter skips when it is the parent) and then the
+# remaining hydrophilic S,T,N,Q,D,E,K,R, so the alphabetical non-hydrophilic
+# tail (A,C,F,G,H,I,L,M,P,V,W,Y) only fills in after every hydrophilic edit.
 POSITION_RESIDUE_ORDER = {
-    1: ["A", "D"],
-    3: ["A", "M"],
-    108: ["A", "T"],
-    109: ["A", "P"],
-    110: ["V", "A"],
-    111: ["A", "S"],
-    113: ["G", "A"],
+    1: ["Q", "D", "S", "T", "N", "E", "K", "R"],
+    3: ["S", "T", "N", "Q", "D", "E", "K", "R"],
+    107: ["S", "T", "N", "Q", "D", "E", "K", "R"],
+    108: ["T", "S", "N", "Q", "D", "E", "K", "R"],
+    109: ["T", "S", "N", "Q", "D", "E", "K", "R"],
+    110: ["V", "T", "S", "N", "Q", "D", "E", "K", "R"],
+    111: ["T", "S", "N", "Q", "D", "E", "K", "R"],
+    112: ["V", "T", "S", "N", "Q", "D", "E", "K", "R"],
+    113: ["S", "T", "N", "Q", "D", "E", "K", "R"],
 }
 
 
