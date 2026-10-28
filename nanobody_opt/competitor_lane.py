@@ -24,9 +24,9 @@ from nanobody_opt.competitor_position_lane import (
     competitor_position_candidates,
     double_position_candidates,
 )
+from nanobody_opt.rules import TARGET, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai"
-TARGET = "P20809"
 
 
 def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
@@ -35,8 +35,9 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
 
     The rival already spent compute finding these, so they are 'proven good'
     parents -- use them directly as the mutation source rather than re-ranking
-    the whole archive. Returns the P20809 sequences for any coldkey starting
-    with ``coldkey_prefix`` over the most recent ``n_epochs`` epochs, deduped.
+    the whole archive. Returns the sequences for the current epoch's target for
+    any coldkey starting with ``coldkey_prefix`` over the most recent
+    ``n_epochs`` epochs, deduped.
     """
     import json
     import urllib.request
@@ -56,7 +57,7 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
             if not str(submission.get("coldkey") or "").startswith(coldkey_prefix):
                 continue
             for nb in submission.get("nanobodies") or []:
-                if nb.get("protein_name") != TARGET:
+                if nb.get("protein_name") != target_for_epoch(e):
                     continue
                 seq = str(nb.get("sequence") or "").strip().upper()
                 if not seq:

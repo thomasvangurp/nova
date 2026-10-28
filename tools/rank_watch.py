@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank-regression watchdog for our SN68 nanobody fleet (target P20809).
+"""Rank-regression watchdog for our SN68 nanobody fleet (current target).
 
 Why this exists
 ---------------
@@ -264,7 +264,7 @@ def describe(kind: str, r: dict, phase: str) -> str:
     if phase == "RECOVERED":
         return (f"[RECOVERED] {kind} cleared at epoch {e}: best rank {r.get('best')}, "
                 f"fleet {r['n']}/{r['N']}, mean rank {fmt(r.get('mean'))}.")
-    head = f"[{phase}] {kind} at epoch {e} (P20809 nanobody)"
+    head = f"[{phase}] {kind} at epoch {e} (nanobody)"
     ctx = (f"baseline (median of {len(r.get('base_epochs', []))} healthy epochs "
            f"{r['base_epochs'][0]}-{r['base_epochs'][-1]}): best rank {fmt(r['base_best'])}, "
            f"fleet size {fmt(r['base_n'])}, mean rank pct {fmt(r['base_mean_pct'])}")

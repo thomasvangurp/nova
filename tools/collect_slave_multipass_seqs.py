@@ -19,11 +19,10 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
+from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/{epoch}/nanobodies"
 DB = "/root/artifacts/nanobody_mutations.sqlite"
-TARGET = "P20809"
 SUPPORTED_LENGTH = 127
 REPLAY_LABELS = (("public_multipass_rivals", "multipass_sum10_pass"),)
 

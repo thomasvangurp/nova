@@ -195,5 +195,6 @@ def test_the_miner_does_not_stringify_before_normalising():
     retry-loop did nothing for exactly this reason.
     """
     source = (Path(__file__).resolve().parents[1] / "neurons" / "miner" / "miner.py").read_text()
-    assert 'nanobody_target=state["config"].nanobody_target,' in source
-    assert 'nanobody_target=str(state["config"].nanobody_target)' not in source
+    assert 'target = state["config"].nanobody_target' in source
+    assert 'nanobody_target=target,' in source
+    assert 'nanobody_target=str(' not in source

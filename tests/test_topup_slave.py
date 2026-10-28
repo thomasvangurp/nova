@@ -241,7 +241,7 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(flags["--wave-size"], "7")            # the whole tranche
         self.assertEqual(flags["--predict-batch-size"], "2")   # pinned whatever the tranche size
         self.assertEqual(flags["--limit"], "7")
-        self.assertEqual(flags["--target"], "P20809")
+        self.assertEqual(flags["--target"], ts.TARGET)
         self.assertEqual(flags["--scorer"], ts.SLAVE_SCORER)
         self.assertEqual(words[-1], "--capture-structures")
 

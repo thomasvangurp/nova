@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from nanobody_opt.backtest_mutation_ranker import AMINO_ACIDS, AA_INDEX
+from nanobody_opt.rules import TARGET
 from nanobody_opt.rank_exact import _observations
 from nanobody_opt.regions import find_regions
 from nanobody_opt.simulate_round import METRICS, rank_sum_in_field
@@ -539,7 +540,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-root", type=Path, default=Path("/root"))
-    parser.add_argument("--target", default="P20809")
+    parser.add_argument("--target", default=TARGET)
     parser.add_argument("--before-epoch", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--workers", type=int, default=16)

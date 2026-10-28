@@ -48,6 +48,13 @@ import struct
 import threading
 import time
 
+
+def _current_target() -> str:
+    """The single rules-owned target, imported lazily so the daemon stays light."""
+    from nanobody_opt import rules
+
+    return rules.TARGET
+
 #: Producer-side switch. Off means the current subprocess path, unchanged.
 ENABLED = os.environ.get("NANOBODY_SCORER_DAEMON", "0") == "1"
 SOCKET_PATH = os.environ.get("NANOBODY_SCORER_SOCKET",
@@ -460,7 +467,7 @@ def job_from_command(command, *, observation_id=None) -> dict:
         "gpus": flags.get("--gpus", "0,1"),
         "shards_per_gpu": _int("--shards-per-gpu", 1),
         "sequences": sequences_list,
-        "target": flags.get("--target", "P20809"),
+        "target": flags.get("--target", _current_target()),
         "subnet_config": flags["--config"],
         "out_path": flags["--out"],
         "batch_size": _int("--batch-size", 24),

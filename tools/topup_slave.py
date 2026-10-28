@@ -71,7 +71,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-TARGET = "P20809"
+sys.path.insert(0, "/root")
+from nanobody_opt.rules import TARGET  # noqa: E402
+
 TARGET_OBS = 20
 MAX_ROUNDS = 12                    # 8 -> 20 observations
 SEQUENCE_LENGTH = 127              # the fast scorer only supports length 127

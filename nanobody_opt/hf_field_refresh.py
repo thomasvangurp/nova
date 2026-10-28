@@ -101,7 +101,7 @@ from typing import Callable
 
 import pandas as pd
 
-TARGET = "P20809"
+from nanobody_opt.rules import TARGET
 # 2026-10-10: per-pass rows under the ONE current multipass label. The old
 # per-sequence mean labels (hf_field_20x_rank_sum, hf_field_sum10_20x_rank_sum)
 # are closed; their rows were relabelled to legacy_* by migrate_hf_field_20x.
@@ -112,7 +112,7 @@ N_PASSES = 20
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
 API = "https://compound-api.metanova-labs.ai"
 
-ARCHIVE = "/root/P20809_nanobodies.csv"
+ARCHIVE = f"/root/{TARGET}_nanobodies.csv"
 CONFIG = "/root/config/config.yaml"
 SCORER = "/root/nanobody_opt/score_boltzgen_fast_adapter.py"
 OUT_ROOT = Path("/root/hf_field_refresh")
@@ -248,7 +248,7 @@ def fetch_our_top50(conn) -> set[str]:
 
 
 def fetch_leaderboard(epoch: int) -> list[tuple[str, str]] | None:
-    """``[(coldkey, sequence)]`` for every P20809 nanobody, deduped; ``None``
+    """``[(coldkey, sequence)]`` for every current-target nanobody, deduped; ``None``
     when the epoch is not available (same semantics as
     ``multipass_all_rivals.fetch_leaderboard``: None != [])."""
     req = urllib.request.Request(

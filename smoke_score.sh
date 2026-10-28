@@ -17,7 +17,7 @@ SNAP_PID=$!
 time bash /root/bgen_python.sh /root/nanobody_opt/score_boltzgen_fast_adapter.py \
   --sequences /tmp/smoke_seqs.json \
   --config /root/config/config.yaml \
-  --target P20809 \
+  --target Q9NZQ7 \
   --gpus 0,1,2,3,4,5,6,7 \
   --shards-per-gpu 1 \
   --batch-size 1 \

@@ -73,9 +73,11 @@ def fetch(path: Path, target: str, *, allow_cached=False) -> dict:
 
 
 def main() -> int:
+    from nanobody_opt import rules
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
-    parser.add_argument('--target', default='P20809')
+    parser.add_argument('--target', default=rules.TARGET)
     args = parser.parse_args()
     try:
         print(json.dumps({'status': 'archive_ready', **fetch(args.output, args.target, allow_cached=True)}))

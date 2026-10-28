@@ -41,10 +41,9 @@ import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
-from nanobody_opt.rules import target_for_epoch
+from nanobody_opt.rules import TARGET, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai"
-TARGET = "P20809"
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
 LOCAL_DB = Path("/root/artifacts/nanobody_mutations.sqlite")
 FIELD_EPOCHS = 10

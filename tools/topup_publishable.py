@@ -37,8 +37,8 @@ from pathlib import Path
 
 os.environ.setdefault("NANOBODY_SCORER_DAEMON", "1")      # same warm-daemon path as the race
 sys.path.insert(0, "/root")
+from nanobody_opt.rules import TARGET
 
-TARGET = "P20809"
 DB = Path("/root/artifacts/nanobody_mutations.sqlite")
 LOG = Path("/root/artifacts/topup_publishable.log")
 CHAIN = Path("/root/artifacts/chain_state.json")

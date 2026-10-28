@@ -18,6 +18,7 @@ from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt.commit_submission import write_receipt
+from nanobody_opt.rules import TARGET
 
 #: The validator reads a commitment only while start_block < commit_block <
 #: end - BLACKOUT_BLOCKS. Canonical definition lives in nanobody_opt.fleet
@@ -152,7 +153,7 @@ def main() -> int:
     parser.add_argument("--epoch", required=True, type=int)
     parser.add_argument("--epoch-length", type=int, default=361)
     parser.add_argument("--coldkey", required=True)
-    parser.add_argument("--target", default="P20809")
+    parser.add_argument("--target", default=TARGET)
     parser.add_argument("--runtime-root", type=Path, default=Path("/root"))
     parser.add_argument("--github-prefix", default="thomasvangurp/nova-sn68-submissions/main/data/results")
     parser.add_argument("--apply", action="store_true")

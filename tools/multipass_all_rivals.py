@@ -27,10 +27,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
+from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET, target_for_epoch
 
 API = "https://compound-api.metanova-labs.ai"
-TARGET = "P20809"
 OUR_COLDKEY = "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ"
 
 # Validator's Algorithm-2 (rank_binders): minmax over weighted metric ranks.

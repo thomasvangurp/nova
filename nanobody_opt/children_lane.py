@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from nanobody_opt import db, gates
+from nanobody_opt import db, gates, rules
 from nanobody_opt.competitor_lane import POSITION_RESIDUE_ORDER
 from nanobody_opt.competitor_position_lane import (
     competitor_position_candidates,
@@ -37,12 +37,13 @@ def top_children(db_path: str, ledger_path: str, k: int) -> list[tuple[str, floa
         """
         SELECT n.sequence, o.score, o.score_kind
         FROM observations o JOIN nodes n ON n.id = o.node_id
-        WHERE n.target = 'P20809'
+        WHERE n.target = ?
           AND o.score_kind IN ('local_exact_validator_replay_rank_sum',
                                'local_validator_replay_rank_sum')
         GROUP BY n.sequence
         ORDER BY o.score ASC
-        """
+        """,
+        (rules.TARGET,),
     ).fetchall()
     conn.close()
 

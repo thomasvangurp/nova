@@ -36,6 +36,7 @@ from nanobody_opt.backtest_budget_allocation import (
     load_fields,
 )
 from nanobody_opt.simulate_round import METRIC_CATEGORIES, METRICS
+from nanobody_opt.rules import TARGET
 
 # Gates whose value is a rank sum on the scorer's own numeric scale.
 SCALE_DEPENDENT_GATES = {
@@ -184,7 +185,7 @@ def main() -> None:
         help="tree of observations from the replacement scorer",
     )
     parser.add_argument("--field-dir", type=Path, required=True)
-    parser.add_argument("--target", default="P20809")
+    parser.add_argument("--target", default=TARGET)
     parser.add_argument("--exclude-uid", type=int, default=8)
     parser.add_argument(
         "--reference-epochs",

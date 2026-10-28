@@ -21,6 +21,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 
 from nanobody_opt.backtest_mutation_ranker import AMINO_ACIDS, AA_INDEX
+from nanobody_opt.rules import TARGET
 from nanobody_opt.train_parent_relative_ranker import (
     AA_PROPERTIES,
     _atomic_json,
@@ -418,7 +419,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-snapshot", required=True, type=Path)
     parser.add_argument("--runtime-root", type=Path, default=Path("/root"))
-    parser.add_argument("--target", default="P20809")
+    parser.add_argument("--target", default=TARGET)
     parser.add_argument("--before-epoch", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--training-epochs", type=int, default=200)

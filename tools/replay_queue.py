@@ -34,10 +34,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, "/root")
-from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch
+from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET, target_for_epoch
 
 DB = "/root/artifacts/nanobody_mutations.sqlite"
-TARGET = "P20809"
 SUPPORTED_LENGTH = 127  # the fast scorer only supports this length; others hang or are refused
 SOURCE, KIND = "public_multipass_rivals", "multipass_sum10_pass"
 STATE_DIR = Path("/root/artifacts/replay_queue")

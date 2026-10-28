@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-TARGET = "P20809"
+from nanobody_opt.rules import TARGET
 
 #: The label and source the dashboard pass scorer writes (observation_labels).
 PASS_SCORE_KIND = "multipass_sum10_pass"

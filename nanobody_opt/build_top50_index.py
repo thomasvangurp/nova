@@ -2,7 +2,7 @@
 """Build the validator's exact top-50 index from the FULL HF archive.
 
 The validator builds its dedup top-50 with ``rank_binders`` (Algorithm 2) over
-Metanova/Submission-Archive's ``P20809_nanobodies.csv`` -- ALL history,
+Metanova/Submission-Archive's ``{target}_nanobodies.csv`` -- ALL history,
 refreshed every epoch -- NOT the live leaderboard. A previous builder ranked
 only the last N API epochs, which indexes a different (current-basin) fifty and
 over-filters: the cause of the 25454/25455 wholesale single-edit rejections.
@@ -94,6 +94,7 @@ def _live_top50_from_db(
     # NOVA_LOCAL_SQLITE migration and no longer applies.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from nanobody_opt import mutation_network  # noqa: E402
+    from nanobody_opt import rules  # noqa: E402
 
     with mutation_network._connect(Path(db_path)) as conn:
         local = mutation_network._is_local(conn)
@@ -111,7 +112,7 @@ def _live_top50_from_db(
             ORDER BY mean_score ASC
             LIMIT {p}
             """,
-            ("P20809", "local_validator_replay_rank_sum",
+            (rules.TARGET, "local_validator_replay_rank_sum",
              "local_exact_validator_replay_rank_sum",
              *REPLAY_SCALE_SOURCES, min_obs, limit + extra * 4),
         ).fetchall()
@@ -122,7 +123,7 @@ def _live_top50_from_db(
         # novelty filter downstream. The producer's iteration fails loudly
         # instead (failed.json -> check_mining_liveness).
         raise SystemExit(
-            "TOP50_EMPTY: no P20809 replay rows from sources "
+            f"TOP50_EMPTY: no {rules.TARGET} replay rows from sources "
             f"{REPLAY_SCALE_SOURCES} with >= {min_obs} observations"
         )
 

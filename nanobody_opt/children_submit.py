@@ -100,9 +100,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nanobody_opt import db, fleet  # noqa: E402
+from nanobody_opt import db, fleet, rules  # noqa: E402
 
-TARGET = "P20809"
 DEFAULT_SOURCE = "children_8x"
 DEFAULT_SCORE_KIND = "local_validator_replay_rank_sum"
 DEFAULT_OUTPUT = "/root/artifacts/nanobody_children_result.json"
@@ -205,6 +204,7 @@ def top_children(
     top_n: int,
     exclude: set[str],
     published: np.ndarray,
+    target: str,
 ) -> list[dict[str, Any]]:
     """Top-N children by mean replay rank sum (lower is better), deduped.
 
@@ -224,13 +224,14 @@ def top_children(
                    SUM(o.observation_count)
             FROM observations o
             JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = ?
+            WHERE n.target = ?
+              AND o.source = ?
               AND o.score_kind = ?
             GROUP BY n.id
             HAVING SUM(o.observation_count) >= ?
             ORDER BY AVG(o.score) ASC, n.sequence ASC
             """,
-            (source, score_kind, MINIMUM_OBSERVATION_COUNT),
+            (target, source, score_kind, MINIMUM_OBSERVATION_COUNT),
         ).fetchall()
         chosen: list[dict[str, Any]] = []
         for node_id, sequence, mean_score, first_epoch, rows, observation_count in aggregate:
@@ -498,7 +499,7 @@ def predict_children(model: Any, frame: Any, length: int) -> Any:
 
 
 def measured_means(
-    database: Path, *, source: str, score_kind: str
+    database: Path, *, source: str, score_kind: str, target: str
 ) -> dict[str, dict[str, Any]]:
     """Children with a full 8x DB score -> measured mean (ground truth)."""
     connection = _open_readonly(database)
@@ -507,11 +508,11 @@ def measured_means(
             """
             SELECT n.sequence, AVG(o.score), SUM(o.observation_count)
             FROM observations o JOIN nodes n ON n.id = o.node_id
-            WHERE o.source = ? AND o.score_kind = ?
+            WHERE n.target = ? AND o.source = ? AND o.score_kind = ?
             GROUP BY n.id
             HAVING SUM(o.observation_count) >= ?
             """,
-            (source, score_kind, MINIMUM_OBSERVATION_COUNT),
+            (target, source, score_kind, MINIMUM_OBSERVATION_COUNT),
         ).fetchall()
         out: dict[str, dict[str, Any]] = {}
         for sequence, mean, observation_count in rows:
@@ -817,10 +818,13 @@ def main(argv: list[str] | None = None) -> int:
     epoch = int(chain["epoch"])
     epoch_length = int(chain["epoch_length"])
     block = int(chain["block"])
-    target = str(chain.get("nanobody_target") or TARGET).strip()
+    # The gate scores against the per-epoch challenge target (Q9NZQ7), not the
+    # legacy chain-state nanobody_target field (still P20809 on live boxes).
+    challenge = chain.get("epoch_challenge") or {}
+    target = str(challenge.get("target") or rules.target_for_epoch(epoch))
     if args.target is not None and target != args.target:
         raise SystemExit(
-            f"chain-state target is {target!r}, not {args.target!r}"
+            f"challenge target is {target!r}, not {args.target!r}"
         )
     coldkey = fleet.resolve_coldkey(
         args.coldkey,
@@ -862,7 +866,8 @@ def main(argv: list[str] | None = None) -> int:
         frame = model_candidate_frame(args.children_dataset, args.model_length)
         predicted = predict_children(model, frame, args.model_length)
         measured = measured_means(
-            args.database, source=args.source, score_kind=args.score_kind
+            args.database, source=args.source, score_kind=args.score_kind,
+            target=target,
         )
         children, by_model, by_measured = rank_with_model(
             predicted, measured, exclude=exclude, top_n=top_n
@@ -887,6 +892,7 @@ def main(argv: list[str] | None = None) -> int:
             top_n=top_n,
             exclude=exclude,
             published=published,
+            target=target,
         )
     if not children:
         raise SystemExit(

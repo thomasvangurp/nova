@@ -129,7 +129,7 @@ def test_storage_maintenance_refuses_new_work_below_reserve(tmp_path, monkeypatc
         maintain_runtime_storage(tmp_path, 11, minimum_free_gib=1)
 
 
-def _sealed_database(path: Path, exact: Path) -> None:
+def _sealed_database(path: Path, exact: Path, target: str = "P20809") -> None:
     digest = hashlib.sha256(exact.read_bytes()).hexdigest()
     with sqlite3.connect(path) as connection:
         connection.executescript(
@@ -146,11 +146,11 @@ def _sealed_database(path: Path, exact: Path) -> None:
         )
         connection.execute(
             "INSERT INTO exact_runs VALUES(?,?,?,?,?,?,?)",
-            ("P20809", "run-1", str(exact), digest, 1, 1, 1),
+            (target, "run-1", str(exact), digest, 1, 1, 1),
         )
         connection.execute(
             "INSERT INTO exact_run_observations VALUES(?,?,?)",
-            ("P20809", "run-1", "observation-1"),
+            (target, "run-1", "observation-1"),
         )
         connection.execute(
             "INSERT INTO observation_artifacts VALUES(?)", ("observation-1",)
@@ -199,3 +199,32 @@ def test_storage_maintenance_keeps_old_epoch_when_audit_row_is_missing(tmp_path)
 
     assert report["removed_epoch_dirs"] == 0
     assert (tmp_path / "live/epoch10").exists()
+
+
+def test_storage_maintenance_seals_the_current_rules_target(tmp_path):
+    from nanobody_opt import rules
+
+    epoch = rules.ACTIVATION_EPOCH + 10
+    old = tmp_path / f"live/epoch{epoch}/producer/iteration_01/race/exact_all.json"
+    old.parent.mkdir(parents=True)
+    old.write_text('{"run": 1}')
+
+    # A legacy-target run at a current epoch must NOT seal the current target.
+    mismatched = tmp_path / "mismatched.sqlite"
+    _sealed_database(mismatched, old, target="P20809")
+    report = maintain_runtime_storage(
+        tmp_path, epoch + 2, minimum_free_gib=0,
+        observation_database=mismatched, retained_epochs=1,
+    )
+    assert report["removed_epoch_dirs"] == 0
+    assert old.exists()
+
+    # The current rules target seals the same run and prunes the epoch dir.
+    matched = tmp_path / "matched.sqlite"
+    _sealed_database(matched, old, target=rules.TARGET)
+    report = maintain_runtime_storage(
+        tmp_path, epoch + 2, minimum_free_gib=0,
+        observation_database=matched, retained_epochs=1,
+    )
+    assert report["removed_epoch_dirs"] == 1
+    assert not old.exists()

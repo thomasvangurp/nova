@@ -24,11 +24,10 @@ import sys
 import time
 from pathlib import Path
 
-TARGET = "P20809"
 NETUID = 68
 
 
-def parse_final_scores(text: str) -> dict[int, dict]:
+def parse_final_scores(text: str, target: str) -> dict[int, dict]:
     """``{uid: {"sequence", "final_score", "metrics"}}`` from the logged dict (the text may carry a log prefix)."""
     start = text.index("{")
     raw = ast.literal_eval(text[start:].strip())
@@ -37,13 +36,14 @@ def parse_final_scores(text: str) -> dict[int, dict]:
         if len(sequences) != 1:
             raise ValueError(f"UID {uid} has {len(sequences)} sequences; expected exactly one")
         (sequence, targets), = sequences.items()
-        metrics = targets[TARGET]
+        metrics = targets[target]
         out[int(uid)] = {"sequence": sequence, "final_score": float(metrics["rank_sum"]),
                          "metrics": {k: v for k, v in metrics.items()}}
     return out
 
 
-def build_rows(scores: dict[int, dict], mapping: dict[int, dict], winner_uid: int | None = None) -> list[dict]:
+def build_rows(scores: dict[int, dict], mapping: dict[int, dict], winner_uid: int | None = None,
+               target: str | None = None) -> list[dict]:
     """API-shaped rows, best first.  Ties go to ``winner_uid`` (the validator's logged winner), then to the lower UID."""
     ordered = sorted(scores.items(),
                      key=lambda item: (item[1]["final_score"], 0 if item[0] == winner_uid else 1, item[0]))
@@ -59,7 +59,7 @@ def build_rows(scores: dict[int, dict], mapping: dict[int, dict], winner_uid: in
         rows.append({
             "uid": uid, "coldkey": who.get("coldkey"), "hotkey": who.get("hotkey"), "blocks_elapsed": None,
             "nanobody_leaderboard_rank": rank, "final_score": item["final_score"], "molecule_final_score": None,
-            "nanobodies": [{"sequence": item["sequence"], "protein_name": TARGET, "final_score": str(item["final_score"]),
+            "nanobodies": [{"sequence": item["sequence"], "protein_name": target, "final_score": str(item["final_score"]),
                             **{k: str(v) for k, v in item["metrics"].items()}}],
             "source": "validator_log",
         })
@@ -139,7 +139,11 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    scores = parse_final_scores(args.dump.read_text())
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from nanobody_opt.rules import target_for_epoch
+
+    target = target_for_epoch(args.epoch)
+    scores = parse_final_scores(args.dump.read_text(), target)
     if args.mapping_json:
         mapping = {int(k): v for k, v in json.loads(args.mapping_json.read_text()).items()}
     else:
@@ -148,7 +152,7 @@ def main(argv=None) -> int:
             body = json.loads(args.fallback_leaderboard.read_text())
             fallback = body["data"] if isinstance(body, dict) else body
         mapping = resolve_mapping(chain_mapping(scores), args.close_block, fallback)
-    rows = build_rows(scores, mapping, args.winner_uid)
+    rows = build_rows(scores, mapping, args.winner_uid, target)
     if args.winner_coldkey and not (rows[0]["coldkey"] or "").startswith(args.winner_coldkey):
         raise SystemExit(f"winner row coldkey {rows[0]['coldkey'][:10]} does not match the paid coldkey {args.winner_coldkey}")
     print(f"epoch {args.epoch}: {len(rows)} UIDs, winner UID {rows[0]['uid']} at {rows[0]['final_score']:.0f}, "

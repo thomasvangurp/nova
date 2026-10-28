@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from nanobody_opt.storage_retention import prune_generated_tree, retained_evidence
+from nanobody_opt.rules import TARGET
 
 EPOCH_DIR = re.compile(r"^epoch(\d+)$")
 ID_CHUNK = 500
@@ -156,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--live-root", type=Path, default=Path("/root/live"))
     parser.add_argument("--database", type=Path, default=Path("/root/artifacts/nanobody_mutations.sqlite"))
-    parser.add_argument("--target", default="P20809")
+    parser.add_argument("--target", default=TARGET)
     parser.add_argument("--keep", type=int, default=10, help="newest epoch directories left untouched")
     parser.add_argument("--python", default=sys.executable, help="interpreter for the importer subprocess")
     parser.add_argument("--min-idle-minutes", type=float, default=30.0,

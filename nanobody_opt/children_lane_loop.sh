@@ -30,7 +30,7 @@ while true; do
     # Rebuild the top-50 gate from the FULL HF archive (all history) each epoch,
     # using the validator's own rank_binders. The API's 15-epoch window indexes
     # a different basin and over-filters (25454/25455 wholesale rejections).
-    HF=/root/P20809_nanobodies.csv
+    HF=/root/Q9NZQ7_nanobodies.csv
     run_metanano python /root/nanobody_opt/fetch_hf_archive.py "$HF" >> $LOG 2>&1
     run_metanano python /root/nanobody_opt/build_top50_index.py "$HF" "$IDX" >> $LOG 2>&1
     GATE=""

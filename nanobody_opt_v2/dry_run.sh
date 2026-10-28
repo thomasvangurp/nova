@@ -24,7 +24,7 @@
 #   /root/validator_probe/parity25747/venv/bin/python -m nanobody_opt_v2.sequential_exact_race \
 #     --dry-run --two-stage 1 --replication-rounds 8 \
 #     --layer2 <synthetic_layer2.json> --archive <archive.csv> --config <config.yaml> \
-#     --target P20809 --epoch <epoch> --output-dir /root/dryrun/race_probe \
+#     --target Q9NZQ7 --epoch <epoch> --output-dir /root/dryrun/race_probe \
 #     --mutation-database /root/artifacts/nanobody_mutations.sqlite \
 #     --chain-state /root/artifacts/chain_state.json --gpus 0,1,2,3,4,5,6,7
 set -euo pipefail

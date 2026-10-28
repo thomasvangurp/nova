@@ -95,7 +95,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
+def _sealed_exact_files(database: Path, paths: list[Path], target: str) -> bool:
     """Prove every raw exact file is losslessly represented in SQLite.
 
     An epoch is eligible for removal only when every raw run is byte-matched,
@@ -115,10 +115,10 @@ def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
     from nanobody_opt import mutation_network
     try:
         connection = mutation_network._connect(Path(database))
-        # No %s/? placeholders in this query (target is a literal), so no
+        # The target is a fixed rules constant, inlined as a literal so no
         # dialect branch is needed -- the SQL is identical on both backends.
         rows = connection.execute(
-            """
+            f"""
             SELECT r.source_path, r.file_sha256, r.expected_rows,
                    r.ingested_rows, r.complete,
                    COUNT(DISTINCT x.observation_id),
@@ -128,7 +128,7 @@ def _sealed_exact_files(database: Path, paths: list[Path]) -> bool:
               ON x.target=r.target AND x.run_id=r.run_id
             LEFT JOIN observation_artifacts a
               ON a.observation_id=x.observation_id
-            WHERE r.target='P20809'
+            WHERE r.target={target!r}
             GROUP BY r.target, r.run_id
             """
         ).fetchall()
@@ -209,7 +209,11 @@ def maintain_runtime_storage(
                 ):
                     continue
                 exact_files = sorted(epoch_root.glob("**/exact_all.json"))
-                if not _sealed_exact_files(observation_database, exact_files):
+                from nanobody_opt import rules
+                if not _sealed_exact_files(
+                    observation_database, exact_files,
+                    rules.target_for_epoch(int(suffix)),
+                ):
                     continue
                 # Keep publication/selection history and all per-pass poses.
                 # Moving CIFs by basename overwrote replicates and left the
@@ -1452,6 +1456,7 @@ def _run_iteration(
 
 def _annotate_parent_screen_scores(*, args, epoch, target, producer_root, pool):
     """Carry measured parent ranks into admission and tranche scheduling."""
+    from nanobody_opt import rules
     from nanobody_opt.competitor_lane import multipass_scores
     payload = json.loads(pool.read_text())
     candidates = payload.get("candidates", [])
@@ -1463,7 +1468,7 @@ def _annotate_parent_screen_scores(*, args, epoch, target, producer_root, pool):
               if c.get("parent_multipass_mean") is not None}
     # Recompute public replay parents against today's same ten-epoch field.
     live = multipass_scores(sorted(parents), args.mutation_database,
-                            min_passes=10, epoch=epoch) if target == "P20809" else {}
+                            min_passes=10, epoch=epoch) if target == rules.TARGET else {}
     scores.update(live)
     for candidate in candidates:
         parent = str(candidate.get("parent_sequence") or candidate.get("parent") or "")

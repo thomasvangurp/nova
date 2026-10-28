@@ -79,7 +79,7 @@ def real():
 # ---------------------------------------------------------------------------
 IDLE = [{"index": i, "uuid": f"GPU-{i}", "util": 0.0, "mem_mib": 3.0} for i in range(4)]
 PRODUCER_ARGV = ("/root/.pixi/envs/metanano/bin/python -m nanobody_opt.run_live_producer "
-                 "--target P20809 --exact-scorer /root/nanobody_opt/score_boltzgen_fast_adapter.py")
+                 f"--target {R.TARGET} --exact-scorer /root/nanobody_opt/score_boltzgen_fast_adapter.py")
 
 
 class FakeProbe:
@@ -137,7 +137,7 @@ def _seqs(passes):
 
 
 def _raw(passes, k, seq):
-    return {m: float(v) for m, v in passes[k]["per_nanobody_components"]["0"][seq]["P20809"].items()}
+    return {m: float(v) for m, v in passes[k]["per_nanobody_components"]["0"][seq][R.TARGET].items()}
 
 
 def _install_fake_scorer(monkeypatch, passes, calls=None):
@@ -164,7 +164,7 @@ def _top_up(monkeypatch, tmp_path, archive, passes, *, plan, counts=None, ours=f
     watchdog = R.Watchdog(FakeProbe(), deadline=1e12, gpus=[0], self_pid=1)
     n = R.score_and_import(
         source, plan, archive, "0", watchdog=watchdog,
-        field={"field": "hf_archive_full", "field_path": "/root/P20809_nanobodies.csv",
+        field={"field": "hf_archive_full", "field_path": f"/root/{R.TARGET}_nanobodies.csv",
                "field_rows": len(archive), "field_sha256": "f" * 64},
         ours=set(ours), counts=counts or {}, epochs=epochs or {}, refresh_epoch=25640,
         env={"NANOBODY_SCORER_DAEMON": "0"},
@@ -294,7 +294,7 @@ def test_old_rival_keeps_its_own_epoch(monkeypatch, tmp_path, real):
 def test_incomplete_passes_are_reported_not_silently_dropped(monkeypatch, tmp_path, real, capsys):
     archive, passes = real
     seq = _seqs(passes)[2]
-    del passes[1]["per_nanobody_components"]["0"][seq]["P20809"]["interaction_pae"]
+    del passes[1]["per_nanobody_components"]["0"][seq][R.TARGET]["interaction_pae"]
     _, rows, _ = _top_up(monkeypatch, tmp_path, archive, passes,
                          plan={s: 4 for s in _seqs(passes)})
     assert len(rows) == 6 * 4 - 1

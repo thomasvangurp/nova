@@ -30,9 +30,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from nanobody_opt import db
+from nanobody_opt import db, rules
 
-DEFAULT_TARGET = "P20809"
+DEFAULT_TARGET = rules.TARGET
 DEFAULT_FRACTION = 0.12
 DEFAULT_SINGLE_KIND = "validator_final_rank_sum"
 DEFAULT_REPLAY_KIND = "local_validator_replay_rank_sum"

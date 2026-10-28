@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse, json
 import numpy as np, pandas as pd
 
+from nanobody_opt.rules import TARGET
 from nanobody_opt.simulate_round import dense_rank_sums
 
 METRICS = {
@@ -47,7 +48,7 @@ def main():
             "quantile": round(rank_pos / (a.n - 1), 3),
             "expected": {m: float(row[m]) for m in METRICS},
         })
-    json.dump({"target": "P20809", "metrics": METRICS, "cases": cases},
+    json.dump({"target": TARGET, "metrics": METRICS, "cases": cases},
               open(a.out, "w"), indent=2)
     print(f"wrote {len(cases)} instrument-check cases to {a.out}")
     print(f"{'quantile':>9} {'archive_rank_sum':>17}  design_iiptm  interaction_pae")

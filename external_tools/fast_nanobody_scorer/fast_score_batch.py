@@ -490,7 +490,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequences", required=True)
     ap.add_argument("--config", required=True)
-    ap.add_argument("--target", default="P20809")
+    # Canonical target lives in nanobody_opt.rules.TARGET; this vendored scorer
+    # cannot import the package, so keep the fallback in sync manually.
+    ap.add_argument("--target", default="Q9NZQ7")
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--shards-per-gpu", type=int, default=1)
     ap.add_argument("--batch-size", type=int, default=24,

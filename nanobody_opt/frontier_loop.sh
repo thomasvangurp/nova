@@ -25,7 +25,7 @@ while true; do
     # 1) validator top-50 from the FULL HF archive (all history), never the API.
     #    A 15-epoch API window indexes a different basin and over-filters (the
     #    25454/25455 wholesale rejections) -- see build_top50_index.py docstring.
-    HF=/root/P20809_nanobodies.csv
+    HF=/root/Q9NZQ7_nanobodies.csv
     run_metanano python /root/nanobody_opt/fetch_hf_archive.py "$HF" >> "$LOG" 2>&1
     run_metanano python /root/nanobody_opt/build_top50_index.py "$HF" "$IDX" "$DB" >> "$LOG" 2>&1
     # 2) generate frontier children (with parent_score)
