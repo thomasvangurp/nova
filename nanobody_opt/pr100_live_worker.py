@@ -137,7 +137,7 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
 def sequence_phase(job, directory):
     from abnumber import Chain
     import pandas as pd
-    from nanobody_opt import gates, pr100_proposal_pilot as proposals
+    from nanobody_opt import gates, hydrophobicity, pr100_proposal_pilot as proposals
     from nanobody_opt import check_validator_novelty as novelty
     from nanobody_opt import pr100_reference_donors as donors
     from collections import Counter
@@ -196,9 +196,18 @@ def sequence_phase(job, directory):
     for sequence, row in unique.items():
         annotation = {**pr100_filter._annotate_uncached(sequence),
                       'annotation_identity': pr100_filter.annotation_identity()}
-        reason = ('basic_sequence' if gates.check_sequence(sequence, config['nanobody_requirements'])
-                  else rules.annotation_reason(annotation, config['nanobody_requirements'],
-                                               sequence=sequence, epoch_challenge=expected))
+        if gates.check_sequence(sequence, config['nanobody_requirements']):
+            reason = 'basic_sequence'
+        else:
+            reason = rules.annotation_reason(annotation, config['nanobody_requirements'],
+                                             sequence=sequence, epoch_challenge=expected)
+            # Cheap sequence-level hydrophobicity safety net: drop the obvious
+            # hydrophobic tail before the expensive 3D fold, mirroring the
+            # Boltz-2 skip-pass-1 screen. Only clearly-over-hydrophobic CDR3s
+            # are rejected; a candidate this screen cannot parse passes through
+            # to the annotation/native gates unchanged.
+            if not reason and not hydrophobicity.check(sequence)[1]:
+                reason = hydrophobicity.REJECT_REASON
         reasons[reason or 'passed'] = reasons.get(reason or 'passed', 0) + 1
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
