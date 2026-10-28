@@ -11,6 +11,24 @@ import math
 import random
 
 AMINO_ACIDS = 'ADEFGHIKLMNPQRSTVWY'  # Do not introduce an extra cysteine.
+
+# Hydrophilicity-biased residue weights for CDR sampling. The previous uniform
+# alphabet fill produced ~47% hydrophobic loops and pushed fresh Q9NZQ7
+# candidates over the native PSH gate. The top miners keep CDR3 at ~31% and
+# CDR2 at ~28% hydrophobic: rich in D/R/Q/K/N/T/S while still presenting
+# aromatic contacts. These weights keep every residue available (aromatics and
+# charged residues stay in play for contacts) but move the expected hydrophobic
+# fraction of a fully sampled CDR3 loop to ~30%.
+AMINO_ACID_WEIGHTS = {
+    # Hydrophilic: favour, strongest top-miner enrichment first.
+    'D': 3.0, 'R': 3.0,
+    'Q': 2.0, 'K': 2.0, 'N': 2.0, 'T': 2.0, 'S': 2.0,
+    'E': 1.5, 'H': 1.5, 'P': 1.5,
+    # Hydrophobic: deprioritise; F/W/Y aromatics stay available for contacts.
+    'A': 1.1, 'M': 1.1, 'V': 1.1,
+    'F': 1.2, 'Y': 1.2,
+    'I': 0.9, 'L': 0.8, 'G': 0.7, 'W': 0.7,
+}
 STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
          'IGHV3-43', 'IGHV3-48', 'IGHV3-53', 'IGHV3-64')
@@ -20,6 +38,13 @@ PROTOCOL = 'pr100-conditional-germline-loop-v1'
 
 def _seed(*parts):
     return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest(), 'big')
+
+
+def _weighted_choice(rng, *, exclude=None):
+    """Draw one amino acid with the hydrophilicity bias, optionally excluding one."""
+    population = [aa for aa in AMINO_ACIDS if aa != exclude]
+    weights = [AMINO_ACID_WEIGHTS[aa] for aa in population]
+    return rng.choices(population, weights=weights, k=1)[0]
 
 
 def select_references(rows, gene, length, stratum, *, limit=32):
@@ -69,10 +94,10 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     # Their effect on V assignment, stability and target quality is measured,
     # never inferred from this construction.
     for p in rng.sample(positions, 6):
-        prefix[p] = rng.choice(AMINO_ACIDS.replace(prefix[p], ''))
+        prefix[p] = _weighted_choice(rng, exclude=prefix[p])
     n = length - len(tail)
     if reference_cdr3 is None:
-        loop = [rng.choice(AMINO_ACIDS) for _ in range(n)]
+        loop = [_weighted_choice(rng) for _ in range(n)]
     else:
         if not isinstance(reference_cdr3, str) or len(reference_cdr3) < 3:
             raise ValueError('reference CDR3 unavailable')
@@ -80,9 +105,9 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
         while len(loop) > n:
             loop.pop(rng.randrange(len(loop)))
         while len(loop) < n:
-            loop.insert(rng.randrange(len(loop)+1), rng.choice(AMINO_ACIDS))
+            loop.insert(rng.randrange(len(loop)+1), _weighted_choice(rng))
         for p in rng.sample(range(n), max(1, math.ceil(n/4))):
-            loop[p] = rng.choice(AMINO_ACIDS.replace(loop[p], ''))
+            loop[p] = _weighted_choice(rng, exclude=loop[p])
     sequence = ''.join(prefix[p] for p in sorted(prefix)) + ''.join(loop) + tail + suffix
     return {'sequence': sequence, 'proposal_type': PROTOCOL,
             'requested_v': gene, 'requested_cdr3_length': length,
