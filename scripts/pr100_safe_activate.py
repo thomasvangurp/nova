@@ -17,6 +17,12 @@ import re
 import subprocess
 import tempfile
 import time
+import sys
+
+# The activation runs as a bare `python scripts/pr100_safe_activate.py` from a
+# systemd unit whose cwd is not the release, so `nanobody_opt` is not on
+# sys.path by default. Add the release root so in-process imports resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 OLD = 'b294f7f06b6f3c1efd05961f9a1365645af60410'
 THROUGHPUT_RELEASE = '036a6c48c32b762b3f803ffa920eaf3cf66d454a'
@@ -24,9 +30,10 @@ QUALIFIED_BOTH_RELEASE = '22407a4ae6324b8c051ef89f738eb74fddaad978'
 QUALIFIED_NOVELTY_RELEASE = '4cec2deeca89dfa1a22ad65477fc631eeaff63a8'
 ARCHIVE_CACHE_RELEASE = '98ef1cba2511bf71786d9dd7a3e732828272d154'
 TERMINAL_INVALIDATION_RELEASE = 'd9b13d773651066b396fcd52835b9f48456b6408'
+PRODUCTION_YIELD_RELEASE = 'da348c997ebe4892742a39961a9782d9f2130547'
 APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEASE,
                                     QUALIFIED_NOVELTY_RELEASE, ARCHIVE_CACHE_RELEASE,
-                                    TERMINAL_INVALIDATION_RELEASE})
+                                    TERMINAL_INVALIDATION_RELEASE, PRODUCTION_YIELD_RELEASE})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
