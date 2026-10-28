@@ -384,8 +384,9 @@ def rollout_options(value, *, native_refill_hosts=(), missing_cell_donors=False)
 
 
 def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None,
-                    interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False):
-    if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
+                    interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False,
+                    force=False):
+    if not force and current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
     if mode not in ('master', 'both'):
@@ -530,7 +531,8 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
                                interleave_confirmations=interleave_confirmations,
-                               native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors)
+                               native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors,
+                               force=force)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
