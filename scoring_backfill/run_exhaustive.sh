@@ -13,19 +13,24 @@ python3 - "$REPO" <<'PY'
 import json, sys, os
 repo = sys.argv[1]
 d = json.load(open(f"{repo}/exhaustive_children.json"))
-children = [{"sequence": c["sequence"], "epoch": 25423} for c in d["children"]]
+target = d["target"]
+children = [{"sequence": c["sequence"], "epoch": c["epoch"], "target": target}
+            for c in d["children"]]
 os.makedirs(f"{repo}/exhaustive_shards", exist_ok=True)
 buckets = [[] for _ in range(11)]
 for i, c in enumerate(children):
     buckets[i % 11].append(c)
 for i, b in enumerate(buckets):
     json.dump(b, open(f"{repo}/exhaustive_shards/b{i}.json", "w"))
-print(f"sharded {len(children)} children across 11 boxes")
+open(f"{repo}/exhaustive_shards/target.txt", "w").write(target)
+print(f"sharded {len(children)} children for {target} across 11 boxes")
 PY
+
+TARGET=$(cat "$REPO/exhaustive_shards/target.txt")
 
 for b in "${BOXES11[@]}"; do
   set -- $b; sh=$1; host=$2; port=$3
   scp $SSHO -P $port $REPO/exhaustive_shards/$sh.json score_worker.py root@$host:/root/ >/dev/null 2>&1
-  ssh $SSHO -p $port root@$host "mkdir -p /root/results_exhaustive /root/bgen_shards_exhaustive; nohup python3 /root/score_worker.py --shard /root/$sh.json --results /root/results_exhaustive/$sh.json --work-root /root/bgen_shards_exhaustive --batch-size 256 --gpus 0,1,2,3,4,5,6,7 > /root/results_exhaustive/$sh.worker.log 2>&1 < /dev/null & echo LAUNCHED $sh" 2>/dev/null
+  ssh $SSHO -p $port root@$host "mkdir -p /root/results_exhaustive /root/bgen_shards_exhaustive; nohup python3 /root/score_worker.py --shard /root/$sh.json --results /root/results_exhaustive/$sh.json --work-root /root/bgen_shards_exhaustive --target $TARGET --batch-size 256 --gpus 0,1,2,3,4,5,6,7 > /root/results_exhaustive/$sh.worker.log 2>&1 < /dev/null & echo LAUNCHED $sh" 2>/dev/null
 done
 echo "EXHAUSTIVE_LAUNCHED"

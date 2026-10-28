@@ -6,12 +6,20 @@ from pathlib import Path
 SCORER = "/root/fastscore/pinned-530f5dcbc54d/fast_score_batch.py"
 LAUNCHER = "/root/fastscore/pinned-530f5dcbc54d/release_python.sh"
 CONFIG = "/root/config/config.yaml"
-SYNTH_REF = "/root/fastscore/pinned-530f5dcbc54d/refdesign/0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif"
-TARGET = "P20809"
+SYNTH_REF_DIR = "/root/fastscore/pinned-530f5dcbc54d/refdesign"
+# The pinned fast-scorer design input shares this hash for both targets; the
+# per-target file differs only in the trailing ``<target>_input.cif`` token.
+SYNTH_REF_SHA = "0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916"
 PASSES = 8
+
+
+def synth_reference_for(target: str) -> str:
+    return f"{SYNTH_REF_DIR}/{SYNTH_REF_SHA}_{target}_input.cif"
+
 
 def seq_hash(s):
     return hashlib.sha256(s.encode("ascii")).hexdigest()
+
 
 def main():
     global PASSES
@@ -21,10 +29,16 @@ def main():
     ap.add_argument("--work-root", default="/root/bgen_shards")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
+    ap.add_argument("--target", required=True, help="nanobody target to score against")
+    ap.add_argument("--synth-reference", default=None,
+                    help="fast-scorer synth reference (default: derived from --target)")
     ap.add_argument("--passes", type=int, default=PASSES,
                     help="total passes to reach; existing passes are kept and only "
                          "the missing ones are scored (deepen an 8x bank to 20x)")
     a = ap.parse_args()
+
+    target = a.target
+    synth_ref = a.synth_reference or synth_reference_for(target)
 
     PASSES = a.passes
     shard = json.load(open(a.shard))
@@ -53,10 +67,10 @@ def main():
             if not out.exists():
                 (bdir / "in.json").write_text(json.dumps([{"sequence": s["sequence"]} for s in batch]))
                 cmd = [LAUNCHER, SCORER, "--sequences", str(bdir / "in.json"),
-                       "--config", CONFIG, "--target", TARGET, "--gpus", a.gpus,
+                       "--config", CONFIG, "--target", target, "--gpus", a.gpus,
                        "--shards-per-gpu", "1", "--batch-size", "24",
                        "--shard-root", str(bdir), "--out", str(out),
-                       "--synth-reference", SYNTH_REF]
+                       "--synth-reference", synth_ref]
                 t0 = time.time()
                 import os as _os
                 _env = dict(_os.environ); _env["HF_HUB_OFFLINE"] = "1"; _env["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -75,7 +89,7 @@ def main():
                     if h not in by_hash:
                         continue
                     entry = results.setdefault(h, {"sequence": seq, "epoch": by_hash[h]["epoch"], "node_id": by_hash[h].get("node_id")})
-                    entry[f"p{pass_idx}"] = by_target[TARGET]
+                    entry[f"p{pass_idx}"] = by_target[target]
             tmp = results_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(results)); tmp.replace(results_path)
 

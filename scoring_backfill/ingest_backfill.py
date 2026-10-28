@@ -12,13 +12,13 @@ for _cand in (_here, _here.parent):
         sys.path.insert(0, str(_cand))
         break
 from nanobody_opt import db
+from nanobody_opt.rules import target_for_epoch
 
 METRICS = {"design_iiptm":"max","design_ptm":"max","design_to_target_iptm":"max",
            "min_design_to_target_pae":"min","interaction_pae":"min",
            "plip_hbonds_refolded":"max","plip_saltbridge_refolded":"max",
            "delta_sasa_refolded":"max","liability_score":"min","liability_num_violations":"min"}
 METRIC_ORDER = list(METRICS.keys())
-TARGET = "P20809"
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 AA_INDEX = {aa: i for i, aa in enumerate(AMINO_ACIDS)}
 PASSES = 8
@@ -110,6 +110,9 @@ def main():
         if len(m["passes"]) < PASSES or not m["sequence"]:
             skipped += 1; continue
         seq = m["sequence"]; epoch = m["epoch"]
+        if epoch is None:
+            skipped += 1; continue
+        target = target_for_epoch(epoch)
         passes = [m["passes"][i] for i in range(1, PASSES + 1)]
         # validate all 10 metrics present + finite
         ok = True
@@ -128,7 +131,7 @@ def main():
         score_p90 = float(np.quantile(score_dist, 0.9))
         aggregate = {mm: float(np.mean([p[mm] for p in passes])) for mm in METRIC_ORDER}
         obs = {"observation_id": f"{source}:epoch{epoch}:{seq}",
-               "sequence": seq, "target": TARGET, "epoch": epoch,
+               "sequence": seq, "target": target, "epoch": epoch,
                "source": source, "score_kind": "local_validator_replay_rank_sum",
                "score": score_mean, "observation_count": PASSES,
                "metrics": aggregate, "score_median": score_median, "score_p90": score_p90}
