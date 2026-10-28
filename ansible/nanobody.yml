@@ -110,10 +110,10 @@
     # differently pinned build cannot quietly occupy the same path, and the
     # adapter's own sha256 check refuses anything but these bytes.
     nanobody_fast_scorer_sha256: >-
-      c758628fa67c2a36d0cf6b73cd5d40e1eb1eb3a7a15f89d17de90d977844375e
+      fffc8685ec47419bbd77383db75b8aa9ca0e4eeab36f65711361ea757a5c1e6d
     nanobody_fast_scorer_root: /root/fastscore
     nanobody_fast_scorer_reference: >-
-      0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_Q9NZQ7_input.cif
+      4b1044579d74a85c8adc7e8bd28ee8c740a1f0b3d17d9ebb27e69c0b6e5b1f98_Q9NZQ7_input.cif
     nanobody_fast_scorer_tuning: {}
     ckpts:
       - name: boltzgen1_diverse.ckpt
