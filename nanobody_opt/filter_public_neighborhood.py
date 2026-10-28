@@ -23,11 +23,16 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-SEQUENCE_LENGTH = 127
+
+def _modal_length(sequences: list[str]) -> int:
+    """The most common proposal length, or 0 when there is nothing to measure."""
+    counts = Counter(len(s) for s in sequences if s)
+    return counts.most_common(1)[0][0] if counts else 0
 
 
 def _encode(sequences: list[str], length: int) -> np.ndarray:
@@ -89,16 +94,31 @@ def main() -> None:
             "screening something beats screening nothing"
         ),
     )
-    parser.add_argument("--sequence-length", type=int, default=SEQUENCE_LENGTH)
+    parser.add_argument(
+        "--sequence-length",
+        type=int,
+        default=None,
+        help=(
+            "keep only proposals of this length; default derives the modal "
+            "length from the input so a new target's length is adopted without "
+            "a producer change"
+        ),
+    )
     args = parser.parse_args()
 
     with args.input.open() as handle:
         reader = csv.DictReader(handle)
         fieldnames = list(reader.fieldnames or [])
         rows = [row for row in reader]
+    sequences = [str(row.get("sequence", "")).strip() for row in rows]
+    sequence_length = (
+        args.sequence_length
+        if args.sequence_length is not None
+        else _modal_length(sequences)
+    )
     usable = [
-        row for row in rows
-        if len(str(row.get("sequence", "")).strip()) == args.sequence_length
+        row for row, seq in zip(rows, sequences)
+        if seq and len(seq) == sequence_length
     ]
     if not usable:
         # Degrade instead of aborting the epoch: write an empty (header-only)
@@ -115,7 +135,7 @@ def main() -> None:
                 writer.writerow(fieldnames)
         return 0
 
-    archive = archive_sequences(args.archive, args.sequence_length)
+    archive = archive_sequences(args.archive, sequence_length)
     distances = minimum_distances(
         [str(row["sequence"]).strip().upper() for row in usable], archive
     )

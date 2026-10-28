@@ -93,6 +93,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -848,7 +849,9 @@ def main(argv: list[str] | None = None) -> int:
     whole_seq_dedup = list(ledger[-RECENT_PUBLISHED_N:])
     if args.cdr3_index is not None and Path(args.cdr3_index).is_file():
         whole_seq_dedup.extend(_load_top50_sequences(args.cdr3_index))
-    published = _published_array(whole_seq_dedup, args.model_length)
+    dedup_lengths = Counter(len(s) for s in whole_seq_dedup if s)
+    dedup_length = dedup_lengths.most_common(1)[0][0] if dedup_lengths else args.model_length
+    published = _published_array(whole_seq_dedup, dedup_length)
     model_mode = args.rank_model is not None and not args.no_rank_model
     if model_mode:
         if args.children_dataset is None:

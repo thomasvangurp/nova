@@ -76,22 +76,28 @@ def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
 # Codex-corrected 2026-10-21: framework/C-tail only -- N-term 1/3 and the
 # C-tail 113-126 band. CDR3-adjacent positions 114/116 and the interior
 # 31/73/100/111/127 are removed (they land in or too near the CDR3).
-HOT_POSITIONS = [1, 3, 113, 115, 120, 121, 122, 123, 124, 125, 126]
+#
+# PROVISIONAL / UNVERIFIED (2026-10-28): remapped for the Q9NZQ7 modal length
+# (~120) by shifting the C-tail positions -7. This assumes the C-terminus is the
+# 7 residues that shrink; it has NOT been re-derived from Q9NZQ7 leaderboard
+# history. Re-run competitor_position_lane.learn_hot_positions over Q9NZQ7
+# submissions before trusting these positions.
+HOT_POSITIONS = [1, 3, 106, 108, 113, 114, 115, 116, 117, 118, 119]
 
 # 1-indexed position -> residues in descending measured quality, from the
 # exhaustive 8x single-edit sweep (scoring_backfill/exhaustive_ranking.json).
 # The sweep scored 4,738 edits (13 positions x 19 residues x 20 parents) 8x and
 # found Alanine best/tied at 7/13 positions. Best residue first; pos 115 was a
 # DUD (dropped). Positions 31/100 were outside the sweep and keep the rival's
-# frequency order.
+# frequency order. PROVISIONAL / UNVERIFIED: same -7 C-tail shift as above.
 POSITION_RESIDUE_ORDER = {
     1: ["A", "D"],
     3: ["A", "M"],
-    121: ["A", "T"],
-    122: ["A", "P"],
-    123: ["V", "A"],
-    124: ["A", "S"],
-    126: ["G", "A"],
+    114: ["A", "T"],
+    115: ["A", "P"],
+    116: ["V", "A"],
+    117: ["A", "S"],
+    119: ["G", "A"],
 }
 
 
@@ -400,9 +406,16 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     pool = [s for s in pool if len(s) == modal_length]
 
     # The freshly gated parent bank gets first access to the proposal budget.
+    # It has its OWN modal length (our current bank is 114 residues while the
+    # public pool is ~120), so filter it to its own modal rather than the
+    # pool's: filtering to the pool's length silently dropped the whole bank.
     priority_pool: list[str] = []
+    priority_length = modal_length
     if priority:
-        priority_pool = [s.upper() for s in priority if len(s) == modal_length]
+        counts = Counter(len(s) for s in priority if s)
+        if counts:
+            priority_length = counts.most_common(1)[0][0]
+        priority_pool = [s.upper() for s in priority if len(s) == priority_length]
         priority_set = set(priority_pool)
         pool = [s for s in pool if s not in priority_set]
 
@@ -448,14 +461,21 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     # downstream layer2/exact-validator gates do the quality filtering. Order
     # residues by the rival's measured usage frequency at each hot position so
     # the winning substitution is emitted before the alphabetical remainder.
-    allowed = []
-    for i in range(length):
-        order = POSITION_RESIDUE_ORDER.get(i + 1)
-        if order:
-            rest = [r for r in sorted(gates.ALLOWED_AAS) if r not in order]
-            allowed.append(order + rest)
-        else:
-            allowed.append(sorted(gates.ALLOWED_AAS))
+    def _allowed_table(table_length: int) -> list[list[str]]:
+        table: list[list[str]] = []
+        for i in range(table_length):
+            order = POSITION_RESIDUE_ORDER.get(i + 1)
+            if order:
+                rest = [r for r in sorted(gates.ALLOWED_AAS) if r not in order]
+                table.append(order + rest)
+            else:
+                table.append(sorted(gates.ALLOWED_AAS))
+        return table
+
+    allowed = _allowed_table(length)
+    priority_allowed = (
+        allowed if priority_length == length else _allowed_table(priority_length)
+    )
 
     def _items(source: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -467,11 +487,11 @@ def generate(archive: Path, positions: list[int], limit: int | None,
 
     # Keep bank proposals separate from the broad fallback pool.
     priority_candidates = competitor_position_candidates(
-        priority_pool, allowed=allowed, positions=positions)
+        priority_pool, allowed=priority_allowed, positions=positions)
     if double_edit_pairs:
         for parent in priority_pool:
             for seq, (p1, p2) in double_position_candidates(
-                parent, allowed=allowed, positions=positions,
+                parent, allowed=priority_allowed, positions=positions,
                 pair_limit=double_edit_pairs,
             ).items():
                 priority_candidates.setdefault(

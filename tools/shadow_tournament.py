@@ -39,12 +39,14 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from nanobody_opt.rules import ACTIVATION_EPOCH, target_for_epoch  # noqa: E402
+
 ROOT = Path(os.environ.get("SHADOW_ROOT", "/root/artifacts/shadow_tournament"))
 DB = "/root/artifacts/nanobody_mutations.sqlite"
-TARGET = "P20809"
 API = "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/{}/nanobodies"
 OURS = "5EkCwcNTfx"
-LENGTH = 127                    # the fast scorer only supports this length
+SUPPORTED_LENGTH = 127          # the legacy fast scorer only supports this length
 PASSES = 10
 TRIALS = 4000
 LOOKBACK = 40
@@ -77,7 +79,7 @@ def rule_picks(epoch: int) -> dict[str, list[str]] | None:
     wp = lambda x: x.get("win_probability") or 0.0
     tier = lambda x: x.get("settled_deviations", 0)
     seq = lambda x: x["sequence"].strip().upper()
-    ok = [x for x in cand if len(seq(x)) == LENGTH]
+    ok = [x for x in cand if epoch >= ACTIVATION_EPOCH or len(seq(x)) == SUPPORTED_LENGTH]
     eligible = [x for x in ok if x["observation_count"] >= 8]
 
     def top(key, pool=ok):
@@ -114,7 +116,7 @@ def cmd_pick(epoch: int) -> bool:
 
 
 # ------------------------------------------------------------------- replays
-def passes(seqs) -> dict[str, list[list[float]]]:
+def passes(seqs, target: str) -> dict[str, list[list[float]]]:
     out: dict[str, list[list[float]]] = collections.defaultdict(list)
     seqs = sorted(set(seqs))
     c = conn()
@@ -123,7 +125,7 @@ def passes(seqs) -> dict[str, list[list[float]]]:
         q = ("SELECT n.sequence, o.metrics_json FROM observations o JOIN nodes n ON n.id=o.node_id "
              "WHERE n.target=? AND o.source='public_multipass_rivals' AND o.score_kind='multipass_sum10_pass' "
              f"AND o.metrics_json NOT IN ('','{{}}') AND n.sequence IN ({','.join('?' * len(ch))})")
-        for s, mj in c.execute(q, (TARGET, *ch)):
+        for s, mj in c.execute(q, (target, *ch)):
             try:
                 m = json.loads(mj)
                 m = m.get("metrics", m) if isinstance(m, dict) else {}
@@ -139,16 +141,23 @@ def pending_sequences() -> list[str]:
     """Pick sequences still short of PASSES, newest epoch first (replay-queue tier 0)."""
     files = sorted(glob.glob(str(ROOT / "epoch*" / "picks.json")),
                    key=lambda p: int(Path(p).parent.name[5:]), reverse=True)
-    ordered: list[str] = []
+    by_target: dict[str, list[str]] = collections.defaultdict(list)
     for f in files:
-        done = (Path(f).parent / "evaluated").exists()
-        if done:
+        if (Path(f).parent / "evaluated").exists():
             continue
-        rules = json.load(open(f))["rules"]
+        epoch = int(Path(f).parent.name[5:])
+        target = target_for_epoch(epoch)
+        picks = json.load(open(f))["rules"]
         for name in RULES:
-            ordered += rules.get(name, [])
-    ordered = list(dict.fromkeys(s for s in ordered if len(s) == LENGTH))
-    have = passes(ordered)
+            for s in picks.get(name, []):
+                if epoch >= ACTIVATION_EPOCH or len(s) == SUPPORTED_LENGTH:
+                    by_target[target].append(s)
+    ordered = list(dict.fromkeys(
+        s for target in sorted(by_target) for s in by_target[target]
+    ))
+    have: dict[str, list[list[float]]] = {}
+    for target, seqs in by_target.items():
+        have.update(passes(seqs, target))
     return [s for s in ordered if len(have.get(s, [])) < PASSES]
 
 
@@ -180,11 +189,12 @@ def cmd_eval(epoch: int, trials: int = TRIALS) -> str:
     path = picks_path(epoch)
     if not path.exists():
         return "no-picks"
+    target = target_for_epoch(epoch)
     picks = json.load(open(path))["rules"]
     board = fetch_board(epoch)
     if board is None:
         return "no-leaderboard"
-    ent = [(r, n) for r in board for n in r["nanobodies"] if n.get("protein_name") == TARGET]
+    ent = [(r, n) for r in board for n in r["nanobodies"] if n.get("protein_name") == target]
     mine = [i for i, (r, n) in enumerate(ent) if str(r["coldkey"]).startswith(OURS)]
     if len(mine) < 5:
         return "too-few-ours"
@@ -195,7 +205,7 @@ def cmd_eval(epoch: int, trials: int = TRIALS) -> str:
     actual = list(dict.fromkeys(seq(i) for i in mine))
     all_arm = {name: [s for s in dict.fromkeys(v)] for name, v in picks.items() if v}
     need = set(s for v in all_arm.values() for s in v)
-    have = passes(set(rivals) | set(actual) | need)
+    have = passes(set(rivals) | set(actual) | need, target)
 
     short = [s for s in need if len(have.get(s, [])) < PASSES]
     if short:

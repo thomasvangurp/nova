@@ -37,7 +37,7 @@ from pathlib import Path
 
 os.environ.setdefault("NANOBODY_SCORER_DAEMON", "1")      # same warm-daemon path as the race
 sys.path.insert(0, "/root")
-from nanobody_opt.rules import TARGET
+from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET
 
 DB = Path("/root/artifacts/nanobody_mutations.sqlite")
 LOG = Path("/root/artifacts/topup_publishable.log")
@@ -153,7 +153,7 @@ def needs(epoch: int) -> tuple[dict[str, int], dict]:
     need: dict[str, int] = {}
     for item in candidates[:TOP_K]:
         sequence = str(item["sequence"]).strip().upper()
-        if len(sequence) != 127:                 # the fast scorer only supports length 127
+        if epoch < ACTIVATION_EPOCH and len(sequence) != 127:   # legacy fast-scorer length (P20809 era only)
             continue
         have = int(item["observation_count"])
         # observations imported after this ranking was written are not in its counts yet

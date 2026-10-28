@@ -72,11 +72,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, "/root")
-from nanobody_opt.rules import TARGET  # noqa: E402
+from nanobody_opt.rules import ACTIVATION_EPOCH, TARGET  # noqa: E402
 
 TARGET_OBS = 20
 MAX_ROUNDS = 12                    # 8 -> 20 observations
-SEQUENCE_LENGTH = 127              # the fast scorer only supports length 127
+SEQUENCE_LENGTH = 127              # the fast scorer's legacy supported length (P20809 era only)
 POOL_K = int(os.environ.get("TOPUP_SLAVE_POOL_K", "130"))   # publisher --strict-pool-size is 100; +30 for the churn a top-up itself causes
 QUALIFIED_K = 60
 MAX_OBS_PER_PASS = int(os.environ.get("TOPUP_SLAVE_MAX_OBS", "600"))
@@ -564,7 +564,7 @@ def needs(epoch: int) -> tuple[dict[str, int], dict[str, Any]]:
     need: dict[str, int] = {}
     skipped_length = 0
     for sequence in order:
-        if len(sequence) != SEQUENCE_LENGTH:
+        if epoch < ACTIVATION_EPOCH and len(sequence) != SEQUENCE_LENGTH:
             skipped_length += 1
             continue
         have = counts.get(sequence, 0)
