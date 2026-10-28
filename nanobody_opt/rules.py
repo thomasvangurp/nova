@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import random
 import re
 from decimal import Decimal, InvalidOperation
@@ -19,7 +20,10 @@ ACTIVATION_EPOCH = 25955
 UPSTREAM_SHA = "ce19ea8cbe656671c3440ba58b4093ff80798d4f"
 FILTER_SHA = "fe2d5868126406a0de8953d26ecd8bdccbdbd029"
 PROFILE = "nanobody-pr100-v1"
-TARGET = "Q9NZQ7"
+#: The current (post-activation) nanobody target. Env-driven so a future
+#: target change is an environment change, not a code change. The
+#: pre-activation target (P20809) is historical and stays a constant below.
+TARGET = os.environ.get("SN68_NANOBODY_TARGET", "Q9NZQ7").strip() or "Q9NZQ7"
 MAX_AVERAGE = Decimal("-0.68002724866200")
 MAX_PEAK = Decimal("1.58023066762925")
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
@@ -41,7 +45,16 @@ def sequence_hash(sequence):
 
 def pinned_config(epoch):
     name = "nanobody_pr100.json" if int(epoch) >= ACTIVATION_EPOCH else "nanobody_pre_pr100.json"
-    return json.loads((CONFIG_DIR / name).read_text())
+    config = json.loads((CONFIG_DIR / name).read_text())
+    if int(epoch) >= ACTIVATION_EPOCH:
+        # The current target string is env-driven (rules.TARGET). The file's
+        # remaining nanobody fields (clip_interval, structure, structure_chain,
+        # structure_res_index, structure_binding_site) are static data keyed to
+        # the target, so a future target change sets SN68_NANOBODY_TARGET AND
+        # updates those fields in config/nanobody_pr100.json together; the
+        # target string itself no longer needs a code or config edit.
+        config["protein_selection"]["nanobody"]["target"] = TARGET
+    return config
 
 
 def is_pr100(requirements):
