@@ -110,7 +110,7 @@
     # differently pinned build cannot quietly occupy the same path, and the
     # adapter's own sha256 check refuses anything but these bytes.
     nanobody_fast_scorer_sha256: >-
-      f593e19e716cae1f4cb24bed9aabd070c5e04b63cb1dd5211905f6ab564b65dc
+      c758628fa67c2a36d0cf6b73cd5d40e1eb1eb3a7a15f89d17de90d977844375e
     nanobody_fast_scorer_root: /root/fastscore
     nanobody_fast_scorer_reference: >-
       0000e1b3814df2814ccd415e06b26f32204cc45753777f284216e0243098d916_P20809_input.cif

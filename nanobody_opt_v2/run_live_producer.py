@@ -1468,7 +1468,7 @@ def _annotate_parent_screen_scores(*, args, epoch, target, producer_root, pool):
               if c.get("parent_multipass_mean") is not None}
     # Recompute public replay parents against today's same ten-epoch field.
     live = multipass_scores(sorted(parents), args.mutation_database,
-                            min_passes=10, epoch=epoch) if target == rules.TARGET else {}
+                            min_passes=10, epoch=epoch) if target == rules.target_for_epoch(epoch) else {}
     scores.update(live)
     for candidate in candidates:
         parent = str(candidate.get("parent_sequence") or candidate.get("parent") or "")

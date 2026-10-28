@@ -15,7 +15,7 @@ def board(monkeypatch, rows):
 
 def row(owner, sequence, target=None):
     return {'coldkey': owner, 'nanobodies': [
-        {'sequence': sequence, 'protein_name': target or replay.TARGET}]}
+        {'sequence': sequence, 'protein_name': target or replay.target_for_epoch(25872)}]}
 
 
 def test_shared_sequence_retains_both_scored_owners(monkeypatch):
