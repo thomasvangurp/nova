@@ -466,6 +466,26 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         priority_set = set(priority_pool)
         pool = [s for s in pool if s not in priority_set]
 
+    # Fetched rival submissions (fetch_rival_sequences) are proven-good parents
+    # that used to be fetched and then dropped: generate() never referenced the
+    # ``rival_sequences`` argument. Surface them as a prioritized parent source
+    # with the same handling as the freshly gated bank -- their own modal
+    # length, deduped against every other parent source, multipass-gated when
+    # --mutation-database is given, and emitted before the broad pool. Only
+    # single-edits of a rival parent are ever candidates (competitor_position_
+    # candidates substitutes one residue), so the rival's exact sequence is
+    # never emitted as our submission.
+    rival_pool: list[str] = []
+    rival_length = priority_length
+    if rival_sequences:
+        rival_counts = Counter(len(s) for s in rival_sequences if s)
+        if rival_counts:
+            rival_length = rival_counts.most_common(1)[0][0]
+        rival_pool = [s.upper() for s in rival_sequences if s and len(s) == rival_length]
+        rival_set = set(rival_pool)
+        priority_pool = [s for s in priority_pool if s not in rival_set]
+        pool = [s for s in pool if s not in rival_set]
+
     multipass_ranked = 0
     scores: dict[str, float] = {}
     if mutation_database is not None:
@@ -477,8 +497,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         # docstring for why this is the same principle as --full-archive-field,
         # one step upstream.
         scores = multipass_scores(
-            sorted(set(priority_pool) | set(pool)), mutation_database,
-            min_passes=min_passes, epoch=epoch)
+            sorted(set(rival_pool) | set(priority_pool) | set(pool)),
+            mutation_database, min_passes=min_passes, epoch=epoch)
         # Elite-history candidates are already gated on >= min_passes raw
         # observations (fetch_elite_history_parents), just not the
         # public_multipass_rivals/multipass_sum10_pass label multipass_
@@ -493,6 +513,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         if priority_scores:
             scores.update({s: value for s, value in priority_scores.items() if s in priority_pool})
         multipass_ranked = len(scores)
+        rival_pool = _merge_priority(rival_pool, scores)
         priority_pool = _merge_priority(priority_pool, scores)
         pool = sorted((s for s in pool if s in scores), key=lambda s: scores[s])
 
@@ -523,6 +544,7 @@ def generate(archive: Path, positions: list[int], limit: int | None,
     priority_allowed = (
         allowed if priority_length == length else _allowed_table(priority_length)
     )
+    rival_allowed = _allowed_table(rival_length)
 
     def _items(source: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -544,20 +566,26 @@ def generate(archive: Path, positions: list[int], limit: int | None,
                 priority_candidates.setdefault(
                     seq, {"parent": parent, "position": p1, "position2": p2}
                 )
+    rival_candidates = competitor_position_candidates(
+        rival_pool, allowed=rival_allowed, positions=positions)
     broad_candidates = competitor_position_candidates(
         pool, allowed=allowed, positions=positions)
 
     priority_items = _items(priority_candidates)
+    rival_items = _items(rival_candidates)
     broad_items = _items(broad_candidates)
-    # A sequence that is a single-edit of both a priority and a broad parent
-    # must not be emitted twice; the priority parent wins.
-    priority_seqs = {item["sequence"] for item in priority_items}
+    # A sequence that is a single-edit of both a rival and a bank parent must
+    # not be emitted twice; the rival parent wins. Likewise a single-edit of
+    # both a priority (rival/bank) and a broad parent keeps the priority parent.
+    rival_seqs = {item["sequence"] for item in rival_items}
+    priority_items = [item for item in priority_items if item["sequence"] not in rival_seqs]
+    priority_seqs = rival_seqs | {item["sequence"] for item in priority_items}
     broad_items = [item for item in broad_items if item["sequence"] not in priority_seqs]
 
     # When a trained parent-relative ranker is supplied, order every parent's
     # single-edits by predicted improvement (best edit per parent first) so
     # --limit keeps the strongest edit of each parent, in parent-merit order.
-    items = priority_items + broad_items
+    items = rival_items + priority_items + broad_items
     excluded_count = 0
     if excluded_sequences is not None:
         before = len(items)
@@ -575,7 +603,8 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         )
         ranker_applied = True
 
-    items = _interleave_parent_edits(items, priority=priority_pool, scores=scores)
+    items = _interleave_parent_edits(
+        items, priority=[*rival_pool, *priority_pool], scores=scores)
     if limit:
         items = items[:limit]
     return {
@@ -585,8 +614,9 @@ def generate(archive: Path, positions: list[int], limit: int | None,
         "positions": positions,
         "multipass_required": mutation_database is not None,
         "multipass_ranked_pool": multipass_ranked,
-        "pool_size": len(priority_pool) + len(pool),
+        "pool_size": len(rival_pool) + len(priority_pool) + len(pool),
         "priority_pool_size": len(priority_pool),
+        "rival_pool_size": len(rival_pool),
         "elite_history_pool_size": len(elite_history_scores) if elite_history_scores else 0,
         "ranker_applied": ranker_applied,
         "sequences": [item["sequence"] for item in items],

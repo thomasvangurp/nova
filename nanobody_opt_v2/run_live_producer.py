@@ -1026,6 +1026,7 @@ def _run_iteration(
             "-m", "nanobody_opt.competitor_lane",
             "--archive", str(archive),
             "--priority-parents", str(priority_path),
+            "--rival-coldkey", args.rival_coldkey,
             "--top50", str(top50),
             "--limit", str(quotas["singles"] if quotas else 4800),
             "--mutation-database", str(args.mutation_database),
@@ -1927,7 +1928,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rival-coldkey",
         type=str,
-        default="5GhREcsK",
+        default="5EHS",
         help="coldkey prefix of the top competitor; their recent submissions "
              "become the competitor_lane parent pool (proven-good source)",
     )
