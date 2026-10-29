@@ -184,6 +184,21 @@ def test_disabled_screen_does_not_limit_existing_target_scoring_gpu_fleet(tmp_pa
     assert controller.validate_config(value) is value
 
 
+def test_enabled_native_screen_allows_up_to_eight_gpus(tmp_path, monkeypatch):
+    value = config(tmp_path, gpu=list(range(8)))
+    value['worker']['native_screen'] = {'enabled': True, 'backend': 'cuda_refine'}
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    assert controller.validate_config(value) is value
+
+
+def test_enabled_native_screen_rejects_more_than_eight_gpus(tmp_path, monkeypatch):
+    value = config(tmp_path, gpu=list(range(9)))
+    value['worker']['native_screen'] = {'enabled': True, 'backend': 'cuda_refine'}
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
+    with pytest.raises(ValueError, match='at most eight'):
+        controller.validate_config(value)
+
+
 def test_sequence_phase_runs_on_the_slave_with_the_reference_bank(tmp_path):
     import base64
     host, request = controller.phase_request(config(tmp_path), challenge(), 'sequence',

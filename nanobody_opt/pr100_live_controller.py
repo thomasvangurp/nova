@@ -776,8 +776,8 @@ def validate_config(config):
     if (refill or any(value.get('native_work_conserving') for value in overrides.values())) and (
             not interleave or screen.get('enabled', False)):
         raise ValueError('native refill requires original CPU interleaving')
-    if screen.get('enabled') is True and len(config.get('native_gpu', gpus)) > 4:
-        raise ValueError('native_gpu must select at most four devices for screening')
+    if screen.get('enabled') is True and len(config.get('native_gpu', gpus)) > 8:
+        raise ValueError('native_gpu must select at most eight devices for screening')
     hosts = config['hosts']
     if not isinstance(hosts, dict) or not {'master', 'slave'} <= set(hosts):
         raise ValueError('hosts must define both master and slave')

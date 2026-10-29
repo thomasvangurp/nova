@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
@@ -164,3 +165,82 @@ def test_guard_always_cleans_after_coordinator_failure(tmp_path,monkeypatch,fail
     screen._guard({'directory':str(tmp_path),'timeout_seconds':30},launch=lambda *a,**k:child,control=Control())
     result=screen.json.loads((tmp_path/'guard.json').read_text())
     assert cleaned==[child] and result['cleanup']['remaining_descendants']==0
+
+def test_discover_local_gpus_parses_and_filters_by_free_mib(monkeypatch):
+    output='0, 12000 MiB\n1, 5000 MiB\n2, 8192 MiB\n3, 20000 MiB\n'
+    calls=[]
+    def fake_run(command,**kwargs):
+        calls.append((command,kwargs))
+        return SimpleNamespace(returncode=0,stdout=output)
+    monkeypatch.setattr(screen.subprocess,'run',fake_run)
+    assert screen.discover_local_gpus(8192)==[0,2,3]
+    command,kwargs=calls[0]
+    assert command==['nvidia-smi','--query-gpu=index,memory.free','--format=csv,noheader']
+    assert kwargs['capture_output'] is True and kwargs['timeout']==8
+
+@pytest.mark.parametrize('failure',['missing','timeout','nonzero','garbage'])
+def test_discover_local_gpus_fails_safe_on_telemetry_problems(monkeypatch,failure):
+    def fake_run(command,**kwargs):
+        if failure=='missing':
+            raise OSError('nvidia-smi not found')
+        if failure=='timeout':
+            raise screen.subprocess.TimeoutExpired(['nvidia-smi'],8)
+        if failure=='nonzero':
+            return SimpleNamespace(returncode=1,stdout='')
+        return SimpleNamespace(returncode=0,stdout='garbage\n0,not-a-number MiB\n')
+    monkeypatch.setattr(screen.subprocess,'run',fake_run)
+    assert screen.discover_local_gpus(8192)==[]
+
+def test_screen_settings_allow_up_to_eight_devices():
+    value=screen.settings({'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':list(range(8))}})
+    assert value['gpus']==list(range(8))
+    with pytest.raises(ValueError):
+        screen.settings({'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':list(range(9))}})
+
+@pytest.mark.parametrize('discovered',[[],[0,2,7]])
+def test_coordinate_uses_local_discovery_not_config_gpus(tmp_path,monkeypatch,discovered):
+    class Control:
+        def dedicated_controller(self):pass
+        def stop_descendants(self,children,timeout):
+            return {'remaining_descendants':0,'fixed_point_reached':True}
+    class Proc:
+        def poll(self):return 0
+    monkeypatch.setattr(screen,'discover_local_gpus',lambda minimum:discovered)
+    monkeypatch.setattr(screen,'capture_weights',lambda:{str(i):{'sha256':'a'*64} for i in range(1,5)})
+    monkeypatch.setattr(screen.signal,'signal',lambda *a:None)
+    monkeypatch.setattr(screen.signal,'setitimer',lambda *a:None)
+    monkeypatch.setattr(screen.subprocess,'Popen',lambda *a,**k:Proc())
+    monkeypatch.setattr('nanobody_opt.pr100_live_gpu._controller',lambda:Control())
+    request={'directory':str(tmp_path),'timeout_seconds':60,
+        'settings':{'backend':'cuda_refine','gpu_minimum_free_mib':8192,
+            'gpus':[1,2,3,4],'workers_per_gpu':1},
+        'sequences':['A'*10],'release':'/release','scorer':'registered',
+        'gpu_lock_directory':str(tmp_path/'locks')}
+    screen._coordinate(request)
+    receipt=screen.json.loads((tmp_path/'coordinator.json').read_text())
+    assert receipt['devices']==discovered
+    assert receipt['status']=='finished'
+
+def test_screen_batch_cuda_with_no_discoverable_devices_falls_back(tmp_path,monkeypatch):
+    class Proc:
+        def wait(self,timeout=None):return 0
+        def terminate(self):pass
+        def kill(self):pass
+    def fake_popen(command,**kwargs):
+        root=Path(command[-1]).parent
+        (root/'guard.json').write_text(json.dumps(
+            {'cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}))
+        (root/'runtime-assets.json').write_text(json.dumps(
+            {str(i):{'sha256':'a'*64} for i in range(1,5)}))
+        (root/'coordinator.json').write_text(json.dumps(
+            {'schema':screen.SCHEMA,'status':'finished','devices':[],
+             'cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}))
+        return Proc()
+    monkeypatch.setattr(screen.subprocess,'Popen',fake_popen)
+    job={'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':[]},
+        'challenge':{'epoch':25962},'native_tools':'/tools','release':'/release',
+        'source_sha':'a'*40}
+    result=screen.screen_batch(['A'],job=job,directory=tmp_path/'batch',timeout_seconds=60)
+    assert result['status']=='unavailable'
+    assert result['profiles']=={}
+    assert result['provenance']['gpus']==[]

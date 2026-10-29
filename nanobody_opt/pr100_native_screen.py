@@ -82,6 +82,38 @@ def protocol(backend):
             'checks': True, 'tries': 3, 'iterations': 6,
             'sources': PINNED_SOURCES, 'versions': PINNED_VERSIONS}
 
+def discover_local_gpus(minimum_free_mib):
+    """Discover this host's own GPUs for the ``cuda_refine`` screen.
+
+    The screen runs on the host inside ``_coordinate``, so a single global
+    config device list is wrong per host (master has 8 devices, slave has 4).
+    Return every local GPU index whose ``memory.free`` is at least
+    ``minimum_free_mib`` MiB. Any telemetry failure degrades to ``[]`` so the
+    worker falls back to the CPU path instead of inventing or trusting a device
+    index that may not exist on this host.
+    """
+    try:
+        completed = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if completed.returncode:
+        return []
+    devices = []
+    for line in completed.stdout.splitlines():
+        fields = [field.strip() for field in line.split(',')]
+        if len(fields) < 2:
+            continue
+        try:
+            index = int(fields[0])
+            free = int(fields[1].split()[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if free >= minimum_free_mib:
+            devices.append(index)
+    return devices
+
 def settings(job):
     value = job.get('native_screen', {})
     if not isinstance(value, dict) or type(value.get('enabled', False)) is not bool:
@@ -96,7 +128,7 @@ def settings(job):
         raise ValueError('screen_cpu_limit')
     if type(minimum) is not int or not 8192 <= minimum <= 200000:
         raise ValueError('screen_memory_limit')
-    if (not isinstance(gpus, list) or len(gpus) > 4 or len(set(gpus)) != len(gpus)
+    if (not isinstance(gpus, list) or len(gpus) > 8 or len(set(gpus)) != len(gpus)
             or any(type(gpu) is not int or gpu < 0 for gpu in gpus)):
         raise ValueError('invalid_screen_devices')
     return dict(enabled=value.get('enabled', False), backend=backend,
@@ -281,7 +313,8 @@ def _coordinate(request):
         atomic(root / 'runtime-assets.json', request['model_assets'])
         configured = request['settings']
         cuda = configured['backend'] == 'cuda_refine'
-        devices = configured['gpus'] if cuda else [None]
+        devices = discover_local_gpus(configured['gpu_minimum_free_mib']) if cuda else [None]
+        receipt['devices'] = devices
         for index, gpu in enumerate(devices):
             sequences = request['sequences'][index::len(devices)]
             if not sequences:
@@ -397,7 +430,7 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
     backend = configured['backend']
     empty = {'schema': SCHEMA, 'status': 'unavailable', 'profiles': {},
              'provenance': {'authoritative': False, 'evidence_backend': backend}}
-    if not configured['enabled'] or not sequences or (backend == 'cuda_refine' and not configured['gpus']):
+    if not configured['enabled'] or not sequences:
         return {**empty, 'reason': 'disabled_or_no_devices'}
     if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
             or not math.isfinite(timeout_seconds) or not 25 <= timeout_seconds <= 420):
@@ -433,7 +466,13 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
         cleanup = receipt.get('cleanup', {})
         if cleanup.get('remaining_descendants') != 0 or cleanup.get('fixed_point_reached') is not True:
             return {**empty, 'reason': 'accelerator_cleanup_unverified'}
-        devices = configured['gpus'] if backend == 'cuda_refine' else [None]
+        if backend == 'cuda_refine':
+            coordinator = json.loads((root / 'coordinator.json').read_text())
+            devices = coordinator.get('devices')
+            if not isinstance(devices, list):
+                devices = []
+        else:
+            devices = [None]
         assets = json.loads((root / 'runtime-assets.json').read_text())
         request['expected_model_weights'] = {key: value['sha256'] for key, value in assets.items()}
         for index, gpu in enumerate(devices):
@@ -459,7 +498,7 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
             'candidate_count': len(sequences), 'measured_count': len(profiles),
             'provenance': {**empty['provenance'], 'request_sha256': request['request_sha256'],
                            'source_sha': job['source_sha'], 'workers_per_gpu': configured['workers_per_gpu'],
-                           'gpus': configured['gpus'], 'cleanup': cleanup}}
+                           'gpus': devices if backend == 'cuda_refine' else configured['gpus'], 'cleanup': cleanup}}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
