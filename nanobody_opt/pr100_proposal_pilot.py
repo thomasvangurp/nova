@@ -25,9 +25,10 @@ The framework applies the full charged CDR2 motif ``DISSQGDQTD`` to all nine
 genes ONLY in the long regime (L >= 12), FR1 ``E->D`` (1) + ``V->Q`` (2), and
 the FR2 hallmarks ``G->E`` (49) + ``L->R`` (50) with germline K (48). In the
 short regime (L < 12) the germline CDR2 is kept per gene instead of the charged
-motif, matching the rival's short-regime winning scaffold. The 5EHS FR1 Q/K/T
-swaps and FR2 ``K->Q`` are dropped to keep the full CDR2 motif within the
->= 82% V-identity gate.
+motif, matching the rival's short-regime winning scaffold, AND the full 5EHS
+FR1 Q/K/T swaps (5/9/13/20) plus the FR2 ``K->Q`` (48) are restored. The full
+framework is short-regime only: with the charged long-regime CDR2 it would drop
+5/9 genes below the >= 82% V-identity gate.
 """
 from __future__ import annotations
 
@@ -168,15 +169,29 @@ def scaffold(panels, gene):
     return prefix, tail, suffix, v[0], j4[0]
 
 
-def _apply_framework_edits(prefix, rng):
+def _apply_framework_edits(prefix, rng, *, short_regime=False):
     """FR1 E->D (1) + V->Q (2); FR2 hallmarks G->E (49), L->R (50).
 
-    The 5EHS FR1 Q/K/T swaps at 5/9/13/20 and the FR2 K->Q (48) are dropped so
-    the full charged CDR2 motif fits the >= 82% V-identity budget. FR2 keeps
-    germline K (``GKERE``).
+    In the SHORT-CDR3 regime (L < 12) the full 5EHS framework is restored on
+    top of those: the FR1 Q(5)/T(9)/K(13)/K(20) swaps and the FR2 K->Q (48),
+    completing the ``GQERE`` FR2 motif. This is the framework the rival's
+    winning ``RAFDY`` scaffold carries and what drives ``design_iiptm`` 0.50;
+    with the germline CDR2 it stays >= 87.88% V identity for all nine genes,
+    above the >= 82% gate.
+
+    The full framework is NOT applied in the long regime (L >= 12): the
+    charged ``DISSQGDQTD`` CDR2 motif already consumes most of the >= 82%
+    V-identity budget and the extra five swaps would drop 5/9 genes to ~81%.
+    The long regime keeps the pruned framework (``GKERE``, germline K 48).
     """
     prefix[1] = 'D'
     prefix[2] = 'Q'
+    if short_regime:
+        prefix[5] = 'Q'
+        prefix[9] = 'T'
+        prefix[13] = 'K'
+        prefix[20] = 'K'
+        prefix[48] = 'Q'
 
 
 def _cdr2_window(seq):
@@ -318,7 +333,8 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
         raise ValueError('pilot cell outside declared scope')
     rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal))
     prefix, tail, suffix, v, j = scaffold(panels, gene)
-    _apply_framework_edits(prefix, rng)
+    _apply_framework_edits(prefix, rng,
+                           short_regime=length < CDR3_TEMPLATE_MIN_LENGTH)
     ordered = sorted(prefix)
     base = ''.join(prefix[p] for p in ordered)
     if length >= CDR3_TEMPLATE_MIN_LENGTH:
