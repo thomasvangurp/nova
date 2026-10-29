@@ -326,15 +326,48 @@ def _diagnostic_sequence_hash(sequence):
 
 
 def verified_fleet(payload, epoch, block_hash, epoch_length=None):
-    """Filter to independently checked current-challenge checkpointed entries."""
+    """Filter to independently checked current-challenge checkpointed entries.
+
+    A same-target artifact for the immediately preceding epoch is accepted as a
+    documented downgrade: when the controller missed this epoch's publication
+    window, last epoch's independently validated sequences are a worse
+    submission than this epoch's and a far better one than nothing. The
+    downgrade re-verifies the artifact against ITS OWN challenge (carried in the
+    artifact) rather than the current one, and is reported via
+    ``handoff_diagnostics["stale_epoch_downgrade"]`` so the commit is never
+    silent. The target check remains strict against the current target, and a
+    missing, older or pre-PR100 artifact is still refused.
+    """
     from compound_miner.nanobody_provider import validate_nanobody_checkpoint
     if type(epoch_length) is not int or epoch_length < 1:
         raise ValueError("independently supplied epoch length is required")
     config = pinned_config(epoch)
     expected = challenge(config, epoch, block_hash, epoch_length)
-    if (not isinstance(payload, dict) or payload.get("epoch") != epoch
-            or payload.get("target") != expected["target"]):
+    stale_epoch_downgrade = False
+    if not isinstance(payload, dict) or payload.get("target") != expected["target"]:
         raise ValueError("nanobody fleet target or epoch is stale")
+    if payload.get("epoch") != epoch:
+        if payload.get("epoch") != epoch - 1 or epoch - 1 < ACTIVATION_EPOCH:
+            raise ValueError("nanobody fleet target or epoch is stale")
+        payload_challenge = payload.get("challenge")
+        if (not isinstance(payload_challenge, dict)
+                or payload_challenge.get("epoch") != epoch - 1
+                or payload_challenge.get("target") != expected["target"]):
+            raise ValueError("nanobody fleet target or epoch is stale")
+        previous_epoch_length = payload_challenge.get("epoch_length")
+        if type(previous_epoch_length) is not int or previous_epoch_length < 1:
+            raise ValueError("nanobody fleet target or epoch is stale")
+        previous_expected = challenge(
+            pinned_config(epoch - 1), epoch - 1,
+            payload_challenge.get("epoch_start_block_hash"),
+            previous_epoch_length)
+        if payload_challenge != previous_expected:
+            raise ValueError("nanobody fleet target or epoch is stale")
+        expected = previous_expected
+        epoch = epoch - 1
+        block_hash = payload_challenge["epoch_start_block_hash"]
+        epoch_length = previous_epoch_length
+        stale_epoch_downgrade = True
     if (not isinstance(payload.get("submissions", []), list)
             or any(not isinstance(e, dict) for e in payload.get("submissions", []))
             or not isinstance(payload.get("sequence_pool", []), list)
@@ -401,6 +434,8 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
         "rejected_count": len(rejections), "usable_sequence_count": len(pool),
         "reason_counts": reason_counts, "rejections": rejections,
     }
+    if stale_epoch_downgrade:
+        diagnostics["stale_epoch_downgrade"] = True
     return {**payload, "sequence_pool": pool, "sequence_pool_size": len(pool),
             "submissions": entries, "submission_count": len(entries),
             "sequence_pool_checkpoints": valid, "handoff_diagnostics": diagnostics}

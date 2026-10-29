@@ -88,50 +88,20 @@ def producer_endpoints(instance: dict) -> list[tuple[str, str, int]]:
 
 
 def pull_producer(vastai: str, label: str, remote: str, destination: Path) -> None:
-    """Fetch the nanobody half from whichever box currently carries the label.
+    """Deliberately disabled: the PR100 controller owns the local artifact.
 
-    Deliberately not a stored host:port. The producer is moving to a bigger
-    rental, and vast.ai rotates ports on restart; resolving the label each run
-    means a rehomed producer needs no change here at all.
+    The live PR100 controller writes ``/opt/nova-submit/nanobody_result.json``
+    directly (its ``publication_path``), so the artifact is already local. The
+    master producer (label ``nova-nanobody-pixi``) is inert and stuck
+    pre-PR100, so scp-ing ``/root/artifacts/nanobody_result.json`` onto the
+    controller's path was a write/write race that overwrote the fresh artifact
+    with a stale one (epoch 25955). This is now a no-op: the submit host reads
+    the controller's local artifact, and the commit path (commit_submission.py)
+    is unchanged.
     """
-    raw = subprocess.run([vastai, "show", "instances", "--raw"],
-                         capture_output=True, text=True, timeout=120)
-    if raw.returncode:
-        raise SystemExit(f"vastai failed: {raw.stderr.strip()[:200]}")
-    try:
-        instances = json.loads(raw.stdout)
-    except ValueError:
-        raise SystemExit("vastai did not return JSON")
-    if isinstance(instances, dict):
-        instances = instances.get("instances", [])
-    matches = [i for i in instances
-               if str(i.get("label") or "") == label
-               and str(i.get("actual_status") or "") == "running"]
-    if len(matches) != 1:
-        raise SystemExit(
-            f"expected exactly one running instance labelled {label!r}, found {len(matches)}")
-    endpoints = producer_endpoints(matches[0])
-    if not endpoints:
-        raise SystemExit(f"instance {matches[0].get('id')} has no resolvable ssh endpoint")
-    failures = []
-    route = host = ""
-    port = 0
-    for route, host, port in endpoints:
-        done = subprocess.run(
-            ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-             "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-             "-P", str(port), f"root@{host}:{remote}", str(destination)],
-            capture_output=True, text=True, timeout=300)
-        if done.returncode == 0:
-            break
-        failures.append(f"{route}:rc={done.returncode}")
-    else:
-        raise SystemExit(
-            f"pull from {label} failed on " + ", ".join(failures)
-        )
-    print(json.dumps(dict(event="pulled", label=label, port=port,
-                          route=route,
-                          bytes=destination.stat().st_size)), flush=True)
+    print(json.dumps(dict(event="pull_disabled", label=label, remote=remote,
+                          destination=str(destination),
+                          reason="pr100_controller_owns_artifact")), flush=True)
 
 
 def _load(path: Path) -> dict:
@@ -173,14 +143,23 @@ def sequences_by_uid(artifact: dict, epoch: int,
     stale artifact once it has waited as long as the window permits: last
     epoch's sequence is a worse submission than this epoch's, and a far better
     one than nothing.
+
+    For PR100 the same downgrade is performed by ``rules.verified_fleet``: a
+    same-target artifact for the immediately preceding epoch is re-verified
+    against its own challenge and marked ``stale_epoch_downgrade``, so a
+    controller that missed the publication window degrades to last epoch's
+    validated sequences instead of committing zero.
     """
     from nanobody_opt import rules
+    stale_epoch_downgrade = False
     if epoch >= rules.ACTIVATION_EPOCH:
         verified = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length)
         print(json.dumps(dict(event="pr100_fleet_verification", epoch=epoch,
                               **verified["handoff_diagnostics"])), flush=True)
         artifact = verified
-        allow_stale = False
+        stale_epoch_downgrade = bool(
+            verified.get("handoff_diagnostics", {}).get("stale_epoch_downgrade"))
+        allow_stale = stale_epoch_downgrade
         if not artifact["sequence_pool"]:
             return {}
     stale = int(artifact.get("epoch", -1)) != epoch
@@ -189,14 +168,17 @@ def sequences_by_uid(artifact: dict, epoch: int,
     # stamp, but a producer that does not stamp it must NOT hard-fail the
     # commit. A missing/non-finite stamp falls back to the always-present
     # epoch field, and only a genuinely stale epoch (age > STALE_AGE_LIMIT)
-    # is rejected. A VALID-but-out-of-window stamp is still rejected.
+    # is rejected. A VALID-but-out-of-window stamp is still rejected, except
+    # for the documented previous-epoch downgrade, whose whole point is that
+    # the controller did not publish this epoch in time.
     updated = artifact.get("updated_at_unix")
     stamp_is_valid = (
         isinstance(updated, (int, float))
         and not isinstance(updated, bool)
         and updated == updated
     )
-    if stamp_is_valid and abs(time.time() - updated) > MAX_ARTIFACT_AGE_SECONDS:
+    if (not stale_epoch_downgrade and stamp_is_valid
+            and abs(time.time() - updated) > MAX_ARTIFACT_AGE_SECONDS):
         raise ValueError("nanobody artifact updated_at_unix is stale")
     if stale and not allow_stale:
         raise ValueError(
@@ -591,23 +573,21 @@ def main(argv=None) -> int:
     parser.add_argument("--reaction", type=int, required=True, choices=list(range(1, 45)))
     parser.add_argument("--crew", default=str(HERE / "crew.json"))
     parser.add_argument("--nanobody", default=str(HERE / "nanobody_result.json"))
-    # The producer is resolved by LABEL at run time, never by a written-down
-    # endpoint: vast.ai rotates the ssh port on every restart, and the producer
-    # itself moves between boxes (it is being rehomed to an 8-GPU rental). A
-    # label survives both; an endpoint in a config file is a latent outage that
-    # looks exactly like a dead box.
+    # The producer pull is DISABLED: the PR100 controller writes
+    # nanobody_result.json locally, and the old master (label
+    # nova-nanobody-pixi, /root/artifacts/nanobody_result.json) is inert and
+    # stuck pre-PR100. These flags are retained for CLI compatibility so the
+    # submit loop's --pull-only probe still reads the controller's local
+    # artifact; pull_producer() is now a logged no-op.
     parser.add_argument("--producer-label", default="nova-nanobody-pixi")
     parser.add_argument("--producer-path", default="/root/artifacts/nanobody_result.json")
     parser.add_argument("--vastai", default="/opt/nova-nanobody/deploy/slot_host/.pixi/envs/default/bin/vastai")
     parser.add_argument("--pull", action="store_true",
-                        help="fetch the nanobody artifact from the producer first")
+                        help="DEPRECATED no-op: the producer pull is disabled "
+                             "(the PR100 controller writes the artifact locally)")
     parser.add_argument("--pull-only", action="store_true",
-                        help="fetch the artifact and stop. The cutover driver "
-                             "verifies the pull BEFORE it stops production, and "
-                             "it must do that by running this program rather "
-                             "than exec()ing part of it: module level here uses "
-                             "__file__, which does not exist under exec, and "
-                             "that failed on the first real cutover.")
+                        help="DEPRECATED no-op: read the controller's local "
+                             "artifact and stop; nothing is fetched")
     parser.add_argument("--fleet", default=str(HERE / "compound_fleet.json"))
     parser.add_argument("--wallet-name", default="mining_ops")
     parser.add_argument("--wallet-path", default=str(Path.home() / ".bittensor/wallets"))

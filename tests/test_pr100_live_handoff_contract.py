@@ -387,6 +387,53 @@ def test_real_consumer_rejects_rebinding_to_another_epoch_hash(replay):
     assert rejected['handoff_diagnostics']['rejected_count'] == 2
 
 
+def _previous_epoch_artifact(fleet, previous_epoch, block_hash, epoch_length):
+    """Relabel a current-epoch fleet as the previous epoch, re-binding every
+    checkpoint to the previous epoch's challenge. The recorded fixture's rows
+    satisfy the same allowed_v / allowed_cdr3_length draw, so the evidence
+    remains internally consistent."""
+    artifact = copy.deepcopy(fleet)
+    artifact['epoch'] = previous_epoch
+    artifact['challenge'] = rules.challenge(rules.pinned_config(previous_epoch),
+                                            previous_epoch, block_hash, epoch_length)
+    for checkpoint in artifact['sequence_pool_checkpoints'].values():
+        checkpoint['epoch'] = previous_epoch
+        checkpoint['pr100_evidence']['challenge'] = artifact['challenge']
+        checkpoint['validation']['boltzgen']['provenance']['epoch'] = previous_epoch
+    return artifact
+
+
+def test_verified_fleet_accepts_same_target_previous_epoch_artifact(replay):
+    fleet = build(replay)
+    previous_epoch = replay.challenge['epoch'] - 1
+    artifact = _previous_epoch_artifact(fleet, previous_epoch,
+                                        replay.challenge['epoch_start_block_hash'],
+                                        replay.challenge['epoch_length'])
+    accepted = rules.verified_fleet(artifact, replay.challenge['epoch'],
+                                    replay.challenge['epoch_start_block_hash'],
+                                    replay.challenge['epoch_length'])
+    assert accepted['sequence_pool'] == artifact['sequence_pool']
+    assert accepted['handoff_diagnostics']['stale_epoch_downgrade'] is True
+    assert accepted['handoff_diagnostics']['accepted_count'] == 2
+
+
+def test_verified_fleet_still_refuses_older_or_wrong_target_artifact(replay):
+    # Two epochs old is not the immediately preceding epoch.
+    with pytest.raises(ValueError, match='stale'):
+        rules.verified_fleet({'epoch': replay.challenge['epoch'] - 2,
+                              'target': rules.TARGET},
+                             replay.challenge['epoch'],
+                             replay.challenge['epoch_start_block_hash'],
+                             replay.challenge['epoch_length'])
+    # The previous epoch but for a different target is still refused.
+    with pytest.raises(ValueError, match='stale'):
+        rules.verified_fleet({'epoch': replay.challenge['epoch'] - 1,
+                              'target': 'P20809'},
+                             replay.challenge['epoch'],
+                             replay.challenge['epoch_start_block_hash'],
+                             replay.challenge['epoch_length'])
+
+
 def test_real_consumer_rejects_a_changed_archive_after_export(replay):
     fleet = build(replay)
     fleet['archive_sha256'] = '0' * 64

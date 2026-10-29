@@ -37,13 +37,30 @@ def _artifact(epoch, uids=(1, 2)):
 def test_a_stale_artifact_is_still_refused_by_default():
     # Preferring fresh remains the default: staleness must be an explicit,
     # last-resort decision by the caller, never a silent downgrade.
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         submit.sequences_by_uid(_artifact(25246), 25247)
 
 
 def test_a_stale_artifact_is_usable_when_the_caller_allows_it():
     got = submit.sequences_by_uid(_artifact(25246), 25247, allow_stale=True)
     assert got == {1: "QVQ1", 2: "QVQ2"}
+
+
+def test_pull_producer_is_a_noop_and_never_overwrites_the_controller_artifact(tmp_path, monkeypatch, capsys):
+    # The inert master (label nova-nanobody-pixi, stuck pre-PR100) must never
+    # scp its stale artifact over the PR100 controller's fresh local file.
+    destination = tmp_path / "nanobody_result.json"
+    destination.write_text(json.dumps({"epoch": 26015, "sequence_pool": ["K" * 120]}))
+    before = destination.read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("pull_producer must not run vastai/scp/subprocess")
+
+    monkeypatch.setattr(submit.subprocess, "run", forbidden)
+    submit.pull_producer("unused-vastai", "nova-nanobody-pixi",
+                         "/root/artifacts/nanobody_result.json", destination)
+    assert destination.read_bytes() == before
+    assert '"pull_disabled"' in capsys.readouterr().out
 
 
 def test_submit_host_detects_a_nonempty_cached_nanobody(tmp_path, monkeypatch):
