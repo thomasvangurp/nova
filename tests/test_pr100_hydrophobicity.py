@@ -46,11 +46,20 @@ def test_top_miner_like_sequence_passes():
 
 
 def test_hydrophobic_heavy_sequence_is_rejected():
-    score, passed = hydrophobicity.check(vhh_with_cdr3('FLIVMWDRQKNTS'))
-    assert score == pytest.approx(6 / 13)
+    score, passed = hydrophobicity.check(vhh_with_cdr3('FLIVMWYFLIVMW'))
+    assert score == pytest.approx(1.0)
     assert passed is False
-    assert hydrophobicity.reason(vhh_with_cdr3('FLIVMWDRQKNTS')) == \
+    assert hydrophobicity.reason(vhh_with_cdr3('FLIVMWYFLIVMW')) == \
         hydrophobicity.REJECT_REASON
+
+
+def test_short_regime_rafdy_head_passes():
+    # The short-CDR3 winning scaffold RAFDY (R-A-F-D-Y) is 3/5 = 0.60 over the
+    # F/L/I/V/M/W/Y/A set; the real PSH gate accepts it because the fold buries
+    # the aromatics, so the coarse screen must not false-positive on it.
+    score, passed = hydrophobicity.check(vhh_with_cdr3('RAFDY'))
+    assert score == pytest.approx(3 / 5)
+    assert passed is True
 
 
 def test_non_vhh_shaped_sequence_passes_conservatively():
@@ -75,7 +84,7 @@ def test_sequence_phase_rejects_hydrophobic_candidate_with_distinct_reason(
     from nanobody_opt import pr100_live_worker as worker
     from nanobody_opt import pr100_proposal_pilot as proposals
 
-    hydrophobic_seq = vhh_with_cdr3('FLIVMWDRQKNTS')
+    hydrophobic_seq = vhh_with_cdr3('FLIVMWYFLIVMW')
 
     monkeypatch.setitem(sys.modules, 'abnumber', types.SimpleNamespace(
         Chain=lambda sequence, **kw: types.SimpleNamespace(cdr3_seq='')))

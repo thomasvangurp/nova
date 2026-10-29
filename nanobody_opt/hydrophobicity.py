@@ -42,8 +42,15 @@ HYDROPHOBIC = frozenset("FLIVMWYA")
 #: Default ceiling on the CDR3 hydrophobic fraction. See the module docstring
 #: for the calibration. Env-overridable so the threshold is tunable in the
 #: deployed box without editing this file.
+#:
+#: Raised from 0.44 to 0.62 for the short-CDR3 regime: the winning scaffold
+#: ``RAFDY`` (the current dominant rival's rank-1 short head) is R-A-F-D-Y,
+#: i.e. 3/5 = 0.60 over the F/L/I/V/M/W/Y/A set, yet passes the real PSH gate
+#: because the fold buries the aromatics. The sequence-level screen is only a
+#: coarse pre-filter now that the GPU native screen owns the real cheap PSH
+#: rejection, so it must not false-positive on a developable short head.
 CDR3_HYDROPHOBIC_FRACTION_MAX = float(
-    os.environ.get("SN68_HYDROPHOBIC_CDR3_MAX", "0.44"))
+    os.environ.get("SN68_HYDROPHOBIC_CDR3_MAX", "0.62"))
 
 #: Distinct gate reason recorded by sequence_phase when this screen rejects.
 REJECT_REASON = "surface_hydrophobicity_screen"
