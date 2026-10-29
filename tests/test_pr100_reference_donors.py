@@ -161,11 +161,12 @@ def test_current_cell_fresh_unique_half_control_with_full_source_accounting(
     result = sequence_runner(challenge(epoch, gene, length),
                              missing_cell_donor_fallback=True, proposals=600)
     candidates = result['candidates']
-    # Pre-hydro accounting (dedup + source split) is exact. Short loops use the
-    # flat-weight draw (600 unique); the L>=12 template's deterministic body
-    # emits only 8 unique fresh CDR3s, so the unique count is ~308 (graft + 8).
+    # Pre-hydro accounting (dedup + source split) is exact. Short loops now use
+    # the small RAFDY-family template, so the unseeded half dedups into a small
+    # pool below the 300 grafted uniques; the L>=12 template's deterministic
+    # body emits only 8 unique fresh CDR3s (~308 graft + 8).
     if length < 12:
-        assert len(result['generated_sequence_hashes']) == 600
+        assert 300 < len(result['generated_sequence_hashes']) < 600
     else:
         assert 300 <= len(result['generated_sequence_hashes']) <= 400
     assert result['existing_references'] == 0 and not result['novelty_checked']

@@ -15,15 +15,19 @@ CDR3 sampling is length-split:
   positive R or relocated H at position 4), body drawn from the charged,
   balanced beater pool ``D/K/T/R/S/E`` (each K/R paired with D/E), tail the
   fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
-* L < 12 falls back to the flat ``AMINO_ACID_WEIGHTS`` sampling (b188a10).
-  The positional template has no body below L=10 and its truncated head is the
-  rival's LOSING L=7 regime, so short loops keep the flat draw for diversity.
+* L < 12 uses a short-regime template modeled on the rival's winning ``RAFDY``
+  junction: head ``R[A/H]`` + fixed ``FDY`` tail, extended with the polar
+  ``T/S/H/G`` pool for longer loops. This replaces the flat
+  ``AMINO_ACID_WEIGHTS`` draw, whose flat heads (``HDFDY``, ``RSFDY``, ...)
+  collapsed interface confidence ~2x below the rival's ``RAFDY``/``RHFDY``.
 
 The framework applies the full charged CDR2 motif ``DISSQGDQTD`` to all nine
-genes (the salt-bridge network that buries the CDR3 aromatics and keeps surface
-PSH low), FR1 ``E->D`` (1) + ``V->Q`` (2), and the FR2 hallmarks ``G->E`` (49)
-+ ``L->R`` (50) with germline K (48). The 5EHS FR1 Q/K/T swaps and FR2 ``K->Q``
-are dropped to keep the full CDR2 motif within the >= 82% V-identity gate.
+genes ONLY in the long regime (L >= 12), FR1 ``E->D`` (1) + ``V->Q`` (2), and
+the FR2 hallmarks ``G->E`` (49) + ``L->R`` (50) with germline K (48). In the
+short regime (L < 12) the germline CDR2 is kept per gene instead of the charged
+motif, matching the rival's short-regime winning scaffold. The 5EHS FR1 Q/K/T
+swaps and FR2 ``K->Q`` are dropped to keep the full CDR2 motif within the
+>= 82% V-identity gate.
 """
 from __future__ import annotations
 
@@ -33,10 +37,10 @@ import random
 
 AMINO_ACIDS = 'ADEFGHIKLMNPQRSTVWY'  # Do not introduce an extra cysteine.
 
-# Flat CDR3 residue weights (b188a10). Used ONLY for short loops (L < 12),
-# where the positional template has no body and its truncated head matches the
-# rival's losing L=7 regime. Zero weight removes N and the aliphatics
-# L/I/V/M/W from the draw; A/E/T keep a small positive floor.
+# Flat CDR3 residue weights (b188a10). Used ONLY by the reference-graft path
+# (_graft_reference) when a donor CDR3 is supplied, not by the short template.
+# Zero weight removes N and the aliphatics L/I/V/M/W from the draw; A/E/T keep
+# a small positive floor.
 AMINO_ACID_WEIGHTS = {
     'F': 3.0, 'Y': 3.0, 'D': 3.0, 'R': 3.0,
     'H': 2.0, 'P': 2.0,
@@ -57,12 +61,54 @@ CDR3_BODY_PATTERN = 'DKTRES'
 CDR3_TAIL = 'FDY'              # fixed IGHJ4-style junction tail (J identity)
 
 # Full charged/polar CDR2 motif (first 10 of the 17-residue CDR2 window).
-# Applied to all nine genes: the charged D/Q motif is the salt-bridge network
-# that buries the CDR3 aromatics and keeps surface PSH low.
+# Applied to all nine genes in the LONG-CDR3 regime only: the charged D/Q motif
+# is the salt-bridge network that buries the CDR3 aromatics and keeps surface
+# PSH low. In the short-CDR3 regime (CDR3 length < CDR3_TEMPLATE_MIN_LENGTH) the
+# rival's winning CDR2 is the germline loop (IYSEGST/IYSDGST derive from
+# IGHV3-66/53's germline IYSGGST), so the charged motif is NOT applied there.
 CDR2_MOTIF = 'DISSQGDQTD'
 
-# Below this CDR3 length the positional template is not used.
+# Below this CDR3 length the positional template and charged CDR2 are not used.
 CDR3_TEMPLATE_MIN_LENGTH = 12
+
+# Germline CDR2 (IMGT 56-65, gaps removed) per V gene, read from the ANARCI
+# 128-state reference panel in tests/pr100_germline.py. This is the reference
+# for the short-CDR3 regime; the proposal simply keeps the germline CDR2 rather
+# than overwriting it, but the explicit table pins the per-gene truth for tests.
+GERMLINE_CDR2 = {
+    'IGHV3-23': 'ISGSGGST',
+    'IGHV3-66': 'IYSGGST',
+    'IGHV3-74': 'INSDGSST',
+    'IGHV3-7': 'IKQDGSEK',
+    'IGHV3-11': 'ISSSGSTI',
+    'IGHV3-43': 'ISWDGGST',
+    'IGHV3-48': 'ISSSSSTI',
+    'IGHV3-53': 'IYSGGST',
+    'IGHV3-64': 'ISSNGGST',
+}
+
+# Short-CDR3 head recipe (L < 12), modeled on the rival's RAFDY winner. The
+# fixed FDY tail (IGHJ4 IMGT 115-117) is appended by the caller, so the head
+# length n = CDR3 length - 3:
+#   L=4 -> 'R', L=5 -> 'RA'/'RH', L=6 -> 'R[A/H]X', ...
+# R is the always-present first residue (the RAFDY junction positive charge);
+# the second position favors A (RAFDY, iiptm 0.50) with H as the alternate
+# (RHFDY, iiptm 0.44); longer heads extend with the polar T/S/H/G pool that
+# mirrors the rival's winning TSH length-6 head. No L/I/V/M/W/N anywhere.
+SHORT_CDR3_HEAD_FIRST = 'R'
+SHORT_CDR3_HEAD_SECOND = 'AH'
+SHORT_CDR3_SECOND_WEIGHTS = (3.0, 1.0)          # favor A (RAFDY)
+SHORT_CDR3_EXTENSION = 'TSHG'
+SHORT_CDR3_EXTENSION_WEIGHTS = (3.0, 3.0, 2.0, 1.0)
+
+# The three byte-exact short-regime 5EHS leaderboard winners. The scaffold must
+# stay as close to these as the similarity gate allows but must never emit a
+# byte-identical sequence (the dedup guard in propose() enforces this).
+RIVAL_5EHS_SEQUENCES = frozenset({
+    'EQQLVESGGGLVKPGRSLKLSCAASGFTVSSYSMSWFRQAPGKEREEVSVIYSEGSTYYAESVKGRFTISRDNSKNTLYLQMNSLKAEDTAVYYCRAFDYWGQGTTVTVSS',
+    'DQQLVESGGGLVQPGRSLKLSCAASGFTVSSYSMSWFRQASGKEREEVSVIYSDGSTYYAESVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCRHFDYWGQGTTVTVSS',
+    'DQQLVESGTGLVQPGSSLRLSCAASGFTVSSYSMSWFRQAPGKEREEVSVIYSDGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCTSHFDYWGQGTTVTVSS',
+})
 
 STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
@@ -231,6 +277,30 @@ def _build_cdr3_loop(rng, loop_len):
     return first + second + head + body
 
 
+def _build_short_cdr3_loop(rng, loop_len):
+    """R[A/H] + polar extension: the RAFDY-family short-regime CDR3 head.
+
+    ``loop_len`` is the requested CDR3 length minus the fixed 3-residue tail,
+    so ``1 <= loop_len <= 8`` here. The head always opens with the positive R
+    (the rival's RAFDY junction signature), the second position favors A
+    (RAFDY, the strongest winner at iiptm 0.50) with H as the alternate (RHFDY,
+    iiptm 0.44), and any remaining positions are filled from the polar T/S/H/G
+    pool that mirrors the rival's winning TSH length-6 head. The caller appends
+    the fixed FDY tail, so the head never contains L/I/V/M/W/N and stays a
+    small, deterministic, high-confidence pool rather than an open flat draw.
+    """
+    if not 1 <= loop_len <= 8:
+        raise ValueError('short CDR3 loop outside the 1..8 head window')
+    loop = [SHORT_CDR3_HEAD_FIRST]
+    if loop_len >= 2:
+        loop.append(rng.choices(SHORT_CDR3_HEAD_SECOND,
+                                weights=SHORT_CDR3_SECOND_WEIGHTS, k=1)[0])
+    if loop_len >= 3:
+        loop.extend(rng.choices(SHORT_CDR3_EXTENSION,
+                                weights=SHORT_CDR3_EXTENSION_WEIGHTS, k=loop_len - 2))
+    return loop
+
+
 def _graft_reference(rng, reference_cdr3, n):
     """Trim/pad/mutate a donor CDR3 to the requested loop length (b188a10)."""
     loop = list(reference_cdr3[:-3])
@@ -249,15 +319,17 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal))
     prefix, tail, suffix, v, j = scaffold(panels, gene)
     _apply_framework_edits(prefix, rng)
-    base = _apply_cdr2_edit(''.join(prefix[p] for p in sorted(prefix)), CDR2_MOTIF)
     ordered = sorted(prefix)
+    base = ''.join(prefix[p] for p in ordered)
+    if length >= CDR3_TEMPLATE_MIN_LENGTH:
+        base = _apply_cdr2_edit(base, CDR2_MOTIF)
     prefix = {p: c for p, c in zip(ordered, base)}
     n = length - len(tail)
     if reference_cdr3 is None:
         if length >= CDR3_TEMPLATE_MIN_LENGTH:
             loop = _build_cdr3_loop(rng, n)
         else:
-            loop = [_weighted_choice(rng) for _ in range(n)]
+            loop = _build_short_cdr3_loop(rng, n)
     else:
         if not isinstance(reference_cdr3, str) or len(reference_cdr3) < 3:
             raise ValueError('reference CDR3 unavailable')
@@ -268,6 +340,8 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     if fraction < 0.82:
         raise ValueError('emitted V identity below the 82% gate')
     sequence = base + ''.join(loop) + tail + suffix
+    if sequence in RIVAL_5EHS_SEQUENCES:
+        raise ValueError('emitted a byte-identical 5EHS leader sequence')
     return {'sequence': sequence, 'proposal_type': PROTOCOL,
             'requested_v': gene, 'requested_cdr3_length': length,
             'v_reference_allele': v, 'j_reference_allele': j,
@@ -293,7 +367,7 @@ def dry_run(rows, panels, *, extract_cdr3, per_arm=256, seed=1000):
                 arms.append(arm)
                 continue
             loops = [extract_cdr3(r['sequence']) for r in refs]
-            seen = set()
+            seen = set(RIVAL_5EHS_SEQUENCES)
             for ordinal in range(per_arm*10):
                 row = propose(panels, gene, length, seed=seed, ordinal=ordinal,
                               reference_cdr3=loops[ordinal % len(loops)] if loops else None)
