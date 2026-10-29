@@ -167,17 +167,20 @@ def _framework_prefix(panel, gene, seq):
 
 
 def test_short_regime_restores_full_5ehs_framework():
-    """L < 12 restores the 5EHS FR1 Q/K/T swaps + FR2 K->Q; L >= 12 does not."""
+    """L < 12 restores the winners' V5/G9/V13/K20 + germline K48; L >= 12 does not."""
     panel = real_panel()
     for gene in GENES:
         short = propose(panel, gene, 5, seed=9, ordinal=0)['sequence']
         long = propose(panel, gene, 16, seed=9, ordinal=0)['sequence']
         s_prefix = _framework_prefix(panel, gene, short)
         l_prefix = _framework_prefix(panel, gene, long)
-        # Full 5EHS FR1 Q/K/T swaps + FR2 K->Q only in the short regime.
+        # Winners' FR1 V5/G9/V13/K20 only in the short regime; K48 is germline
+        # in both regimes (the ``GKERE`` FR2 motif).
         assert (s_prefix[5], s_prefix[9], s_prefix[13], s_prefix[20], s_prefix[48]) == \
-            ('Q', 'T', 'K', 'K', 'Q'), gene
+            ('V', 'G', 'V', 'K', 'K'), gene
         assert l_prefix[48] == 'K', gene  # germline K (pruned framework)
+        assert (l_prefix[5], l_prefix[9], l_prefix[13], l_prefix[20]) != \
+            ('V', 'G', 'V', 'K'), gene
         # The shared FR1 E->D/V->Q + FR2 G->E/L->R hallmarks are in both regimes.
         for prefix in (s_prefix, l_prefix):
             assert (prefix[1], prefix[2]) == ('D', 'Q'), gene
@@ -200,8 +203,9 @@ def test_short_regime_full_framework_v_identity_meets_gate():
                 _, _, vf = v_identity(panel, gene, prefix, loop)
                 worst[gene] = min(worst.get(gene, 1.0), vf)
                 assert vf >= 0.82, (gene, length, ordinal, vf)
-    # Measured 2026-10-28: the weakest gene (IGHV3-43) sits at 87.88%, still
-    # comfortably above the >= 82% gate, so no per-gene relaxation is needed.
+    # Measured 2026-10-29 with the V5/G9/V13/K20 + K48 framework: the weakest
+    # gene (IGHV3-53) sits at 91.75%, comfortably above the >= 82% gate, so no
+    # per-gene relaxation is needed.
     assert min(worst.values()) >= 0.82
 
 

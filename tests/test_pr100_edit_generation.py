@@ -105,9 +105,10 @@ def test_generate_empty_parents_is_empty():
 
 
 def test_edit_generation_settings_defaults_off_and_validates():
-    assert worker.edit_generation_settings({}) == {'enabled': False, 'limit': 0}
+    assert worker.DEFAULT_EDIT_LIMIT == 300
+    assert worker.edit_generation_settings({}) == {'enabled': False, 'limit': 300}
     assert worker.edit_generation_settings({'edit_generation': {'enabled': True}}) == \
-        {'enabled': True, 'limit': 0}
+        {'enabled': True, 'limit': 300}
     assert worker.edit_generation_settings({'edit_generation': {'enabled': True,
                                                                  'limit': 40}})['limit'] == 40
     with pytest.raises(ValueError, match='enabled'):
@@ -115,6 +116,58 @@ def test_edit_generation_settings_defaults_off_and_validates():
     with pytest.raises(ValueError, match='limit'):
         worker.edit_generation_settings({'edit_generation': {'enabled': True,
                                                               'limit': -1}})
+    # limit=0 used to mean "unlimited"; an enabled lane must now be bounded.
+    with pytest.raises(ValueError, match='limit'):
+        worker.edit_generation_settings({'edit_generation': {'enabled': True,
+                                                              'limit': 0}})
+    with pytest.raises(ValueError, match='limit'):
+        worker.edit_generation_settings({'edit_generation': {'enabled': True,
+                                                              'limit': True}})
+    # A disabled lane never consumes the limit, so a legacy 0 stays accepted.
+    assert worker.edit_generation_settings(
+        {'edit_generation': {'enabled': False, 'limit': 0}})['enabled'] is False
+
+
+def test_haplotypes_skip_donors_with_non_standard_residues():
+    """A haplotype copies donor residues verbatim; one bad residue drops it all."""
+    parent = 'ACDEFGHIKLMNPQRSTVWY' * 2
+    allowed = [[residue] for residue in parent]
+    bad = list(parent)
+    bad[3], bad[8] = 'X', 'A'      # one non-standard + one standard change
+    good = list(parent)
+    good[3], good[8] = 'A', 'A'    # two standard changes
+    bad, good = ''.join(bad), ''.join(good)
+    positions = set(range(len(parent)))
+
+    framework = edit.supported_framework_candidates(
+        parent, allowed=allowed, background_sequences=[bad, good],
+        cdr_positions=set(), protected=set(), terminal_width=len(parent))
+    lineage = edit.supported_lineage_candidates(
+        parent, allowed=allowed, background_sequences=[bad, good],
+        cdr_positions=positions, protected=set(), terminal_width=len(parent))
+    for name, candidates in (('framework', framework), ('lineage', lineage)):
+        emitted = {sequence for sequence, _ in candidates}
+        assert good in emitted, name
+        assert bad not in emitted, name
+        assert all(set(sequence) <= gates.ALLOWED_AAS for sequence in emitted), name
+
+
+def test_generate_skips_and_counts_malformed_parents():
+    panel = real_panel()
+    parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    pos = _safe_framework_position(parent)
+    sibling = _variant(parent, pos, 'S')
+    malformed = 'G' * len(parent)       # no framework cysteine -> find_regions raises
+    with pytest.raises(ValueError):
+        find_regions(malformed)
+    stats = {}
+    children = edit.generate([malformed, parent], background_sequences=[sibling],
+                             stats=stats)
+    assert stats == {'malformed_parents': 1}
+    assert children and all(c['parent_sequence'] == parent for c in children)
+    clean = {}
+    edit.generate([parent], background_sequences=[sibling], stats=clean)
+    assert clean == {'malformed_parents': 0}
 
 
 def _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=('AAA',)):
@@ -196,3 +249,37 @@ def test_worker_edit_lane_off_by_default_and_on_emits_gate_passing_children(
     for r in edit_candidates:
         vf = _v_identity_of(panel, 'IGHV3-23', r['sequence'], 5)
         assert vf >= 0.82, (r['proposal_lane'], vf)
+
+
+def test_worker_rejects_non_standard_residues_before_annotation(monkeypatch, tmp_path):
+    panel = real_panel()
+    parent1 = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    pos = _safe_framework_position(parent1)
+    parent2 = _variant(parent1, 0, 'X')    # inherited by every child of parent2
+    bank_rows = [
+        {'sequence': sequence, 'sequence_hash': rules.sequence_hash(sequence),
+         'cells': ['IGHV3-23:5'], 'source': 'rival_bank_test'}
+        for sequence in (parent1, parent2)]
+    run = _edit_runner(monkeypatch, tmp_path, bank_rows,
+                       archive_sequences=(_variant(parent1, pos, 'T'),
+                                          _variant(parent1, pos, 'N')))
+    annotated = []
+
+    def annotate(sequence):
+        # The real annotator crashes on a residue outside the alphabet.
+        assert set(sequence) <= gates.ALLOWED_AAS, sequence
+        annotated.append(sequence)
+        return {'fixture_annotation': True}
+
+    monkeypatch.setattr(worker.pr100_filter, '_annotate_uncached', annotate)
+    monkeypatch.setattr(gates, 'check_sequence', lambda seq, cfg:
+                        ['invalid_aas'] if set(seq) - gates.ALLOWED_AAS else [])
+    challenge = {'epoch': 25969, 'target': rules.TARGET,
+                 'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
+
+    result = run(challenge, edit_generation={'enabled': True, 'limit': 50})
+    assert result['annotation_reasons'].get('basic_sequence', 0) >= 1
+    assert annotated and all(set(s) <= gates.ALLOWED_AAS for s in annotated)
+    assert all(set(r['sequence']) <= gates.ALLOWED_AAS for r in result['candidates'])
+    assert result['edit_generation_stats'] == {'malformed_parents': 0}
+    assert result['edit_generation_candidates'] <= 50

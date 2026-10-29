@@ -18,6 +18,7 @@ DEFAULT_MAX_WORKERS = 64
 DEFAULT_CANDIDATE_BUDGET = 300.0
 DEFAULT_PROPOSALS = 600
 DEFAULT_REFERENCE_SLOTS = 16
+DEFAULT_EDIT_LIMIT = 300
 WORKER_RSS_BYTES = 1.4 * 1024 ** 3
 SCREEN_BACKENDS = frozenset({'resident_cpu', 'cuda_refine'})
 # Only execution settings that can change the numerical backend are bound.
@@ -112,18 +113,21 @@ def edit_generation_settings(job):
     """Opt-in v2 edit-based generation lane; OFF unless the operator enables it.
 
     The worker runs the de-novo scaffold lane by default. ``job['edit_generation']``
-    is an optional object -- ``{"enabled": true, "limit": 0}`` turns on the
+    is an optional object -- ``{"enabled": true, "limit": 300}`` turns on the
     edit-based lane (``pr100_edit_generation``, ported from
     ``nanobody_opt/local_neighborhood``) fed by rival parents from the reference
-    bank. ``limit`` caps the number of emitted edit candidates (0 = unlimited).
+    bank. ``limit`` caps the number of emitted edit candidates and defaults to
+    ``DEFAULT_EDIT_LIMIT``; an enabled lane is never unlimited, so it must be >= 1.
     """
     supplied = job.get('edit_generation', {})
     if not isinstance(supplied, dict) or not isinstance(supplied.get('enabled', False), bool):
         raise ValueError('edit_generation must contain a boolean enabled flag')
-    settings = {'enabled': False, 'limit': 0, **supplied}
+    settings = {'enabled': False, 'limit': DEFAULT_EDIT_LIMIT, **supplied}
     limit = settings['limit']
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         raise ValueError('edit_generation.limit must be a nonnegative integer')
+    if settings['enabled'] and limit < 1:
+        raise ValueError('edit_generation.limit must be >= 1 when edit_generation is enabled')
     return settings
 
 
@@ -206,6 +210,7 @@ def sequence_phase(job, directory):
         source_counts[provenance['reference_stratum']] += 1
     edit_settings = edit_generation_settings(job)
     edit_source_counts = Counter()
+    edit_stats = {}
     if edit_settings['enabled']:
         # The edit lane mutates parents IN PLACE, preserving their CDR3 length
         # and V gene. Only parents already matching this epoch's challenge cell
@@ -220,7 +225,7 @@ def sequence_phase(job, directory):
                            if isinstance(s, str) and s.strip()]
         edit_candidates = pr100_edit_generation.generate(
             edit_parents, background_sequences=edit_background,
-            limit=edit_settings['limit'] or None)
+            limit=edit_settings['limit'], stats=edit_stats)
         for edit in edit_candidates:
             rows.append({**edit, 'source': 'edit_generation',
                          'requested_v': expected['allowed_v'],
@@ -237,20 +242,22 @@ def sequence_phase(job, directory):
               if rules.sequence_hash(r['sequence']) not in excluded | parent_hashes}
     eligible, reasons = [], {}
     for sequence, row in unique.items():
+        # Reject on the cheap sequence gates BEFORE annotation: a residue outside
+        # the standard alphabet (e.g. 'X') crashes the annotator.
+        if gates.check_sequence(sequence, config['nanobody_requirements']):
+            reasons['basic_sequence'] = reasons.get('basic_sequence', 0) + 1
+            continue
         annotation = {**pr100_filter._annotate_uncached(sequence),
                       'annotation_identity': pr100_filter.annotation_identity()}
-        if gates.check_sequence(sequence, config['nanobody_requirements']):
-            reason = 'basic_sequence'
-        else:
-            reason = rules.annotation_reason(annotation, config['nanobody_requirements'],
-                                             sequence=sequence, epoch_challenge=expected)
-            # Cheap sequence-level hydrophobicity safety net: drop the obvious
-            # hydrophobic tail before the expensive 3D fold, mirroring the
-            # Boltz-2 skip-pass-1 screen. Only clearly-over-hydrophobic CDR3s
-            # are rejected; a candidate this screen cannot parse passes through
-            # to the annotation/native gates unchanged.
-            if not reason and not hydrophobicity.check(sequence)[1]:
-                reason = hydrophobicity.REJECT_REASON
+        reason = rules.annotation_reason(annotation, config['nanobody_requirements'],
+                                         sequence=sequence, epoch_challenge=expected)
+        # Cheap sequence-level hydrophobicity safety net: drop the obvious
+        # hydrophobic tail before the expensive 3D fold, mirroring the
+        # Boltz-2 skip-pass-1 screen. Only clearly-over-hydrophobic CDR3s
+        # are rejected; a candidate this screen cannot parse passes through
+        # to the annotation/native gates unchanged.
+        if not reason and not hydrophobicity.check(sequence)[1]:
+            reason = hydrophobicity.REJECT_REASON
         reasons[reason or 'passed'] = reasons.get(reason or 'passed', 0) + 1
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
@@ -265,6 +272,7 @@ def sequence_phase(job, directory):
               'edit_generation_enabled': edit_settings['enabled'],
               'edit_generation_source_counts': dict(edit_source_counts),
               'edit_generation_candidates': sum(edit_source_counts.values()),
+              'edit_generation_stats': dict(edit_stats),
               'eligible_proposal_source_counts': dict(Counter(
                   r['reference_stratum'] for r in eligible if 'reference_stratum' in r)),
               'eligible_edit_generation_source_counts': dict(Counter(

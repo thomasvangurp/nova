@@ -9,8 +9,10 @@ PR100 worker's ``sequence_phase`` can run an edit-based lane in-process, fed by
 rival parents, without importing ``local_neighborhood``'s top-level scientific
 stack (which pulls in ``mutation_network`` -> ``db`` -> ``MySQLdb``).
 
-Ported verbatim (AST-verified against the v2 source) and dependency-free --
-no pandas, no numpy, no network, no DB:
+Ported from the v2 source and dependency-free -- no pandas, no numpy, no
+network, no DB. The one intentional deviation is that both haplotype paths skip
+a haplotype carrying a residue outside ``gates.ALLOWED_AAS``, since a donor
+residue is copied verbatim and would otherwise reach the annotator:
 
 * ``supported_framework_candidates`` -- single/multi framework and terminal
   substitutions that PRESERVE the parent CDR3 (positions outside the CDRs).
@@ -107,6 +109,11 @@ def supported_framework_candidates(
             ]
             if not 2 <= len(changes) <= maximum_haplotype_mutations:
                 continue
+            # A haplotype copies donor residues verbatim, so (unlike the
+            # singles, which draw from ``allowed``) it can carry a residue
+            # outside the standard alphabet; drop the whole haplotype.
+            if any(donor[position] not in gates.ALLOWED_AAS for position in changes):
+                continue
             candidate = list(parent)
             for position in changes:
                 candidate[position] = donor[position]
@@ -173,6 +180,10 @@ def supported_lineage_candidates(
         ]
         if not 2 <= len(changes) <= maximum_haplotype_mutations:
             continue
+        # Same guard as the framework haplotypes: skip the whole haplotype if
+        # any changed position carries a non-standard residue.
+        if any(donor[position] not in gates.ALLOWED_AAS for position in changes):
+            continue
         candidate = list(parent)
         for position in changes:
             candidate[position] = donor[position]
@@ -235,6 +246,7 @@ def generate(
     framework_maximum_haplotype_mutations: int = 3,
     min_support: int = 1,
     limit: int | None = None,
+    stats: dict[str, int] | None = None,
 ) -> list[dict[str, str]]:
     """Emit edit-based children for a pool of same-length parent sequences.
 
@@ -245,7 +257,14 @@ def generate(
     are byte-identical to a parent (a cross single-edit) or to a previously
     emitted child are dropped. The result is deduped, deterministic for a fixed
     input, and ordered parent-first.
+
+    A parent whose regions cannot be located (``find_regions`` raises
+    ``ValueError``) is skipped rather than aborting the pool. Pass a ``stats``
+    dict to receive the count under ``malformed_parents``.
     """
+    if stats is None:
+        stats = {}
+    stats.setdefault("malformed_parents", 0)
     parent_list: list[str] = []
     seen: set[str] = set()
     for raw in parents:
@@ -270,7 +289,11 @@ def generate(
     parent_set = set(parent_list)
     records: list[dict[str, str]] = []
     for parent in parent_list:
-        regions = find_regions(parent)
+        try:
+            regions = find_regions(parent)
+        except ValueError:
+            stats["malformed_parents"] += 1
+            continue
         cdr_positions = set(regions.cdr_positions())
         protected: set[int] = set()
         for candidate, lane in supported_framework_candidates(

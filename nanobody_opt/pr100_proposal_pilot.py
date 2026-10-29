@@ -25,10 +25,10 @@ The framework applies the full charged CDR2 motif ``DISSQGDQTD`` to all nine
 genes ONLY in the long regime (L >= 12), FR1 ``E->D`` (1) + ``V->Q`` (2), and
 the FR2 hallmarks ``G->E`` (49) + ``L->R`` (50) with germline K (48). In the
 short regime (L < 12) the germline CDR2 is kept per gene instead of the charged
-motif, matching the rival's short-regime winning scaffold, AND the full 5EHS
-FR1 Q/K/T swaps (5/9/13/20) plus the FR2 ``K->Q`` (48) are restored. The full
-framework is short-regime only: with the charged long-regime CDR2 it would drop
-5/9 genes below the >= 82% V-identity gate.
+motif, matching the rival's short-regime winning scaffold, AND the winners'
+FR1 swaps V5/G9/V13/K20 are restored while FR2 keeps the germline K48
+(``GKERE``). The restored framework is short-regime only: with the charged
+long-regime CDR2 it would drop 5/9 genes below the >= 82% V-identity gate.
 """
 from __future__ import annotations
 
@@ -71,6 +71,11 @@ CDR2_MOTIF = 'DISSQGDQTD'
 
 # Below this CDR3 length the positional template and charged CDR2 are not used.
 CDR3_TEMPLATE_MIN_LENGTH = 12
+
+# Short-regime (L < 12) framework residues, IMGT position -> residue, carried by
+# the 5EHS winners: V5/G9/V13/K20 in FR1, with germline K48 kept in FR2
+# (``GKERE``). Applied on top of the shared D1/Q2 + E49/R50 hallmarks.
+SHORT_REGIME_FRAMEWORK = {5: 'V', 9: 'G', 13: 'V', 20: 'K', 48: 'K'}
 
 # Germline CDR2 (IMGT 56-65, gaps removed) per V gene, read from the ANARCI
 # 128-state reference panel in tests/pr100_germline.py. This is the reference
@@ -172,12 +177,12 @@ def scaffold(panels, gene):
 def _apply_framework_edits(prefix, rng, *, short_regime=False):
     """FR1 E->D (1) + V->Q (2); FR2 hallmarks G->E (49), L->R (50).
 
-    In the SHORT-CDR3 regime (L < 12) the full 5EHS framework is restored on
-    top of those: the FR1 Q(5)/T(9)/K(13)/K(20) swaps and the FR2 K->Q (48),
-    completing the ``GQERE`` FR2 motif. This is the framework the rival's
-    winning ``RAFDY`` scaffold carries and what drives ``design_iiptm`` 0.50;
-    with the germline CDR2 it stays >= 87.88% V identity for all nine genes,
-    above the >= 82% gate.
+    In the SHORT-CDR3 regime (L < 12) the winners' framework is restored on
+    top of those: ``SHORT_REGIME_FRAMEWORK`` sets V5/G9/V13/K20 and keeps the
+    germline K48, giving the ``GKERE`` FR2 motif. This is the framework the
+    rival's winning ``RAFDY`` scaffold carries and what drives ``design_iiptm``
+    0.50; with the germline CDR2 it stays above the >= 82% V-identity gate for
+    all nine genes (see ``test_short_regime_full_framework_v_identity_meets_gate``).
 
     The full framework is NOT applied in the long regime (L >= 12): the
     charged ``DISSQGDQTD`` CDR2 motif already consumes most of the >= 82%
@@ -187,11 +192,7 @@ def _apply_framework_edits(prefix, rng, *, short_regime=False):
     prefix[1] = 'D'
     prefix[2] = 'Q'
     if short_regime:
-        prefix[5] = 'Q'
-        prefix[9] = 'T'
-        prefix[13] = 'K'
-        prefix[20] = 'K'
-        prefix[48] = 'Q'
+        prefix.update(SHORT_REGIME_FRAMEWORK)
 
 
 def _cdr2_window(seq):
