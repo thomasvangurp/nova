@@ -4,48 +4,68 @@ This is a deliberately simple, reproducible baseline for the new challenge,
 not a production generator. Every emitted sequence still needs annotation,
 native developability, archive novelty and target scoring.
 
-The CDR3 sampling below is no longer a flat residue-weight table. It is the
-positional recipe measured from the dominant Q9NZQ7 rival (uid 8, coldkey
-5EHS..., leaderboard epochs 25984-25997, 12 winning CDR3s):
+CDR3 sampling is length-split:
 
-    CDR3 = anchor(2) + head(5) + body(L-10) + tail(3)
+* L >= 12 uses the positional recipe measured from the dominant Q9NZQ7 rival
+  (uid 8, coldkey 5EHS..., leaderboard epochs 25984-25997)::
 
-The anchor is ``A[RKQ]`` or ``S[RKQ]``, the head is ``YPHRF`` (P at position
-2, R at position 4, F at position 5, with H/Y alternating at positions 1 and
-3), the body is a G/S/Q/K/P/R/D/E hydrophilic linker (no aromatic, no
-aliphatic -- this is the stretch that grows with the loop), and the tail is
-the fixed IGHJ4-style junction tail ``FDY``. The one length-independent
-invariant is ZERO L/I/V/M/W anywhere in the CDR3.
+      CDR3 = anchor(2) + head(5) + body(L-10) + tail(3)
+
+  anchor ``A[RKQ]``/``S[RKQ]``, head ``YPHRF`` (P@2, R@4, F@5 fixed, H/Y
+  alternating at 1 and 3), body ``G/S/Q/K/P/R/D/E`` (no aromatic/aliphatic),
+  tail the fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
+* L < 12 falls back to the flat ``AMINO_ACID_WEIGHTS`` sampling (b188a10).
+  The positional template has no body below L=10 and its truncated head is the
+  rival's LOSING L=7 regime, so short loops keep the flat draw for diversity.
+
+The framework/CDR2 edits are gene-conditional on human V identity: the
+full FR1/FR2 set is always applied, but the charged/polar CDR2 motif is only
+applied where the worst-case V identity stays >= 84% (the 82% gate plus margin).
+Failing genes use a minimal hydrophilic CDR2 subset that still reaches CDR2
+hydro 4/17 ~= 0.235 (the PSH lever) with fewer mismatches.
 """
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 
-# CDR3 positional recipe constants (all measured, not guessed -- see module
-# docstring). ``CDR3_BODY`` is exactly the residue set observed in the rival's
-# body stretch; it deliberately excludes every aromatic and every aliphatic.
+AMINO_ACIDS = 'ADEFGHIKLMNPQRSTVWY'  # Do not introduce an extra cysteine.
+
+# Flat CDR3 residue weights (b188a10). Used ONLY for short loops (L < 12),
+# where the positional template has no body and its truncated head matches the
+# rival's losing L=7 regime. Zero weight removes N and the aliphatics
+# L/I/V/M/W from the draw; A/E/T keep a small positive floor.
+AMINO_ACID_WEIGHTS = {
+    'F': 3.0, 'Y': 3.0, 'D': 3.0, 'R': 3.0,
+    'H': 2.0, 'P': 2.0,
+    'S': 1.6, 'K': 1.4, 'Q': 1.2, 'G': 1.0,
+    'A': 0.6, 'E': 0.2, 'T': 0.2,
+    'N': 0.0, 'L': 0.0, 'I': 0.0, 'V': 0.0, 'M': 0.0, 'W': 0.0,
+}
+
+# CDR3 positional recipe constants for L >= 12.
 CDR3_ANCHOR_FIRST = 'AS'       # anchor first residue: A or S
 CDR3_ANCHOR_SECOND = 'RKQ'     # anchor second residue: basic/polar side chain
 CDR3_HEAD = 'YPHRF'            # head: P@2, R@4, F@5 fixed; H/Y alternate @1,@3
 CDR3_BODY = 'GSQKPRDE'         # body: hydrophilic linker, NO aromatic/aliphatic
-# The head ends in F; a G as the first body residue plus a later G would form
-# a false ``FGxG`` FR4 anchor for regions.find_regions. The rival's measured
+# The head ends in F; a G as the first body residue plus a later G would form a
+# false ``FGxG`` FR4 anchor for regions.find_regions. The rival's measured
 # bodies never open with G, so the first body residue excludes it.
 CDR3_BODY_FIRST = 'SQKPRDE'
 CDR3_TAIL = 'FDY'              # fixed IGHJ4-style junction tail
 
-# Charged/polar CDR2 motif. This is the first 10 residues of the rival's
-# 17-residue CDR2 window; the remaining 7 stay germline. Together they put the
-# CDR2 hydrophobic fraction at 4/17 ~= 0.235 (field median 0.353), which is the
-# surface-hydrophobic-patches (PSH) lever.
+# Full charged/polar CDR2 motif (first 10 of the 17-residue CDR2 window).
+# Applied only where V identity stays >= 84%; otherwise a minimal subset is used.
 CDR2_MOTIF = 'DISSQGDQTD'
 
+# Below this CDR3 length the positional template is not used.
+CDR3_TEMPLATE_MIN_LENGTH = 12
+
 # FR1 edits measured in framework.py (5EHS vs the epoch's allowed_v germline).
-# IMGT positions (the HMM panel numbering scaffold() reads): 2 is the mandatory
-# V->Q; 5/9/13/20 are the small set of Q/K/T swaps (framework.py FR1 positions
-# 5/9/12/19, which are IMGT 5/9/13/20 because of the IMGT-10 gap). Weights are
-# the observed target-residue counts across the rival's 12 entries.
+# IMGT positions: 2 is the mandatory V->Q; 5/9/13/20 are the small Q/K/T swap
+# set (framework.py FR1 positions 5/9/12/19 = IMGT 5/9/13/20 because of the
+# IMGT-10 gap). Weights are the observed target-residue counts.
 _FR1_TARGETS = {
     5: (('Q', 'E'), (5, 3)),
     9: (('T', 'S'), (4, 3)),
@@ -62,6 +82,13 @@ PROTOCOL = 'pr100-conditional-germline-loop-v1'
 
 def _seed(*parts):
     return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest(), 'big')
+
+
+def _weighted_choice(rng, *, exclude=None):
+    """Draw one amino acid with the hydrophilicity bias, optionally excluding one."""
+    population = [aa for aa in AMINO_ACIDS if aa != exclude]
+    weights = [AMINO_ACID_WEIGHTS[aa] for aa in population]
+    return rng.choices(population, weights=weights, k=1)[0]
 
 
 def select_references(rows, gene, length, stratum, *, limit=32):
@@ -93,15 +120,15 @@ def scaffold(panels, gene):
     if not {23, 49, 50, 104} <= prefix.keys():
         raise ValueError('incomplete framework reference')
     prefix.update({23: 'C', 49: 'E', 50: 'R', 104: 'C'})
-    # 5EHS uses a hybrid J: FR4 matches IGHJ6 ('WGQGTTVTVSS') while the CDR3
-    # junction tail is the IGHJ4-style 'FDY' (IGHJ4 IMGT 115-117). Read the
-    # suffix from IGHJ6 and the tail from IGHJ4 rather than one J allele, so the
-    # emitted FR4 and tail reproduce the rival exactly.
+    # 5EHS uses a hybrid J: the CDR3 junction tail is IGHJ4's 'FDY' (IMGT
+    # 115-117) while the FR4 suffix is IGHJ6's 'WGQGTTVTVSS' (IMGT >=118). The
+    # full J region therefore matches IGHJ4 best (13/14), so the reported
+    # reference allele is IGHJ4, not IGHJ6.
     tail = ''.join(panels['J'][j4[0]][p] for p in range(115, 118))
     suffix = ''.join(aa for p, aa in panels['J'][j6[0]].items() if p >= 118 and aa != '-')
     if len(tail) != 3 or '-' in tail or not suffix:
         raise ValueError('incomplete joining reference')
-    return prefix, tail, suffix, v[0], j6[0]
+    return prefix, tail, suffix, v[0], j4[0]
 
 
 def _apply_framework_edits(prefix, rng):
@@ -117,59 +144,153 @@ def _apply_framework_edits(prefix, rng):
         prefix[48] = 'Q'
 
 
-def _apply_cdr2_motif(base):
-    """Overwrite the first 10 residues of the 17-residue CDR2 window.
-
-    Anchors mirror ``regions.find_regions`` so the window here is the same one
-    ``hydrophobicity.score`` will read. Synthetic panels without the FR2
-    tryptophan anchor leave the window untouched (the motif is a recipe detail
-    that only applies to VHH-shaped assemblies).
-    """
-    c1 = base.find('C', 18, 28)
+def _cdr2_window(seq):
+    """Locate the 17-residue CDR2 window, mirroring regions.find_regions."""
+    c1 = seq.find('C', 18, 28)
     if c1 < 0:
-        return base
-    w = base.find('WVRQ', c1)
+        return None
+    w = seq.find('WVRQ', c1)
     if w < 0:
-        w = base.find('W', c1 + 8)
-    if w < 0 or w + 31 > len(base):
-        return base
-    window = base[w + 14:w + 31]
+        w = seq.find('W', c1 + 8)
+    if w < 0 or w + 31 > len(seq):
+        return None
+    window = seq[w + 14:w + 31]
     if len(window) != 17:
+        return None
+    return w + 14, window
+
+
+def _apply_cdr2_edit(base, replacement):
+    """Overwrite the first 10 residues of the 17-residue CDR2 window."""
+    found = _cdr2_window(base)
+    if found is None:
         return base
-    return base[:w + 14] + CDR2_MOTIF + window[10:] + base[w + 31:]
+    start, window = found
+    return base[:start] + replacement + window[10:] + base[start + 17:]
+
+
+def _minimal_cdr2(first10, tail7):
+    """Minimal hydrophilic CDR2 subset: convert hydrophobic first-10 residues.
+
+    Converts just enough hydrophobic residues (left to right) to bring the full
+    17-residue window to 4 hydrophobic residues (4/17 ~= 0.235, the PSH lever),
+    keeping identity mismatch count minimal.
+    """
+    tail_hydro = sum(1 for aa in tail7 if aa in 'FLIVMWYA')
+    budget = max(0, 4 - tail_hydro)
+    hydro_positions = [i for i, aa in enumerate(first10) if aa in 'FLIVMWYA']
+    convert = hydro_positions[:max(0, len(hydro_positions) - budget)]
+    out = list(first10)
+    for i in convert:
+        out[i] = 'D'
+    return ''.join(out)
+
+
+def v_identity(panels, gene, prefix, loop):
+    """Numeric V percent identity = matches / non-gap reference positions.
+
+    Mirrors utils/germline_identity.py: the query at each non-gap reference
+    position is the assembled prefix (IMGT 1-104) plus the first three CDR3
+    residues (IMGT 105-107, which the V germline still covers). Missing query
+    positions are mismatches.
+    """
+    alleles = sorted(k for k in panels['V'] if k.split('*')[0] == gene)
+    if not alleles:
+        raise ValueError('required human germline reference unavailable')
+    ref = panels['V'][alleles[0]]
+    nongap = [p for p in sorted(ref) if ref[p] != '-']
+    matches = 0
+    for p in nongap:
+        if p <= 104:
+            q = prefix.get(p, '-')
+        elif p == 105 and len(loop) >= 1:
+            q = loop[0]
+        elif p == 106 and len(loop) >= 2:
+            q = loop[1]
+        elif p == 107 and len(loop) >= 3:
+            q = loop[2]
+        else:
+            q = '-'
+        if q == ref[p]:
+            matches += 1
+    return matches, len(nongap), matches / len(nongap)
+
+
+def j_identity(panels, tail, suffix):
+    """Numeric J percent identity = max matches / non-gap positions over J alleles."""
+    region = tail + suffix
+    best = 0.0
+    for allele, ref in panels['J'].items():
+        nongap = [p for p in sorted(ref) if ref[p] != '-']
+        if not nongap:
+            continue
+        matches = 0
+        for p in nongap:
+            idx = p - 115
+            q = region[idx] if 0 <= idx < len(region) else '-'
+            if q == ref[p]:
+                matches += 1
+        best = max(best, matches / len(nongap))
+    return best
+
+
+def _cdr2_replacement(panels, gene, prefix):
+    """Gene-conditional CDR2 first-10 replacement (full motif or minimal subset).
+
+    The full DISSQGDQTD motif is applied only when the worst-case V identity
+    (worst anchor draw) stays >= 84%; otherwise the minimal hydrophilic subset
+    keeps CDR2 hydro at 4/17 with fewer mismatches.
+    """
+    alleles = sorted(k for k in panels['V'] if k.split('*')[0] == gene)
+    if not alleles:
+        raise ValueError('required human germline reference unavailable')
+    ref = panels['V'][alleles[0]]
+    seq = ''.join(ref[p] for p in sorted(ref) if ref[p] != '-')
+    found = _cdr2_window(seq)
+    if found is None:
+        return CDR2_MOTIF
+    _, window = found
+    first10, tail7 = window[:10], window[10:]
+    worst = ['S', 'Q', 'H']
+    base = ''.join(prefix[p] for p in sorted(prefix))
+    ordered = sorted(prefix)
+    full_prefix = {p: c for p, c in zip(ordered, _apply_cdr2_edit(base, CDR2_MOTIF))}
+    if v_identity(panels, gene, full_prefix, worst)[2] >= 0.84:
+        return CDR2_MOTIF
+    return _minimal_cdr2(first10, tail7)
 
 
 def _build_cdr3_loop(rng, loop_len):
-    """anchor(2) + head(min(5, loop_len-2)) + body(rest); tail is appended later.
+    """anchor(2) + head(5) + body(loop_len - 7); positional template for L >= 12.
 
-    ``loop_len`` is the requested CDR3 length minus the fixed 3-residue tail.
-    The body only exists when loop_len - 2 > 5 (i.e. requested length > 10).
-    The anchor first residue is chosen so the finished CDR3 (with the FDY tail)
-    stays under the 0.44 hydrophobic ceiling: A contributes exactly one more
-    hydrophobic residue than S, so it is only offered when that still fits.
+    ``loop_len`` is the requested CDR3 length minus the fixed 3-residue tail,
+    so ``loop_len >= 9`` here: the head is always full and the body always
+    exists (requested length > 10).
     """
-    head_len = min(5, max(0, loop_len - 2))
-    body_len = max(0, loop_len - 2 - head_len)
+    head_len = 5
+    body_len = loop_len - 2 - head_len
     second = rng.choice(CDR3_ANCHOR_SECOND)
-    if head_len == 1:
-        # A single Y here would put a 6-residue CDR3 at 0.5 hydrophobic.
-        head = 'H'
-    elif head_len >= 2:
-        template = list(CDR3_HEAD)  # 'YPHRF': P@2, R@4, F@5 fixed
-        hy = rng.choice(('H', 'Y'))
-        template[0] = hy
-        template[2] = 'Y' if hy == 'H' else 'H'
-        head = ''.join(template[:head_len])
-    else:
-        head = ''
-    body = ('' if body_len == 0
-            else rng.choice(CDR3_BODY_FIRST) +
+    template = list(CDR3_HEAD)  # 'YPHRF': P@2, R@4, F@5 fixed
+    hy = rng.choice(('H', 'Y'))
+    template[0] = hy
+    template[2] = 'Y' if hy == 'H' else 'H'
+    head = ''.join(template)
+    body = (rng.choice(CDR3_BODY_FIRST) +
             ''.join(rng.choice(CDR3_BODY) for _ in range(body_len - 1)))
-    core = head + body + CDR3_TAIL
-    hydro = sum(1 for aa in core if aa in 'FLIVMWYA')
-    first = (rng.choice(CDR3_ANCHOR_FIRST) if (hydro + 1) / (2 + len(core)) <= 0.44
-             else 'S')
+    first = rng.choice(CDR3_ANCHOR_FIRST)  # A and S both stay <= 0.44 for L >= 12
     return first + second + head + body
+
+
+def _graft_reference(rng, reference_cdr3, n):
+    """Trim/pad/mutate a donor CDR3 to the requested loop length (b188a10)."""
+    loop = list(reference_cdr3[:-3])
+    while len(loop) > n:
+        loop.pop(rng.randrange(len(loop)))
+    while len(loop) < n:
+        loop.insert(rng.randrange(len(loop)+1), _weighted_choice(rng))
+    for p in rng.sample(range(n), max(1, math.ceil(n/4))):
+        loop[p] = _weighted_choice(rng, exclude=loop[p])
+    return loop
 
 
 def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
@@ -178,17 +299,25 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal))
     prefix, tail, suffix, v, j = scaffold(panels, gene)
     _apply_framework_edits(prefix, rng)
-    base = _apply_cdr2_motif(''.join(prefix[p] for p in sorted(prefix)))
+    replacement = _cdr2_replacement(panels, gene, prefix)
+    base = _apply_cdr2_edit(''.join(prefix[p] for p in sorted(prefix)), replacement)
+    ordered = sorted(prefix)
+    prefix = {p: c for p, c in zip(ordered, base)}
+    n = length - len(tail)
     if reference_cdr3 is None:
-        loop_rng = rng
+        if length >= CDR3_TEMPLATE_MIN_LENGTH:
+            loop = _build_cdr3_loop(rng, n)
+        else:
+            loop = [_weighted_choice(rng) for _ in range(n)]
     else:
         if not isinstance(reference_cdr3, str) or len(reference_cdr3) < 3:
             raise ValueError('reference CDR3 unavailable')
-        # The reference only steers the draw: the emitted loop is still the
-        # positional template, never a flat random graft of donor residues.
-        loop_rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal,
-                                       reference_cdr3))
-    loop = _build_cdr3_loop(loop_rng, length - len(tail))
+        # Graft the donor's CDR3 chemistry (trim/pad/mutate), never erase it.
+        loop = _graft_reference(rng, reference_cdr3, n)
+    loop = list(loop)
+    _, _, fraction = v_identity(panels, gene, prefix, loop)
+    if fraction < 0.84:
+        raise ValueError('emitted V identity below the 84% margin')
     sequence = base + ''.join(loop) + tail + suffix
     return {'sequence': sequence, 'proposal_type': PROTOCOL,
             'requested_v': gene, 'requested_cdr3_length': length,

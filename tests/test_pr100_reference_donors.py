@@ -11,6 +11,7 @@ from nanobody_opt import pr100_live_worker as worker
 from nanobody_opt import pr100_proposal_pilot as proposal
 from nanobody_opt import pr100_reference_donors as donors
 from nanobody_opt import rules
+from pr100_germline import real_panel
 
 
 # Cell counts from the frozen 78-row bank, SHA256
@@ -18,14 +19,12 @@ from nanobody_opt import rules
 # Identities here are synthetic; no historical sequences or scores are needed.
 BANK_CELLS = {'IGHV3-23:16': 6, 'IGHV3-23:18': 68,
               'IGHV3-23:5': 2, 'IGHV3-7:16': 2}
-MISSING_CELLS = [(25969, 'IGHV3-23', 17), (25970, 'IGHV3-48', 17),
+MISSING_CELLS = [(25969, 'IGHV3-23', 11), (25970, 'IGHV3-48', 17),
                  (25971, 'IGHV3-43', 21)]
 
 
 def panel():
-    j = {p: ('A' if p >= 115 else '-') for p in range(1, 129)}
-    return {'V': {g + '*01': {p: 'A' for p in range(1, 129)} for g in proposal.GENES},
-            'J': {'IGHJ4*01': dict(j), 'IGHJ6*01': dict(j)}}
+    return real_panel()
 
 
 @pytest.fixture
@@ -43,7 +42,7 @@ def bank():
     return rows
 
 
-def challenge(epoch=25969, gene='IGHV3-23', length=17):
+def challenge(epoch=25969, gene='IGHV3-23', length=11):
     return {'epoch': epoch, 'target': rules.TARGET,
             'allowed_v': gene, 'allowed_cdr3_length': length}
 
@@ -58,7 +57,7 @@ def test_actual_missing_cells_choose_bounded_ranked_donors(bank, epoch, gene, le
     expected = 'same_v_nearby_length' if epoch == 25969 else 'other_v_nearby_length'
     assert evidence['selected_by_stratum'] == {expected: 16}
     if epoch == 25969:
-        assert [d['reference_length_distance'] for _, d in chosen] == [1]*16
+        assert [d['reference_length_distance'] for _, d in chosen] == [5]*6 + [6]*2 + [7]*8
     elif epoch == 25970:
         assert {d['reference_length_distance'] for _, d in chosen} == {1}
     else:
@@ -115,8 +114,10 @@ def test_fallback_refuses_bad_identity_or_cell(bank, change):
 def sequence_runner(monkeypatch, tmp_path, bank):
     from nanobody_opt import gates
     calls = []
+    # The real IGHV3 germline has 96 non-gap V positions (IMGT 1-104), then the
+    # CDR3 (loop + 3-residue tail), then the 11-residue FR4.
     monkeypatch.setitem(sys.modules, 'abnumber', types.SimpleNamespace(
-        Chain=lambda sequence, **kw: types.SimpleNamespace(cdr3_seq=sequence[104:-11])))
+        Chain=lambda sequence, **kw: types.SimpleNamespace(cdr3_seq=sequence[96:-11])))
     monkeypatch.setattr(worker.rules, 'pinned_config', lambda epoch: {'nanobody_requirements': {}})
     monkeypatch.setattr(worker.pr100_filter, 'validate_annotation_runtime', lambda: None)
     monkeypatch.setattr(worker.pr100_filter, 'helper', lambda name:
@@ -126,6 +127,12 @@ def sequence_runner(monkeypatch, tmp_path, bank):
     monkeypatch.setattr(worker.pr100_filter, 'annotation_identity', lambda: 'a'*64)
     monkeypatch.setattr(worker.rules, 'annotation_reason', lambda *a, **kw: '')
     monkeypatch.setattr(gates, 'check_sequence', lambda *a: False)
+    # This fixture exercises proposal/dedup/accounting, not the hydrophobic
+    # screen (covered in test_pr100_hydrophobicity.py). Short-loop flat-weight
+    # proposals are diverse but have ~35-60% CDR3-hydro outliers, so the cheap
+    # screen is held open here rather than conflating the two concerns.
+    from nanobody_opt import hydrophobicity
+    monkeypatch.setattr(hydrophobicity, 'check', lambda *a, **kw: (None, True))
     def forbidden(*a, **kw):
         raise AssertionError('no scientific profiling or novelty in this proposal test')
     monkeypatch.setattr(worker.pr100_filter, 'develop', forbidden)
@@ -160,7 +167,7 @@ def test_current_cell_fresh_unique_half_control_with_full_source_accounting(
     assert {r['sequence_hash'] for r in candidates}.isdisjoint(r['sequence_hash'] for r in bank)
     assert all(r['source'] == 'fresh_baseline_proposal' for r in candidates)
     assert all(r['requested_v'] == gene and r['requested_cdr3_length'] == length for r in candidates)
-    assert all(r['v_reference_allele'] == gene+'*01' and len(r['sequence']) == 104+length+11
+    assert all(r['v_reference_allele'] == gene+'*01' and len(r['sequence']) == 96+length+11
                for r in candidates)
     assert all(not r['acceptance_qualified'] and not r['target_scored'] for r in candidates)
     assert sum(r['reference_hash'] is not None for r in candidates) == 300
