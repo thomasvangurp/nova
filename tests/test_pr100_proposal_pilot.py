@@ -57,7 +57,7 @@ def test_short_loops_use_flat_weights_with_diversity():
 
 
 def test_long_loops_use_positional_template():
-    """L >= 12 emits anchor(2) + head(5) + body + tail(3), zero L/I/V/M/W."""
+    """L >= 12 emits the beat-recipe aromatic-Pro-aromatic head, zero L/I/V/M/W."""
     rng = random.Random(1)
     for length in (12, 16, 18, 23):
         for _ in range(20):
@@ -65,11 +65,40 @@ def test_long_loops_use_positional_template():
             assert len(cdr3) == length
             assert cdr3.endswith(CDR3_TAIL)
             assert not set('LIVMW') & set(cdr3)
-            assert cdr3[0] in 'AS' and cdr3[1] in 'RKQ'
+            assert cdr3[0] in 'SA' and cdr3[1] in 'KR'
             head, body = cdr3[2:7], cdr3[7:-3]
-            assert head[1] == 'P' and head[3] == 'R' and head[4] == 'F'
-            assert set(head[0] + head[2]) == {'H', 'Y'}
+            # F-P-[F/Y]-R-S: 2-aromatic kink, zero His, R at pos 4, S at pos 5.
+            assert head[0] == 'F' and head[1] == 'P' and head[3] == 'R' and head[4] == 'S'
+            assert head[2] in 'FY'
             assert all(aa in CDR3_BODY for aa in body)
+
+
+def test_short_loop_hydro_rejection_rate_in_expected_band():
+    """The cheap hydro screen trims ~35-60% of flat-weight short loops (not bypassed)."""
+    from nanobody_opt.hydrophobicity import check
+    panel = real_panel()
+    for length in (5, 8, 9, 11):
+        rejected = 0
+        total = 400
+        for ordinal in range(total):
+            seq = propose(panel, 'IGHV3-23', length, seed=9, ordinal=ordinal)['sequence']
+            if not check(seq)[1]:
+                rejected += 1
+        rate = rejected / total
+        assert 0.35 <= rate <= 0.60, (length, rate)
+
+
+def test_template_emissions_stay_under_hydro_ceiling():
+    """L >= 12 template emissions all pass the 0.44 CDR3 hydro ceiling."""
+    from nanobody_opt.hydrophobicity import score
+    panel = real_panel()
+    for gene in GENES:
+        for length in range(12, 24):
+            for ordinal in range(30):
+                seq = propose(panel, gene, length, seed=8, ordinal=ordinal)['sequence']
+                h = score(seq)
+                assert h['cdr3'] <= 0.44 + 1e-9, (gene, length, h['cdr3'])
+                assert h['cdr2'] <= 0.24 + 1e-9, (gene, length, h['cdr2'])
 
 
 def test_v_and_j_identity_meet_gate_margin():

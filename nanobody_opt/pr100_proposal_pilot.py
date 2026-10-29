@@ -6,14 +6,17 @@ native developability, archive novelty and target scoring.
 
 CDR3 sampling is length-split:
 
-* L >= 12 uses the positional recipe measured from the dominant Q9NZQ7 rival
-  (uid 8, coldkey 5EHS..., leaderboard epochs 25984-25997)::
+* L >= 12 uses the positional recipe derived from the beat-5EHS analysis
+  (the ``S-K-[F/Y]-P`` aromatic-Pro head) rather than the rival's ``YPHRF``
+  head::
 
       CDR3 = anchor(2) + head(5) + body(L-10) + tail(3)
 
-  anchor ``A[RKQ]``/``S[RKQ]``, head ``YPHRF`` (P@2, R@4, F@5 fixed, H/Y
-  alternating at 1 and 3), body ``G/S/Q/K/P/R/D/E`` (no aromatic/aliphatic),
-  tail the fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
+  anchor ``S-K``/``S-R``/``A-K`` (S preferred for the hydrophobic budget),
+  head ``F-P-[F/Y]-R-S`` (the 2-aromatic aromatic-Pro-aromatic kink at
+  positions 1-3, zero His, positive R at position 4, hydrophilic S at
+  position 5), body ``G/S/Q/T/P`` (neutral hydrophilic, no charges), tail the
+  fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
 * L < 12 falls back to the flat ``AMINO_ACID_WEIGHTS`` sampling (b188a10).
   The positional template has no body below L=10 and its truncated head is the
   rival's LOSING L=7 regime, so short loops keep the flat draw for diversity.
@@ -21,8 +24,9 @@ CDR3 sampling is length-split:
 The framework/CDR2 edits are gene-conditional on human V identity: the
 full FR1/FR2 set is always applied, but the charged/polar CDR2 motif is only
 applied where the worst-case V identity stays >= 84% (the 82% gate plus margin).
-Failing genes use a minimal hydrophilic CDR2 subset that still reaches CDR2
-hydro 4/17 ~= 0.235 (the PSH lever) with fewer mismatches.
+Failing genes use a minimal hydrophilic CDR2 subset (hydrophobic residues
+swapped to S, an uncharged hydrophilic) that still reaches CDR2 hydro 4/17
+~= 0.235 with fewer mismatches and no D-charge cluster.
 """
 from __future__ import annotations
 
@@ -44,16 +48,15 @@ AMINO_ACID_WEIGHTS = {
     'N': 0.0, 'L': 0.0, 'I': 0.0, 'V': 0.0, 'M': 0.0, 'W': 0.0,
 }
 
-# CDR3 positional recipe constants for L >= 12.
-CDR3_ANCHOR_FIRST = 'AS'       # anchor first residue: A or S
-CDR3_ANCHOR_SECOND = 'RKQ'     # anchor second residue: basic/polar side chain
-CDR3_HEAD = 'YPHRF'            # head: P@2, R@4, F@5 fixed; H/Y alternate @1,@3
-CDR3_BODY = 'GSQKPRDE'         # body: hydrophilic linker, NO aromatic/aliphatic
-# The head ends in F; a G as the first body residue plus a later G would form a
-# false ``FGxG`` FR4 anchor for regions.find_regions. The rival's measured
-# bodies never open with G, so the first body residue excludes it.
-CDR3_BODY_FIRST = 'SQKPRDE'
-CDR3_TAIL = 'FDY'              # fixed IGHJ4-style junction tail
+# CDR3 positional recipe constants for L >= 12 (beat-5EHS head swap).
+CDR3_ANCHOR_FIRST = 'SA'       # anchor first residue: S preferred, A allowed
+CDR3_ANCHOR_SECOND = 'KR'      # anchor second residue: positive K/R
+CDR3_HEAD = 'FPFRS'            # F-P-[F/Y]-R-S: 2-aromatic kink, R charge, S tail
+CDR3_BODY = 'GSQTP'            # body: neutral hydrophilic (G/S/Q/T/P), no charges
+# The head ends in S; a G as the first body residue is safe now, but keep the
+# first residue pool separate for a readable split.
+CDR3_BODY_FIRST = 'SQTP'
+CDR3_TAIL = 'FDY'              # fixed IGHJ4-style junction tail (J identity)
 
 # Full charged/polar CDR2 motif (first 10 of the 17-residue CDR2 window).
 # Applied only where V identity stays >= 84%; otherwise a minimal subset is used.
@@ -174,7 +177,9 @@ def _minimal_cdr2(first10, tail7):
 
     Converts just enough hydrophobic residues (left to right) to bring the full
     17-residue window to 4 hydrophobic residues (4/17 ~= 0.235, the PSH lever),
-    keeping identity mismatch count minimal.
+    keeping identity mismatch count minimal. The swap residue is S (uncharged
+    hydrophilic) rather than D, so no gene accumulates a run of adjacent
+    negative charges that would trip ``negative_charge_patches``.
     """
     tail_hydro = sum(1 for aa in tail7 if aa in 'FLIVMWYA')
     budget = max(0, 4 - tail_hydro)
@@ -182,7 +187,7 @@ def _minimal_cdr2(first10, tail7):
     convert = hydro_positions[:max(0, len(hydro_positions) - budget)]
     out = list(first10)
     for i in convert:
-        out[i] = 'D'
+        out[i] = 'S'
     return ''.join(out)
 
 
@@ -265,19 +270,22 @@ def _build_cdr3_loop(rng, loop_len):
 
     ``loop_len`` is the requested CDR3 length minus the fixed 3-residue tail,
     so ``loop_len >= 9`` here: the head is always full and the body always
-    exists (requested length > 10).
+    exists (requested length > 10). The head is the beat-recipe 2-aromatic kink
+    ``F-P-[F/Y]-R-S`` (aromatic-Pro-aromatic at positions 1-3, zero His,
+    positive R at position 4, hydrophilic S at position 5); the body is the
+    length-flexible neutral hydrophilic stretch.
     """
     head_len = 5
     body_len = loop_len - 2 - head_len
-    second = rng.choice(CDR3_ANCHOR_SECOND)
-    template = list(CDR3_HEAD)  # 'YPHRF': P@2, R@4, F@5 fixed
-    hy = rng.choice(('H', 'Y'))
-    template[0] = hy
-    template[2] = 'Y' if hy == 'H' else 'H'
+    second = rng.choice(CDR3_ANCHOR_SECOND)  # K or R
+    template = list(CDR3_HEAD)  # 'FPFRS': F-P-[F/Y]-R-S
+    template[2] = rng.choice('FY')  # aromatic at the kink's third position
     head = ''.join(template)
     body = (rng.choice(CDR3_BODY_FIRST) +
             ''.join(rng.choice(CDR3_BODY) for _ in range(body_len - 1)))
-    first = rng.choice(CDR3_ANCHOR_FIRST)  # A and S both stay <= 0.44 for L >= 12
+    # Head + tail carry 4 aromatics; an A anchor adds a fifth (5/12 = 0.417 is
+    # the worst case, still under the 0.44 ceiling), so A is always safe.
+    first = rng.choice(CDR3_ANCHOR_FIRST)
     return first + second + head + body
 
 
