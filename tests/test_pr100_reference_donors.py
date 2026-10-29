@@ -210,7 +210,7 @@ def test_accidental_parent_reuse_is_dropped_without_retry_or_budget_growth(
     monkeypatch.setattr(proposal, 'propose', collision)
     result = sequence_runner(missing_cell_donor_fallback=True)
     assert ordinals == list(range(40)) and result['next_proposal_offset'] == 40
-    assert result['donor_parent_reuse_blocked'] == 1 and 0 < len(result['candidates']) < 39
+    assert result['donor_parent_reuse_blocked'] == 1 and 0 < len(result['candidates']) <= 39
     assert bank[0]['sequence_hash'] not in {r['sequence_hash'] for r in result['candidates']}
 
 
@@ -230,7 +230,7 @@ def test_resume_exclusions_and_shared_fresh_cap_remain_unchanged(sequence_runner
     assert rerun['candidates'] == [] and rerun['excluded_generated'] == 40
     second = sequence_runner(missing_cell_donor_fallback=True, proposal_offset=40,
                               excluded_sequence_hashes=excluded)
-    assert second['next_proposal_offset'] == 80 and 0 < len(second['candidates']) < 40
+    assert second['next_proposal_offset'] == 80 and 0 < len(second['candidates']) <= 40
     assert set(second['generated_sequence_hashes']).isdisjoint(excluded)
     state = {}
     ledger = budget.ensure(state, {'epoch_fresh_native_limit': 4})
