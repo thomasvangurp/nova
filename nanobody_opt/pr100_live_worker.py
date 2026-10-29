@@ -108,6 +108,25 @@ def candidate_budget(job):
     return float(budget)
 
 
+def edit_generation_settings(job):
+    """Opt-in v2 edit-based generation lane; OFF unless the operator enables it.
+
+    The worker runs the de-novo scaffold lane by default. ``job['edit_generation']``
+    is an optional object -- ``{"enabled": true, "limit": 0}`` turns on the
+    edit-based lane (``pr100_edit_generation``, ported from
+    ``nanobody_opt/local_neighborhood``) fed by rival parents from the reference
+    bank. ``limit`` caps the number of emitted edit candidates (0 = unlimited).
+    """
+    supplied = job.get('edit_generation', {})
+    if not isinstance(supplied, dict) or not isinstance(supplied.get('enabled', False), bool):
+        raise ValueError('edit_generation must contain a boolean enabled flag')
+    settings = {'enabled': False, 'limit': 0, **supplied}
+    limit = settings['limit']
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise ValueError('edit_generation.limit must be a nonnegative integer')
+    return settings
+
+
 def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
                   on_result=None, on_result_error=None, timeout_seconds=None):
     """Profile a batch and report wall measured from slot acquisition.
@@ -140,6 +159,7 @@ def sequence_phase(job, directory):
     from nanobody_opt import gates, hydrophobicity, pr100_proposal_pilot as proposals
     from nanobody_opt import check_validator_novelty as novelty
     from nanobody_opt import pr100_reference_donors as donors
+    from nanobody_opt import pr100_edit_generation
     from collections import Counter
     expected = job['challenge']
     config = rules.pinned_config(expected['epoch'])
@@ -147,6 +167,7 @@ def sequence_phase(job, directory):
     archive = directory / 'archive.csv'
     if file_digest(archive) != job['archive_sha256']:
         raise ValueError('archive snapshot changed')
+    frame = pd.read_csv(archive)
     fallback = donors.enabled(job)
     bank_path = Path(job['references'])
     bank = json.loads(bank_path.read_text())['rows']
@@ -183,6 +204,28 @@ def sequence_phase(job, directory):
                      'reference_hash': ref['sequence_hash'] if ref else None,
                      **provenance})
         source_counts[provenance['reference_stratum']] += 1
+    edit_settings = edit_generation_settings(job)
+    edit_source_counts = Counter()
+    if edit_settings['enabled']:
+        # The edit lane mutates parents IN PLACE, preserving their CDR3 length
+        # and V gene. Only parents already matching this epoch's challenge cell
+        # can seed children that pass the wrong_epoch_* annotation gates, so the
+        # lane is fed by the bank rows that carry the exact cell. The public
+        # archive supplies the same-length background residue variation (and the
+        # haplotype donors), exactly as local_neighborhood uses the recent field.
+        edit_cell = f"{expected['allowed_v']}:{expected['allowed_cdr3_length']}"
+        edit_parents = [r['sequence'] for r in bank
+                        if edit_cell in r.get('cells', [])]
+        edit_background = [str(s).strip().upper() for s in frame['sequence']
+                           if isinstance(s, str) and s.strip()]
+        edit_candidates = pr100_edit_generation.generate(
+            edit_parents, background_sequences=edit_background,
+            limit=edit_settings['limit'] or None)
+        for edit in edit_candidates:
+            rows.append({**edit, 'source': 'edit_generation',
+                         'requested_v': expected['allowed_v'],
+                         'requested_cdr3_length': expected['allowed_cdr3_length']})
+            edit_source_counts[edit['proposal_lane']] += 1
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
     # Missing-cell donors are never candidates themselves. Also refuse an
     # accidental proposal collision with any parent; do not spend extra
@@ -212,7 +255,6 @@ def sequence_phase(job, directory):
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
                              'pr100_annotation': annotation})
-    frame = pd.read_csv(archive)
     # Novelty is deliberately NOT run here: the archive search now runs after
     # native developability, so it is spent only on native passers.
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'],
@@ -220,8 +262,13 @@ def sequence_phase(job, directory):
               'archive_rows': len(frame), 'existing_references': len(refs),
               'reference_coverage': reference_coverage,
               'proposal_source_counts': dict(source_counts),
+              'edit_generation_enabled': edit_settings['enabled'],
+              'edit_generation_source_counts': dict(edit_source_counts),
+              'edit_generation_candidates': sum(edit_source_counts.values()),
               'eligible_proposal_source_counts': dict(Counter(
                   r['reference_stratum'] for r in eligible if 'reference_stratum' in r)),
+              'eligible_edit_generation_source_counts': dict(Counter(
+                  r['proposal_lane'] for r in eligible if r.get('source') == 'edit_generation')),
               'donor_parent_reuse_blocked': len(parent_collisions),
               'proposals': proposals_wanted, 'annotation_reasons': reasons,
               'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposals_wanted,
