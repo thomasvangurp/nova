@@ -12,19 +12,24 @@ import random
 
 AMINO_ACIDS = 'ADEFGHIKLMNPQRSTVWY'  # Do not introduce an extra cysteine.
 
-# CDR3 residue weights derived from the measured winning distribution of the
-# dominant Q9NZQ7 rival (uid 8, coldkey 5EHS..., leaderboard epochs 25979-25997,
-# 16 winning CDR3s / 201 residues). Their winning recipe concentrates on
-# aromatic F/Y stacking contacts and charged D/R salt bridges, plus H/P, keeps
-# Q/S/K/G moderate, and leaves the aliphatics (L/I/V/M/W) and N/A/T/E at or
-# near zero. Measured fractions: Y .159, R .134, F .129, D .124, P .090,
+# CDR3 residue weights replicating the measured winning recipe of the dominant
+# Q9NZQ7 rival (uid 8, coldkey 5EHS..., leaderboard epochs 25979-25997, 16
+# winning CDR3s / 201 residues). Their recipe concentrates on aromatic F/Y
+# stacking contacts and charged D/R salt bridges, plus H/P, keeps S/K/Q/G
+# moderate, uses A/E/T only sparsely, and never uses N or the aliphatics
+# L/I/V/M/W. Measured fractions: Y .159, R .134, F .129, D .124, P .090,
 # S .080, K .060, H .055, Q .050, A .040, G .040, E .025, T .015, and 0 for
 # N/L/I/V/M/W. H and P are lifted above their raw frequency because histidine
 # adds aromatic stacking plus H-bonds and proline breaks the loop for paratope
-# exposure; every residue keeps a floor so no option is removed from sampling.
-# Expected CDR3 hydrophobic fraction is 8.3/25.0 ~= 0.33 -- matching the rival's
-# ~33% surface hydrophobicity and safely below the 0.44 sequence pre-screen
-# ceiling, which trims any overshoot.
+# exposure. N and the aliphatics get a weight of exactly zero, so
+# ``random.choices`` never returns them; A/E/T keep a small positive floor (A
+# slightly larger: it is the only non-F/Y residue in the hydrophobic set, so it
+# holds the expected CDR3 hydrophobic fraction near 0.30). The weights are
+# length-agnostic -- the same table is applied at whatever CDR3 length the
+# epoch demands.
+# Expected CDR3 hydrophobic fraction (FLIVMWYA weight share) is
+# (3+3+0.6)/22.2 ~= 0.30 -- under the rival's ~33% surface hydrophobicity and
+# safely below the 0.44 sequence pre-screen ceiling, which trims any overshoot.
 AMINO_ACID_WEIGHTS = {
     # Favour: aromatic F/Y stacking contacts and charged D/R salt bridges.
     'F': 3.0, 'Y': 3.0, 'D': 3.0, 'R': 3.0,
@@ -32,10 +37,13 @@ AMINO_ACID_WEIGHTS = {
     'H': 2.0, 'P': 2.0,
     # Moderate: solubility and framework compatibility (S/K/Q/G).
     'S': 1.6, 'K': 1.4, 'Q': 1.2, 'G': 1.0,
-    # Deprioritised: A/T/N/E (rival uses sparsely) and the aliphatics
-    # L/I/V/M/W (rival uses not at all); the floor keeps them available.
-    'A': 0.8, 'E': 0.6, 'T': 0.5, 'N': 0.4,
-    'L': 0.3, 'I': 0.3, 'V': 0.3, 'M': 0.3, 'W': 0.3,
+    # Tiny: A/E/T, used sparsely by the rival. A carries the largest share of
+    # the trio because it is the only remaining hydrophobic residue besides
+    # F/Y and keeps the expected CDR3 hydrophobic fraction near 0.30.
+    'A': 0.6, 'E': 0.2, 'T': 0.2,
+    # Zero: N and the aliphatics L/I/V/M/W, absent from the rival's winning
+    # CDR3s. A zero weight removes them from the draw entirely.
+    'N': 0.0, 'L': 0.0, 'I': 0.0, 'V': 0.0, 'M': 0.0, 'W': 0.0,
 }
 STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
