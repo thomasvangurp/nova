@@ -153,6 +153,17 @@ def test_developability_flag_fails_closed_without_profile(bank):
     assert evidence['developability_out_of_range_selected'] == 16
 
 
+@pytest.mark.parametrize('in_range_cell', ['IGHV3-7:16', 'IGHV3-23:18'])
+def test_v_match_and_length_distance_precede_developability(bank, in_range_cell):
+    preferred = copy.deepcopy(next(r for r in bank if r['cells'] == ['IGHV3-23:16']))
+    in_range = copy.deepcopy(next(r for r in bank if r['cells'] == [in_range_cell]))
+    in_range['developability'] = _developability()
+    for rows in ([in_range, preferred], [preferred, in_range]):
+        _, chosen, _ = donors.select(rows, challenge(), 1, fallback=True)
+        assert chosen[0][0]['sequence_hash'] == preferred['sequence_hash']
+        assert chosen[0][1]['cdr_developability_in_range'] is False
+
+
 def test_out_of_range_donor_is_dropped_when_in_range_fills_slots(bank):
     # Sixteen in-range donors fill every slot; the two out-of-range donors are
     # deprioritised out of the selection without shrinking the count.

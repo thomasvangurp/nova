@@ -136,7 +136,7 @@ def select(bank, challenge, slots, *, fallback=False, family_cap=None, cdr3_of=N
         # Developability deprioritises (fail-closed), never drops: in-range
         # donors sort ahead of out-of-range donors at equal stratum/distance,
         # and the total selection count is unchanged.
-        rank = (not in_range, other_v, distance, rules.digest([challenge['epoch'], digest]))
+        rank = (other_v, distance, not in_range, rules.digest([challenge['epoch'], digest]))
         # A repeated bank identity is one donor. Its metadata must agree.
         if digest in found and found[digest][2] != descriptor:
             raise ValueError('conflicting native-pass donor cells')

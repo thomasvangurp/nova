@@ -325,15 +325,15 @@ def _diagnostic_sequence_hash(sequence):
         return None
 
 
-def verified_fleet(payload, epoch, block_hash, epoch_length=None):
+def verified_fleet(payload, epoch, block_hash, epoch_length=None, *, get_block_hash=None):
     """Filter to independently checked current-challenge checkpointed entries.
 
     A same-target artifact for the immediately preceding epoch is accepted as a
     documented downgrade: when the controller missed this epoch's publication
     window, last epoch's independently validated sequences are a worse
     submission than this epoch's and a far better one than nothing. The
-    downgrade re-verifies the artifact against ITS OWN challenge (carried in the
-    artifact) rather than the current one, and is reported via
+    downgrade attests the historical challenge with ``get_block_hash`` and
+    rechecks each sequence against the current V gene and CDR3 length, reported via
     ``handoff_diagnostics["stale_epoch_downgrade"]`` so the commit is never
     silent. The target check remains strict against the current target, and a
     missing, older or pre-PR100 artifact is still refused.
@@ -343,6 +343,7 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
         raise ValueError("independently supplied epoch length is required")
     config = pinned_config(epoch)
     expected = challenge(config, epoch, block_hash, epoch_length)
+    current_expected = expected
     stale_epoch_downgrade = False
     if not isinstance(payload, dict) or payload.get("target") != expected["target"]:
         raise ValueError("nanobody fleet target or epoch is stale")
@@ -355,17 +356,25 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
                 or payload_challenge.get("target") != expected["target"]):
             raise ValueError("nanobody fleet target or epoch is stale")
         previous_epoch_length = payload_challenge.get("epoch_length")
-        if type(previous_epoch_length) is not int or previous_epoch_length < 1:
+        # The chain-attested tempo must also bind the historical block height;
+        # reject a changed tempo rather than trust an artifact-supplied height.
+        if type(previous_epoch_length) is not int or previous_epoch_length != epoch_length:
             raise ValueError("nanobody fleet target or epoch is stale")
+        if not callable(get_block_hash):
+            raise ValueError("historical chain hash lookup is required for stale reuse")
+        try:
+            previous_block_hash = get_block_hash((epoch - 1) * epoch_length)
+        except Exception:
+            raise ValueError("historical chain hash lookup failed") from None
         previous_expected = challenge(
             pinned_config(epoch - 1), epoch - 1,
-            payload_challenge.get("epoch_start_block_hash"),
+            previous_block_hash,
             previous_epoch_length)
         if payload_challenge != previous_expected:
             raise ValueError("nanobody fleet target or epoch is stale")
         expected = previous_expected
         epoch = epoch - 1
-        block_hash = payload_challenge["epoch_start_block_hash"]
+        block_hash = previous_expected["epoch_start_block_hash"]
         epoch_length = previous_epoch_length
         stale_epoch_downgrade = True
     if (not isinstance(payload.get("submissions", []), list)
@@ -400,6 +409,14 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None):
             if found != sequence:
                 rejected(sequence, "checkpoint_sequence_mismatch")
                 continue
+            if stale_epoch_downgrade:
+                reason = annotation_reason(
+                    checkpoint["pr100_evidence"]["annotation"],
+                    config["nanobody_requirements"], sequence=sequence,
+                    epoch_challenge=current_expected)
+                if reason:
+                    rejected(sequence, reason)
+                    continue
             if checkpoint.get("publication_stage") == "live_trial":
                 archive = payload.get("archive_sha256")
                 reason = ("novelty_archive_invalid" if not isinstance(archive, str)

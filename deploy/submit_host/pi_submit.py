@@ -131,7 +131,7 @@ def attest_epoch(chain, epoch: int, netuid: int) -> dict:
 def sequences_by_uid(artifact: dict, epoch: int,
                      allow_stale: bool = False,
                      crew=None, epoch_start_block_hash=None,
-                     epoch_length=None) -> dict[int, str]:
+                     epoch_length=None, get_block_hash=None) -> dict[int, str]:
     """The nanobody half. A stale artifact is refused, not silently reused.
 
     Its epoch is checked because the producer rewrites it every epoch and a
@@ -146,14 +146,16 @@ def sequences_by_uid(artifact: dict, epoch: int,
 
     For PR100 the same downgrade is performed by ``rules.verified_fleet``: a
     same-target artifact for the immediately preceding epoch is re-verified
-    against its own challenge and marked ``stale_epoch_downgrade``, so a
+    against its chain-attested historical challenge and current V/length
+    eligibility, then marked ``stale_epoch_downgrade``, so a
     controller that missed the publication window degrades to last epoch's
     validated sequences instead of committing zero.
     """
     from nanobody_opt import rules
     stale_epoch_downgrade = False
     if epoch >= rules.ACTIVATION_EPOCH:
-        verified = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length)
+        verified = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length,
+                                        get_block_hash=get_block_hash)
         print(json.dumps(dict(event="pr100_fleet_verification", epoch=epoch,
                               **verified["handoff_diagnostics"])), flush=True)
         artifact = verified
@@ -627,9 +629,11 @@ def main(argv=None) -> int:
     from nanobody_opt import rules
     epoch_hash = None
     epoch_length = None
+    get_block_hash = None
     if arguments.epoch >= rules.ACTIVATION_EPOCH:
         import bittensor as bt
         chain = bt.Subtensor(network=arguments.network)
+        get_block_hash = chain.determine_block_hash
         attestation = attest_epoch(chain, arguments.epoch, arguments.netuid)
         epoch_hash = attestation["epoch_start_block_hash"]
         epoch_length = attestation["epoch_length"]
@@ -638,7 +642,8 @@ def main(argv=None) -> int:
         sequences = sequences_by_uid(_load(Path(arguments.nanobody)), arguments.epoch,
                                      allow_stale=arguments.allow_stale_nanobody,
                                      crew=crew, epoch_start_block_hash=epoch_hash,
-                                     epoch_length=epoch_length)
+                                     epoch_length=epoch_length,
+                                     get_block_hash=get_block_hash)
     except (ValueError, TypeError, KeyError, OSError) as error:
         if arguments.epoch < rules.ACTIVATION_EPOCH:
             raise
