@@ -6,27 +6,24 @@ native developability, archive novelty and target scoring.
 
 CDR3 sampling is length-split:
 
-* L >= 12 uses the positional recipe derived from the beat-5EHS analysis
-  (the ``S-K-[F/Y]-P`` aromatic-Pro head) rather than the rival's ``YPHRF``
-  head::
+* L >= 12 uses the positional recipe derived from the beat-5EHS analysis and
+  the actually-submitted beater sequences::
 
       CDR3 = anchor(2) + head(5) + body(L-10) + tail(3)
 
-  anchor ``S-K``/``S-R``/``A-K`` (S preferred for the hydrophobic budget),
-  head ``F-P-[F/Y]-R-S`` (the 2-aromatic aromatic-Pro-aromatic kink at
-  positions 1-3, zero His, positive R at position 4, hydrophilic S at
-  position 5), body ``G/S/Q/T/P`` (neutral hydrophilic, no charges), tail the
+  anchor ``S-K``/``S-R``/``A-K``, head ``Y-P-Y-[R/H]-F`` (three aromatics,
+  positive R or relocated H at position 4), body drawn from the charged,
+  balanced beater pool ``D/K/T/R/S/E`` (each K/R paired with D/E), tail the
   fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
 * L < 12 falls back to the flat ``AMINO_ACID_WEIGHTS`` sampling (b188a10).
   The positional template has no body below L=10 and its truncated head is the
   rival's LOSING L=7 regime, so short loops keep the flat draw for diversity.
 
-The framework/CDR2 edits are gene-conditional on human V identity: the
-full FR1/FR2 set is always applied, but the charged/polar CDR2 motif is only
-applied where the worst-case V identity stays >= 84% (the 82% gate plus margin).
-Failing genes use a minimal hydrophilic CDR2 subset (hydrophobic residues
-swapped to S, an uncharged hydrophilic) that still reaches CDR2 hydro 4/17
-~= 0.235 with fewer mismatches and no D-charge cluster.
+The framework applies the full charged CDR2 motif ``DISSQGDQTD`` to all nine
+genes (the salt-bridge network that buries the CDR3 aromatics and keeps surface
+PSH low), FR1 ``E->D`` (1) + ``V->Q`` (2), and the FR2 hallmarks ``G->E`` (49)
++ ``L->R`` (50) with germline K (48). The 5EHS FR1 Q/K/T swaps and FR2 ``K->Q``
+are dropped to keep the full CDR2 motif within the >= 82% V-identity gate.
 """
 from __future__ import annotations
 
@@ -51,30 +48,21 @@ AMINO_ACID_WEIGHTS = {
 # CDR3 positional recipe constants for L >= 12 (beat-5EHS head swap).
 CDR3_ANCHOR_FIRST = 'SA'       # anchor first residue: S preferred, A allowed
 CDR3_ANCHOR_SECOND = 'KR'      # anchor second residue: positive K/R
-CDR3_HEAD = 'FPFRS'            # F-P-[F/Y]-R-S: 2-aromatic kink, R charge, S tail
-CDR3_BODY = 'GSQTP'            # body: neutral hydrophilic (G/S/Q/T/P), no charges
-# The head ends in S; a G as the first body residue is safe now, but keep the
-# first residue pool separate for a readable split.
-CDR3_BODY_FIRST = 'SQTP'
+CDR3_HEAD = 'YPYRF'            # Y-P-Y-[R/H]-F: the submitted beater head
+# Body is the beater DKTRDSE pattern with the extra D dropped and the D/E spaced
+# (D-K-T-R-E-S): each positive K/R is paired with a negative D/E, and never more
+# than one negative per cycle, so the charged body buries the CDR3 aromatics
+# without clustering negative charge patches.
+CDR3_BODY_PATTERN = 'DKTRES'
 CDR3_TAIL = 'FDY'              # fixed IGHJ4-style junction tail (J identity)
 
 # Full charged/polar CDR2 motif (first 10 of the 17-residue CDR2 window).
-# Applied only where V identity stays >= 84%; otherwise a minimal subset is used.
+# Applied to all nine genes: the charged D/Q motif is the salt-bridge network
+# that buries the CDR3 aromatics and keeps surface PSH low.
 CDR2_MOTIF = 'DISSQGDQTD'
 
 # Below this CDR3 length the positional template is not used.
 CDR3_TEMPLATE_MIN_LENGTH = 12
-
-# FR1 edits measured in framework.py (5EHS vs the epoch's allowed_v germline).
-# IMGT positions: 2 is the mandatory V->Q; 5/9/13/20 are the small Q/K/T swap
-# set (framework.py FR1 positions 5/9/12/19 = IMGT 5/9/13/20 because of the
-# IMGT-10 gap). Weights are the observed target-residue counts.
-_FR1_TARGETS = {
-    5: (('Q', 'E'), (5, 3)),
-    9: (('T', 'S'), (4, 3)),
-    13: (('K', 'Q'), (5, 1)),
-    20: (('K', 'Q', 'T'), (2, 3, 1)),
-}
 
 STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
@@ -135,16 +123,14 @@ def scaffold(panels, gene):
 
 
 def _apply_framework_edits(prefix, rng):
-    """FR1 V->Q plus the measured Q/K/T swaps, and the FR2 ``GKGLE -> GQERE``.
+    """FR1 E->D (1) + V->Q (2); FR2 hallmarks G->E (49), L->R (50).
 
-    FR2 ``G->E`` (IMGT 49) and ``L->R`` (IMGT 50) are already applied by
-    scaffold()'s hallmark update; only ``K->Q`` (IMGT 48) completes the motif.
+    The 5EHS FR1 Q/K/T swaps at 5/9/13/20 and the FR2 K->Q (48) are dropped so
+    the full charged CDR2 motif fits the >= 82% V-identity budget. FR2 keeps
+    germline K (``GKERE``).
     """
+    prefix[1] = 'D'
     prefix[2] = 'Q'
-    for pos, (population, weights) in _FR1_TARGETS.items():
-        prefix[pos] = rng.choices(population, weights=weights, k=1)[0]
-    if 48 in prefix:
-        prefix[48] = 'Q'
 
 
 def _cdr2_window(seq):
@@ -170,25 +156,6 @@ def _apply_cdr2_edit(base, replacement):
         return base
     start, window = found
     return base[:start] + replacement + window[10:] + base[start + 17:]
-
-
-def _minimal_cdr2(first10, tail7):
-    """Minimal hydrophilic CDR2 subset: convert hydrophobic first-10 residues.
-
-    Converts just enough hydrophobic residues (left to right) to bring the full
-    17-residue window to 4 hydrophobic residues (4/17 ~= 0.235, the PSH lever),
-    keeping identity mismatch count minimal. The swap residue is S (uncharged
-    hydrophilic) rather than D, so no gene accumulates a run of adjacent
-    negative charges that would trip ``negative_charge_patches``.
-    """
-    tail_hydro = sum(1 for aa in tail7 if aa in 'FLIVMWYA')
-    budget = max(0, 4 - tail_hydro)
-    hydro_positions = [i for i, aa in enumerate(first10) if aa in 'FLIVMWYA']
-    convert = hydro_positions[:max(0, len(hydro_positions) - budget)]
-    out = list(first10)
-    for i in convert:
-        out[i] = 'S'
-    return ''.join(out)
 
 
 def v_identity(panels, gene, prefix, loop):
@@ -239,53 +206,28 @@ def j_identity(panels, tail, suffix):
     return best
 
 
-def _cdr2_replacement(panels, gene, prefix):
-    """Gene-conditional CDR2 first-10 replacement (full motif or minimal subset).
-
-    The full DISSQGDQTD motif is applied only when the worst-case V identity
-    (worst anchor draw) stays >= 84%; otherwise the minimal hydrophilic subset
-    keeps CDR2 hydro at 4/17 with fewer mismatches.
-    """
-    alleles = sorted(k for k in panels['V'] if k.split('*')[0] == gene)
-    if not alleles:
-        raise ValueError('required human germline reference unavailable')
-    ref = panels['V'][alleles[0]]
-    seq = ''.join(ref[p] for p in sorted(ref) if ref[p] != '-')
-    found = _cdr2_window(seq)
-    if found is None:
-        return CDR2_MOTIF
-    _, window = found
-    first10, tail7 = window[:10], window[10:]
-    worst = ['S', 'Q', 'H']
-    base = ''.join(prefix[p] for p in sorted(prefix))
-    ordered = sorted(prefix)
-    full_prefix = {p: c for p, c in zip(ordered, _apply_cdr2_edit(base, CDR2_MOTIF))}
-    if v_identity(panels, gene, full_prefix, worst)[2] >= 0.84:
-        return CDR2_MOTIF
-    return _minimal_cdr2(first10, tail7)
-
-
 def _build_cdr3_loop(rng, loop_len):
     """anchor(2) + head(5) + body(loop_len - 7); positional template for L >= 12.
 
     ``loop_len`` is the requested CDR3 length minus the fixed 3-residue tail,
     so ``loop_len >= 9`` here: the head is always full and the body always
-    exists (requested length > 10). The head is the beat-recipe 2-aromatic kink
-    ``F-P-[F/Y]-R-S`` (aromatic-Pro-aromatic at positions 1-3, zero His,
-    positive R at position 4, hydrophilic S at position 5); the body is the
-    length-flexible neutral hydrophilic stretch.
+    exists (requested length > 10). The head is the submitted beater head
+    ``Y-P-Y-[R/H]-F`` (three aromatics buried by the charged body); the body is
+    the beater-pattern ``D-K-T-R-E-S`` cycled to the requested length (each
+    positive K/R paired with a negative D/E, spaced so negatives never cluster).
     """
     head_len = 5
     body_len = loop_len - 2 - head_len
     second = rng.choice(CDR3_ANCHOR_SECOND)  # K or R
-    template = list(CDR3_HEAD)  # 'FPFRS': F-P-[F/Y]-R-S
-    template[2] = rng.choice('FY')  # aromatic at the kink's third position
+    template = list(CDR3_HEAD)  # 'YPYRF': Y-P-Y-[R/H]-F
+    template[3] = rng.choice('RH')  # R (charge) or H (relocated His)
     head = ''.join(template)
-    body = (rng.choice(CDR3_BODY_FIRST) +
-            ''.join(rng.choice(CDR3_BODY) for _ in range(body_len - 1)))
-    # Head + tail carry 4 aromatics; an A anchor adds a fifth (5/12 = 0.417 is
-    # the worst case, still under the 0.44 ceiling), so A is always safe.
-    first = rng.choice(CDR3_ANCHOR_FIRST)
+    body = ''.join(CDR3_BODY_PATTERN[i % len(CDR3_BODY_PATTERN)]
+                   for i in range(body_len))
+    # Head + tail carry 5 aromatics; an A anchor adds a sixth. Only offer A when
+    # 6/length stays <= 0.44 (length >= 14); shorter loops force S.
+    length = loop_len + 3
+    first = rng.choice(CDR3_ANCHOR_FIRST) if 6 / length <= 0.44 else 'S'
     return first + second + head + body
 
 
@@ -307,8 +249,7 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal))
     prefix, tail, suffix, v, j = scaffold(panels, gene)
     _apply_framework_edits(prefix, rng)
-    replacement = _cdr2_replacement(panels, gene, prefix)
-    base = _apply_cdr2_edit(''.join(prefix[p] for p in sorted(prefix)), replacement)
+    base = _apply_cdr2_edit(''.join(prefix[p] for p in sorted(prefix)), CDR2_MOTIF)
     ordered = sorted(prefix)
     prefix = {p: c for p, c in zip(ordered, base)}
     n = length - len(tail)
@@ -324,8 +265,8 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
         loop = _graft_reference(rng, reference_cdr3, n)
     loop = list(loop)
     _, _, fraction = v_identity(panels, gene, prefix, loop)
-    if fraction < 0.84:
-        raise ValueError('emitted V identity below the 84% margin')
+    if fraction < 0.82:
+        raise ValueError('emitted V identity below the 82% gate')
     sequence = base + ''.join(loop) + tail + suffix
     return {'sequence': sequence, 'proposal_type': PROTOCOL,
             'requested_v': gene, 'requested_cdr3_length': length,

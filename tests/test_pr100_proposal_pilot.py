@@ -2,8 +2,9 @@
 import random
 
 from nanobody_opt.pr100_proposal_pilot import (
-    AMINO_ACID_WEIGHTS, AMINO_ACIDS, CELLS, GENES, CDR3_BODY, CDR3_TAIL,
-    j_identity, propose, dry_run, v_identity, _build_cdr3_loop, _weighted_choice,
+    AMINO_ACID_WEIGHTS, AMINO_ACIDS, CELLS, GENES, CDR3_BODY_PATTERN,
+    CDR3_TAIL, j_identity, propose, dry_run, v_identity, _build_cdr3_loop,
+    _weighted_choice,
 )
 from nanobody_opt.regions import find_regions
 from pr100_germline import real_panel
@@ -57,7 +58,7 @@ def test_short_loops_use_flat_weights_with_diversity():
 
 
 def test_long_loops_use_positional_template():
-    """L >= 12 emits the beat-recipe aromatic-Pro-aromatic head, zero L/I/V/M/W."""
+    """L >= 12 emits the submitted beater head + charged body, zero L/I/V/M/W."""
     rng = random.Random(1)
     for length in (12, 16, 18, 23):
         for _ in range(20):
@@ -67,10 +68,12 @@ def test_long_loops_use_positional_template():
             assert not set('LIVMW') & set(cdr3)
             assert cdr3[0] in 'SA' and cdr3[1] in 'KR'
             head, body = cdr3[2:7], cdr3[7:-3]
-            # F-P-[F/Y]-R-S: 2-aromatic kink, zero His, R at pos 4, S at pos 5.
-            assert head[0] == 'F' and head[1] == 'P' and head[3] == 'R' and head[4] == 'S'
-            assert head[2] in 'FY'
-            assert all(aa in CDR3_BODY for aa in body)
+            # Y-P-Y-[R/H]-F: three aromatics, R or H at position 4.
+            assert head[0] == 'Y' and head[1] == 'P' and head[2] == 'Y' and head[4] == 'F'
+            assert head[3] in 'RH'
+            # Body is the DKTRDSE pattern cycled to the requested length.
+            assert body == CDR3_BODY_PATTERN * (len(body) // len(CDR3_BODY_PATTERN)) + \
+                CDR3_BODY_PATTERN[:len(body) % len(CDR3_BODY_PATTERN)]
 
 
 def test_short_loop_hydro_rejection_rate_in_expected_band():
