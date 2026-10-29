@@ -726,10 +726,10 @@ def validate_config(config):
     if len(set(gpus)) != len(gpus):
         raise ValueError('gpu list contains a duplicate id')
     native_gpus = config.get('native_gpu')
-    if 'native_gpu' in config and (not isinstance(native_gpus, list) or not 1 <= len(native_gpus) <= 4
+    if 'native_gpu' in config and (not isinstance(native_gpus, list) or not 1 <= len(native_gpus) <= 8
             or any(type(g) is not int or g < 0 for g in native_gpus)
             or len(set(native_gpus)) != len(native_gpus)):
-        raise ValueError('native_gpu must contain one to four distinct non-negative gpu ids')
+        raise ValueError('native_gpu must contain one to eight distinct non-negative gpu ids')
     for key in ('state_root', 'publication_path'):
         if not Path(config[key]).is_absolute():
             raise ValueError(f'{key} must be an absolute path')

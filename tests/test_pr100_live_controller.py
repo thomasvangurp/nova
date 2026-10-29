@@ -170,7 +170,7 @@ def test_native_screen_job_has_lease_context_but_keeps_cpu_confirmation_environm
     assert scoring['spec']['environment']['CUDA_VISIBLE_DEVICES'] == '0,1'
 
 
-@pytest.mark.parametrize('devices', [[], [1, 1], [True], [-1], [0, 1, 2, 3, 4], '5,6,7'])
+@pytest.mark.parametrize('devices', [[], [1, 1], [True], [-1], list(range(9)), '5,6,7'])
 def test_native_screen_rejects_invalid_device_allocation(tmp_path, monkeypatch, devices):
     value = config(tmp_path, native_gpu=devices)
     monkeypatch.setattr(controller, 'verify_build_stamp', lambda _: None)
