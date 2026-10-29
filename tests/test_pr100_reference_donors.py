@@ -18,13 +18,14 @@ from nanobody_opt import rules
 # Identities here are synthetic; no historical sequences or scores are needed.
 BANK_CELLS = {'IGHV3-23:16': 6, 'IGHV3-23:18': 68,
               'IGHV3-23:5': 2, 'IGHV3-7:16': 2}
-MISSING_CELLS = [(25969, 'IGHV3-23', 11), (25970, 'IGHV3-48', 17),
+MISSING_CELLS = [(25969, 'IGHV3-23', 17), (25970, 'IGHV3-48', 17),
                  (25971, 'IGHV3-43', 21)]
 
 
 def panel():
+    j = {p: ('A' if p >= 115 else '-') for p in range(1, 129)}
     return {'V': {g + '*01': {p: 'A' for p in range(1, 129)} for g in proposal.GENES},
-            'J': {'IGHJ4*01': {p: ('A' if p >= 115 else '-') for p in range(1, 129)}}}
+            'J': {'IGHJ4*01': dict(j), 'IGHJ6*01': dict(j)}}
 
 
 @pytest.fixture
@@ -42,7 +43,7 @@ def bank():
     return rows
 
 
-def challenge(epoch=25969, gene='IGHV3-23', length=11):
+def challenge(epoch=25969, gene='IGHV3-23', length=17):
     return {'epoch': epoch, 'target': rules.TARGET,
             'allowed_v': gene, 'allowed_cdr3_length': length}
 
@@ -57,7 +58,7 @@ def test_actual_missing_cells_choose_bounded_ranked_donors(bank, epoch, gene, le
     expected = 'same_v_nearby_length' if epoch == 25969 else 'other_v_nearby_length'
     assert evidence['selected_by_stratum'] == {expected: 16}
     if epoch == 25969:
-        assert [d['reference_length_distance'] for _, d in chosen] == [5]*6 + [6]*2 + [7]*8
+        assert [d['reference_length_distance'] for _, d in chosen] == [1]*16
     elif epoch == 25970:
         assert {d['reference_length_distance'] for _, d in chosen} == {1}
     else:

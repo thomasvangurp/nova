@@ -2,15 +2,16 @@
 import random
 
 from nanobody_opt.pr100_proposal_pilot import (
-    AMINO_ACIDS, AMINO_ACID_WEIGHTS, propose, dry_run, CELLS, GENES,
-    _weighted_choice,
+    CDR2_MOTIF, CDR3_BODY, CDR3_BODY_FIRST, CDR3_TAIL, CELLS, GENES, propose,
+    dry_run, _apply_cdr2_motif, _build_cdr3_loop,
 )
 
 
 def panel():
     v = {p: 'A' for p in range(1, 129)}
     j = {p: ('A' if p >= 115 else '-') for p in range(1, 129)}
-    return {'V': {g+'*01': dict(v) for g in {g for g, _ in CELLS}}, 'J': {'IGHJ4*01': j}}
+    return {'V': {g+'*01': dict(v) for g in {g for g, _ in CELLS}},
+            'J': {'IGHJ4*01': dict(j), 'IGHJ6*01': dict(j)}}
 
 
 def test_proposals_are_reproducible_unqualified_and_length_conditioned():
@@ -22,6 +23,7 @@ def test_proposals_are_reproducible_unqualified_and_length_conditioned():
         assert not a['acceptance_qualified'] and not a['target_scored']
         assert a['sequence'][22] == a['sequence'][103] == 'C'
         assert a['sequence'][48:50] == 'ER'
+        assert a['j_reference_allele'] == 'IGHJ6*01'
 
 
 def test_unavailable_reference_arms_are_not_reported_as_zero_yield():
@@ -39,28 +41,42 @@ def test_generator_gene_scope_matches_pinned_challenge():
     assert set(GENES)=={g for genes in cfg['germline_filtering']['v_neighborhood_categories'].values() for g in genes}
 
 
-def test_sampled_cdr3_composition_matches_5ehs_recipe():
-    """The weighted draw mirrors the rival's CDR3 recipe at every residue site.
+def test_cdr3_loop_matches_5ehs_positional_recipe():
+    """The CDR3 is anchor(2)+head+body+tail(3), never a flat residue table.
 
-    Every residue draw (CDR3 fill, CDR1/2 substitutions, reference-CDR3
-    padding/mutation) routes through ``_weighted_choice``, so a large sample of
-    that helper is the composition of the generated CDR3s. The 5EHS recipe
-    forbids N and the aliphatics L/I/V/M/W (zero weight) and concentrates on
-    aromatic F/Y plus charged D/R/K/E/H.
+    Every length in the declared 5..23 scope must decompose as the positional
+    recipe: anchor ``A[RKQ]``/``S[RKQ]``, head ``YPHRF`` (P@2, R@4, F@5 with
+    H/Y alternating at 1 and 3), a G/S/Q/K/P/R/D/E body, and the fixed ``FDY``
+    tail. The one length-independent invariant is ZERO L/I/V/M/W in the CDR3.
     """
     rng = random.Random(20261028)
-    draws = [_weighted_choice(rng) for _ in range(20_000)]
-    aliphatic = frozenset('LIVMW')
-    aromatic_charged = frozenset('FYDRKEH')
-    hydrophobic = frozenset('FLIVMWYA')
-    # Zero weight means these residues can never be emitted by random.choices.
-    assert not aliphatic.intersection(draws)
-    assert 'N' not in draws
-    assert set(draws) <= set(AMINO_ACIDS)
-    # Aromatic + charged dominate (~0.70 of the mass), as in the rival's winners.
-    assert sum(aa in aromatic_charged for aa in draws) / len(draws) > 0.6
-    # The implied CDR3 hydrophobic fraction is ~0.30, inside the 0.44 PSH gate.
-    assert 0.25 < sum(aa in hydrophobic for aa in draws) / len(draws) < 0.35
-    # Every weight is still a positive, length-agnostic table over the full
-    # (cysteine-free) alphabet; zero-weight residues are the only ones removed.
-    assert set(AMINO_ACID_WEIGHTS) == set(AMINO_ACIDS)
+    for length in range(5, 24):
+        for _ in range(50):
+            cdr3 = _build_cdr3_loop(rng, length - 3) + CDR3_TAIL
+            assert len(cdr3) == length
+            assert cdr3.endswith(CDR3_TAIL)
+            assert not set('LIVMW') & set(cdr3)
+            anchor, headbody = cdr3[:2], cdr3[2:-3]
+            assert anchor[0] in 'AS' and anchor[1] in 'RKQ'
+            head_len = min(5, max(0, length - 5))
+            head, body = headbody[:head_len], headbody[head_len:]
+            assert all(aa in CDR3_BODY for aa in body)
+            assert body == '' or body[0] in CDR3_BODY_FIRST
+            if head_len >= 2:
+                assert head[1] == 'P'
+            if head_len >= 4:
+                assert head[3] == 'R'
+            if head_len >= 5:
+                assert head[4] == 'F'
+                assert set(head[0] + head[2]) == {'H', 'Y'}
+            # CDR3 hydrophobic fraction must sit under the 0.44 PSH screen.
+            hydro = sum(1 for aa in cdr3 if aa in 'FLIVMWYA') / length
+            assert hydro <= 0.44 + 1e-9
+
+
+def test_cdr2_motif_lands_in_the_17residue_window():
+    base = 'G'*22 + 'C' + 'GG' + 'WVRQ' + 'G'*10 + 'AISGSGGSTYYADSVKG' + 'G'*20
+    out = _apply_cdr2_motif(base)
+    w = base.find('WVRQ')
+    window = out[w+14:w+31]
+    assert window == CDR2_MOTIF + 'YADSVKG'
