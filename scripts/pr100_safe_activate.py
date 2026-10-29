@@ -360,6 +360,21 @@ def selected_mode(current, mode):
     return mode
 
 
+def enable_native_screen(value, backend):
+    """Enable the non-authoritative native developability pre-filter.
+
+    Screen mode must not carry a CPU-interleaving confirmation policy or any
+    per-host work-conserving refill flag: the live controller treats those as
+    mutually exclusive operating modes.
+    """
+    value['worker']['native_screen'] = {'enabled': True, 'backend': backend}
+    if value['worker'].get('native_interleave_confirmations'):
+        value['worker']['native_interleave_confirmations'] = False
+    for override in value.get('native_worker_overrides', {}).values():
+        override.pop('native_work_conserving', None)
+    return value
+
+
 def rollout_options(value, *, native_refill_hosts=(), missing_cell_donors=False):
     """Enable explicitly selected policies without widening worker allocation."""
     if (not isinstance(native_refill_hosts, (tuple, list))
@@ -385,7 +400,7 @@ def rollout_options(value, *, native_refill_hosts=(), missing_cell_donors=False)
 
 def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None,
                     interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False,
-                    force=False):
+                    native_screen=None, force=False):
     if not force and current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
@@ -393,6 +408,12 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
         raise ValueError('invalid_activation_mode')
     if not isinstance(interleave_confirmations, bool):
         raise ValueError('interleave_confirmations_must_be_boolean')
+    if native_screen is not None and native_screen not in ('resident_cpu', 'cuda_refine'):
+        raise ValueError('invalid_native_screen_backend')
+    if native_screen is not None and interleave_confirmations:
+        raise ValueError('native_screen_and_interleave_confirmations_are_mutually_exclusive')
+    if native_screen is not None and native_refill_hosts:
+        raise ValueError('native_screen_and_native_refill_are_mutually_exclusive')
     if interleave_confirmations and current.get('worker', {}).get('native_screen', {}).get('enabled', False):
         raise ValueError('interleaved_confirmations_require_original_cpu_profiling')
     value = copy.deepcopy(current); previous = current['source_sha']
@@ -413,6 +434,8 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
                 raise ValueError('unexpected_host_release')
             runtime['release'] = runtime['release'][:-len(previous)] + sha
             runtime['novelty_runtime'] = runtimes[host]
+        if native_screen is not None:
+            enable_native_screen(value, native_screen)
         return rollout_options(value, native_refill_hosts=native_refill_hosts,
                                missing_cell_donors=missing_cell_donors)
     value.update(source_sha=sha, start_epoch=epoch, native_hosts=['master'] if mode == 'master' else ['master', 'slave'])
@@ -423,6 +446,8 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
         'slave': {'workers': 32, 'max_workers': 32, 'cpu_slots': 32}}
     value['worker'].update(native_minimum_call_window_seconds=130, native_cleanup_reserve_seconds=10,
                            native_screen={'enabled': False, 'backend': 'resident_cpu'})
+    if native_screen is not None:
+        enable_native_screen(value, native_screen)
     for host in ('master', 'slave'):
         runtime = value['hosts'][host]
         if not runtime['release'].endswith('/' + previous):
@@ -518,7 +543,7 @@ def recovery_required(sha, epoch, error, *, start_attempted):
 
 
 def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
-            native_refill_hosts=(), missing_cell_donors=False, clock_reader=current_clock,
+            native_refill_hosts=(), missing_cell_donors=False, native_screen=None, clock_reader=current_clock,
             service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
@@ -532,7 +557,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
                                interleave_confirmations=interleave_confirmations,
                                native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors,
-                               force=force)
+                               native_screen=native_screen, force=force)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -609,10 +634,16 @@ def main(argv=None):
                         help='Opt in to CI-qualified confirmation-first mixed native waves')
     parser.add_argument('--native-refill-host', action='append', choices=('master', 'slave'), default=[],
                         help='Enable bounded slot refill only on this qualified native host')
+    parser.add_argument('--native-screen', choices=('resident_cpu', 'cuda_refine'), default=None,
+                        help='Enable the non-authoritative native developability pre-filter on the chosen backend')
     parser.add_argument('--missing-cell-donors', action='store_true',
                         help='Enable bounded missing-cell donors with unchanged validation and unseeded controls')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
+    if args.native_screen is not None and args.interleave_confirmations:
+        parser.error('--native-screen and --interleave-confirmations are mutually exclusive')
+    if args.native_screen is not None and args.native_refill_host:
+        parser.error('--native-screen and --native-refill-host are mutually exclusive')
     if not re.fullmatch('[0-9a-f]{40}', args.sha) or not 1 <= args.wait_seconds <= 7200:
         raise ValueError('invalid_arguments')
     release = BASE / 'pr100-releases' / args.sha
@@ -637,6 +668,7 @@ def main(argv=None):
                                         interleave_confirmations=args.interleave_confirmations,
                                         native_refill_hosts=args.native_refill_host,
                                         missing_cell_donors=args.missing_cell_donors,
+                                        native_screen=args.native_screen,
                                         force=os.environ.get('SN68_FORCE_ACTIVATION') == '1')
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}

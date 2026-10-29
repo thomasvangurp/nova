@@ -759,3 +759,72 @@ def test_cli_forwards_optin_to_both_shipping_gate_and_handoff(deployment, monkey
     assert a.main([SHA, 'preserve', '--staging-receipt', str(stage),
         '--novelty-qualification-receipt', str(stage), '--interleave-confirmations']) == 0
     assert calls == [('verify', True), ('handoff', True)]
+
+
+@pytest.mark.parametrize('backend', ['cuda_refine', 'resident_cpu'])
+def test_native_screen_activation_sets_backend_without_refill_or_interleave(deployment, backend):
+    *_, old = deployment
+    value = a.proposed_config(old, SHA, CLOCK['epoch'], 'master', native_screen=backend)
+    assert value['worker']['native_screen'] == {'enabled': True, 'backend': backend}
+    assert not value['worker'].get('native_interleave_confirmations')
+    for override in value['native_worker_overrides'].values():
+        assert 'native_work_conserving' not in override
+
+
+def test_native_screen_handoff_threads_backend_through_proposal(deployment):
+    base, release, unit, root, old = deployment; events = []
+    result = a.handoff(base, SHA, 'master', release, None, native_screen='cuda_refine',
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'activated'
+    new = a.read(base / 'pr100-controller.json')
+    assert new['worker']['native_screen'] == {'enabled': True, 'backend': 'cuda_refine'}
+    assert not new['worker'].get('native_interleave_confirmations')
+    for override in new['native_worker_overrides'].values():
+        assert 'native_work_conserving' not in override
+
+
+def test_native_screen_activation_clears_existing_refill_and_interleave(deployment, novelty_receipt):
+    *_, old = deployment
+    old['source_sha'] = a.TERMINAL_INVALIDATION_RELEASE
+    for host in old['hosts'].values():
+        host['release'] = '/root/releases/' + old['source_sha']
+    old.update(native_hosts=['master', 'slave'], epoch_fresh_native_limit=4800,
+               native_worker_overrides={'master': {'workers': 96, 'native_work_conserving': True},
+                                        'slave': {'workers': 32}})
+    old['worker'].update(native_interleave_confirmations=True, native_screen={'enabled': False})
+    release, receipt, _ = novelty_receipt
+    runtimes = a.verify_novelty_qualification(release, receipt)
+    value = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', {}, novelty_runtimes=runtimes,
+                              native_screen='resident_cpu')
+    assert value['worker']['native_screen'] == {'enabled': True, 'backend': 'resident_cpu'}
+    assert value['worker'].get('native_interleave_confirmations') is False
+    assert 'native_work_conserving' not in value['native_worker_overrides']['master']
+
+
+def test_native_screen_with_refill_host_raises(deployment):
+    *_, old = deployment
+    with pytest.raises(ValueError, match='mutually_exclusive'):
+        a.proposed_config(old, SHA, CLOCK['epoch'], 'master', native_screen='cuda_refine',
+                          native_refill_hosts=['slave'])
+
+
+def test_native_screen_with_interleave_raises(deployment):
+    *_, old = deployment
+    with pytest.raises(ValueError, match='mutually_exclusive'):
+        a.proposed_config(old, SHA, CLOCK['epoch'], 'master', native_screen='cuda_refine',
+                          interleave_confirmations=True)
+
+
+@pytest.mark.parametrize('conflict', [['--interleave-confirmations'], ['--native-refill-host', 'slave']])
+def test_cli_rejects_native_screen_with_conflicting_modes(conflict):
+    with pytest.raises(SystemExit) as error:
+        a.main([SHA, 'master', '--staging-receipt', '/unused',
+                '--novelty-qualification-receipt', '/unused', '--native-screen', 'cuda_refine'] + conflict)
+    assert error.value.code == 2
+
+
+def test_non_screen_activation_resets_native_screen_to_disabled(deployment):
+    *_, old = deployment
+    value = a.proposed_config(old, SHA, CLOCK['epoch'], 'master')
+    assert value['worker']['native_screen']['enabled'] is False
+
