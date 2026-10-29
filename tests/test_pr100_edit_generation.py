@@ -170,6 +170,72 @@ def test_generate_skips_and_counts_malformed_parents():
     assert clean == {'malformed_parents': 0}
 
 
+def test_generate_malformed_parent_does_not_seed_allowed_table():
+    panel = real_panel()
+    parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    pos = _safe_framework_position(parent)
+    sibling = _variant(parent, pos, 'S')
+    malformed = 'G' * len(parent)
+    children = edit.generate([malformed, parent], background_sequences=[sibling])
+    # Only the sibling's residue is supported by a located parent/background;
+    # the malformed parent's G must not widen the per-position allowed table.
+    assert children
+    for child in children:
+        diff = [(a, s) for a, p, s in zip(child['sequence'], parent, sibling) if a != p]
+        assert all(a == s for a, s in diff), child
+    assert ({c['sequence'] for c in children}
+            == {c['sequence'] for c in edit.generate([parent], background_sequences=[sibling])})
+
+
+def _lane_rich_pool(parent):
+    """Background with one distinct residue per FR3 and CDR1 position, so the
+    framework and lineage lanes each have several single-substitution children."""
+    regions = find_regions(parent)
+    positions = (list(range(regions.cdr2[1] + 2, regions.cdr3[0] - 2, 3))[:6]
+                 + list(range(regions.cdr1[0], regions.cdr1[1]))[:6])
+    return [_variant(parent, p, 'T' if parent[p] != 'T' else 'S') for p in positions]
+
+
+def test_generate_limit_alternates_framework_and_lineage_lanes():
+    panel = real_panel()
+    parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    background = _lane_rich_pool(parent)
+    everything = edit.generate([parent], background_sequences=background)
+    lanes = {c['proposal_lane'].startswith('lineage_') for c in everything}
+    assert lanes == {True, False}  # both lanes produce children for this pool
+    limited = edit.generate([parent], background_sequences=background, limit=4)
+    assert [c['sequence'] for c in limited] == [c['sequence'] for c in everything[:4]]
+    kinds = [c['proposal_lane'].startswith('lineage_') for c in limited]
+    assert kinds == [False, True, False, True]  # framework no longer fills the cap alone
+
+
+def test_generate_limit_counts_only_kept_candidates():
+    panel = real_panel()
+    parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    background = _lane_rich_pool(parent)
+    everything = edit.generate([parent], background_sequences=background)
+    assert len(everything) >= 12
+    excluded = {rules.sequence_hash(c['sequence']) for c in everything[:4]}
+    kept = edit.generate([parent], background_sequences=background, limit=4,
+                         excluded_hashes=excluded)
+    # Excluded hashes do not consume the cap: the next four fresh candidates come back.
+    assert [c['sequence'] for c in kept] == [c['sequence'] for c in everything[4:8]]
+    # A deterministic continuation that excludes every prior hash walks the whole
+    # pool in fixed-size batches instead of exhausting after one attempt.
+    seen, order = set(), []
+    for _ in range(len(everything)):
+        batch = edit.generate([parent], background_sequences=background, limit=4,
+                              excluded_hashes=seen)
+        if not batch:
+            break
+        order.extend(c['sequence'] for c in batch)
+        seen |= {rules.sequence_hash(c['sequence']) for c in batch}
+    assert order == [c['sequence'] for c in everything]
+    # Excluding everything leaves nothing to emit, whatever the limit.
+    assert edit.generate([parent], background_sequences=background, limit=4,
+                         excluded_hashes=seen) == []
+
+
 def _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=('AAA',)):
     panel = real_panel()
     monkeypatch.setitem(sys.modules, 'abnumber', types.SimpleNamespace(
@@ -249,6 +315,31 @@ def test_worker_edit_lane_off_by_default_and_on_emits_gate_passing_children(
     for r in edit_candidates:
         vf = _v_identity_of(panel, 'IGHV3-23', r['sequence'], 5)
         assert vf >= 0.82, (r['proposal_lane'], vf)
+
+
+def test_worker_edit_lane_limit_counts_only_non_excluded_candidates(monkeypatch, tmp_path):
+    panel = real_panel()
+    parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    archive = _lane_rich_pool(parent)
+    bank_rows = [{'sequence': parent, 'sequence_hash': rules.sequence_hash(parent),
+                  'cells': ['IGHV3-23:5'], 'source': 'rival_bank_test'}]
+    run = _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=tuple(archive))
+    challenge = {'epoch': 25969, 'target': rules.TARGET,
+                 'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
+    settings = {'enabled': True, 'limit': 3}
+    first = run(challenge, edit_generation=settings)
+    assert first['edit_generation_candidates'] == 3
+    assert first['excluded_generated'] == 0
+    # A continuation excluding every prior edit child must still receive a full
+    # ``limit`` of fresh ones; the cap is applied after exclusion, not before.
+    prior = edit.generate([parent], background_sequences=archive, limit=3)
+    assert len(prior) == 3
+    second = run(challenge, edit_generation=settings,
+                 excluded_sequence_hashes=[rules.sequence_hash(c['sequence']) for c in prior])
+    assert second['edit_generation_candidates'] == 3
+    assert second['excluded_generated'] == 0
+    assert not set(second['generated_sequence_hashes']) & {
+        rules.sequence_hash(c['sequence']) for c in prior}
 
 
 def test_worker_rejects_non_standard_residues_before_annotation(monkeypatch, tmp_path):

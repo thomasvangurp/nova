@@ -31,8 +31,9 @@ mutation-network ranking) remains available as a subprocess:
 from __future__ import annotations
 
 from collections import Counter
+from itertools import zip_longest
 
-from nanobody_opt import gates
+from nanobody_opt import gates, rules
 from nanobody_opt.regions import find_regions
 
 #: Proposal record source tag emitted by the in-process edit lane.
@@ -246,6 +247,7 @@ def generate(
     framework_maximum_haplotype_mutations: int = 3,
     min_support: int = 1,
     limit: int | None = None,
+    excluded_hashes: set[str] | frozenset[str] | None = None,
     stats: dict[str, int] | None = None,
 ) -> list[dict[str, str]]:
     """Emit edit-based children for a pool of same-length parent sequences.
@@ -253,14 +255,23 @@ def generate(
     Parents are proposal CENTRES, never submissions. Each parent seeds the
     framework lane (CDR3-preserving singles/haplotypes) and the lineage lane
     (CDR + terminal singles/haplotypes), both drawn from the same per-position
-    ``allowed`` table built from the parent + background pool. Children that
-    are byte-identical to a parent (a cross single-edit) or to a previously
-    emitted child are dropped. The result is deduped, deterministic for a fixed
-    input, and ordered parent-first.
+    ``allowed`` table built from the parent + background pool. Within a parent
+    the two lanes alternate, so a small ``limit`` cannot be filled by the
+    framework lane alone. Children that are byte-identical to a parent (a cross
+    single-edit) or to a previously emitted child are dropped. The result is
+    deduped, deterministic for a fixed input, and ordered parent-first.
+
+    ``excluded_hashes`` holds ``rules.sequence_hash`` values the caller will
+    discard anyway (already-published or already-tried sequences). They are
+    skipped BEFORE ``limit`` is applied, so ``limit`` caps only the candidates
+    that are actually emitted; a deterministic continuation that excludes every
+    prior hash therefore advances to fresh candidates instead of re-selecting
+    the same leading ``limit``.
 
     A parent whose regions cannot be located (``find_regions`` raises
-    ``ValueError``) is skipped rather than aborting the pool. Pass a ``stats``
-    dict to receive the count under ``malformed_parents``.
+    ``ValueError``) is skipped rather than aborting the pool, and does not seed
+    the ``allowed`` table or the parent filter. Pass a ``stats`` dict to
+    receive the count under ``malformed_parents``.
     """
     if stats is None:
         stats = {}
@@ -280,23 +291,31 @@ def generate(
     if not parent_list:
         return []
     length = len(parent_list[0])
-    background = [
-        str(sequence).strip().upper()
-        for sequence in (background_sequences or [])
-        if len(str(sequence).strip().upper()) == length
-    ]
-    allowed = allowed_table([*parent_list, *background], length, min_support=min_support)
-    parent_set = set(parent_list)
-    records: list[dict[str, str]] = []
+    # Only parents whose regions can be located may seed ``allowed`` and the
+    # parent filter; a malformed parent would otherwise inject its residues.
+    located: list[tuple[str, set[int]]] = []
     for parent in parent_list:
         try:
             regions = find_regions(parent)
         except ValueError:
             stats["malformed_parents"] += 1
             continue
-        cdr_positions = set(regions.cdr_positions())
+        located.append((parent, set(regions.cdr_positions())))
+    if not located:
+        return []
+    background = [
+        str(sequence).strip().upper()
+        for sequence in (background_sequences or [])
+        if len(str(sequence).strip().upper()) == length
+    ]
+    allowed = allowed_table(
+        [*(parent for parent, _ in located), *background], length, min_support=min_support
+    )
+    parent_set = {parent for parent, _ in located}
+    records: list[dict[str, str]] = []
+    for parent, cdr_positions in located:
         protected: set[int] = set()
-        for candidate, lane in supported_framework_candidates(
+        framework = supported_framework_candidates(
             parent,
             allowed=allowed,
             background_sequences=background,
@@ -304,12 +323,8 @@ def generate(
             protected=protected,
             terminal_width=terminal_width,
             maximum_haplotype_mutations=framework_maximum_haplotype_mutations,
-        ):
-            if candidate in parent_set:
-                continue
-            records.append({"sequence": candidate, "parent_sequence": parent,
-                            "proposal_lane": lane, "source": SOURCE})
-        for candidate, lane in supported_lineage_candidates(
+        )
+        lineage = supported_lineage_candidates(
             parent,
             allowed=allowed,
             background_sequences=background,
@@ -318,17 +333,26 @@ def generate(
             terminal_width=terminal_width,
             maximum_haplotype_mutations=maximum_haplotype_mutations,
             priors=priors,
-        ):
-            if candidate in parent_set:
-                continue
-            records.append({"sequence": candidate, "parent_sequence": parent,
-                            "proposal_lane": lane, "source": SOURCE})
+        )
+        for pair in zip_longest(framework, lineage):
+            for candidate_lane in pair:
+                if candidate_lane is None:
+                    continue
+                candidate, lane = candidate_lane
+                if candidate in parent_set:
+                    continue
+                records.append({"sequence": candidate, "parent_sequence": parent,
+                                "proposal_lane": lane, "source": SOURCE})
+    excluded = excluded_hashes or ()
     deduped: list[dict[str, str]] = []
     emitted: set[str] = set()
     for record in records:
-        if record["sequence"] in emitted:
+        sequence = record["sequence"]
+        if sequence in emitted:
             continue
-        emitted.add(record["sequence"])
+        emitted.add(sequence)
+        if excluded and rules.sequence_hash(sequence) in excluded:
+            continue
         deduped.append(record)
         if limit is not None and len(deduped) >= limit:
             break

@@ -225,7 +225,8 @@ def sequence_phase(job, directory):
                            if isinstance(s, str) and s.strip()]
         edit_candidates = pr100_edit_generation.generate(
             edit_parents, background_sequences=edit_background,
-            limit=edit_settings['limit'], stats=edit_stats)
+            limit=edit_settings['limit'], excluded_hashes=excluded,
+            stats=edit_stats)
         for edit in edit_candidates:
             rows.append({**edit, 'source': 'edit_generation',
                          'requested_v': expected['allowed_v'],
