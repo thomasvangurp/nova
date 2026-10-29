@@ -124,7 +124,7 @@ def settings(job):
     minimum, gpus = value.get('gpu_minimum_free_mib', 8192), value.get('gpus', job.get('gpus', []))
     if type(workers) is not int or not 1 <= workers <= 4:
         raise ValueError('screen_context_limit')
-    if type(cpu) is not int or not 1 <= cpu <= 64:
+    if type(cpu) is not int or not 1 <= cpu <= 256:
         raise ValueError('screen_cpu_limit')
     if type(minimum) is not int or not 8192 <= minimum <= 200000:
         raise ValueError('screen_memory_limit')

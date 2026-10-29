@@ -103,6 +103,12 @@ def test_bounded_devices_and_contexts():
     assert value['gpus']==[5,6,7] and value['workers_per_gpu']==4
     with pytest.raises(ValueError):screen.settings({'native_screen':{'workers_per_gpu':48}})
 
+def test_screen_accepts_high_worker_count_for_cuda():
+    # Master runs 96 workers (native_worker_overrides.master.workers=96); cpu is
+    # unused for cuda_refine, so a high worker count must not trip screen_cpu_limit.
+    v=screen.settings({'native_screen':{'enabled':True,'backend':'cuda_refine'},'workers':96,'gpus':[1,2,3,4]})
+    assert v['workers']==96
+
 def test_disabled_or_short_window_never_launches(tmp_path,monkeypatch):
     monkeypatch.setattr(screen.subprocess,'Popen',lambda *a,**k:pytest.fail('must not launch'))
     assert screen.screen_batch(['A'],job={},directory=tmp_path/'disabled',timeout_seconds=60)['profiles']=={}
