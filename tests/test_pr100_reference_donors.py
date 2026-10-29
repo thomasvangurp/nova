@@ -1,4 +1,5 @@
 """Missing-cell proposals only: inert annotation, no native/model/scoring calls."""
+from collections import Counter
 import copy
 import json
 import sys
@@ -116,6 +117,100 @@ def test_fallback_refuses_bad_identity_or_cell(bank, change):
     bank[0].update(change)
     with pytest.raises(ValueError, match='donor'):
         donors.select(bank, challenge(), 16, fallback=True)
+
+
+# ---------------------------------------------------------------------------
+# v2 port #3: developability flag + opt-in CDR3-family ceiling on donors.
+# ---------------------------------------------------------------------------
+def _developability(total=30.0, cdr3=14.0, compact=1.0):
+    """Minimal in-range (or caller-overridden) developability profile.
+
+    ``cdr_developability_in_range`` reads only these three red-region fields;
+    the remaining native metrics are irrelevant to the donor flag.
+    """
+    return {'total_cdr_length': total, 'cdr3_length': cdr3, 'cdr3_compactness': compact}
+
+
+def test_developability_flag_attached_and_applied(bank):
+    # The synthetic bank has no profiles, so every donor fails closed (False).
+    # Give one row an in-range profile: it must rank first and carry the flag.
+    rows = copy.deepcopy(bank)
+    rows[0]['developability'] = _developability()
+    exact, chosen, evidence = donors.select(rows, challenge(), 16, fallback=True)
+    flags = [d['cdr_developability_in_range'] for _, d in chosen]
+    assert flags.count(True) == 1 and flags[0] is True
+    assert chosen[0][0]['sequence_hash'] == rows[0]['sequence_hash']
+    assert evidence['developability_in_range_selected'] == 1
+    assert evidence['developability_out_of_range_selected'] == 15
+    assert evidence['selected_donors'][0]['cdr_developability_in_range'] is True
+
+
+def test_developability_flag_fails_closed_without_profile(bank):
+    exact, chosen, evidence = donors.select(bank, challenge(), 16, fallback=True)
+    assert len(chosen) == 16  # deprioritisation never changes the count
+    assert all(not d['cdr_developability_in_range'] for _, d in chosen)
+    assert evidence['developability_in_range_selected'] == 0
+    assert evidence['developability_out_of_range_selected'] == 16
+
+
+def test_out_of_range_donor_is_dropped_when_in_range_fills_slots(bank):
+    # Sixteen in-range donors fill every slot; the two out-of-range donors are
+    # deprioritised out of the selection without shrinking the count.
+    rows = copy.deepcopy(bank)
+    for row in rows[:16]:
+        row['developability'] = _developability()
+    exact, chosen, evidence = donors.select(rows, challenge(), 16, fallback=True)
+    assert len(chosen) == 16
+    assert all(d['cdr_developability_in_range'] for _, d in chosen)
+    assert evidence['developability_in_range_selected'] == 16
+    assert evidence['developability_out_of_range_selected'] == 0
+
+
+def test_exact_cell_donors_carry_the_developability_flag(bank):
+    exact, chosen, evidence = donors.select(bank, challenge(length=18), 16,
+                                           fallback=False)
+    assert exact and all('cdr_developability_in_range' in d for _, d in chosen)
+    assert all(not d['cdr_developability_in_range'] for _, d in chosen)
+    assert evidence['developability_out_of_range_selected'] == len(exact)
+
+
+def test_family_cap_is_opt_in_and_preserves_default_selection(bank):
+    # No family_cap: the default path keeps the exact 16-donor, distance-ordered
+    # selection even though the synthetic bank collapses under the 0.15 family
+    # threshold (its length-16 CDR3s differ by one residue).
+    exact, chosen, evidence = donors.select(bank, challenge(), 16, fallback=True)
+    assert len(chosen) == 16
+    assert [d['reference_length_distance'] for _, d in chosen] == [5]*6 + [6]*2 + [7]*8
+
+
+def test_family_cap_bounds_selection_to_one_per_clonotype(bank):
+    # Label each bank cell as one clonotype family and cap at one: the ceiling
+    # admits a single donor per family, never a hard dedup of the whole bank.
+    # The labels are deliberately far apart under Levenshtein so the 0.15 family
+    # predicate does not itself collapse them (cell labels differ by one char).
+    labels = {cell: 'FAM' + str(i) * 3 for i, cell in enumerate(sorted(BANK_CELLS))}
+    labelled = copy.deepcopy(bank)
+    for row in labelled:
+        row['family'] = labels[next(iter(row['cells']))]
+    cdr3_of = lambda r: r['family']
+    exact, chosen, evidence = donors.select(labelled, challenge(), 16, fallback=True,
+                                            family_cap=1, cdr3_of=cdr3_of)
+    assert evidence['family_cap'] == 1 and evidence['family_cap_trimmed'] is True
+    assert len(chosen) == len(BANK_CELLS)
+    assert evidence['family_cap_families_selected'] == len(BANK_CELLS)
+    assert max(Counter(r['family'] for r, _ in chosen).values()) == 1
+
+
+@pytest.mark.parametrize('family_cap', [0, -1, True, 1.5])
+def test_family_cap_rejects_invalid_values(bank, family_cap):
+    with pytest.raises(ValueError, match='family_cap'):
+        donors.select(bank, challenge(), 16, fallback=True,
+                      family_cap=family_cap, cdr3_of=lambda r: r['sequence'])
+
+
+def test_family_cap_requires_a_cdr3_extractor(bank):
+    with pytest.raises(ValueError, match='cdr3_of'):
+        donors.select(bank, challenge(), 16, fallback=True, family_cap=2)
 
 
 @pytest.fixture
