@@ -229,7 +229,7 @@ def test_rule_configuration_disagreement_cannot_be_blessed_by_native_pass(authen
 from tests.test_pr100_epoch_continuation import legacy, replay, write
 
 
-@pytest.mark.parametrize('partial_kind', ['conflicting', 'extended_rejection'])
+@pytest.mark.parametrize('partial_kind', ['conflicting', 'extended_rejection', 'complete_positive'])
 def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_history(
         legacy, authenticated_draws, monkeypatch, partial_kind):
     import json
@@ -245,24 +245,33 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
         return {'challenge': challenge, 'target': challenge['target'], 'epoch': challenge['epoch'],
                 'candidates': [], 'terminal_native_outcomes': {},
                 'native_complete_histories': [{'sequence_hash': key, 'measurements': values,
-                    'fleet_policy': copy.deepcopy(POLICY),
+                    'fleet_policy': copy.deepcopy(POLICY), 'identity': copy.deepcopy(identity),
+                    'execution_host': 'slave',
                     'request_sha256s': [v['native_reference']['receipt']['request_sha256'] for v in values]}]}
 
-    identity = {'resume_eligible': True, 'runtime': 'synthetic_registered_test'}
+    identity = {'resume_eligible': True, 'backend': 'native_reference',
+                'registration_sha256': 'd' * 64, 'runtime_identity_sha256': 'b' * 64,
+                'policy_sha256': 'c' * 64, 'challenge_sha256': rules.digest(challenge),
+                'requirements_sha256': rules.digest(rules.pinned_config(challenge['epoch'])['nanobody_requirements']),
+                'filter_sha': rules.FILTER_SHA}
 
     def checkpoint(values):
         return {**x.rows[0], 'native_resume': {
             'schema': 'pr100-native-confirmation-checkpoint-v1', 'sequence_hash': key,
             'identity': identity, 'measurements': values, 'required_cpu_observations': 3,
+            'execution_host': 'slave',
             'fleet_policy': copy.deepcopy(POLICY), 'failed_first_rescue_reserved': False}}
 
     continuation.reconcile_native_histories(saved, history(initial), {key})
     saved['pending_confirmation'] = [checkpoint(initial)]
     prior_pending = copy.deepcopy(saved['pending_confirmation'])
     write(x.local / 'continuation.json', saved)
-    values = ([authenticated_draws('changed-prefix', 82., sequence=sequence)]
-              if partial_kind == 'conflicting' else initial + [
-                  authenticated_draws(f'later-{i}', 90. + i, sequence=sequence) for i in range(3)])
+    if partial_kind == 'conflicting':
+        values = [authenticated_draws('changed-prefix', 82., sequence=sequence)]
+    elif partial_kind == 'complete_positive':
+        values = initial + [authenticated_draws(f'complete-{i}', 82., sequence=sequence) for i in range(2)]
+    else:
+        values = initial + [authenticated_draws(f'later-{i}', 90. + i, sequence=sequence) for i in range(3)]
     partial = {**history(values), 'status': 'partial',
                'attempted_sequence_hashes': [key], 'fresh_admitted_sequence_hashes': [],
                'fresh_never_started_sequence_hashes': [],
@@ -283,6 +292,17 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
         assert outcome['native_history_recovery_rejected'] is True
         assert restored['pending_confirmation'] == prior_pending
         assert restored['native_reference_histories'][key]['complete_draws'] == 1
+    elif partial_kind == 'complete_positive':
+        assert restored['native_reference_histories'][key]['complete_draws'] == 3
+        assert restored['native_reference_histories'][key]['admitted'] is True
+        assert restored['native_rows'] == []  # Partial transport is no novelty qualification.
+        pending = restored['pending_confirmation']
+        assert len(pending) == 1 and pending[0]['sequence'] == sequence
+        assert pending[0]['native_resume']['measurements'] == values
+        assert pending[0]['native_resume']['identity'] == identity
+        assert pending[0]['native_resume']['fleet_policy'] == POLICY
+        assert pending[0]['native_resume']['execution_host'] == 'slave'
+        assert continuation.mode_for(restored) == 'native'
     else:
         assert restored['native_reference_histories'][key]['complete_draws'] == 4
         assert restored['native_reference_histories'][key]['admitted'] is False
@@ -300,3 +320,28 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
         assert corrected['status'] == 'withdrawn'
         published = json.loads(Path(x.config['publication_path']).read_text())
         assert published['sequence_pool'] == [] and published['status'] == 'invalidated'
+
+
+def test_stale_shorter_partial_result_preserves_newer_canonical_pending_checkpoint(authenticated_draws):
+    from nanobody_opt import pr100_epoch_continuation as continuation
+    challenge = legacy_evidence()['challenge']; key = rules.sequence_hash(SEQ)
+    rows = [authenticated_draws('first', 81.), authenticated_draws('second', 90.)]
+    saved = {'challenge': challenge, 'native_rows': [], 'pending_confirmation': []}
+
+    def result(values):
+        return {'challenge': challenge, 'epoch': challenge['epoch'], 'candidates': [],
+                'terminal_native_outcomes': {}, 'native_complete_histories': [{
+                    'sequence_hash': key, 'measurements': values, 'fleet_policy': POLICY,
+                    'request_sha256s': [m['native_reference']['receipt']['request_sha256'] for m in values]}]}
+
+    continuation.reconcile_native_histories(saved, result(rows), {key})
+    canonical = {'sequence': SEQ, 'native_resume': {'measurements': rows, 'fleet_policy': POLICY,
+                 'required_cpu_observations': 3, 'identity': {'resume_eligible': True}}}
+    saved['pending_confirmation'] = [canonical]
+    incoming = result(rows[:1])
+    incoming['deferred_confirmations'] = [
+        {'sequence': SEQ, 'native_resume': {**canonical['native_resume'], 'measurements': rows[:1]}}]
+    continuation.reconcile_native_histories(saved, incoming, {key})
+    assert incoming['deferred_confirmations'] == [canonical]
+    assert incoming['terminal_native_outcomes'] == {}
+    assert saved['native_reference_histories'][key]['complete_draws'] == 2

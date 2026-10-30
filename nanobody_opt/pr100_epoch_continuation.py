@@ -159,6 +159,14 @@ def reconcile_native_histories(state, value, assigned_hashes):
                 stale.add(key); terminal.pop(key, None)
                 if old.get('admitted') is False and not old.get('bounded_rescue_pending'):
                     terminal[key] = old['reason']
+                else:
+                    checkpoint = next((r for r in state.get('pending_confirmation', [])
+                        if rules.sequence_hash(r['sequence']) == key
+                        and r.get('native_resume', {}).get('fleet_policy') == old['policy']
+                        and [rules.digest(m) for m in r.get('native_resume', {}).get('measurements', [])]
+                            == old_digests), None)
+                    if checkpoint is not None:
+                        preserved_checkpoints[key] = checkpoint
                 continue
             if (len(requests) == len(old_ids) and old.get('bounded_rescue_pending')
                     and not rescue_pending):
@@ -201,6 +209,63 @@ def reconcile_native_histories(state, value, assigned_hashes):
         if rules.sequence_hash(r['sequence']) not in stale | set(preserved_checkpoints)]
     value['deferred_confirmations'].extend(preserved_checkpoints.values())
     value['terminal_native_outcomes'] = terminal
+
+
+def recover_native_checkpoints(state, value, assigned, required_observations):
+    """Keep authenticated partial positives schedulable without blessing novelty.
+
+    Reconciliation must run first. Only its current accepted history may become
+    a checkpoint, bound to this assignment and the observed runtime. A complete
+    checkpoint is consumed by the ordinary native/novelty path without another
+    draw; an incomplete one retains the original bounded repeat requirement.
+    """
+    from nanobody_opt import pr100_live_selection as selection
+    by_hash = {rules.sequence_hash(row['sequence']): row for row in assigned}
+    pending = list(value.get('deferred_confirmations', []))
+    queued = {rules.sequence_hash(row['sequence']) for row in pending}
+    expected_requirements = rules.digest(rules.pinned_config(
+        state['challenge']['epoch'])['nanobody_requirements'])
+    for record in value.get('native_complete_histories', []):
+        key = record['sequence_hash']; ledger = state.get('native_reference_histories', {}).get(key, {})
+        values = record['measurements']
+        if key in queued or not values or ledger.get('admitted') is not True:
+            continue
+        # Shorter stale artifacts were intentionally ignored by reconciliation.
+        if ([rules.digest(row) for row in values] != ledger.get('measurement_sha256s')
+                or record.get('request_sha256s') != ledger.get('request_sha256s')):
+            continue
+        original = by_hash.get(key)
+        identity, registration = record.get('identity'), ledger.get('registration', {})
+        policy = selection.fleet_policy_settings(record.get('fleet_policy'))
+        if (original is None or not isinstance(identity, dict)
+                or identity.get('resume_eligible') is not True
+                or identity.get('challenge_sha256') != rules.digest(state['challenge'])
+                or identity.get('requirements_sha256') != expected_requirements
+                or identity.get('filter_sha') != rules.FILTER_SHA
+                or any(identity.get(field) != registration.get(field) for field in
+                       ('backend', 'registration_sha256', 'runtime_identity_sha256', 'policy_sha256'))
+                or policy != ledger.get('policy')):
+            raise ValueError('partial native checkpoint binding mismatch')
+        prior = original.get('native_resume') or {}
+        if not isinstance(prior, dict):
+            raise ValueError('partial native checkpoint invalid')
+        if prior and (prior.get('identity') != identity or prior.get('fleet_policy') != policy):
+            raise ValueError('partial native checkpoint identity changed')
+        host = prior.get('execution_host', record.get('execution_host'))
+        if (host not in ('master', 'slave') or record.get('execution_host') != host):
+            raise ValueError('partial native checkpoint host mismatch')
+        required = prior.get('required_cpu_observations', required_observations)
+        if (type(required) is not int or not 1 <= required <= 64
+                or not 1 <= len(values) < 64):
+            raise ValueError('partial native checkpoint repeat count invalid')
+        pending.append({**original, 'native_resume': {
+            'schema': 'pr100-native-confirmation-checkpoint-v1', 'sequence_hash': key,
+            'identity': identity, 'measurements': values, 'fleet_policy': policy,
+            'required_cpu_observations': max(required, len(values)),
+            'execution_host': host,
+            'failed_first_rescue_reserved': prior.get('failed_first_rescue_reserved') is True}})
+        queued.add(key)
+    value['deferred_confirmations'] = pending
 
 def valid_rows(value, challenge):
     if not isinstance(value, dict) or value.get('challenge') != challenge:
@@ -922,6 +987,8 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 try:
                     reconcile_native_histories(state, partial,
                         {rules.sequence_hash(r['sequence']) for r in assigned})
+                    recover_native_checkpoints(state, partial, assigned,
+                        worker.get('repeats', 3))
                 except (ValueError, TypeError, KeyError):
                     receipt['native_history_recovery_rejected'] = True
                 else:
