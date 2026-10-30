@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -92,13 +94,15 @@ class LockTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
-    def run_case(self, directory, snapshots, *, finishes=False):
+    def run_case(self, directory, snapshots, *, finishes=False,
+                 finishes_during_wait=False, wait_error=False):
         now = [0.0]
         job = {'gpu': 1, 'ttl_seconds': 10, 'lock_directory': str(Path(directory)/'locks'),
                'receipt': str(Path(directory)/'receipt.json'), 'scorer': '/pinned/scorer.py',
                'command': ['/bin/public-program'], 'cwd': directory, 'env': {'PATH': '/usr/bin'}}
         proc = Mock(pid=70)
-        proc.poll.side_effect = [0, 0] if finishes else lambda: None
+        finished = [finishes]
+        proc.poll.side_effect = lambda: 0 if finished[0] else None
         control = Mock()
         control.descendants.return_value = {70}
         def cleanup(processes, timeout):
@@ -108,6 +112,14 @@ class RunTests(unittest.TestCase):
                     self.fail('lease released before owned-tree cleanup')
             return {'remaining_descendants': 0, 'fixed_point_reached': True}
         control.stop_descendants.side_effect = cleanup
+        def wait_child(child, timeout):
+            self.assertIs(child, proc)
+            if wait_error:
+                raise RuntimeError('wait failed')
+            now[0] += .125 if finishes_during_wait else timeout
+            if finishes_during_wait:
+                finished[0] = True
+        control.wait_child = Mock(side_effect=wait_child)
         def launch(*args, **kwargs):
             self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'], '1')
             self.assertNotIn('AWS_SECRET_ACCESS_KEY', kwargs['env'])
@@ -120,7 +132,8 @@ class RunTests(unittest.TestCase):
             return proc
         snap = Mock(side_effect=snapshots) if isinstance(snapshots, list) else snapshots
         result = gpu.run_reserved(job, snapshot=snap, control=control, launch=launch,
-                                  clock=lambda: now[0], sleep=lambda t: now.__setitem__(0, now[0]+t))
+                                  clock=lambda: now[0], sleep=lambda t: now.__setitem__(0, now[0]+t),
+                                  wait=control.wait_child)
         self.assertEqual(json.loads(Path(job['receipt']).read_text()), result)
         with gpu.lease_locks(1, job['lock_directory']):
             pass
@@ -133,6 +146,67 @@ class RunTests(unittest.TestCase):
         self.assertTrue(result['released'])
         self.assertFalse(result['exclusive_gpu'])
         control.stop_descendants.assert_called_once()
+        self.assertEqual([call.args[1] for call in control.wait_child.call_args_list], [2, 1])
+        self.assertEqual(result['elapsed_seconds'], 5)
+
+    def test_exit_wakes_without_waiting_for_next_telemetry_interval(self):
+        snapshots = Mock(side_effect=[sample(), sample(), sample()])
+        with tempfile.TemporaryDirectory() as d:
+            result, control = self.run_case(d, snapshots, finishes_during_wait=True)
+        self.assertEqual(result['status'], 'process_finished')
+        self.assertEqual(result['child_exit_code'], 0)
+        self.assertEqual(result['elapsed_seconds'], 2.125)
+        self.assertEqual(snapshots.call_count, 3)
+        self.assertEqual(control.wait_child.call_count, 1)
+        self.assertEqual(control.wait_child.call_args.args[1], 2)
+        control.stop_descendants.assert_called_once()
+        self.assertTrue(result['released'])
+
+    def test_foreign_process_after_wait_still_aborts_owned_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            result, control = self.run_case(d, [sample(), sample(), sample(),
+                                                sample(pid=999, idle=False)])
+        self.assertEqual(result['status'], 'contention_abort')
+        self.assertEqual(control.wait_child.call_count, 1)
+        control.stop_descendants.assert_called_once()
+        self.assertTrue(result['released'])
+
+    def test_wait_failure_still_cleans_owned_tree_before_release(self):
+        with tempfile.TemporaryDirectory() as d:
+            result, control = self.run_case(d, lambda *args: sample(), wait_error=True)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_class'], 'RuntimeError')
+        control.stop_descendants.assert_called_once()
+        self.assertTrue(result['released'])
+
+    def test_real_child_completion_releases_without_polling_delay(self):
+        control = Mock()
+        control.descendants.return_value = set()
+        control.stop_descendants.return_value = {'remaining_descendants': 0,
+                                                  'fixed_point_reached': True}
+        snapshots = Mock(return_value=sample())
+        with tempfile.TemporaryDirectory() as directory:
+            job = {'gpu': 1, 'ttl_seconds': 10,
+                   'lock_directory': str(Path(directory)/'locks'),
+                   'receipt': str(Path(directory)/'receipt.json'),
+                   'scorer': '/pinned/scorer.py', 'cwd': directory,
+                   'command': [sys.executable, '-c', 'pass']}
+            result = gpu.run_reserved(job, snapshot=snapshots, control=control,
+                                      sleep=lambda seconds: None)
+            with gpu.lease_locks(1, job['lock_directory']):
+                pass
+        self.assertEqual(result['status'], 'process_finished')
+        self.assertEqual(result['child_exit_code'], 0)
+        self.assertLess(result['elapsed_seconds'], 1.5)
+        self.assertLessEqual(snapshots.call_count, 3)
+        control.stop_descendants.assert_called_once()
+
+    def test_running_child_wait_timeout_returns_to_contention_checks(self):
+        with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.1)'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as child:
+            gpu._wait_for_child(child, .001)
+            self.assertIsNone(child.poll())
+            child.wait(timeout=5)
 
     def test_new_foreign_process_aborts_only_our_work(self):
         with tempfile.TemporaryDirectory() as d:

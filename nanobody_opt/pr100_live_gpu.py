@@ -222,8 +222,16 @@ def _controller():
     return module
 
 
+def _wait_for_child(child, timeout):
+    """Wake on child exit without increasing the contention telemetry rate."""
+    try:
+        child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.Popen,
-                 clock=time.monotonic, sleep=time.sleep):
+                 clock=time.monotonic, sleep=time.sleep, wait=_wait_for_child):
     """Run in a dedicated session/process. TTL includes admission and cleanup.
 
     Caller supplies a public command/environment, never credential values. This
@@ -289,7 +297,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
                     if not uncontended(snapshot(gpu, job['scorer']), second,
                                        control.descendants(), 512):
                         result['status'] = 'contention_abort'; break
-                    sleep(min(2, max(.01, deadline - 5 - clock())))
+                    wait(child, min(2, max(.01, deadline - 5 - clock())))
                 else:
                     result['status'] = 'process_finished'
                 result['child_exit_code'] = child.poll()
