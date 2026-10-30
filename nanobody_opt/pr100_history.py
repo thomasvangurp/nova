@@ -89,6 +89,16 @@ def open_store(path):
         conn.execute('INSERT INTO history_store VALUES(?,?)', (TARGET, ERA_START))
         conn.commit()
     conn.execute('PRAGMA busy_timeout=1000')
+    # Additive migrations also run for previously staged, marked history stores.
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS history_public_epochs(
+            epoch INTEGER PRIMARY KEY,status TEXT NOT NULL,source_id TEXT,
+            checked_at REAL NOT NULL,row_count INTEGER NOT NULL,
+            http_status INTEGER,error_type TEXT);
+        CREATE TABLE IF NOT EXISTS history_public_observations(
+            source_id TEXT NOT NULL,observation_id TEXT NOT NULL,
+            PRIMARY KEY(source_id,observation_id));
+    ''')
     return conn
 
 

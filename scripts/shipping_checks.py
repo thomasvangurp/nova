@@ -53,6 +53,7 @@ TEST_FILES = (
     'tests/test_pr100_parent_feed.py',
     'tests/test_pr100_lineage_outcomes.py',
     'tests/test_pr100_history.py',
+    'tests/test_pr100_history_public.py',
     'tests/test_pr100_rival_merit.py',
     'tests/test_pr100_edit_generation.py',
     'tests/test_pr100_hydrophobicity.py',
