@@ -1,0 +1,898 @@
+{
+  "baseline": [
+    {
+      "metrics": {
+        "delta_sasa_refolded": 595.58057,
+        "design_iiptm": 0.22079,
+        "design_ptm": 0.70719,
+        "design_to_target_iptm": 0.20531,
+        "interaction_pae": 21.08103,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 13.64824,
+        "plip_hbonds_refolded": 7.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "published": true,
+      "sequence_hash": "b9a16b616c0f163d7d8e6ae4c0bacbe4a54aa0b88a27493d9bf6b7443aae3090"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 741.18066,
+        "design_iiptm": 0.21342,
+        "design_ptm": 0.72691,
+        "design_to_target_iptm": 0.18124,
+        "interaction_pae": 21.73668,
+        "liability_num_violations": 25.0,
+        "liability_score": 225.0,
+        "min_design_to_target_pae": 14.02527,
+        "plip_hbonds_refolded": 6.0,
+        "plip_saltbridge_refolded": 2.0
+      },
+      "published": true,
+      "sequence_hash": "c60c8779606cee7a083914b77bb50064e723686da41d5539deed33e9c1263688"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 659.45801,
+        "design_iiptm": 0.20141,
+        "design_ptm": 0.68718,
+        "design_to_target_iptm": 0.16476,
+        "interaction_pae": 22.28403,
+        "liability_num_violations": 25.0,
+        "liability_score": 225.0,
+        "min_design_to_target_pae": 14.68365,
+        "plip_hbonds_refolded": 2.0,
+        "plip_saltbridge_refolded": 2.0
+      },
+      "published": true,
+      "sequence_hash": "eb5e443a7a6cdcb33a88ce051b33ae257fa42cb5121fb3b008b9c6bc703cdada"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 618.55273,
+        "design_iiptm": 0.26186,
+        "design_ptm": 0.69198,
+        "design_to_target_iptm": 0.22864,
+        "interaction_pae": 20.2162,
+        "liability_num_violations": 23.0,
+        "liability_score": 205.0,
+        "min_design_to_target_pae": 11.21638,
+        "plip_hbonds_refolded": 0.0,
+        "plip_saltbridge_refolded": 0.0
+      },
+      "published": false,
+      "sequence_hash": "5353c14db8eb5630d01f9779ce9c2d132e1dbf4212a417c86fb7a5dcbe4b35b2"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 856.24707,
+        "design_iiptm": 0.14196,
+        "design_ptm": 0.69461,
+        "design_to_target_iptm": 0.14021,
+        "interaction_pae": 23.88312,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 17.81662,
+        "plip_hbonds_refolded": 0.0,
+        "plip_saltbridge_refolded": 2.0
+      },
+      "published": true,
+      "sequence_hash": "c9dab9a535281e6e4329804da1b70bbd4c3e39f825ab90b2ac7838cc20434282"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 695.49951,
+        "design_iiptm": 0.15573,
+        "design_ptm": 0.70708,
+        "design_to_target_iptm": 0.15573,
+        "interaction_pae": 23.13917,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 16.57689,
+        "plip_hbonds_refolded": 4.0,
+        "plip_saltbridge_refolded": 1.0
+      },
+      "published": true,
+      "sequence_hash": "f14a39432c8a62bc6573e7420c994c81a0625bea9bc79be6a29e1718a946e6da"
+    },
+    {
+      "metrics": {
+        "delta_sasa_refolded": 840.17188,
+        "design_iiptm": 0.15872,
+        "design_ptm": 0.70498,
+        "design_to_target_iptm": 0.15051,
+        "interaction_pae": 23.58586,
+        "liability_num_violations": 26.0,
+        "liability_score": 235.0,
+        "min_design_to_target_pae": 16.91421,
+        "plip_hbonds_refolded": 12.0,
+        "plip_saltbridge_refolded": 2.0
+      },
+      "published": false,
+      "sequence_hash": "dffd8fababed4abb937be0391d55c66aabc2041fc4f8577ca35b404347463fe2"
+    }
+  ],
+  "baseline_native": [
+    {
+      "proposal_arm": "diverse",
+      "psh_mean": 78.65593333333334,
+      "reference_hash": "75b0e221ec3e779ea580f8f38ec1e9d7997acf74705630e20251c423b863e555",
+      "reference_stratum": "same_v_nearby_length",
+      "repeats": 3,
+      "requested_cdr3_length": 19,
+      "requested_v": "IGHV3-23",
+      "selection_reason": "",
+      "sequence_sha256": "b9a16b616c0f163d7d8e6ae4c0bacbe4a54aa0b88a27493d9bf6b7443aae3090",
+      "source": "fresh_baseline_proposal",
+      "tier": "A"
+    },
+    {
+      "proposal_arm": "diverse",
+      "psh_mean": 87.28956666666666,
+      "reference_hash": null,
+      "reference_stratum": "unseeded_control",
+      "repeats": 3,
+      "requested_cdr3_length": 19,
+      "requested_v": "IGHV3-23",
+      "selection_reason": "margin_missed",
+      "sequence_sha256": "eb5e443a7a6cdcb33a88ce051b33ae257fa42cb5121fb3b008b9c6bc703cdada",
+      "source": "fresh_baseline_proposal",
+      "tier": "B"
+    },
+    {
+      "proposal_arm": "diverse",
+      "psh_mean": 88.8929,
+      "reference_hash": "75b0e221ec3e779ea580f8f38ec1e9d7997acf74705630e20251c423b863e555",
+      "reference_stratum": "same_v_nearby_length",
+      "repeats": 3,
+      "requested_cdr3_length": 19,
+      "requested_v": "IGHV3-23",
+      "selection_reason": "margin_missed",
+      "sequence_sha256": "c9dab9a535281e6e4329804da1b70bbd4c3e39f825ab90b2ac7838cc20434282",
+      "source": "fresh_baseline_proposal",
+      "tier": "B"
+    },
+    {
+      "proposal_arm": "diverse",
+      "psh_mean": 78.52993333333333,
+      "reference_hash": "2203b198c08af23209b5ea78b35837460ea0feeb3c5917c9f9a98464542915d3",
+      "reference_stratum": "same_v_nearby_length",
+      "repeats": 3,
+      "requested_cdr3_length": 19,
+      "requested_v": "IGHV3-23",
+      "selection_reason": "",
+      "sequence_sha256": "f14a39432c8a62bc6573e7420c994c81a0625bea9bc79be6a29e1718a946e6da",
+      "source": "fresh_baseline_proposal",
+      "tier": "A"
+    },
+    {
+      "proposal_arm": "diverse",
+      "psh_mean": 82.55886666666667,
+      "reference_hash": "2203b198c08af23209b5ea78b35837460ea0feeb3c5917c9f9a98464542915d3",
+      "reference_stratum": "same_v_nearby_length",
+      "repeats": 3,
+      "requested_cdr3_length": 19,
+      "requested_v": "IGHV3-23",
+      "selection_reason": "margin_missed",
+      "sequence_sha256": "c60c8779606cee7a083914b77bb50064e723686da41d5539deed33e9c1263688",
+      "source": "fresh_baseline_proposal",
+      "tier": "B"
+    }
+  ],
+  "epoch": 26019,
+  "experimental_heldout": [
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 75.0,
+          "draw": 1,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 927.63965,
+            "design_iiptm": 0.57878,
+            "design_ptm": 0.76994,
+            "design_to_target_iptm": 0.57878,
+            "interaction_pae": 11.10165,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 3.12793,
+            "plip_hbonds_refolded": 12.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 60.0,
+          "draw": 2,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 970.24951,
+            "design_iiptm": 0.59804,
+            "design_ptm": 0.77618,
+            "design_to_target_iptm": 0.58496,
+            "interaction_pae": 11.05384,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 3.07913,
+            "plip_hbonds_refolded": 12.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 70.0,
+          "draw": 3,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 966.53271,
+            "design_iiptm": 0.57502,
+            "design_ptm": 0.77375,
+            "design_to_target_iptm": 0.57502,
+            "interaction_pae": 11.14296,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 3.09063,
+            "plip_hbonds_refolded": 7.0,
+            "plip_saltbridge_refolded": 3.0
+          }
+        }
+      ],
+      "experiment_arm": "actual_5EHS_parent_control",
+      "mean_dense10_rank_sum": 68.33333333333333,
+      "parent_sequence_hash": null,
+      "sd_dense10_rank_sum": 7.637626158259733,
+      "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7"
+    },
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 126.0,
+          "draw": 1,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 776.42969,
+            "design_iiptm": 0.61596,
+            "design_ptm": 0.77286,
+            "design_to_target_iptm": 0.57596,
+            "interaction_pae": 11.33731,
+            "liability_num_violations": 19.0,
+            "liability_score": 170.0,
+            "min_design_to_target_pae": 3.41753,
+            "plip_hbonds_refolded": 7.0,
+            "plip_saltbridge_refolded": 3.0
+          }
+        },
+        {
+          "dense10_rank_sum": 130.0,
+          "draw": 2,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 778.91162,
+            "design_iiptm": 0.56842,
+            "design_ptm": 0.76959,
+            "design_to_target_iptm": 0.56842,
+            "interaction_pae": 11.49733,
+            "liability_num_violations": 19.0,
+            "liability_score": 170.0,
+            "min_design_to_target_pae": 3.34722,
+            "plip_hbonds_refolded": 7.0,
+            "plip_saltbridge_refolded": 4.0
+          }
+        },
+        {
+          "dense10_rank_sum": 81.0,
+          "draw": 3,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 849.68555,
+            "design_iiptm": 0.57835,
+            "design_ptm": 0.77099,
+            "design_to_target_iptm": 0.56388,
+            "interaction_pae": 11.39724,
+            "liability_num_violations": 19.0,
+            "liability_score": 170.0,
+            "min_design_to_target_pae": 3.38144,
+            "plip_hbonds_refolded": 9.0,
+            "plip_saltbridge_refolded": 4.0
+          }
+        }
+      ],
+      "experiment_arm": "actual_5EHS_parent_control",
+      "mean_dense10_rank_sum": 112.33333333333333,
+      "parent_sequence_hash": null,
+      "sd_dense10_rank_sum": 27.209067116190024,
+      "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2"
+    },
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 158.0,
+          "draw": 1,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 845.36572,
+            "design_iiptm": 0.51974,
+            "design_ptm": 0.74705,
+            "design_to_target_iptm": 0.48549,
+            "interaction_pae": 13.36193,
+            "liability_num_violations": 25.0,
+            "liability_score": 230.0,
+            "min_design_to_target_pae": 4.45871,
+            "plip_hbonds_refolded": 10.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 143.0,
+          "draw": 2,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 899.65625,
+            "design_iiptm": 0.49987,
+            "design_ptm": 0.74775,
+            "design_to_target_iptm": 0.46096,
+            "interaction_pae": 13.70223,
+            "liability_num_violations": 25.0,
+            "liability_score": 230.0,
+            "min_design_to_target_pae": 4.62369,
+            "plip_hbonds_refolded": 11.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 165.0,
+          "draw": 3,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 873.13184,
+            "design_iiptm": 0.48986,
+            "design_ptm": 0.73757,
+            "design_to_target_iptm": 0.46938,
+            "interaction_pae": 13.63499,
+            "liability_num_violations": 25.0,
+            "liability_score": 230.0,
+            "min_design_to_target_pae": 4.75652,
+            "plip_hbonds_refolded": 8.0,
+            "plip_saltbridge_refolded": 7.0
+          }
+        }
+      ],
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_mean_dense10_rank_sum": 68.33333333333333,
+      "mean_dense10_rank_sum": 155.33333333333334,
+      "mean_difference_vs_parent": 87.00000000000001,
+      "parent_sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "sd_dense10_rank_sum": 11.239810200058244,
+      "sequence_hash": "44eefb5755c993e6154f8bcec3515ef0309762dabc6401301228be57f9129845"
+    },
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 167.0,
+          "draw": 1,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 847.98584,
+            "design_iiptm": 0.47615,
+            "design_ptm": 0.74095,
+            "design_to_target_iptm": 0.47615,
+            "interaction_pae": 14.04347,
+            "liability_num_violations": 22.0,
+            "liability_score": 200.0,
+            "min_design_to_target_pae": 5.41233,
+            "plip_hbonds_refolded": 10.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 122.0,
+          "draw": 2,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 940.55566,
+            "design_iiptm": 0.48088,
+            "design_ptm": 0.75565,
+            "design_to_target_iptm": 0.46756,
+            "interaction_pae": 14.10506,
+            "liability_num_violations": 22.0,
+            "liability_score": 200.0,
+            "min_design_to_target_pae": 5.60834,
+            "plip_hbonds_refolded": 10.0,
+            "plip_saltbridge_refolded": 2.0
+          }
+        },
+        {
+          "dense10_rank_sum": 213.0,
+          "draw": 3,
+          "gpu": 7,
+          "metrics": {
+            "delta_sasa_refolded": 789.62305,
+            "design_iiptm": 0.4488,
+            "design_ptm": 0.74605,
+            "design_to_target_iptm": 0.4488,
+            "interaction_pae": 14.84274,
+            "liability_num_violations": 22.0,
+            "liability_score": 200.0,
+            "min_design_to_target_pae": 6.14567,
+            "plip_hbonds_refolded": 9.0,
+            "plip_saltbridge_refolded": 4.0
+          }
+        }
+      ],
+      "experiment_arm": "actual_5EHS_parent_control",
+      "mean_dense10_rank_sum": 167.33333333333334,
+      "parent_sequence_hash": null,
+      "sd_dense10_rank_sum": 45.50091574170055,
+      "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7"
+    },
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 204.0,
+          "draw": 1,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 949.7583,
+            "design_iiptm": 0.40535,
+            "design_ptm": 0.73525,
+            "design_to_target_iptm": 0.39882,
+            "interaction_pae": 16.21435,
+            "liability_num_violations": 20.0,
+            "liability_score": 180.0,
+            "min_design_to_target_pae": 7.28895,
+            "plip_hbonds_refolded": 7.0,
+            "plip_saltbridge_refolded": 4.0
+          }
+        },
+        {
+          "dense10_rank_sum": 241.0,
+          "draw": 2,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 826.83545,
+            "design_iiptm": 0.39715,
+            "design_ptm": 0.72779,
+            "design_to_target_iptm": 0.39577,
+            "interaction_pae": 15.97108,
+            "liability_num_violations": 20.0,
+            "liability_score": 180.0,
+            "min_design_to_target_pae": 7.154,
+            "plip_hbonds_refolded": 11.0,
+            "plip_saltbridge_refolded": 5.0
+          }
+        },
+        {
+          "dense10_rank_sum": 212.0,
+          "draw": 3,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 879.88672,
+            "design_iiptm": 0.40591,
+            "design_ptm": 0.72986,
+            "design_to_target_iptm": 0.40591,
+            "interaction_pae": 16.09104,
+            "liability_num_violations": 20.0,
+            "liability_score": 180.0,
+            "min_design_to_target_pae": 7.19743,
+            "plip_hbonds_refolded": 9.0,
+            "plip_saltbridge_refolded": 3.0
+          }
+        }
+      ],
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_mean_dense10_rank_sum": 112.33333333333333,
+      "mean_dense10_rank_sum": 219.0,
+      "mean_difference_vs_parent": 106.66666666666667,
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sd_dense10_rank_sum": 19.467922333931785,
+      "sequence_hash": "1c86268feed639528b347ce769b8abf35163b3ba872f0b8e6f9526fd0f1a80ea"
+    },
+    {
+      "distinct_metric_vectors": 3,
+      "draws": [
+        {
+          "dense10_rank_sum": 845.0,
+          "draw": 1,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 769.81104,
+            "design_iiptm": 0.15513,
+            "design_ptm": 0.70212,
+            "design_to_target_iptm": 0.14842,
+            "interaction_pae": 23.5509,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 17.30534,
+            "plip_hbonds_refolded": 2.0,
+            "plip_saltbridge_refolded": 6.0
+          }
+        },
+        {
+          "dense10_rank_sum": 765.0,
+          "draw": 2,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 966.48242,
+            "design_iiptm": 0.15187,
+            "design_ptm": 0.70708,
+            "design_to_target_iptm": 0.14642,
+            "interaction_pae": 23.46494,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 17.93461,
+            "plip_hbonds_refolded": 4.0,
+            "plip_saltbridge_refolded": 3.0
+          }
+        },
+        {
+          "dense10_rank_sum": 842.0,
+          "draw": 3,
+          "gpu": 6,
+          "metrics": {
+            "delta_sasa_refolded": 771.05029,
+            "design_iiptm": 0.15966,
+            "design_ptm": 0.70182,
+            "design_to_target_iptm": 0.15411,
+            "interaction_pae": 23.35631,
+            "liability_num_violations": 24.0,
+            "liability_score": 220.0,
+            "min_design_to_target_pae": 17.33326,
+            "plip_hbonds_refolded": 6.0,
+            "plip_saltbridge_refolded": 4.0
+          }
+        }
+      ],
+      "experiment_arm": "balanced08_control",
+      "matched_parent_mean_dense10_rank_sum": 68.33333333333333,
+      "mean_dense10_rank_sum": 817.3333333333334,
+      "mean_difference_vs_parent": 749.0,
+      "parent_sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "sd_dense10_rank_sum": 45.34681172181053,
+      "sequence_hash": "da45144efac6287823c7a63c029fb07348c8d4c81bc17dfe492abbdfcc7b5978"
+    }
+  ],
+  "experimental_initial": [
+    {
+      "experiment_arm": "actual_5EHS_parent_control",
+      "metrics": {
+        "delta_sasa_refolded": 913.6333,
+        "design_iiptm": 0.59119,
+        "design_ptm": 0.77441,
+        "design_to_target_iptm": 0.56995,
+        "interaction_pae": 11.39334,
+        "liability_num_violations": 19.0,
+        "liability_score": 170.0,
+        "min_design_to_target_pae": 3.41136,
+        "plip_hbonds_refolded": 13.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "parent_sequence_hash": null,
+      "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "single_pass_category_final_score": 12.0,
+      "single_pass_dense10_rank_sum": 53.0
+    },
+    {
+      "experiment_arm": "actual_5EHS_parent_control",
+      "metrics": {
+        "delta_sasa_refolded": 894.71436,
+        "design_iiptm": 0.57554,
+        "design_ptm": 0.77268,
+        "design_to_target_iptm": 0.57554,
+        "interaction_pae": 11.1405,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 3.09743,
+        "plip_hbonds_refolded": 8.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "parent_sequence_hash": null,
+      "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "single_pass_category_final_score": 29.0,
+      "single_pass_dense10_rank_sum": 75.0
+    },
+    {
+      "dense10_difference_vs_parent": 80.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 75.0,
+      "metrics": {
+        "delta_sasa_refolded": 924.01807,
+        "design_iiptm": 0.47712,
+        "design_ptm": 0.73944,
+        "design_to_target_iptm": 0.46323,
+        "interaction_pae": 13.68409,
+        "liability_num_violations": 25.0,
+        "liability_score": 230.0,
+        "min_design_to_target_pae": 4.83875,
+        "plip_hbonds_refolded": 10.0,
+        "plip_saltbridge_refolded": 6.0
+      },
+      "parent_sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "sequence_hash": "44eefb5755c993e6154f8bcec3515ef0309762dabc6401301228be57f9129845",
+      "single_pass_category_final_score": 40.0,
+      "single_pass_dense10_rank_sum": 155.0
+    },
+    {
+      "experiment_arm": "actual_5EHS_parent_control",
+      "metrics": {
+        "delta_sasa_refolded": 840.20947,
+        "design_iiptm": 0.47745,
+        "design_ptm": 0.75218,
+        "design_to_target_iptm": 0.47637,
+        "interaction_pae": 14.04831,
+        "liability_num_violations": 22.0,
+        "liability_score": 200.0,
+        "min_design_to_target_pae": 5.51406,
+        "plip_hbonds_refolded": 7.0,
+        "plip_saltbridge_refolded": 5.0
+      },
+      "parent_sequence_hash": null,
+      "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+      "single_pass_category_final_score": 48.0,
+      "single_pass_dense10_rank_sum": 155.0
+    },
+    {
+      "dense10_difference_vs_parent": 174.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 858.15381,
+        "design_iiptm": 0.43585,
+        "design_ptm": 0.721,
+        "design_to_target_iptm": 0.41395,
+        "interaction_pae": 16.0139,
+        "liability_num_violations": 20.0,
+        "liability_score": 180.0,
+        "min_design_to_target_pae": 7.17439,
+        "plip_hbonds_refolded": 5.0,
+        "plip_saltbridge_refolded": 5.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "1c86268feed639528b347ce769b8abf35163b3ba872f0b8e6f9526fd0f1a80ea",
+      "single_pass_category_final_score": 51.0,
+      "single_pass_dense10_rank_sum": 227.0
+    },
+    {
+      "dense10_difference_vs_parent": 515.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 831.12598,
+        "design_iiptm": 0.26266,
+        "design_ptm": 0.70203,
+        "design_to_target_iptm": 0.25385,
+        "interaction_pae": 19.76795,
+        "liability_num_violations": 21.0,
+        "liability_score": 190.0,
+        "min_design_to_target_pae": 11.72436,
+        "plip_hbonds_refolded": 7.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "0d0b4e5bbaf692fd70f6ed8937f874839523f9022e1d49fdd5dcb4c8f4145721",
+      "single_pass_category_final_score": 132.0,
+      "single_pass_dense10_rank_sum": 568.0
+    },
+    {
+      "dense10_difference_vs_parent": 600.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 868.6665,
+        "design_iiptm": 0.21364,
+        "design_ptm": 0.70645,
+        "design_to_target_iptm": 0.21364,
+        "interaction_pae": 21.2571,
+        "liability_num_violations": 19.0,
+        "liability_score": 170.0,
+        "min_design_to_target_pae": 13.4945,
+        "plip_hbonds_refolded": 3.0,
+        "plip_saltbridge_refolded": 5.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "547e35f218636a8043023f2867979324526bfe84e7d3bb32ce72f44f04e77102",
+      "single_pass_category_final_score": 136.0,
+      "single_pass_dense10_rank_sum": 653.0
+    },
+    {
+      "dense10_difference_vs_parent": 622.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 721.23535,
+        "design_iiptm": 0.25149,
+        "design_ptm": 0.71578,
+        "design_to_target_iptm": 0.23636,
+        "interaction_pae": 20.50674,
+        "liability_num_violations": 20.0,
+        "liability_score": 180.0,
+        "min_design_to_target_pae": 12.9287,
+        "plip_hbonds_refolded": 3.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "0aff781c82b51f9ebd6456fea4cb0640ff35a4c35e2408f991c92ba8ac5b20df",
+      "single_pass_category_final_score": 189.0,
+      "single_pass_dense10_rank_sum": 675.0
+    },
+    {
+      "dense10_difference_vs_parent": 661.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 703.55713,
+        "design_iiptm": 0.23002,
+        "design_ptm": 0.72262,
+        "design_to_target_iptm": 0.21205,
+        "interaction_pae": 21.01312,
+        "liability_num_violations": 20.0,
+        "liability_score": 180.0,
+        "min_design_to_target_pae": 13.52523,
+        "plip_hbonds_refolded": 7.0,
+        "plip_saltbridge_refolded": 3.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "f07309754b8261c91eddb1ffee755af0a9a088155674938906c3a5defaa4719c",
+      "single_pass_category_final_score": 199.0,
+      "single_pass_dense10_rank_sum": 714.0
+    },
+    {
+      "dense10_difference_vs_parent": 708.0,
+      "experiment_arm": "balanced08_control",
+      "matched_parent_dense10_rank_sum": 75.0,
+      "metrics": {
+        "delta_sasa_refolded": 859.30322,
+        "design_iiptm": 0.15266,
+        "design_ptm": 0.70316,
+        "design_to_target_iptm": 0.1475,
+        "interaction_pae": 23.55398,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 17.73801,
+        "plip_hbonds_refolded": 8.0,
+        "plip_saltbridge_refolded": 4.0
+      },
+      "parent_sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "sequence_hash": "da45144efac6287823c7a63c029fb07348c8d4c81bc17dfe492abbdfcc7b5978",
+      "single_pass_category_final_score": 175.0,
+      "single_pass_dense10_rank_sum": 783.0
+    },
+    {
+      "dense10_difference_vs_parent": 737.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 53.0,
+      "metrics": {
+        "delta_sasa_refolded": 517.11621,
+        "design_iiptm": 0.19731,
+        "design_ptm": 0.71729,
+        "design_to_target_iptm": 0.19958,
+        "interaction_pae": 21.29647,
+        "liability_num_violations": 19.0,
+        "liability_score": 170.0,
+        "min_design_to_target_pae": 13.79016,
+        "plip_hbonds_refolded": 2.0,
+        "plip_saltbridge_refolded": 3.0
+      },
+      "parent_sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "sequence_hash": "37d9d7ac2f973383143b5eb0ceb0028465bc1a73f1da1f67403c6afce8e42631",
+      "single_pass_category_final_score": 225.0,
+      "single_pass_dense10_rank_sum": 790.0
+    },
+    {
+      "dense10_difference_vs_parent": 726.0,
+      "experiment_arm": "chemistry_conservative",
+      "matched_parent_dense10_rank_sum": 155.0,
+      "metrics": {
+        "delta_sasa_refolded": 622.24707,
+        "design_iiptm": 0.16608,
+        "design_ptm": 0.72378,
+        "design_to_target_iptm": 0.1476,
+        "interaction_pae": 23.88343,
+        "liability_num_violations": 24.0,
+        "liability_score": 220.0,
+        "min_design_to_target_pae": 17.53486,
+        "plip_hbonds_refolded": 5.0,
+        "plip_saltbridge_refolded": 2.0
+      },
+      "parent_sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+      "sequence_hash": "49f85d0ed441e8958f3a0680116340cdedcb7ec5fcc1ddacf5869aa141d63321",
+      "single_pass_category_final_score": 255.0,
+      "single_pass_dense10_rank_sum": 881.0
+    }
+  ],
+  "field_sha256": "a16ae4b601e6e2b2ba85f0227156fdb265e1d6ea1ac4d6ceb1d926529d474037",
+  "limits": [
+    "Experimental parents are historical controls, not novel submissions.",
+    "Chemistry children have one corrected-stack native pass each; held-out repeats measure binding predictions only.",
+    "Baseline native metadata used the previous local CPU stack.",
+    "No observed production discard is established: all five baseline candidates were submitted.",
+    "Field ranking is a predicted-fitness proxy, not biological binding or validator equivalence."
+  ],
+  "provenance": {
+    "baseline_sha256": "b24c8d6e02915ee84292693e2c3252649f0dec60e529d2423f043a95fe00509b",
+    "field_provenance": {
+      "actual_epochs": [
+        26018,
+        26017,
+        26016,
+        26015,
+        26011,
+        26010,
+        26009,
+        26008,
+        26007,
+        26006
+      ],
+      "before_epoch": 26019,
+      "database_path": "/root/artifacts/nanobody_mutations.sqlite",
+      "external_worker_runtime_attested": false,
+      "field_sha256": "a16ae4b601e6e2b2ba85f0227156fdb265e1d6ea1ac4d6ceb1d926529d474037",
+      "requested_epoch_count": 10,
+      "rows_by_epoch": {
+        "26006": 8,
+        "26007": 20,
+        "26008": 44,
+        "26009": 66,
+        "26010": 36,
+        "26011": 34,
+        "26015": 18,
+        "26016": 10,
+        "26017": 18,
+        "26018": 52
+      },
+      "same_target": "Q9NZQ7",
+      "source": "canonical_public_validator_api_observations_sqlite_snapshot"
+    },
+    "heldout_comparison_sha256": "d797fa68659888feb59e1878f9b3aa45b96816df7764bf2578f35f82680240c6",
+    "heldout_raw_artifacts": [
+      {
+        "draw": 1,
+        "gpu": 6,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu6/pass1/length126/exact_all.json",
+        "sha256": "92442d31fbac68c57158bff84aac10f8a245d2c8ab43f7a063ef7f92bbbe9213",
+        "valid_structure_records": 3
+      },
+      {
+        "draw": 2,
+        "gpu": 6,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu6/pass2/length126/exact_all.json",
+        "sha256": "ef576e4519ffcec24370b96b76d83597bb85952de9073213b78289398324371b",
+        "valid_structure_records": 3
+      },
+      {
+        "draw": 3,
+        "gpu": 6,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu6/pass3/length126/exact_all.json",
+        "sha256": "1160efe945ecea29ba2e8f5e60a72ace8ad2e8f01abbed5c69270e11980733ec",
+        "valid_structure_records": 3
+      },
+      {
+        "draw": 1,
+        "gpu": 7,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu7/pass1/length126/exact_all.json",
+        "sha256": "d45905e90f1ecccfdd58e92c99345acf3454a1bcc057cc23f167ea3edb89d2f2",
+        "valid_structure_records": 3
+      },
+      {
+        "draw": 2,
+        "gpu": 7,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu7/pass2/length126/exact_all.json",
+        "sha256": "5591c9a6b7f917e1090b2d3666ea8ef35225c34c7e9e45b3b1e5cff2c1a50e57",
+        "valid_structure_records": 3
+      },
+      {
+        "draw": 3,
+        "gpu": 7,
+        "path": "/root/pr100-reference-probes/binding-26019-1793324696135058000/heldout3/score-gpu7/pass3/length126/exact_all.json",
+        "sha256": "54ba00c07c370818582962b19e7a42fb6a4f3b63a48315320395ff444de5ad05",
+        "valid_structure_records": 3
+      }
+    ],
+    "initial_comparison_sha256": "6bbc0c46e1ef22a47cb9f8ae9d8ef5a70bbcc613c1d62cf79d5d2f4548153159"
+  },
+  "schema": "pr100-fitness-selection-audit-fixture-v1",
+  "target": "Q9NZQ7"
+}

@@ -718,6 +718,41 @@ def test_publish_refuses_after_the_cutoff_and_on_a_changed_epoch_start(tmp_path,
                            local, tiers=tiers)
 
 
+def test_publish_forwards_a_frozen_reference_field_to_the_exporter(tmp_path, monkeypatch):
+    value = config(tmp_path)
+    local = tmp_path / 'local'
+    local.mkdir()
+    monkeypatch.setattr(controller, 'fetch_archive', lambda target: b'archive')
+    digest = __import__('hashlib').sha256(b'archive').hexdigest()
+    forwarded = {}
+
+    def build(validity, scores, settings, **kwargs):
+        forwarded['reference_field'] = kwargs.get('reference_field')
+        pool = [row['sequence'] for row in validity['candidates']]
+        return {'epoch': validity['challenge']['epoch'], 'sequence_pool': pool,
+                'sequence_pool_size': len(pool), 'status': 'live_trial'}
+
+    monkeypatch.setattr(pr100_live_trial_export, 'build', build)
+    monkeypatch.setattr(rules, 'verified_fleet',
+                        lambda fleet, *a, **k: {'sequence_pool': fleet['sequence_pool']})
+    rows = [candidate('AAA', 'A', 78.0)]
+    validity = {'challenge': challenge(), 'candidates': rows, 'archive_sha256': digest}
+    sentinel = object()
+    controller.publish(value, Chain(), challenge(), validity, {'target': rules.TARGET},
+                       {'samples': 5}, 'c' * 64, 'd' * 64, local,
+                       tiers=controller.candidate_tiers(rows), reference_field=sentinel)
+    assert forwarded['reference_field'] is sentinel
+
+
+def test_publish_defaults_to_within_trial_ranking_without_a_reference_field(tmp_path, publishable):
+    value = config(tmp_path)
+    local = tmp_path / 'local'
+    local.mkdir()
+    rows = [candidate('AAA', 'A', 78.0)]
+    outcome = publish_once(value, local, rows, controller.candidate_tiers(rows))
+    assert outcome['status'] == 'published' and outcome['count'] == 1
+
+
 # --- config validation and build stamp ---------------------------------------------
 
 def stamped_release(tmp_path, value, root=None):

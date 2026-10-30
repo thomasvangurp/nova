@@ -319,3 +319,66 @@ def snapshot(config, challenge):
     except OSError:
         pass  # An unavailable diagnostic disk cannot strand an otherwise valid epoch.
     return result
+
+
+def fitness_field(config, challenge, metrics):
+    """Collect a past-only public metric field from completed ledger boards.
+
+    The field is built from the content-addressed public boards already recorded
+    in the parent-feed ledger, never from the annotated (selected) parent bank
+    and never over the network. The ledger points at exactly one immutable
+    digest per epoch, so a corrected board replaces its predecessor instead of
+    appending an older observation. Every observation must be target-matched,
+    strictly before the owning epoch, and complete for every requested
+    ``metrics`` key (a row missing a key is skipped, which is a documented
+    selection because ranking requires a complete vector). Only the ten most
+    recent distinct epochs contribute. Any missing, invalid or stale ledger
+    returns ``None`` so the caller keeps its within-trial ranking; this is never
+    a publication gate. The returned dict is ``{'target', 'epochs', 'rows'}``.
+    """
+    try:
+        cfg = settings(config)
+        if cfg is None:
+            return None
+        directory = Path(cfg['state_directory']) / challenge['target']
+        ledger = json.loads(read(directory / 'public-ledger.json'))
+        if not isinstance(ledger, dict):
+            return None
+        metric_names = tuple(sorted(metrics))
+        by_epoch = {}
+        for text, item in sorted(ledger.items(), key=lambda pair: pair[0]):
+            try:
+                epoch = int(text)
+            except (TypeError, ValueError):
+                continue
+            board_sha256 = item.get('sha256') if isinstance(item, dict) else None
+            if (type(epoch) is not int or not 0 <= epoch < challenge['epoch']
+                    or not isinstance(board_sha256, str)
+                    or re.fullmatch('[0-9a-f]{64}', board_sha256) is None):
+                continue
+            content = read(directory / 'public' / (board_sha256 + '.json'))
+            if sha(content) != board_sha256:
+                return None
+            board = json.loads(content)
+            if board.get('target') != challenge['target'] or board.get('epoch') != epoch:
+                return None
+            projected_rows = []
+            for row in board.get('rows', []):
+                if not isinstance(row, dict) or not isinstance(row.get('metrics'), dict):
+                    continue
+                projected = {name: row['metrics'].get(name) for name in metric_names}
+                if any(type(v) not in (int, float) or not math.isfinite(v)
+                       or isinstance(v, bool) for v in projected.values()):
+                    continue
+                projected_rows.append(projected)
+            if projected_rows:
+                by_epoch[epoch] = projected_rows
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if not by_epoch:
+        return None
+    selected_epochs = sorted(by_epoch, reverse=True)[:10]
+    collected = [(epoch, row) for epoch in selected_epochs for row in by_epoch[epoch]]
+    collected.sort(key=lambda item: (item[0], tuple(item[1][name] for name in metric_names)))
+    return {'target': challenge['target'], 'epochs': sorted(selected_epochs),
+            'rows': [row for _, row in collected]}

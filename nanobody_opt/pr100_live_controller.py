@@ -731,7 +731,7 @@ def collect_native_journal(config, epoch, local, stop_at, *, transport=remote):
 
 
 def publish(config, chain, challenge, validity, scores, settings, scorer_hash, settings_hash, local,
-            *, tiers=None, dry_run=False, invalidated_sequence_hashes=()):
+            *, tiers=None, dry_run=False, invalidated_sequence_hashes=(), reference_field=None):
     from nanobody_opt.pr100_live_trial_export import build
     epoch = challenge['epoch']
     reserve = config.get('reserve_blocks', RESERVE_BLOCKS)
@@ -744,7 +744,8 @@ def publish(config, chain, challenge, validity, scores, settings, scorer_hash, s
     if hashlib.sha256(fresh_archive).hexdigest() != validity['archive_sha256']:
         raise ValueError('archive changed after exact novelty check')
     fleet = build(validity, scores, settings, scorer_sha256=scorer_hash,
-                  settings_file_sha256=settings_hash, now=time.time())
+                  settings_file_sha256=settings_hash, now=time.time(),
+                  reference_field=reference_field)
     verified = rules.verified_fleet(fleet, epoch, challenge['epoch_start_block_hash'],
                                     challenge['epoch_length'])
     if verified['sequence_pool'] != fleet['sequence_pool'] or not fleet['sequence_pool']:

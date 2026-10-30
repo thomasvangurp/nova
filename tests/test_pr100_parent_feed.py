@@ -10,6 +10,8 @@ import pytest
 
 from nanobody_opt import pr100_parent_bank as bank, pr100_parent_feed as feed
 from nanobody_opt import pr100_live_controller as controller, rules
+from nanobody_opt import pr100_fitness_reference as reference
+from nanobody_opt.pr100_live_trial_export import METRICS as FITNESS_METRICS
 from test_pr100_live_controller import config as controller_config
 
 FIXTURE = Path(__file__).parent / 'fixtures/pr100/parent_feed'
@@ -343,3 +345,50 @@ def test_release_upgrade_empty_public_still_dispatches_accumulated_bank(case, mo
     assert calls[0]['job']['original_bank_sha256'] == pointer['bank_sha256']
     assert calls[0]['job']['original_bank_path'] == pointer['remote_bank_path']
     assert calls[0]['job']['source_sha'] == 'f' * 40
+
+
+def test_fitness_field_freezes_past_only_target_rows_from_ledger(case):
+    _, _, pointer = promote(case)
+    field = bank.fitness_field(case.config, case.challenge, FITNESS_METRICS)
+    assert field is not None
+    assert field['target'] == TARGET
+    assert field['epochs'] == [26028]
+    assert len(field['rows']) == 20
+    for row in field['rows']:
+        assert set(row) == set(FITNESS_METRICS)
+        assert all(type(v) in (float, int) and not isinstance(v, bool) for v in row.values())
+    frozen = reference.freeze(field, target=case.challenge['target'],
+        epoch=case.challenge['epoch'], metrics=FITNESS_METRICS,
+        scorer_sha256='a' * 64, settings_sha256='b' * 64, settings_file_sha256='c' * 64)
+    assert frozen.row_count == 20 and frozen.reference_epochs == (26028,)
+    assert frozen.source_sha256 == bank.sha(reference.serialize(field))
+    assert frozen.score(field['rows'][0]) >= 10  # dense rank sum lower bound across 10 metrics
+
+
+def test_fitness_field_returns_none_when_feed_disabled_or_no_past_board(case):
+    disabled = copy.deepcopy(case.config); disabled.pop('parent_bank_feed')
+    assert bank.fitness_field(disabled, case.challenge, FITNESS_METRICS) is None
+    _, _, pointer = promote(case)
+    assert bank.fitness_field(case.config, {'epoch': 26026, 'target': TARGET}, FITNESS_METRICS) is None
+    # A field for a different target cannot leak rows from this target's ledger.
+    other = copy.deepcopy(case.config)
+    assert bank.fitness_field(other, {'epoch': 26030, 'target': 'OTHER'}, FITNESS_METRICS) is None
+
+
+def test_fitness_field_uses_latest_ledger_board_not_an_older_revision(case):
+    _, _, _ = promote(case)
+    before = bank.fitness_field(case.config, case.challenge, FITNESS_METRICS)
+    assert before is not None and len(before['rows']) == 20
+    # A corrected board publishes a new content-addressed digest; the ledger now
+    # points at exactly that digest, so the older revision is not combined.
+    revised_payload = copy.deepcopy(PUBLIC); revised_payload['data'] = revised_payload['data'][:5]
+    revised = bank.public_epoch(revised_payload, TARGET, 26028, 26030)
+    content = bank.raw(revised); digest = bank.sha(content)
+    bank.immutable(case.directory / 'public' / (digest + '.json'), content)
+    ledger = json.loads(bank.read(case.directory / 'public-ledger.json'))
+    assert ledger['26028']['sha256'] != digest
+    ledger['26028']['sha256'] = digest
+    bank.atomic(case.directory / 'public-ledger.json', ledger)
+    after = bank.fitness_field(case.config, case.challenge, FITNESS_METRICS)
+    assert after is not None and after['epochs'] == [26028]
+    assert len(after['rows']) == len(revised['rows']) < 20  # replaced, never appended

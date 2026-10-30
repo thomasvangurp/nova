@@ -11,7 +11,8 @@ from config.config_loader import load_boltzgen_metrics
 METRICS = load_boltzgen_metrics(str(Path(__file__).resolve().parents[1] / "config/boltzgen_config.yaml"))
 
 
-def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, now):
+def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, now,
+          reference_field=None):
     """Join actual validity and one fast observation; never claim equivalence."""
     expected = validity["challenge"]
     epoch, target = expected["epoch"], expected["target"]
@@ -19,6 +20,15 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
     if epoch < rules.ACTIVATION_EPOCH or expected != rules.challenge(
             config, epoch, expected["epoch_start_block_hash"], expected["epoch_length"]):
         raise ValueError("invalid current challenge")
+    if reference_field is not None:
+        from nanobody_opt.pr100_fitness_reference import FrozenField
+        if (not isinstance(reference_field, FrozenField)
+                or reference_field.target != target or reference_field.epoch != epoch
+                or {key: direction for key, direction, _ in reference_field.columns} != METRICS
+                or reference_field.scorer_sha256 != scorer_sha256
+                or reference_field.settings_sha256 != rules.digest(settings)
+                or reference_field.settings_file_sha256 != settings_file_sha256):
+            raise ValueError("reference field challenge or metrics mismatch")
     if scored.get("target") != target or validity.get("target") != target:
         raise ValueError("scoring target mismatch")
     for value in (scorer_sha256, settings_file_sha256, validity.get("archive_sha256")):
@@ -68,6 +78,11 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
         score = float(sum(1 + sum(value > metrics[key] if direction == "max" else value < metrics[key]
                                  for value in {other[key] for _, other, _, _ in joined})
                           for key, direction in METRICS.items()))
+        selection = ({"score": score, "score_p90": score,
+            "method": "one_pass_within_trial_dense_rank_sum",
+            "reference_scope": "four_entry_live_trial" if len(joined) == 4 else "partial_live_trial",
+            "reference_count": len(joined), "multipass_measured": False}
+            if reference_field is None else reference_field.selection(metrics))
         checkpoints[sequence] = {
             "schema_version": 3, "status": "live_trial", "publication_stage": "live_trial",
             "target": target, "epoch": epoch, "sequences": [sequence], "pr100_evidence": evidence,
@@ -79,9 +94,7 @@ def build(validity, scored, settings, *, scorer_sha256, settings_file_sha256, no
                         "settings": settings, "settings_file_sha256": settings_file_sha256,
                         "target": target, "epoch": epoch}}},
             "exact": {"observation_count": 1, "metrics": metrics, "scoring_equivalence_qualified": False},
-            "selection": {"score": score, "score_p90": score,
-                "method": "one_pass_within_trial_dense_rank_sum", "reference_scope": "four_entry_live_trial" if len(joined) == 4 else "partial_live_trial",
-                "reference_count": len(joined), "multipass_measured": False},
+            "selection": selection,
         }
     pool = sorted(checkpoints, key=lambda sequence: (checkpoints[sequence]["selection"]["score"],
                                                     rules.sequence_hash(sequence)))

@@ -28,6 +28,8 @@ TEST_FILES = (
     'tests/test_pr100_native_benchmark.py',
     'tests/test_pr100_resources.py',
     'tests/test_pr100_live_trial_export.py',
+    'tests/test_pr100_fitness_reference.py',
+    'tests/test_pr100_fitness_real_pools.py',
     # The whole Pi-owned live path: controller, supervisor, worker, GPU lease, selection
     # and the handoff diagnostics the publisher depends on.
     'tests/test_pr100_live_controller.py',

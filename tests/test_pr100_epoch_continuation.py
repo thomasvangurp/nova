@@ -216,3 +216,71 @@ def test_running_attempt_keeps_frozen_parent_bank_when_pointer_changes(legacy, m
         assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'recoverable_failure'
     assert snapshots == [1]
     assert dispatched == [first, first]
+
+
+def test_frozen_fitness_field_binds_the_epoch_entry_field(monkeypatch):
+    challenge = {'target': 'Q9NZQ7', 'epoch': 26030}
+    identity = {'scorer_sha256': 'a' * 64, 'settings_sha256': 'b' * 64,
+                'settings_file_sha256': 'c' * 64}
+    metrics = {'design_iiptm': 'max'}
+    field = {'target': 'Q9NZQ7', 'epochs': [26029], 'rows': [{'design_iiptm': 0.5}]}
+    state = {'fitness_field': field}
+    frozen = continuation.frozen_fitness_field(state, challenge, identity, metrics=metrics)
+    assert frozen is not None and frozen.reference_epochs == (26029,)
+    assert frozen.scorer_sha256 == 'a' * 64 and frozen.settings_file_sha256 == 'c' * 64
+
+
+def test_frozen_fitness_field_falls_back_when_field_unavailable_or_unfreezable(monkeypatch):
+    identity = {'scorer_sha256': 'a' * 64, 'settings_sha256': 'b' * 64,
+                'settings_file_sha256': 'c' * 64}
+    assert continuation.frozen_fitness_field({'fitness_field': None},
+        {'target': 'Q9NZQ7', 'epoch': 26030}, identity) is None
+    assert continuation.frozen_fitness_field({},
+        {'target': 'Q9NZQ7', 'epoch': 26030}, identity) is None
+    stale = {'target': 'Q9NZQ7', 'epochs': [26000], 'rows': [{'design_iiptm': 0.5}]}
+    assert continuation.frozen_fitness_field({'fitness_field': stale},
+        {'target': 'Q9NZQ7', 'epoch': 26030}, identity, metrics={'design_iiptm': 'max'}) is None
+
+
+def test_epoch_entry_freezes_fitness_field_once_across_restarts(legacy, monkeypatch):
+    from nanobody_opt import pr100_parent_bank
+    x = legacy; collections = []
+    field = {'target': x.replay.challenge['target'], 'epochs': [x.replay.challenge['epoch'] - 1],
+             'rows': [{'design_iiptm': 0.5}]}
+    monkeypatch.setattr(pr100_parent_bank, 'fitness_field',
+                        lambda config, challenge, metrics: collections.append(1) or field)
+    def phase(cfg, *args, **kwargs):
+        raise RuntimeError('fixture interrupted before remote dispatch')
+    monkeypatch.setattr(c, 'run_phase', phase)
+    for _ in range(2):
+        assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'recoverable_failure'
+    assert collections == [1]  # collected once at epoch entry, never re-collected on restart
+    saved = json.loads((x.local / 'continuation.json').read_text())
+    assert saved['fitness_field'] == field
+
+
+def test_run_epoch_passes_frozen_field_into_publication(legacy, monkeypatch):
+    from nanobody_opt import pr100_parent_bank
+    from nanobody_opt.pr100_live_trial_export import METRICS
+    x = legacy
+    state = continuation.migrate(x.local, x.replay.challenge, x.config)
+    state['active'] = {'number': 1, 'phase': 'publish', 'proposal_offset': 600}
+    state['next_attempt'] = 2
+    write(x.local / 'continuation.json', state)
+    field = {'target': x.replay.challenge['target'],
+             'epochs': [x.replay.challenge['epoch'] - 1],
+             'rows': [{name: 0.5 for name in METRICS}]}
+    monkeypatch.setattr(pr100_parent_bank, 'fitness_field', lambda *a: field)
+    seen = {}
+    real_publish = c.publish
+    def publish(config, chain, challenge, validity, scores, settings, scorer_hash,
+                settings_hash, local, **kwargs):
+        seen['reference_field'] = kwargs.get('reference_field')
+        return real_publish(config, chain, challenge, validity, scores, settings,
+                            scorer_hash, settings_hash, local, **kwargs)
+    monkeypatch.setattr(c, 'publish', publish)
+    outcome = c.run_epoch(x.config, x.chain, c.clock_state(x.chain))
+    assert outcome['status'] == 'published'
+    assert seen['reference_field'] is not None and seen['reference_field'].row_count == 1
+    assert seen['reference_field'].selection({name: 0.5 for name in METRICS})['method'] \
+        == 'one_pass_frozen_public_field_dense_rank_sum'

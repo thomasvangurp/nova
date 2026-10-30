@@ -692,6 +692,33 @@ def required_seconds(mode, config):
         required += c.PHASE_FLOORS['sequence']
     return required
 
+
+def frozen_fitness_field(state, challenge, identity, *, metrics=None):
+    """Bind the epoch-entry frozen field to the measured scorer, or ``None``.
+
+    The raw field is collected once at epoch entry (see ``run_epoch``) and
+    stored in ``state['fitness_field']`` (``None`` means no usable field was
+    found). Every attempt then ranks against the same frozen observations; a
+    later ledger/API refresh cannot switch an earlier selection score. The
+    binding to scorer/settings happens here and is deterministic. A field that
+    cannot be bound safely returns ``None`` and within-trial ranking is kept.
+    """
+    from nanobody_opt import pr100_fitness_reference
+    from nanobody_opt.pr100_live_trial_export import METRICS
+    metrics = METRICS if metrics is None else metrics
+    field = state.get('fitness_field')
+    if field is None:
+        return None
+    try:
+        return pr100_fitness_reference.freeze(
+            field, target=challenge['target'], epoch=challenge['epoch'], metrics=metrics,
+            scorer_sha256=identity['scorer_sha256'],
+            settings_sha256=identity['settings_sha256'],
+            settings_file_sha256=identity['settings_file_sha256'])
+    except ValueError:
+        return None
+
+
 def run_epoch(config, chain, clock, *, dry_run=False):
     from nanobody_opt import pr100_live_controller as c
     clock = c.clock_state(chain)
@@ -736,6 +763,15 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         return {'status': 'qualified_novelty_migration_waiting_for_ownership', 'epoch': epoch}
     prune_invalidated_confirmations(state)
     c.atomic(path, state)
+    if 'fitness_field' not in state:
+        # Freeze the past-only public ranking field once at epoch entry, before
+        # any selection is scored. A later ledger/API refresh must not switch an
+        # earlier selection score, so the collected (or unavailable) field is
+        # persisted immediately and reused by every attempt in this epoch.
+        from nanobody_opt import pr100_parent_bank
+        from nanobody_opt.pr100_live_trial_export import METRICS
+        state['fitness_field'] = pr100_parent_bank.fitness_field(config, challenge, METRICS)
+        c.atomic(path, state)
     budget = fresh_budget.ensure(state, config)
     c.atomic(path, state)
     mode = state['active']['phase'] if state.get('active') else mode_for(state)
@@ -949,6 +985,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                       'structures': {}, 'n': len(state['score_rows'])}
             active['phase'] = 'publish'; save()
             identity = state['scoring_identity']
+            reference_field = frozen_fitness_field(state, challenge, identity)
             ordered = c.order_candidates(validity['candidates'], allow_marginal=worker.get('allow_marginal', True))
             if not ordered:
                 previous = read(config['publication_path'], {})
@@ -970,7 +1007,8 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                     outcome = c.publish(config, chain, challenge, {**validity, 'candidates': subset}, scores,
                         state['settings'], identity['scorer_sha256'], identity['settings_file_sha256'], local,
                         tiers=c.candidate_tiers(subset), dry_run=dry_run,
-                        invalidated_sequence_hashes=state.get('invalidated_native_hashes', []))
+                        invalidated_sequence_hashes=state.get('invalidated_native_hashes', []),
+                        reference_field=reference_field)
                 except ValueError as error:
                     if str(error) not in ('cannot degrade an existing valid partial fleet',
                                           'cannot discard an existing valid partial fleet'):
