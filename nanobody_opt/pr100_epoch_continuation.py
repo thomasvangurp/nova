@@ -87,6 +87,18 @@ def union_rows(old, new):
     return list(rows.values())
 
 
+def prune_invalidated_confirmations(state):
+    """Terminal scientific failures remain audit history, never repeat jobs.
+
+    Progress journals can contain every complete draw, including exhausted
+    failures. Reconciliation decides terminal status before this queue filter;
+    reserved first-failure rescues are deliberately not invalidated.
+    """
+    rejected = set(state.get('invalidated_native_hashes', []))
+    state['pending_confirmation'] = [row for row in state.get('pending_confirmation', [])
+        if rules.sequence_hash(row['sequence']) not in rejected]
+
+
 def reconcile_native_histories(state, value, assigned_hashes):
     """Keep complete registered draw histories monotone within this epoch.
 
@@ -722,6 +734,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         return {'status': 'qualified_novelty_migration_waiting_for_ownership', 'epoch': epoch}
     if not restore_for_qualified_novelty(state, local, config):
         return {'status': 'qualified_novelty_migration_waiting_for_ownership', 'epoch': epoch}
+    prune_invalidated_confirmations(state)
     c.atomic(path, state)
     budget = fresh_budget.ensure(state, config)
     c.atomic(path, state)
@@ -865,6 +878,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                     if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
                 rejected = set(value.get('terminal_native_outcomes', {}))
                 state['invalidated_native_hashes'] = sorted(set(state.get('invalidated_native_hashes', [])) | rejected)
+                prune_invalidated_confirmations(state)
                 state['native_rows'] = [r for r in state['native_rows']
                     if rules.sequence_hash(r['sequence']) not in rejected]
                 state['native_rows'] = union_rows(state['native_rows'], valid_rows(value, challenge))
@@ -1013,6 +1027,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                     state['native_attempted_hashes'] = sorted(set(state['native_attempted_hashes']) | set(attempted))
                     state['pending_confirmation'] = [r for r in partial.get('deferred_confirmations', [])
                         if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
+                    prune_invalidated_confirmations(state)
             elif active['phase'] == 'score':
                 partial = read(terminal_dir / 'score/result.json', {})
                 admitted = partial.get('attempted_sequence_hashes',

@@ -7,7 +7,9 @@ resource discovery are replaced; actual runner/receipt tests live separately.
 import asyncio
 from collections import Counter
 import copy
+import gzip
 import json
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -22,6 +24,114 @@ from test_pr100_fleet_probability_integration import POLICY, authenticated_draws
 MODES = ('barriers', 'interleaved', 'refill')
 RESUME = {'resume_eligible': True, 'backend': 'native_reference',
           'runtime_identity_sha256': 'b' * 64, 'registration_sha256': 'd' * 64}
+
+
+def real_resume_input():
+    """Actual source36 epoch26030 attempt2; immutable receipts are not fabricated."""
+    path = Path(__file__).parent / 'fixtures/pr100/registered_resume_real_26030.json.gz'
+    return json.loads(gzip.decompress(path.read_bytes()))
+
+
+def test_actual_controller_routes_only_live_confirmations_without_fresh_recharge(tmp_path, monkeypatch):
+    from nanobody_opt import pr100_live_controller as controller
+    from nanobody_opt import pr100_epoch_continuation as continuation
+    from nanobody_opt import pr100_native_dispatch as dispatch, pr100_fresh_budget as budget
+    artifact = real_resume_input()
+    challenge = artifact['input.json']['challenge']
+    state = {'schema': continuation.SCHEMA, 'challenge': challenge, 'active': None,
+        'next_attempt': artifact['next_attempt'], 'proposal_offset': 600, 'generated_hashes': [],
+        'native_attempted_hashes': artifact['fresh_native_budget']['admitted_hashes'],
+        'score_attempted_hashes': [], 'pending_native': [],
+        'pending_confirmation': artifact['input.json']['candidates'], 'native_rows': [], 'score_rows': {},
+        'invalidated_native_hashes': artifact['invalidated_native_hashes'],
+        'fresh_native_budget': artifact['fresh_native_budget']}
+    local = tmp_path / str(challenge['epoch']); local.mkdir()
+    (local / 'continuation.json').write_text(json.dumps(state))
+    before = budget.summary(state['fresh_native_budget'])
+
+    class Chain:
+        def get_current_block(self): return challenge['epoch_start_block'] + 100
+        def tempo(self, _): return challenge['epoch_length'] - 1
+        def determine_block_hash(self, _): return challenge['epoch_start_block_hash']
+
+    class RoutedWithoutCompute(BaseException):
+        pass
+
+    def routed(config, current_challenge, payload, *_args, **_kwargs):
+        rows = json.loads(payload['input.json'])['candidates']
+        assert current_challenge == challenge and len(rows) == 34
+        assert config['worker']['fresh_admission_limit'] == 0
+        assert not (set(artifact['invalidated_native_hashes']) &
+                    {rules.sequence_hash(r['sequence']) for r in rows})
+        groups, blocked = dispatch.partition(rows, ['master', 'slave'], {'master': 4, 'slave': 32})
+        assert groups == {'master': rows, 'slave': []} and not blocked
+        raise RoutedWithoutCompute()
+
+    monkeypatch.setattr(dispatch, 'run', routed)
+    monkeypatch.setattr(controller, 'fetch_archive', lambda _target: b'archive fixture')
+    config = {'state_root': str(tmp_path), 'remote_root': '/inert', 'source_sha': '1' * 40,
+        'epoch_fresh_native_limit': 4800, 'native_hosts': ['master', 'slave'],
+        'worker': {'proposals': 600, 'repeats': 3}}
+    with pytest.raises(RoutedWithoutCompute):
+        continuation.run_epoch(config, Chain(), controller.clock_state(Chain()))
+    saved = json.loads((local / 'continuation.json').read_text())
+    assert len(saved['pending_confirmation']) == 34
+    assert saved['invalidated_native_hashes'] == artifact['invalidated_native_hashes']
+    assert budget.summary(saved['fresh_native_budget']) == before
+
+
+@pytest.mark.parametrize('remove_terminal', [False, True])
+def test_actual_62_checkpoint_batch_retains_19_passes_and_15_reserved_rescues(
+        tmp_path, monkeypatch, remove_terminal):
+    from nanobody_opt import pr100_epoch_continuation as continuation
+    from nanobody_opt import pr100_native_journal as journal
+    from nanobody_opt import pr100_fresh_budget as budget, pr100_native_dispatch as dispatch
+    artifact = real_resume_input()
+    job, payload = artifact['job.json'], artifact['input.json']
+    state = {'pending_confirmation': payload['candidates'],
+             'invalidated_native_hashes': artifact['invalidated_native_hashes'],
+             'fresh_native_budget': artifact['fresh_native_budget']}
+    assert len(state['pending_confirmation']) == 62 and job['fresh_admission_limit'] == 0
+    before_budget = copy.deepcopy(state['fresh_native_budget'])
+    if remove_terminal:
+        continuation.prune_invalidated_confirmations(state)
+        rows = state['pending_confirmation']
+        assert len(rows) == 34
+        assert sum(r['native_resume']['measurements'][0]['passed'] for r in rows) == 19
+        assert sum(r['native_resume']['failed_first_rescue_reserved'] is True
+                   and not r['native_resume']['measurements'][0]['passed'] for r in rows) == 15
+        assert state['fresh_native_budget'] == before_budget
+        planned = budget.reserve(state['fresh_native_budget'], artifact['next_attempt'], rows)
+        assert planned == rows and budget.planned_fresh_count(
+            state['fresh_native_budget'], artifact['next_attempt']) == 0
+        assert budget.summary(state['fresh_native_budget']) == budget.summary(before_budget)
+        groups, blocked = dispatch.partition(rows, ['master', 'slave'], {'master': 4, 'slave': 32})
+        assert groups == {'master': rows, 'slave': []} and not blocked
+        payload['candidates'] = rows
+    (tmp_path / 'input.json').write_text(json.dumps(payload))
+    monkeypatch.setattr(worker, 'worker_count', lambda _job: 4)
+    monkeypatch.setattr(worker, 'available_cores', lambda: 224)
+    monkeypatch.setattr(pr100_filter, 'helper', lambda _name: SimpleNamespace(tool_paths=None))
+
+    class NoComputeAdapter:
+        capacity = 4
+        def __init__(self, *_args):
+            pass
+
+    class ValidatedAllCheckpoints(BaseException):
+        pass
+
+    def stop_before_journal(*_args):
+        raise ValidatedAllCheckpoints()
+
+    monkeypatch.setattr(real_native, 'Adapter', NoComputeAdapter)
+    monkeypatch.setattr(journal, 'AsyncJournal', stop_before_journal)
+    # Authentication, policy, identity and every checkpoint check remain real.
+    # The sentinel proves the complete loop finished before any new computation.
+    expected = ValidatedAllCheckpoints if remove_terminal else ValueError
+    with pytest.raises(expected):
+        worker.native_phase(job, tmp_path, clock=lambda: 0.)
+    assert not (tmp_path / 'result.json').exists()
 
 
 @pytest.fixture
