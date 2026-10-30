@@ -7,6 +7,7 @@ math, selection, annotation checks and publication validation run unchanged here
 """
 import copy
 import hashlib
+from pathlib import Path
 import sys
 import types
 
@@ -220,3 +221,82 @@ def test_rule_configuration_disagreement_cannot_be_blessed_by_native_pass(authen
     verdict = selection.decide([authenticated_draws(0, 85)],
         {**REQUIREMENTS, 'psh_strict_rejection_threshold': 84}, sequence=SEQ, fleet_policy=POLICY)
     assert verdict['tier'] is None and verdict['reason'] == 'reference_gate_mismatch'
+
+
+# Recorded controller/chain fixture; the new native receipts still use the
+# explicitly synthetic immutable authentication seam above. The actual exception
+# recovery branch, history reconciliation and persisted state run unchanged.
+from tests.test_pr100_epoch_continuation import legacy, replay, write
+
+
+@pytest.mark.parametrize('partial_kind', ['conflicting', 'extended_rejection'])
+def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_history(
+        legacy, authenticated_draws, monkeypatch, partial_kind):
+    import json
+    from nanobody_opt import pr100_epoch_continuation as continuation
+    from nanobody_opt import pr100_live_controller as controller
+
+    x = legacy; sequence = x.rows[0]['sequence']; key = rules.sequence_hash(sequence)
+    challenge = x.replay.challenge
+    saved = continuation.migrate(x.local, challenge, x.config)
+    initial = [authenticated_draws('initial', 81., sequence=sequence)]
+
+    def history(values):
+        return {'challenge': challenge, 'target': challenge['target'], 'epoch': challenge['epoch'],
+                'candidates': [], 'terminal_native_outcomes': {},
+                'native_complete_histories': [{'sequence_hash': key, 'measurements': values,
+                    'fleet_policy': copy.deepcopy(POLICY),
+                    'request_sha256s': [v['native_reference']['receipt']['request_sha256'] for v in values]}]}
+
+    identity = {'resume_eligible': True, 'runtime': 'synthetic_registered_test'}
+
+    def checkpoint(values):
+        return {**x.rows[0], 'native_resume': {
+            'schema': 'pr100-native-confirmation-checkpoint-v1', 'sequence_hash': key,
+            'identity': identity, 'measurements': values, 'required_cpu_observations': 3,
+            'fleet_policy': copy.deepcopy(POLICY), 'failed_first_rescue_reserved': False}}
+
+    continuation.reconcile_native_histories(saved, history(initial), {key})
+    saved['pending_confirmation'] = [checkpoint(initial)]
+    prior_pending = copy.deepcopy(saved['pending_confirmation'])
+    write(x.local / 'continuation.json', saved)
+    values = ([authenticated_draws('changed-prefix', 82., sequence=sequence)]
+              if partial_kind == 'conflicting' else initial + [
+                  authenticated_draws(f'later-{i}', 90. + i, sequence=sequence) for i in range(3)])
+    partial = {**history(values), 'status': 'partial',
+               'attempted_sequence_hashes': [key], 'fresh_admitted_sequence_hashes': [],
+               'fresh_never_started_sequence_hashes': [],
+               'deferred_confirmations': [checkpoint(values)] if partial_kind == 'conflicting' else []}
+
+    def interrupted_phase(_config, _challenge, phase, _files, _stop, _chain, directory, **_kwargs):
+        assert phase == 'native'
+        write(directory / 'native/result.json', partial)
+        write(directory / 'native-supervisor.json', {'cleanup': {
+            'remaining_descendants': 0, 'fixed_point_reached': True}})
+        raise RuntimeError('inert post-cleanup native transport failure')
+
+    monkeypatch.setattr(controller, 'run_phase', interrupted_phase)
+    outcome = controller.run_epoch(x.config, x.chain, controller.clock_state(x.chain))
+    restored = json.loads((x.local / 'continuation.json').read_text())
+    assert outcome['status'] == 'recoverable_failure'
+    if partial_kind == 'conflicting':
+        assert outcome['native_history_recovery_rejected'] is True
+        assert restored['pending_confirmation'] == prior_pending
+        assert restored['native_reference_histories'][key]['complete_draws'] == 1
+    else:
+        assert restored['native_reference_histories'][key]['complete_draws'] == 4
+        assert restored['native_reference_histories'][key]['admitted'] is False
+        assert restored['pending_confirmation'] == [] and restored['native_rows'] == []
+        # Otherwise the next publication-quality merge can preserve the older
+        # successful member despite the authenticated later rejection.
+        assert key in restored['invalidated_native_hashes']
+        assert continuation.mode_for(restored) == 'publish'
+        # Reconciliation must be the next bounded action, not wait behind an
+        # unrelated fresh native batch while a disproven member stays published.
+        def no_new_science(*_args, **_kwargs):
+            pytest.fail('invalidated publication waited for new scientific work')
+        monkeypatch.setattr(controller, 'run_phase', no_new_science)
+        corrected = controller.run_epoch(x.config, x.chain, controller.clock_state(x.chain))
+        assert corrected['status'] == 'withdrawn'
+        published = json.loads(Path(x.config['publication_path']).read_text())
+        assert published['sequence_pool'] == [] and published['status'] == 'invalidated'
