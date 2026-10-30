@@ -553,6 +553,33 @@ def blocks_left(epoch: int, network: str, epoch_length: int = 361):
         return None
 
 
+def serial_commit_result(result, uid: int, *, dry_run: bool = False) -> str:
+    """Classify the helper's explicit outcome, never its exit code alone.
+
+    The helper intentionally exits zero for stale and rate-limited skips.
+    COMMIT_OK is its reported success, not independent chain inclusion or
+    validator-acceptance evidence. Keep arbitrary child output out of receipts.
+    """
+    from nanobody_opt.commit_submission import (
+        RESULT_COMMITTED, RESULT_STALE, RESULT_TOO_SOON,
+    )
+    if result.returncode:
+        return "failed"
+    markers = {RESULT_COMMITTED: "committed", RESULT_STALE: "stale",
+               RESULT_TOO_SOON: "rate_limited", "COMMIT_DRY_RUN": "dry_run"}
+    found = set()
+    for line in (result.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] in markers and fields[1] == f"uid={uid}":
+            found.add(markers[fields[0]])
+    if len(found) != 1:
+        return "unverified"
+    outcome = found.pop()
+    if (outcome == "dry_run" and not dry_run) or (outcome == "committed" and dry_run):
+        return "unverified"
+    return outcome
+
+
 def plan(crew, molecules, sequences, value=None):
     """One row per uid, with whichever halves are actually available.
 
@@ -719,33 +746,38 @@ def main(argv=None) -> int:
     if arguments.rehearse or (not arguments.serial and not arguments.dry_run):
         committed, failures, dropped = commit_batch(rows, arguments, environment)
         print(json.dumps(dict(event="done", committed=committed, failed=failures,
+                              commit_evidence="helper_reported",
                               dropped_to_blackout=len(dropped),
                               dropped_uids=dropped)), flush=True)
-        if not failures or arguments.rehearse:
+        if not failures or arguments.rehearse or committed:
             if not arguments.rehearse and committed == 0 and rows:
-                # Zero verified commits from a nonempty intended fleet must not
-                # read as success: "COMMIT_OK" has to mean something actually
-                # landed on-chain for the validator to read.
+                # Zero helper-reported commits from a nonempty intended fleet
+                # must not read as success.
                 print(json.dumps(dict(event="zero_commits",
                                       intended=len(rows), committed=0)), flush=True)
                 return 2
             return 1 if failures else 0
+        # A partial batch has already repaired its failed rows once. Keep its
+        # success count and never re-run known successful UIDs: a second commit
+        # can overwrite their earlier commitment and lose the ordering tie-break.
+        # Only a zero-success batch reaches this fallback.
         # The parallel batch push failed (e.g. a racing push on the shared
         # submissions repo). Fall back to the serial per-uid path below so the
         # nanobody sequences still commit instead of the whole fleet scoring 0.
-        # The serial path re-runs every uid; the chain refuses re-commits of
-        # already-landed uids harmlessly.
         print(json.dumps(dict(event="parallel_fallback", committed=committed,
                               failed=failures)), flush=True)
 
     failures = 0
     dropped = []
+    committed = 0
+    skipped = 0
+    dry_runs = 0
     for index, row in enumerate(rows):
         left = blocks_left(arguments.epoch, arguments.network)
         if left is not None and left <= arguments.blackout_blocks:
             dropped = [r["uid"] for r in rows[index:]]
             print(json.dumps(dict(event="blackout_stop", blocks_left=left,
-                                  committed=index, dropped=dropped)), flush=True)
+                                  committed=committed, dropped=dropped)), flush=True)
             break
         command = [arguments.python, "-m", "nanobody_opt.commit_submission",
                    "--uid", str(row["uid"]), "--hotkey", row["hotkey"],
@@ -779,22 +811,28 @@ def main(argv=None) -> int:
                            NOVA_GIT_WORKDIR=str(HERE / ".git_work"))
         done = subprocess.run(command, cwd=str(HERE), capture_output=True,
                               text=True, env=environment)
-        tail = (done.stdout or done.stderr).strip().splitlines()
+        outcome = serial_commit_result(done, row["uid"], dry_run=arguments.dry_run)
         print(json.dumps(dict(event="commit", uid=row["uid"], rc=done.returncode,
                               molecules=row["has_molecules"],
                               sequence=row["has_sequence"],
-                              last=tail[-1][:160] if tail else "")), flush=True)
-        if done.returncode:
+                              result=outcome)), flush=True)
+        if outcome == "committed":
+            committed += 1
+        elif outcome in {"stale", "rate_limited"}:
+            skipped += 1
+        elif outcome == "dry_run":
+            dry_runs += 1
+        else:
             failures += 1
-    # "committed" counts what the VALIDATOR can read, not what the chain
-    # accepted. Reporting len(rows) here is how 25242 got recorded as ten
-    # clean commits when most of the tail had already fallen past the cutoff.
+    # These are helper-reported outcomes. Independent chain metadata and
+    # validator results are still needed to establish inclusion and acceptance.
     attempted = len(rows) - len(dropped)
-    committed = attempted - failures
     print(json.dumps(dict(event="done", committed=committed,
-                          failed=failures, dropped_to_blackout=len(dropped),
+                          commit_evidence="helper_reported",
+                          attempted=attempted, failed=failures, skipped=skipped,
+                          dry_run=dry_runs, dropped_to_blackout=len(dropped),
                           dropped_uids=dropped)), flush=True)
-    if committed == 0 and rows:
+    if committed == 0 and rows and not (arguments.dry_run and dry_runs):
         print(json.dumps(dict(event="zero_commits",
                               intended=len(rows), committed=0)), flush=True)
         return 2

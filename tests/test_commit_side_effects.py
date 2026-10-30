@@ -85,6 +85,109 @@ def test_bug3_success_requires_a_commit(submit, arguments, monkeypatch, isolated
     assert submit.main(arguments) == 0
 
 
+@pytest.mark.parametrize('marker', [
+    'COMMIT_SKIPPED_STALE_HOTKEY', 'COMMIT_SKIPPED_RATE_LIMITED',
+    'COMMIT_DRY_RUN', 'UNKNOWN_RESULT',
+])
+def test_serial_zero_exit_without_commit_is_not_a_commit(
+        submit, arguments, monkeypatch, isolated_preflight, capsys, marker):
+    """The real helper uses zero for routine skips, so rc=0 is insufficient."""
+    monkeypatch.setattr(submit.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=f'{marker} uid=7\n', stderr=''))
+    assert submit.main(arguments + ['--serial']) != 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    done = next(row for row in events if row['event'] == 'done')
+    assert done['committed'] == 0
+    assert done['attempted'] == 1
+    assert done['skipped'] == int(marker.startswith('COMMIT_SKIPPED_'))
+
+
+@pytest.mark.parametrize('stdout,returncode', [
+    ('COMMIT_OK uid=8\n', 0),
+    ('COMMIT_OK uid=7\nCOMMIT_SKIPPED_RATE_LIMITED uid=7\n', 0),
+    ('COMMIT_OK uid=7\n', 1),
+    ('prefix COMMIT_OK uid=7\n', 0),
+])
+def test_serial_success_requires_unambiguous_matching_uid(
+        submit, arguments, monkeypatch, isolated_preflight, capsys, stdout, returncode):
+    monkeypatch.setattr(submit.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr='unstructured diagnostic'))
+    assert submit.main(arguments + ['--serial']) != 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert next(row for row in events if row['event'] == 'done')['committed'] == 0
+    assert all('last' not in row for row in events)
+
+
+def test_serial_actual_success_and_dry_run_have_distinct_counts(
+        submit, arguments, monkeypatch, isolated_preflight, capsys):
+    for flags, marker, expected_committed, expected_dry in [
+            (['--serial'], 'COMMIT_OK', 1, 0),
+            (['--dry-run'], 'COMMIT_DRY_RUN', 0, 1)]:
+        def run(argv, **kwargs):
+            assert ('--dry-run' in argv) == bool(expected_dry)
+            return SimpleNamespace(returncode=0, stdout=f'{marker} uid=7\n', stderr='')
+        monkeypatch.setattr(submit.subprocess, 'run', run)
+        assert submit.main(arguments + flags) == 0
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        done = next(row for row in events if row['event'] == 'done')
+        assert (done['committed'], done['dry_run']) == (expected_committed, expected_dry)
+
+
+def test_partial_parallel_batch_preserves_success_without_resubmitting(
+        submit, arguments, monkeypatch, isolated_preflight, capsys):
+    """One actual batch success survives a failed row and its built-in repair."""
+    from nanobody_opt import commit_submission, fleet
+    crew = Path(arguments[arguments.index('--crew') + 1])
+    crew.write_text(json.dumps([[7, 'public-seven'], [8, 'public-eight']]))
+    artifact = Path(arguments[arguments.index('--nanobody') + 1])
+    data = fresh_artifact()
+    data['sequence_pool'].append('R' * 120)
+    artifact.write_text(json.dumps(data))
+    attempts = []
+    def commit(wallet, **kwargs):
+        attempts.append(wallet.hotkey)
+        return wallet.hotkey == 'seven'
+    hotkeys = ['other'] * 7 + ['public-seven', 'public-eight']
+    bt = ModuleType('bittensor')
+    bt.Subtensor = lambda **k: SimpleNamespace(
+        metagraph=lambda netuid: SimpleNamespace(hotkeys=hotkeys),
+        get_current_block=lambda: 100 * 361 + 200, set_commitment=commit)
+    bt.Wallet = lambda **k: SimpleNamespace(**k)
+    errors = ModuleType('bittensor.core.errors')
+    errors.MetadataError = type('MetadataError', (Exception,), {})
+    btdr = ModuleType('btdr')
+    btdr.QuicknetBittensorDrandTimelock = lambda: object()
+    files = ModuleType('files')
+    files.load_github_path = lambda: 'public-owner/public-repo/main/data/results'
+    files.push_submissions = lambda rows: True
+    for name, module in [('bittensor', bt), ('bittensor.core', ModuleType('bittensor.core')),
+                         ('bittensor.core.errors', errors), ('btdr', btdr), ('files', files)]:
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(fleet, 'local_hotkey_addresses',
+                        lambda *a: {'public-seven': 'seven', 'public-eight': 'eight'})
+    monkeypatch.setattr(commit_submission, 'encoded_payload',
+                        lambda message, uid, block, timelock: (f'{uid:020x}', 'synthetic'))
+    monkeypatch.setattr(submit, 'commit_batch', submit._real_commit_batch)
+    assert submit.main(arguments) == 1
+    assert attempts.count('seven') == 1
+    assert attempts.count('eight') == 2  # one parallel attempt and one repair
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert not any(row['event'] == 'parallel_fallback' for row in events)
+    done = [row for row in events if row['event'] == 'done']
+    assert len(done) == 1 and (done[0]['committed'], done[0]['failed']) == (1, 1)
+
+
+def test_zero_success_batch_keeps_serial_fallback(
+        submit, arguments, monkeypatch, isolated_preflight, capsys):
+    monkeypatch.setattr(submit, 'commit_batch', lambda *a: (0, 1, []))
+    monkeypatch.setattr(submit.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout='COMMIT_OK uid=7\n', stderr=''))
+    assert submit.main(arguments) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert any(row['event'] == 'parallel_fallback' for row in events)
+    assert [row for row in events if row['event'] == 'done'][-1]['committed'] == 1
+
+
 def test_bug3_real_preflight_api_exists():
     """Bug 3 integration prerequisite: real CLI preflight must be callable."""
     from nanobody_opt import commit_submission
