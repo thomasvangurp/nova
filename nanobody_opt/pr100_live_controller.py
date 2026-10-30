@@ -21,6 +21,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+import zlib
 
 from nanobody_opt import pr100_filter, rules
 from nanobody_opt import pr100_archive_cache
@@ -126,7 +127,10 @@ else:
    with open(p,'rb') as h:
     h.seek(0,2);s=h.tell();h.seek(max(0,s-2048))
     out.setdefault('tails',{})[name]=h.read(2048).decode('utf-8','replace')
-print(json.dumps(out))
+encoded=json.dumps(out).encode()
+if r.get('compress_response') is True and len(encoded)>8192:
+ sys.stdout.buffer.write(b'NOVA_PR100_GZIP_V1:'+base64.b64encode(gzip.compress(encoded,compresslevel=1,mtime=0))+b'\n')
+else:print(encoded.decode())
 '''
 
 
@@ -185,10 +189,41 @@ def phase_cap(phase, stop_at, *, now=None, publish_reserve=PUBLISH_RESERVE_SECON
 TRANSPORT_ATTEMPTS = 5
 TRANSPORT_BACKOFF_SECONDS = 3
 POLL_FAILURE_LIMIT = 8
+REPLY_PREFIX = b'NOVA_PR100_GZIP_V1:'
+MAX_REPLY_BYTES = 256 * 1024 * 1024
+MAX_COMPRESSED_REPLY_BYTES = 64 * 1024 * 1024
+
+
+def decode_transport_reply(raw):
+    """Decode the same public result bytes with a bounded decompression limit."""
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError('empty_transport_reply')
+    body = lines[-1]
+    if body.startswith(REPLY_PREFIX):
+        encoded = body[len(REPLY_PREFIX):]
+        if len(encoded) > 4 * ((MAX_COMPRESSED_REPLY_BYTES + 2) // 3):
+            raise ValueError('compressed_transport_reply_too_large')
+        packed = base64.b64decode(encoded, validate=True)
+        if len(packed) > MAX_COMPRESSED_REPLY_BYTES:
+            raise ValueError('compressed_transport_reply_too_large')
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        body = decoder.decompress(packed, MAX_REPLY_BYTES + 1)
+        if (len(body) > MAX_REPLY_BYTES or not decoder.eof
+                or decoder.unused_data or decoder.unconsumed_tail):
+            raise ValueError('invalid_bounded_transport_reply')
+    if len(body) > MAX_REPLY_BYTES:
+        raise ValueError('transport_reply_too_large')
+    value = json.loads(body)
+    if not isinstance(value, dict):
+        raise ValueError('transport_reply_not_object')
+    return value
 
 
 def remote(config, host, request, *, sleep=time.sleep):
     runtime = config['hosts'][host]
+    if config.get('transport_compress_results') is True:
+        request = {**request, 'compress_response': True}
     cache = pr100_archive_cache.prepare(config, host, request)
     identity = []
     if runtime.get('host_key_alias'):
@@ -244,9 +279,8 @@ def remote(config, host, request, *, sleep=time.sleep):
         raise error
     try:
         # A login banner or rc-file echo may precede the reply; the reply is the last line.
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
-        reply = json.loads(lines[-1])
-    except (ValueError, IndexError) as cause:
+        reply = decode_transport_reply(result.stdout)
+    except (ValueError, IndexError, zlib.error) as cause:
         error = RuntimeError('remote transport returned no result')
         error.diagnostics = {'stdout_tail': sanitize(result.stdout),
                              'stderr_tail': sanitize(result.stderr)}
