@@ -639,6 +639,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             result['native_complete_histories'] = [
                 {'sequence_hash': rules.sequence_hash(key), 'measurements': values,
                  'fleet_policy': fleet_policy, 'identity': resume_identity,
+                 'execution_host': job.get('native_host', 'master'),
                  'request_sha256s': [value['native_reference']['receipt']['request_sha256'] for value in values]}
                 for key, values in measurements.items()]
             # Every complete draw stays in this attempt's current-history file,

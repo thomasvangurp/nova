@@ -10,7 +10,7 @@ COUNTERS = ('completed', 'fresh_evaluations', 'repeat_evaluations', 'native_pass
             'total_profile_evaluations', 'carried_cpu_observations')
 
 
-def host_artifacts(files, incoming, rows, terminal, owned, detail):
+def host_artifacts(files, incoming, rows, terminal, owned, detail, *, expected_host=None):
     """A malformed peer cannot erase another host's valid completed work."""
     assigned = {r['sequence'] for r in rows}
     hashes = {rules.sequence_hash(s) for s in assigned}
@@ -37,6 +37,8 @@ def host_artifacts(files, incoming, rows, terminal, owned, detail):
         for history in value.get('native_complete_histories', []):
             if not isinstance(history, dict) or history.get('sequence_hash') not in hashes:
                 raise ValueError('host native history outside assigned batch')
+            if expected_host is not None and history.get('execution_host') != expected_host:
+                raise ValueError('host native history execution owner mismatch')
         if any(type(value.get(k, 0)) is not int or value.get(k, 0) < 0 for k in COUNTERS):
             raise ValueError('invalid host counters')
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -147,7 +149,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         if not isinstance(terminal, dict):
             terminal = {}
         owned = not cleanup_verified(terminal)
-        value, observed = host_artifacts(files, incoming, rows, terminal, owned, detail)
+        value, observed = host_artifacts(files, incoming, rows, terminal, owned, detail, expected_host=host)
         return host, value, observed, owned, detail
 
     with ThreadPoolExecutor(max_workers=len(hosts), thread_name_prefix='pr100-native-host') as pool:

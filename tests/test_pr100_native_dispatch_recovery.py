@@ -20,6 +20,7 @@ def test_both_host_dispatch_preserves_assigned_complete_native_histories(tmp_pat
     def phase(config, current, name, payload, stop, chain, directory, **kwargs):
         local = json.loads(payload['input.json'])
         histories = [{'sequence_hash': rules.sequence_hash(row['sequence']),
+                      'execution_host': config['_native_host'],
                       'measurements': [{'passed': False}], 'request_sha256s': ['b' * 64]}
                      for row in local['candidates']]
         write(directory / 'native-supervisor.json', {'cleanup': {
