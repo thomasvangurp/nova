@@ -235,7 +235,13 @@ def developability_reason(result, requirements, *, sequence=None):
 
 
 def authoritative_cpu_measurement(value):
-    """Reject explicit screen evidence while retaining legacy CPU profiles."""
+    """Legacy name; accept only legacy CPU or the explicitly registered native route."""
+    if isinstance(value, dict) and value.get("evidence_backend") == "native_reference":
+        try:
+            from nanobody_opt.pr100_native_reference import authoritative_measurement
+            return authoritative_measurement(value)
+        except ImportError:
+            return False
     return (isinstance(value, dict)
             and ("authoritative" not in value or value["authoritative"] is True)
             and value.get("evidence_backend") in (None, "cpu_native"))
@@ -250,6 +256,25 @@ def validate_evidence(evidence, sequence, expected, config):
             and not authoritative_cpu_measurement(evidence["developability"])):
         raise ValueError("non_authoritative_measurement")
     requirements = config["nanobody_requirements"]
+    primary = evidence.get("developability")
+    fleet_selection = evidence.get("native_fleet_selection")
+    if isinstance(primary, dict) and primary.get("evidence_backend") == "native_reference":
+        from nanobody_opt import pr100_live_selection as selection
+        if not isinstance(fleet_selection, dict) or "native_screen_confirmation" in evidence:
+            raise ValueError("native_fleet_history_required")
+        observations = fleet_selection.get("measurements")
+        if not isinstance(observations, list) or not observations:
+            raise ValueError("native_fleet_history_required")
+        verdict = selection.decide(observations, requirements, sequence=sequence,
+                                   fleet_policy=fleet_selection.get("policy"))
+        index = verdict.get("primary_passing_index")
+        if (verdict.get("tier") not in ("A", "B") or type(index) is not int
+                or not 0 <= index < len(observations)
+                or fleet_selection.get("primary_passing_index") != index
+                or observations[index] != primary):
+            raise ValueError("native_fleet_selection_invalid")
+    elif fleet_selection is not None:
+        raise ValueError("native_fleet_selection_invalid")
     if "native_screen_confirmation" in evidence:
         confirmation = evidence["native_screen_confirmation"]
         if not isinstance(confirmation, dict):
@@ -286,6 +311,7 @@ HANDOFF_REJECTION_CODES = frozenset({
     "cdr3_length_unavailable", "wrong_epoch_v_gene", "wrong_epoch_cdr3_length",
     "developability_unavailable", "developability_red_flags", "psh_unavailable",
     "non_authoritative_measurement", "cpu_confirmation_required",
+    "native_fleet_history_required", "native_fleet_selection_invalid",
     "psh_threshold", "aggrescan_unavailable_or_failed", "aggrescan_sequence_mismatch",
     "aggrescan_provenance_mismatch", "aggrescan_threshold", "developability_failed",
 })

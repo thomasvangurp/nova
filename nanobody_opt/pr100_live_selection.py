@@ -122,7 +122,7 @@ def mean_and_sd(values):
 
 
 def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS,
-           margin=None, reason_for=None, cpu_confirmation_minimum=0):
+           margin=None, reason_for=None, cpu_confirmation_minimum=0, fleet_policy=None):
     """Classify a candidate from its raw repeat measurements.
 
     Returns a dict with the tier ('A', 'B' or None), every raw measurement, the
@@ -134,6 +134,10 @@ def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS
     ``reason_for`` is the per-measurement gate verdict (default
     ``rules.developability_reason``); this function never re-implements a gate.
     """
+    if fleet_policy is not None:
+        return decide_native_fleet(measurements, requirements, sequence=sequence,
+            repeats=repeats, margin=margin, reason_for=reason_for,
+            cpu_confirmation_minimum=cpu_confirmation_minimum, fleet_policy=fleet_policy)
     settings = margin_settings(margin)
     if (isinstance(cpu_confirmation_minimum, bool)
             or not isinstance(cpu_confirmation_minimum, int) or cpu_confirmation_minimum < 0):
@@ -183,6 +187,101 @@ def decide(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS
         # Gates all passed; only the margin (or the repeat count) is missing.
         verdict.update(tier='B', reason='margin_missed' if enough else 'insufficient_repeats')
     return verdict
+
+
+def fleet_policy_settings(supplied):
+    """Explicit bounded experimental policy; never inferred from a tier label."""
+    from nanobody_opt.pr100_fleet_probability import POLICY
+    if (not isinstance(supplied, dict)
+            or set(supplied) - {'kind', 'minimum_smoothed_fraction'}
+            or supplied.get('kind') != POLICY):
+        raise ValueError('invalid_native_fleet_policy')
+    minimum = supplied.get('minimum_smoothed_fraction', 0.4)
+    if not _finite(minimum) or not 0.4 <= minimum <= 1:
+        raise ValueError('invalid_native_fleet_policy')
+    return {'kind': POLICY, 'minimum_smoothed_fraction': minimum}
+
+
+def decide_native_fleet(measurements, requirements, *, sequence=None,
+                        repeats=DEFAULT_REPEATS, margin=None, reason_for=None,
+                        cpu_confirmation_minimum=0, fleet_policy):
+    """Use authenticated full-gate draw history; a failed repeat is not a veto.
+
+    Admission to binding comparison is distinct from deciding whether more
+    observations are worth collecting. Publication carries all draws and must
+    re-run this decision, with a genuine passing observation as primary evidence.
+    """
+    from nanobody_opt import pr100_fleet_probability as probability
+    policy = fleet_policy_settings(fleet_policy)
+    measurements = list(measurements)
+    verdict = decide([], requirements, sequence=sequence, repeats=repeats, margin=margin,
+                     reason_for=reason_for, cpu_confirmation_minimum=cpu_confirmation_minimum)
+    verdict.update(measurements=measurements, repeats=len(measurements), fleet_policy=policy)
+    if not measurements:
+        return verdict
+    if cpu_confirmation_minimum:
+        verdict['reason'] = 'native_fleet_policy_cannot_waive_screen_confirmation'
+        return verdict
+    try:
+        summary = probability.from_measurements(measurements,
+            minimum_smoothed_fraction=policy['minimum_smoothed_fraction'])
+    except (ImportError, ValueError, KeyError, TypeError):
+        verdict['reason'] = 'non_authoritative_measurement'
+        return verdict
+    from nanobody_opt import rules
+    if sequence is not None and summary['sequence_hash'] != rules.sequence_hash(sequence):
+        verdict['reason'] = 'non_authoritative_measurement'
+        return verdict
+    gate = reason_for or (lambda value: rules.developability_reason(value, requirements, sequence=sequence))
+    if any((not bool(gate(value))) != observation['passed']
+           for value, observation in zip(measurements, summary['observations'])):
+        verdict['reason'] = 'reference_gate_mismatch'
+        return verdict
+    values = psh_values(measurements)
+    mean, sd = mean_and_sd(values)
+    verdict.update(psh_values=values, psh_mean=mean, psh_sd=sd,
+                   psh_boundary_margin=psh_margin(mean), probability_summary=summary,
+                   primary_passing_index=summary['primary_passing_observation_index'])
+    if not summary['admit_to_binding_comparison']:
+        verdict['reason'] = summary['reason']
+        return verdict
+    # Retain the old confidence tier only when every complete observation passed.
+    if summary['failing_draws'] == 0:
+        strict = decide(measurements, requirements, sequence=sequence, repeats=repeats,
+                        margin=margin, reason_for=reason_for)
+        verdict.update({key: strict[key] for key in
+            ('tier', 'margin_safe', 'margin_threshold', 'margin_lower_threshold')})
+    else:
+        verdict.update(tier='B', margin_safe=False)
+    verdict['reason'] = 'measured_pass_with_uncertainty'
+    verdict['native_fleet_selection'] = {'policy': policy, 'measurements': measurements,
+        'primary_passing_index': summary['primary_passing_observation_index']}
+    return verdict
+
+
+def should_repeat(measurements, requirements, *, sequence=None, repeats=DEFAULT_REPEATS,
+                  margin=None, fleet_policy=None, failed_first_rescue_available=False):
+    """Bound repeat sampling independently of admission; caller owns rescue quota.
+
+    A new-route first complete failure may receive one rescue draw. Two complete
+    failures with no pass stop. Passing candidates may receive the remaining
+    configured repeats. The caller must also enforce epoch time and the shared
+    repeat budget; neither a repeat nor a rescue is a new fresh candidate.
+    """
+    if type(repeats) is not int or repeats < 1 or type(failed_first_rescue_available) is not bool:
+        raise ValueError('invalid_repeat_policy')
+    values = list(measurements)
+    if not values or len(values) >= repeats:
+        return False
+    verdict = decide(values, requirements, sequence=sequence, repeats=repeats,
+                     margin=margin, fleet_policy=fleet_policy)
+    if fleet_policy is None:
+        return verdict['tier'] is not None
+    summary = verdict.get('probability_summary')
+    if not summary or summary.get('native_authority_validated') is not True:
+        return False
+    return bool(summary['passing_draws'] or
+                (len(values) == 1 and failed_first_rescue_available))
 
 
 def order_candidates(candidates, *, allow_marginal=True):
