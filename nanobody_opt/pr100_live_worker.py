@@ -174,7 +174,13 @@ def sequence_phase(job, directory):
     frame = pd.read_csv(archive)
     fallback = donors.enabled(job)
     bank_path = Path(job['references'])
-    bank = json.loads(bank_path.read_text())['rows']
+    bank_bytes = bank_path.read_bytes()
+    bank_digest = hashlib.sha256(bank_bytes).hexdigest()
+    expected_bank = job.get('reference_bank_sha256')
+    if expected_bank is not None and (not isinstance(expected_bank, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', expected_bank) or expected_bank != bank_digest):
+        raise ValueError('reference bank identity mismatch')
+    bank = json.loads(bank_bytes)['rows']
     slots = job.get('reference_slots', DEFAULT_REFERENCE_SLOTS)
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
     proposal_offset = job.get('proposal_offset', 0)
@@ -190,24 +196,64 @@ def sequence_phase(job, directory):
             raise ValueError(name + ' must be a positive integer')
     refs, proposal_donors, reference_coverage = donors.select(bank, expected, slots,
                                                            fallback=fallback)
-    reference_coverage['bank_sha256'] = file_digest(bank_path)
+    reference_coverage['bank_sha256'] = bank_digest
     panels, _ = pr100_filter.helper('germline_identity')._anarci_panel('human')
-    rows = [{**r, 'source': 'existing_native_reference'} for r in refs]
-    source_counts = Counter()
-    for index in range(proposals_wanted):
-        ordinal = proposal_offset + index
-        reference_share = proposals_wanted // 2
-        ref, provenance = (proposal_donors[ordinal % len(proposal_donors)]
-                           if proposal_donors and index < reference_share
-                           else (None, {'reference_stratum': 'unseeded_control'}))
-        cdr3 = (Chain(ref['sequence'], scheme='imgt', cdr_definition='imgt',
-                      use_anarcii=False).cdr3_seq if ref else None)
-        row = proposals.propose(panels, expected['allowed_v'], expected['allowed_cdr3_length'],
-                                seed=expected['epoch'], ordinal=ordinal, reference_cdr3=cdr3)
-        rows.append({**row, 'source': 'fresh_baseline_proposal',
-                     'reference_hash': ref['sequence_hash'] if ref else None,
-                     **provenance})
-        source_counts[provenance['reference_stratum']] += 1
+    archive_hashes = {rules.sequence_hash(str(value).strip().upper())
+                      for value in frame['sequence'].dropna() if str(value).strip()}
+    # Exact archive duplicates cannot pass validator novelty. Avoid annotation
+    # and native work for them, while retaining the full later novelty check.
+    parent_hashes = ({r['sequence_hash'] for r in bank}
+                     if reference_coverage['fallback_used'] else set())
+    blocked = excluded | archive_hashes | parent_hashes
+    rows = [{**r, 'source': 'existing_native_reference'} for r in refs
+            if r['sequence_hash'] not in blocked]
+    seen = {r['sequence_hash'] for r in rows}
+    historical_collisions = {r['sequence_hash'] for r in refs} & archive_hashes
+    parent_collisions = set()
+    source_counts, duplicate_counts = Counter(), Counter()
+    proposal_attempts = 0
+    loop_cache = {}
+    fresh_count = 0
+
+    def emit(quota, use_donors):
+        nonlocal proposal_attempts, fresh_count
+        emitted = 0
+        # The cap bounds cheap proposal work only. Native admission remains
+        # independently bounded by the shared fresh-evaluation ledger.
+        for _ in range(quota * 10):
+            if emitted >= quota:
+                break
+            ordinal = proposal_offset + proposal_attempts
+            proposal_attempts += 1
+            ref, provenance = (proposal_donors[ordinal % len(proposal_donors)]
+                if use_donors else (None, {'reference_stratum': 'unseeded_control'}))
+            cdr3 = None
+            if ref:
+                if ref['sequence_hash'] not in loop_cache:
+                    loop_cache[ref['sequence_hash']] = Chain(ref['sequence'], scheme='imgt',
+                        cdr_definition='imgt', use_anarcii=False).cdr3_seq
+                cdr3 = loop_cache[ref['sequence_hash']]
+            row = proposals.propose(panels, expected['allowed_v'], expected['allowed_cdr3_length'],
+                                    seed=expected['epoch'], ordinal=ordinal, reference_cdr3=cdr3)
+            digest = rules.sequence_hash(row['sequence'])
+            if digest in seen or digest in blocked:
+                duplicate_counts[provenance['reference_stratum']] += 1
+                if digest in archive_hashes:
+                    historical_collisions.add(digest)
+                if digest in parent_hashes:
+                    parent_collisions.add(digest)
+                continue
+            seen.add(digest)
+            rows.append({**row, 'source': 'fresh_baseline_proposal',
+                         'reference_hash': ref['sequence_hash'] if ref else None, **provenance})
+            source_counts[provenance['reference_stratum']] += 1
+            emitted += 1
+            fresh_count += 1
+
+    if proposal_donors:
+        emit(proposals_wanted // 2, True)
+    # An exhausted donor arm releases its unused proposal slots to cold start.
+    emit(proposals_wanted - fresh_count, False)
     edit_settings = edit_generation_settings(job)
     edit_source_counts = Counter()
     edit_stats = {}
@@ -219,28 +265,33 @@ def sequence_phase(job, directory):
         # archive supplies the same-length background residue variation (and the
         # haplotype donors), exactly as local_neighborhood uses the recent field.
         edit_cell = f"{expected['allowed_v']}:{expected['allowed_cdr3_length']}"
-        edit_parents = [r['sequence'] for r in bank
+        edit_parents = [r['sequence'] for r in refs
                         if edit_cell in r.get('cells', [])]
         edit_background = [str(s).strip().upper() for s in frame['sequence']
                            if isinstance(s, str) and s.strip()]
+        parent_cdrs = {}
+        for parent in edit_parents:
+            try:
+                if set(parent) - gates.ALLOWED_AAS:
+                    raise ValueError('invalid parent alphabet')
+                chain = Chain(parent, scheme='imgt', cdr_definition='imgt', use_anarcii=False)
+                parent_cdrs[parent] = {key: str(getattr(chain, key + '_seq'))
+                                       for key in ('cdr1', 'cdr2', 'cdr3')}
+            except Exception:
+                # A malformed bank row must not abort all useful parent work.
+                edit_stats['parent_annotation_failed'] = edit_stats.get('parent_annotation_failed', 0) + 1
         edit_candidates = pr100_edit_generation.generate(
             edit_parents, background_sequences=edit_background,
-            limit=edit_settings['limit'], excluded_hashes=excluded,
-            stats=edit_stats)
+            limit=edit_settings['limit'], excluded_hashes=excluded | archive_hashes | seen,
+            stats=edit_stats, novelty_aware=True, parent_cdrs=parent_cdrs)
         for edit in edit_candidates:
             rows.append({**edit, 'source': 'edit_generation',
                          'requested_v': expected['allowed_v'],
                          'requested_cdr3_length': expected['allowed_cdr3_length']})
             edit_source_counts[edit['proposal_lane']] += 1
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
-    # Missing-cell donors are never candidates themselves. Also refuse an
-    # accidental proposal collision with any parent; do not spend extra
-    # ordinals or change the requested proposal/native admission budgets.
-    parent_hashes = ({r['sequence_hash'] for r in bank}
-                     if reference_coverage['fallback_used'] else set())
-    parent_collisions = set(generated) & parent_hashes
     unique = {r['sequence']: r for r in rows
-              if rules.sequence_hash(r['sequence']) not in excluded | parent_hashes}
+              if rules.sequence_hash(r['sequence']) not in blocked}
     eligible, reasons = [], {}
     for sequence, row in unique.items():
         # Reject on the cheap sequence gates BEFORE annotation: a residue outside
@@ -279,9 +330,14 @@ def sequence_phase(job, directory):
               'eligible_edit_generation_source_counts': dict(Counter(
                   r['proposal_lane'] for r in eligible if r.get('source') == 'edit_generation')),
               'donor_parent_reuse_blocked': len(parent_collisions),
+              'historical_exact_reuse_blocked': len(historical_collisions),
+              'proposal_attempts': proposal_attempts,
+              'proposal_duplicate_counts': dict(duplicate_counts),
+              'fresh_unique_proposals': fresh_count,
+              'proposal_exhausted': fresh_count < proposals_wanted,
               'proposals': proposals_wanted, 'annotation_reasons': reasons,
-              'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposals_wanted,
-              'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique),
+              'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposal_attempts,
+              'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique) + sum(duplicate_counts.values()),
               'candidates': eligible, 'novelty_checked': False,
               'annotated_total': len(eligible), 'status': 'complete'}
     pr100_filter.atomic(directory / 'result.json', result)
@@ -1043,6 +1099,9 @@ def collect_scores(out, jobs):
         try:
             lease = json.loads(Path(gpu_job['receipt']).read_text())
             entry['lease'] = lease.get('status')
+            if lease.get('reason') in ('insufficient_gpu_headroom', 'gpu_not_idle', 'coordination_lock_busy',
+                                      'gpu_missing', 'gpu_telemetry_failed'):
+                entry['lease_reason'] = lease['reason']
         except (OSError, ValueError):
             lease = None
             entry['lease'] = None

@@ -29,47 +29,60 @@ from nanobody_opt.rules import TARGET, target_for_epoch
 API = "https://compound-api.metanova-labs.ai"
 
 
-def fetch_rival_sequences(epoch: int, coldkey_prefix: str,
-                          n_epochs: int = 15) -> list[str]:
-    """Fetch a competitor's submitted sequences from the leaderboard.
+def fetch_rival_records(epoch: int, coldkey_prefix: str, n_epochs: int = 15) -> list[dict]:
+    """Public submissions with field-normalized, explicitly single-pass evidence.
 
-    The rival already spent compute finding these, so they are 'proven good'
-    parents -- use them directly as the mutation source rather than re-ranking
-    the whole archive. Returns the sequences for the current epoch's target for
-    any coldkey starting with ``coldkey_prefix`` over the most recent
-    ``n_epochs`` epochs, deduped.
+    Raw rank-sums from different epochs are not comparable. Retain raw values
+    for provenance but rank this proposal prior by percentile within its board.
+    Never import an old-target score into the current target's parent pool.
     """
-    import json
     import urllib.request
-
-    best: dict[str, float] = {}
-    for e in range(epoch - 1, epoch - 1 - n_epochs, -1):
-        req = urllib.request.Request(
-            f"{API}/api/competitions/leaderboard/{e}/nanobodies",
-            headers={"User-Agent": "nova-competitor-lane/1"},
-        )
+    from bisect import bisect_left
+    target = target_for_epoch(epoch)
+    found = {}
+    for e in range(epoch - 1, max(-1, epoch - 1 - n_epochs), -1):
+        if target_for_epoch(e) != target:
+            continue
+        request = urllib.request.Request(
+            f"{API}/api/competitions/leaderboard/{e}/nanobodies?limit=10000",
+            headers={"User-Agent": "nova-competitor-lane/2"})
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                payload = json.load(resp)
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.load(response)
         except Exception:
             continue
-        for submission in payload.get("data") or []:
-            if not str(submission.get("coldkey") or "").startswith(coldkey_prefix):
-                continue
-            for nb in submission.get("nanobodies") or []:
-                if nb.get("protein_name") != target_for_epoch(e):
+        rows = []
+        for submission in payload.get('data') or []:
+            for nb in submission.get('nanobodies') or []:
+                if nb.get('protein_name') != target:
                     continue
-                seq = str(nb.get("sequence") or "").strip().upper()
-                if not seq:
-                    continue
+                sequence = str(nb.get('sequence') or '').strip().upper()
                 try:
-                    score = float(nb.get("final_score"))
+                    score = float(nb.get('final_score'))
                 except (TypeError, ValueError):
-                    score = float("inf")
-                if seq not in best or score < best[seq]:
-                    best[seq] = score
-    # Best (lowest validator final_score) first, so --pool-limit keeps the top.
-    return [s for s, _ in sorted(best.items(), key=lambda kv: kv[1])]
+                    continue
+                if sequence and math.isfinite(score):
+                    rows.append((submission, sequence, score))
+        field = sorted(score for _, _, score in rows)
+        for submission, sequence, score in rows:
+            if not str(submission.get('coldkey') or '').startswith(coldkey_prefix):
+                continue
+            row = found.setdefault(sequence, {'sequence': sequence, 'quality_evidence': []})
+            if len(field) > 1:
+                row['quality_evidence'].append({
+                    'kind': 'public_validator_percentile', 'target': target, 'epoch': e,
+                    'value': bisect_left(field, score) / (len(field) - 1),
+                    'field_size': len(field), 'raw_score': score, 'passes': 1})
+    def order(row):
+        newest = max(row['quality_evidence'], key=lambda item: item['epoch'], default=None)
+        return (newest['value'] if newest else 2.0, -newest['epoch'] if newest else 0,
+                row['sequence'])
+    return sorted(found.values(), key=order)
+
+
+def fetch_rival_sequences(epoch: int, coldkey_prefix: str, n_epochs: int = 15) -> list[str]:
+    """Compatibility wrapper; bank builders should retain the evidence records."""
+    return [row['sequence'] for row in fetch_rival_records(epoch, coldkey_prefix, n_epochs)]
 
 # 1-indexed framework/FR4 positions the competitor lane single-edits, sized for
 # the Q9NZQ7 field modal length 114 (108 DB nodes at length 114; the public

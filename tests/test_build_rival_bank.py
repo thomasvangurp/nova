@@ -29,7 +29,7 @@ def challenge(gene="IGHV3-48", length=17, epoch=26000):
 
 def test_build_emits_donor_accepted_rows_with_correct_cells_and_dedup(monkeypatch):
     fetched = ["S1", "S1", "S2", "S3", "S4", "S5"]
-    monkeypatch.setattr(build_rival_bank, "fetch_rival_sequences",
+    monkeypatch.setattr(build_rival_bank, "fetch_rival_records",
                         lambda epoch, prefix, n_epochs=15: list(fetched))
     mapping = {
         "S1": anno("IGHV3-23", 16),
@@ -65,7 +65,7 @@ def test_build_emits_donor_accepted_rows_with_correct_cells_and_dedup(monkeypatc
 
 
 def test_build_rejects_invalid_epoch_and_coldkey(monkeypatch):
-    monkeypatch.setattr(build_rival_bank, "fetch_rival_sequences", lambda *a, **k: [])
+    monkeypatch.setattr(build_rival_bank, "fetch_rival_records", lambda *a, **k: [])
     with pytest.raises(ValueError, match="epoch"):
         build_rival_bank.build(-1, "5GhR", annotate=annotator({}))
     with pytest.raises(ValueError, match="coldkey"):
@@ -75,7 +75,7 @@ def test_build_rejects_invalid_epoch_and_coldkey(monkeypatch):
 
 
 def test_cli_writes_schema_exact_bank_and_summary(tmp_path, monkeypatch):
-    monkeypatch.setattr(build_rival_bank, "fetch_rival_sequences",
+    monkeypatch.setattr(build_rival_bank, "fetch_rival_records",
                         lambda epoch, prefix, n_epochs=15: ["S1", "S2"])
     mapping = {"S1": anno("IGHV3-23", 16), "S2": anno("IGHV3-66", 18)}
     monkeypatch.setattr(de_novo_bank, "default_annotate", annotator(mapping))
@@ -94,3 +94,15 @@ def test_cli_writes_schema_exact_bank_and_summary(tmp_path, monkeypatch):
          "sequence_hash": rules.sequence_hash("S2"), "source": "rival_bank_ts"},
     ]
     assert json.loads(summary.read_text())["kept"] == 2
+
+
+def test_rival_bank_keeps_measured_field_provenance(monkeypatch):
+    measurement = {'target': rules.TARGET, 'epoch': 25999,
+        'kind': 'public_validator_percentile', 'value': 0.0, 'passes': 1,
+        'field_size': 30, 'raw_score': 17}
+    monkeypatch.setattr(build_rival_bank, 'fetch_rival_records',
+        lambda *a, **k: [{'sequence': 'S1', 'quality_evidence': [measurement]}])
+    bank, _, _ = build_rival_bank.build(26000, '5EHSBSGW', source='test',
+        annotate=annotator({'S1': anno('IGHV3-23', 16)}))
+    assert bank['rows'][0]['quality_evidence'] == [measurement]
+    assert 'pr100_evidence' not in bank['rows'][0]

@@ -20,9 +20,8 @@ ACTIVATION_EPOCH = 25955
 UPSTREAM_SHA = "ce19ea8cbe656671c3440ba58b4093ff80798d4f"
 FILTER_SHA = "fe2d5868126406a0de8953d26ecd8bdccbdbd029"
 PROFILE = "nanobody-pr100-v1"
-#: The current (post-activation) nanobody target. Env-driven so a future
-#: target change is an environment change, not a code change. The
-#: pre-activation target (P20809) is historical and stays a constant below.
+#: Any environment selection must match the entire qualified target asset config.
+#: Changing the label alone cannot relabel previously measured biology.
 TARGET = os.environ.get("SN68_NANOBODY_TARGET", "Q9NZQ7").strip() or "Q9NZQ7"
 MAX_AVERAGE = Decimal("-0.68002724866200")
 MAX_PEAK = Decimal("1.58023066762925")
@@ -46,14 +45,8 @@ def sequence_hash(sequence):
 def pinned_config(epoch):
     name = "nanobody_pr100.json" if int(epoch) >= ACTIVATION_EPOCH else "nanobody_pre_pr100.json"
     config = json.loads((CONFIG_DIR / name).read_text())
-    if int(epoch) >= ACTIVATION_EPOCH:
-        # The current target string is env-driven (rules.TARGET). The file's
-        # remaining nanobody fields (clip_interval, structure, structure_chain,
-        # structure_res_index, structure_binding_site) are static data keyed to
-        # the target, so a future target change sets SN68_NANOBODY_TARGET AND
-        # updates those fields in config/nanobody_pr100.json together; the
-        # target string itself no longer needs a code or config edit.
-        config["protein_selection"]["nanobody"]["target"] = TARGET
+    if int(epoch) >= ACTIVATION_EPOCH and config["protein_selection"]["nanobody"]["target"] != TARGET:
+        raise ValueError("target override does not match the qualified target assets")
     return config
 
 
@@ -286,7 +279,7 @@ HANDOFF_REJECTION_CODES = frozenset({
     "pr100_filter_mismatch", "layer_1_historically_unique_failed",
     "layer_1_duplicate_gate_failed", "novelty_missing", "novelty_not_passed",
     "novelty_sequence_mismatch", "novelty_target_mismatch",
-    "novelty_archive_invalid", "novelty_archive_mismatch",
+    "novelty_archive_invalid", "novelty_archive_mismatch", "current_novelty_evidence_required",
     "annotation_unavailable", "annotation_policy_mismatch", "annotation_sequence_mismatch",
     "not_single_heavy_domain", "not_vhh", "canonical_cysteines", "human_v_identity",
     "human_j_identity", "annotation_reference_missing", "annotation_reference_mismatch",
@@ -325,7 +318,8 @@ def _diagnostic_sequence_hash(sequence):
         return None
 
 
-def verified_fleet(payload, epoch, block_hash, epoch_length=None, *, get_block_hash=None):
+def verified_fleet(payload, epoch, block_hash, epoch_length=None, *, get_block_hash=None,
+                   current_archive_sha256=None):
     """Filter to independently checked current-challenge checkpointed entries.
 
     A same-target artifact for the immediately preceding epoch is accepted as a
@@ -333,7 +327,8 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None, *, get_block_h
     window, last epoch's independently validated sequences are a worse
     submission than this epoch's and a far better one than nothing. The
     downgrade attests the historical challenge with ``get_block_hash`` and
-    rechecks each sequence against the current V gene and CDR3 length, reported via
+    rechecks each sequence against the current V gene, CDR3 length and independently
+    fetched current archive identity, reported via
     ``handoff_diagnostics["stale_epoch_downgrade"]`` so the commit is never
     silent. The target check remains strict against the current target, and a
     missing, older or pre-PR100 artifact is still refused.
@@ -416,6 +411,16 @@ def verified_fleet(payload, epoch, block_hash, epoch_length=None, *, get_block_h
                     epoch_challenge=current_expected)
                 if reason:
                     rejected(sequence, reason)
+                    continue
+                # Historical novelty is reusable only if an independent current
+                # archive fetch proves the search corpus has not changed. A
+                # changed corpus needs a fresh controller-side novelty search.
+                novelty = checkpoint.get("validation", {}).get("layer_1", {}).get("novelty")
+                if (not isinstance(current_archive_sha256, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", current_archive_sha256)
+                        or novelty_reason(novelty, sequence, expected["target"],
+                                          archive_sha256=current_archive_sha256)):
+                    rejected(sequence, "current_novelty_evidence_required")
                     continue
             if checkpoint.get("publication_stage") == "live_trial":
                 archive = payload.get("archive_sha256")

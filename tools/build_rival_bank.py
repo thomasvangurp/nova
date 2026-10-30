@@ -1,4 +1,4 @@
-"""Build a PR100 native-pass reference bank from a competitor's submissions.
+"""Build a PR100 annotated proposal-parent bank from a competitor's submissions.
 
 The rival-parent lane is *opt-in* and additive: this tool produces a bank the
 operator can point ``hosts.slave.references`` at, it does not modify the live
@@ -11,9 +11,9 @@ consumes::
                "sequence_hash": "<sha256 hex>",
                "source": "rival_bank_<unix>"}]}
 
-The input is ``competitor_lane.fetch_rival_sequences``: the rival's recent
-leaderboard submissions over the last ``--n-epochs`` epochs, best (lowest
-validator ``final_score``) first. Every sequence is then annotated with the
+The input is ``competitor_lane.fetch_rival_records``: the rival's recent
+leaderboard submissions over the last ``--n-epochs`` epochs, ordered by within-board percentile. Single-validator
+evidence is preserved explicitly; it is not multipass or native qualification. Every sequence is then annotated with the
 pinned ``pr100_filter._annotate_uncached`` stack, filtered to the 9-gene
 IGHV3 set + CDR3 length 5-23, and deduped by ``rules.sequence_hash`` -- the
 same conversion path as ``tools/de_novo_bank``.
@@ -28,7 +28,7 @@ import json
 import time
 from pathlib import Path
 
-from nanobody_opt.competitor_lane import fetch_rival_sequences
+from nanobody_opt.competitor_lane import fetch_rival_records
 from tools import de_novo_bank
 
 
@@ -37,7 +37,7 @@ def build(epoch, coldkey_prefix, *, n_epochs=15, source=None, annotate=None):
 
     ``bank`` is the ``{"rows": [...]}`` payload in the exact
     ``pr100_reference_donors`` schema. ``sequences`` is the raw deduped rival
-    submission list (best first) that ``fetch_rival_sequences`` returned, for
+    submission list (best first) that ``fetch_rival_records`` returned, for
     provenance. ``annotate`` defaults to the pinned ``_annotate_uncached`` and
     is injectable for tests (see ``tests/test_build_rival_bank.py``).
     """
@@ -47,9 +47,10 @@ def build(epoch, coldkey_prefix, *, n_epochs=15, source=None, annotate=None):
         raise ValueError('rival coldkey prefix must be a nonempty string')
     if isinstance(n_epochs, bool) or not isinstance(n_epochs, int) or n_epochs < 1:
         raise ValueError('n_epochs must be a positive integer')
-    sequences = fetch_rival_sequences(epoch, coldkey_prefix, n_epochs=n_epochs)
+    records = fetch_rival_records(epoch, coldkey_prefix, n_epochs=n_epochs)
+    sequences = [r["sequence"] if isinstance(r, dict) else r for r in records]
     source = source or f"rival_bank_{int(time.time())}"
-    rows, summary = de_novo_bank.convert(sequences, source=source, annotate=annotate)
+    rows, summary = de_novo_bank.convert(records, source=source, annotate=annotate)
     de_novo_bank.validate(rows)
     return {"rows": rows}, summary, sequences
 

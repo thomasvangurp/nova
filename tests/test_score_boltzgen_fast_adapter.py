@@ -5,6 +5,78 @@ import pytest
 from nanobody_opt import score_boltzgen_fast_adapter as adapter
 
 
+@pytest.mark.parametrize('mode', ['daemon', 'subprocess', 'no-daemon'])
+def test_reserved_gpu_cannot_reach_daemon_or_direct_fallback(tmp_path, monkeypatch, mode):
+    import sys
+    from types import SimpleNamespace
+    from nanobody_opt import scorer_daemon
+    policy=tmp_path/'reservation.json'
+    policy.write_text(json.dumps({'schema':'pr100-gpu-reservation-v1',
+                                 'owner':'pr100-live-controller','gpus':[1,2,3,4]}))
+    monkeypatch.setattr(scorer_daemon, 'GPU_RESERVATION_FILE', str(policy))
+    monkeypatch.setattr(adapter, '_scorer_daemon', SimpleNamespace(
+        ENABLED=mode=='daemon', available=lambda:pytest.fail('reserved GPU reached daemon')))
+    monkeypatch.setattr(adapter.subprocess, 'run', lambda *a,**k:pytest.fail('reserved GPU reached subprocess'))
+    monkeypatch.setattr(sys, 'argv', ['adapter','--sequences',str(tmp_path/'unused.json'),
+        '--config','unused.yaml','--target','TEST','--work-root',str(tmp_path/'work'),
+        '--out',str(tmp_path/'out.json'),'--gpus','1'] + (['--no-daemon'] if mode=='no-daemon' else []))
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        adapter.main()
+    assert not (tmp_path/'work').exists()
+
+
+def test_reservation_installed_during_daemon_request_blocks_fallback(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from nanobody_opt import scorer_daemon
+    source=tmp_path/'input.json'; source.write_text(json.dumps({'sequences':['AAAA']}))
+    policy=tmp_path/'reservation.json'
+    monkeypatch.setattr(scorer_daemon, 'GPU_RESERVATION_FILE', str(policy))
+    monkeypatch.setattr(adapter, 'load_settings', lambda *a:{'use_daemon':True})
+    def refuse(job):
+        policy.write_text(json.dumps({'schema':'pr100-gpu-reservation-v1',
+                                     'owner':'pr100-live-controller','gpus':[1,2,3,4]}))
+        raise RuntimeError('gpu_reserved_for_pr100')
+    monkeypatch.setattr(adapter, '_scorer_daemon', SimpleNamespace(
+        ENABLED=True, available=lambda:True, job_from_command=lambda command:{}, score=refuse))
+    monkeypatch.setattr(adapter.subprocess, 'run', lambda *a,**k:pytest.fail('reservation bypassed through fallback'))
+    monkeypatch.setattr(sys, 'argv', ['adapter','--sequences',str(source),
+        '--config','unused.yaml','--target','TEST','--work-root',str(tmp_path/'work'),
+        '--out',str(tmp_path/'out.json'),'--gpus','1'])
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        adapter.main()
+
+
+@pytest.mark.parametrize('leased', [False, True])
+def test_only_verified_production_lease_exempts_reserved_adapter_gpu(tmp_path, monkeypatch, leased):
+    import sys
+    from types import SimpleNamespace
+    from nanobody_opt import scorer_daemon, pr100_live_gpu
+    source=tmp_path/'input.json'; source.write_text(json.dumps({'sequences':['AAAA']}))
+    policy=tmp_path/'reservation.json'
+    policy.write_text(json.dumps({'schema':'pr100-gpu-reservation-v1',
+                                 'owner':'pr100-live-controller','gpus':[1,2,3,4]}))
+    monkeypatch.setattr(scorer_daemon, 'GPU_RESERVATION_FILE', str(policy))
+    def attest(gpus):
+        assert gpus == ['1']
+        return 7 if leased else None
+    monkeypatch.setattr(pr100_live_gpu, 'inherited_lease_fd', attest)
+    monkeypatch.setattr(adapter, 'load_settings', lambda *a:{'use_daemon':True})
+    monkeypatch.setattr(adapter, '_scorer_daemon', SimpleNamespace(
+        ENABLED=True, available=lambda:pytest.fail('leased production must not enter legacy daemon')))
+    calls=[]
+    monkeypatch.setattr(adapter.subprocess, 'run', lambda command:calls.append(command) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(sys, 'argv', ['adapter','--sequences',str(source),
+        '--config','unused.yaml','--target','TEST','--work-root',str(tmp_path/'work'),
+        '--out',str(tmp_path/'out.json'),'--gpus','1'])
+    if leased:
+        with pytest.raises(SystemExit) as exited: adapter.main()
+        assert exited.value.code == 0 and len(calls)==1
+    else:
+        with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'): adapter.main()
+        assert calls == []
+
+
 def _args(tmp_path, **overrides):
     import argparse
 

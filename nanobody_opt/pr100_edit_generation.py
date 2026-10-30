@@ -31,6 +31,9 @@ mutation-network ranking) remains available as a subprocess:
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import math
+import random
 from itertools import zip_longest
 
 from nanobody_opt import gates, rules
@@ -237,6 +240,70 @@ def allowed_table(sequences: list[str], length: int, *, min_support: int = 1) ->
     return table
 
 
+def _annotated_spans(parent, cdrs):
+    if not isinstance(cdrs, dict):
+        return None
+    spans = {}
+    for key in ('cdr1', 'cdr2', 'cdr3'):
+        loop = cdrs.get(key)
+        if not isinstance(loop, str) or not loop or parent.count(loop) != 1:
+            return None
+        start = parent.index(loop)
+        spans[key] = list(range(start, start + len(loop)))
+    if (max(spans['cdr1']) >= min(spans['cdr2'])
+            or max(spans['cdr2']) >= min(spans['cdr3'])):
+        return None
+    return spans
+
+
+def novelty_aware_candidates(parent, *, cdrs, allowed, limit):
+    """Bounded parent-guided multi-edits; parent-relative proxies are not novelty.
+
+    CDR spans come from qualified annotation, not the heuristic region finder.
+    Framework, conserved cysteines and the final three J-junction residues stay
+    unchanged. The final pipeline must still annotate, profile and search the
+    full current archive using the validator implementation.
+    """
+    spans = _annotated_spans(parent, cdrs)
+    if spans is None or len(allowed) != len(parent):
+        return []
+    # Strict inequalities: 95% whole identity and 85% CDR3 identity are both
+    # duplicate boundaries, so equality does not qualify this proposal arm.
+    whole_edits = math.floor(len(parent) * 0.05) + 1
+    cdr3_edits = math.floor(len(spans['cdr3']) * 0.15) + 1
+    cdr3_mutable = [i for i in spans['cdr3'][:-3] if parent[i] != 'C']
+    other_mutable = [i for key in ('cdr1', 'cdr2') for i in spans[key] if parent[i] != 'C']
+    if cdr3_edits > len(cdr3_mutable) or whole_edits - cdr3_edits > len(other_mutable):
+        return []
+    from nanobody_opt.pr100_proposal_pilot import AMINO_ACID_WEIGHTS
+    broad = [aa for aa, weight in AMINO_ACID_WEIGHTS.items() if weight > 0 and aa != 'C']
+    candidates = []
+    seen = set()
+    for ordinal in range(limit):
+        seed = int.from_bytes(hashlib.sha256(
+            ('pr100-parent-multi-edit-v1:' + parent + ':' + str(ordinal)).encode()).digest(), 'big')
+        rng = random.Random(seed)
+        positions = (rng.sample(cdr3_mutable, cdr3_edits)
+                     + rng.sample(other_mutable, whole_edits - cdr3_edits))
+        candidate = list(parent)
+        for position in positions:
+            observed = [aa for aa in allowed[position] if aa != parent[position] and aa != 'C']
+            population = observed if observed and ordinal % 2 == 0 else [
+                aa for aa in broad if aa != parent[position]]
+            if not population:
+                break
+            candidate[position] = rng.choice(population)
+        candidate = ''.join(candidate)
+        differences = sum(a != b for a, b in zip(candidate, parent))
+        changed_cdr3 = sum(candidate[i] != parent[i] for i in spans['cdr3'])
+        if (differences < whole_edits or changed_cdr3 < cdr3_edits
+                or candidate in seen):
+            continue
+        seen.add(candidate)
+        candidates.append((candidate, 'novelty_aware_multi_edit'))
+    return candidates
+
+
 def generate(
     parents: list[str],
     *,
@@ -249,8 +316,14 @@ def generate(
     limit: int | None = None,
     excluded_hashes: set[str] | frozenset[str] | None = None,
     stats: dict[str, int] | None = None,
+    novelty_aware: bool = False,
+    parent_cdrs: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    """Emit edit-based children for a pool of same-length parent sequences.
+    """Emit edit children round-robin, with separate contexts for each parent length.
+
+    With ``novelty_aware=True``, only bounded multi-edits that pass strict
+    parent-relative identity proxies are emitted, using supplied annotation
+    CDRs. These proxies are never current-archive novelty evidence.
 
     Parents are proposal CENTRES, never submissions. Each parent seeds the
     framework lane (CDR3-preserving singles/haplotypes) and the lineage lane
@@ -259,7 +332,7 @@ def generate(
     the two lanes alternate, so a small ``limit`` cannot be filled by the
     framework lane alone. Children that are byte-identical to a parent (a cross
     single-edit) or to a previously emitted child are dropped. The result is
-    deduped, deterministic for a fixed input, and ordered parent-first.
+    deduped, deterministic for a fixed input, and ordered round-robin across the ranked parents.
 
     ``excluded_hashes`` holds ``rules.sequence_hash`` values the caller will
     discard anyway (already-published or already-tried sequences). They are
@@ -273,87 +346,99 @@ def generate(
     the ``allowed`` table or the parent filter. Pass a ``stats`` dict to
     receive the count under ``malformed_parents``.
     """
+    if limit is not None and (type(limit) is not int or limit < 0):
+        raise ValueError('limit must be a nonnegative integer')
+    if limit == 0:
+        return []
     if stats is None:
         stats = {}
     stats.setdefault("malformed_parents", 0)
-    parent_list: list[str] = []
-    seen: set[str] = set()
+    located = []
+    seen = set()
     for raw in parents:
+        parent = str(raw).strip().upper()
+        if not parent or parent in seen:
+            continue
+        seen.add(parent)
+        if novelty_aware:
+            spans = _annotated_spans(parent, (parent_cdrs or {}).get(parent))
+            if spans is None:
+                stats['malformed_parents'] += 1
+                continue
+            cdr_positions = set().union(*spans.values())
+        else:
+            try:
+                regions = find_regions(parent)
+            except ValueError:
+                stats["malformed_parents"] += 1
+                continue
+            cdr_positions = set(regions.cdr_positions())
+        located.append((parent, cdr_positions))
+    backgrounds = {}
+    for raw in background_sequences or []:
         sequence = str(raw).strip().upper()
-        if not sequence:
-            continue
-        if parent_list and len(sequence) != len(parent_list[0]):
-            continue  # per-length context, like _generate_exact_length
-        if sequence in seen:
-            continue
-        seen.add(sequence)
-        parent_list.append(sequence)
-    if not parent_list:
-        return []
-    length = len(parent_list[0])
-    # Only parents whose regions can be located may seed ``allowed`` and the
-    # parent filter; a malformed parent would otherwise inject its residues.
-    located: list[tuple[str, set[int]]] = []
-    for parent in parent_list:
-        try:
-            regions = find_regions(parent)
-        except ValueError:
-            stats["malformed_parents"] += 1
-            continue
-        located.append((parent, set(regions.cdr_positions())))
-    if not located:
-        return []
-    background = [
-        str(sequence).strip().upper()
-        for sequence in (background_sequences or [])
-        if len(str(sequence).strip().upper()) == length
-    ]
-    allowed = allowed_table(
-        [*(parent for parent, _ in located), *background], length, min_support=min_support
-    )
+        backgrounds.setdefault(len(sequence), []).append(sequence)
     parent_set = {parent for parent, _ in located}
-    records: list[dict[str, str]] = []
+    allowed_by_length = {}
+    for parent, _ in located:
+        length = len(parent)
+        if length not in allowed_by_length:
+            allowed_by_length[length] = allowed_table(
+                [p for p, _ in located if len(p) == length] + backgrounds.get(length, []),
+                length, min_support=min_support)
+    streams = []
     for parent, cdr_positions in located:
-        protected: set[int] = set()
-        framework = supported_framework_candidates(
-            parent,
-            allowed=allowed,
-            background_sequences=background,
-            cdr_positions=cdr_positions,
-            protected=protected,
-            terminal_width=terminal_width,
-            maximum_haplotype_mutations=framework_maximum_haplotype_mutations,
-        )
-        lineage = supported_lineage_candidates(
-            parent,
-            allowed=allowed,
-            background_sequences=background,
-            cdr_positions=cdr_positions,
-            protected=protected,
-            terminal_width=terminal_width,
-            maximum_haplotype_mutations=maximum_haplotype_mutations,
-            priors=priors,
-        )
+        length = len(parent)
+        background = backgrounds.get(length, [])
+        allowed = allowed_by_length[length]
+        if novelty_aware:
+            framework = novelty_aware_candidates(parent,
+                cdrs=(parent_cdrs or {}).get(parent), allowed=allowed,
+                limit=max(16, min(2048, (limit or 300) * 4)))
+            lineage = []
+        else:
+            framework = supported_framework_candidates(
+                parent, allowed=allowed, background_sequences=background,
+                cdr_positions=cdr_positions, protected=set(), terminal_width=terminal_width,
+                maximum_haplotype_mutations=framework_maximum_haplotype_mutations)
+            lineage = supported_lineage_candidates(
+                parent, allowed=allowed, background_sequences=background,
+                cdr_positions=cdr_positions, protected=set(), terminal_width=terminal_width,
+                maximum_haplotype_mutations=maximum_haplotype_mutations, priors=priors)
+        records = []
         for pair in zip_longest(framework, lineage):
             for candidate_lane in pair:
                 if candidate_lane is None:
                     continue
                 candidate, lane = candidate_lane
-                if candidate in parent_set:
+                if candidate not in parent_set:
+                    records.append({"sequence": candidate, "parent_sequence": parent,
+                                    "proposal_lane": lane, "source": SOURCE})
+        # Dedup/filter before round-robin so a parent's redundant leading
+        # records cannot starve the other parents under a small output limit.
+        own_seen = set()
+        stream = []
+        for record in records:
+            candidate = record['sequence']
+            if candidate in own_seen or rules.sequence_hash(candidate) in (excluded_hashes or ()):
+                continue
+            own_seen.add(candidate)
+            stream.append(record)
+        streams.append(iter(stream))
+    deduped = []
+    emitted = set()
+    while streams:
+        pending = []
+        for stream in streams:
+            for record in stream:
+                sequence = record['sequence']
+                if sequence in emitted:
                     continue
-                records.append({"sequence": candidate, "parent_sequence": parent,
-                                "proposal_lane": lane, "source": SOURCE})
-    excluded = excluded_hashes or ()
-    deduped: list[dict[str, str]] = []
-    emitted: set[str] = set()
-    for record in records:
-        sequence = record["sequence"]
-        if sequence in emitted:
-            continue
-        emitted.add(sequence)
-        if excluded and rules.sequence_hash(sequence) in excluded:
-            continue
-        deduped.append(record)
-        if limit is not None and len(deduped) >= limit:
-            break
+                emitted.add(sequence)
+                deduped.append(record)
+                pending.append(stream)
+                break
+            if limit is not None and len(deduped) >= limit:
+                return deduped
+        streams = pending
     return deduped

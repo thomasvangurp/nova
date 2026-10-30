@@ -24,9 +24,9 @@ the contract that ``tools/multipass_all_rivals.py`` (dashboard) and
 
   score_kind    multipass_sum10_pass
   source        public_multipass_rivals   (the only registered source)
-  score         ONE pass's sum-of-10 vs the full HF archive + that pass's batch
-                (archive duplicates dropped, keep the fresh pass: same as
-                multipass_all_rivals.rank_pass_payload)
+  score         ONE pass's sum-of-10 against the fixed full HF archive. Each
+                candidate is inserted independently, using the shared ranker;
+                changing the scoring batch cannot change its rank.
   metrics_json  the RAW per-pass BoltzGen metrics (all ten metrics; this was
                 '{}' on every row the old version wrote)
   provenance    writer=hf_field_refresh, formula=sum10, cohort, pass_index,
@@ -101,7 +101,7 @@ from typing import Callable
 
 import pandas as pd
 
-from nanobody_opt.rules import TARGET
+from nanobody_opt.rules import TARGET, target_for_epoch
 # 2026-10-10: per-pass rows under the ONE current multipass label. The old
 # per-sequence mean labels (hf_field_20x_rank_sum, hf_field_sum10_20x_rank_sum)
 # are closed; their rows were relabelled to legacy_* by migrate_hf_field_20x.
@@ -374,9 +374,9 @@ def latest_epochs(conn, sequences, run_epoch: int) -> dict[str, tuple[int, str]]
         chunk = ordered[i:i + 300]
         rows = conn.execute(
             "SELECT n.sequence, MAX(o.epoch) FROM observations o JOIN nodes n ON n.id=o.node_id "
-            "WHERE o.source=%s AND o.epoch IS NOT NULL AND o.epoch<=%s "
+            "WHERE n.target=%s AND o.source=%s AND o.epoch IS NOT NULL AND o.epoch<=%s "
             f"AND n.sequence IN ({','.join(['%s'] * len(chunk))}) GROUP BY n.sequence",
-            (SOURCE, int(run_epoch), *chunk)).fetchall()
+            (TARGET, SOURCE, int(run_epoch), *chunk)).fetchall()
         for seq, epoch in rows:
             seq = str(seq).strip().upper()
             if seq in out and epoch is not None:
@@ -723,7 +723,11 @@ def assert_label_open() -> None:
     observation_labels.check_observations([
         {"observation_id": "hf20x_pass:preflight", "sequence": "A", "target": TARGET,
          "source": SOURCE, "score_kind": SCORE_KIND, "score": 1.0,
-         "writer": WRITER, "formula": FORMULA_ID, "cohort": cohort}
+         "writer": WRITER, "formula": FORMULA_ID, "cohort": cohort,
+         # Schema probe only: never written to the observation store. Keep the
+         # real raw-pass contract intact rather than exempting this writer.
+         "metrics": {metric: 0.0 for metric in SUM_OF_TEN_DIRS},
+         "synthetic_preflight": True}
         for cohort in ("rival", "hf_top200")])
 
 
@@ -745,6 +749,8 @@ def raw_metrics_from_payload(payload: dict, wanted: set[str] | None = None
     (wave 0, TARGET), for the requested sequences only. Formula-independent
     (= multipass_all_rivals.raw_metrics_from_exact_all, restricted to the
     batch we asked for)."""
+    if payload.get("target", TARGET) != TARGET:
+        raise ValueError("refresh payload belongs to another target")
     wave = (payload.get("per_nanobody_components") or {}).get("0") or {}
     out: dict[str, dict[str, float]] = {}
     for seq, comp in wave.items():
@@ -761,17 +767,15 @@ def raw_metrics_from_payload(payload: dict, wanted: set[str] | None = None
 
 
 def rank_pass(raw: dict[str, dict[str, float]], archive: pd.DataFrame) -> dict[str, float]:
-    """Sum-of-10 of each scored sequence vs the archive + this pass's batch,
-    with archive duplicates dropped (the fresh pass wins) -- exactly
-    ``multipass_all_rivals.rank_pass_payload``, so every row under the label
-    is ranked the same way (tests/test_hf_field_refresh.py checks this)."""
-    rows = {s: {k: v for k, v in m.items() if k in METRICS_NEEDED} for s, m in raw.items()}
-    rival = pd.DataFrame(rows).T
-    archive_s = archive.set_index("sequence")[METRICS_NEEDED]
-    field = pd.concat([archive_s, rival])
-    field = field[~field.index.duplicated(keep="last")]
-    scores = sum_of_ten(field)
-    return {seq: float(scores[seq]) for seq in rival.index if seq in scores.index}
+    """Rank each candidate independently against the declared fixed field.
+
+    Share the dashboard's arithmetic, not its field: this writer declares the
+    full HF archive, while a recent-epoch replay declares its pooled field.
+    """
+    if archive.empty:
+        raise ValueError("refresh requires a measured field for the same target")
+    from nanobody_opt.rank_exact import rank_metrics_against_field
+    return rank_metrics_against_field(raw, archive)
 
 
 def structures_from_payload(payload: dict) -> dict[str, dict]:
@@ -990,6 +994,10 @@ def main(argv: list[str] | None = None, *, probe=None,
               "--allow-unconsumed or set HF_FIELD_REFRESH_ENABLED=1 to run.", flush=True)
         return EXIT_DISABLED
 
+    if args.epoch is not None and target_for_epoch(args.epoch) != TARGET:
+        _loud("HF_REFRESH_GUARD_REFUSED", "refresh target does not match the requested epoch")
+        return EXIT_REFUSED
+
     probe = probe or SystemProbe()
     started = probe.now()
     try:
@@ -1032,6 +1040,9 @@ def main(argv: list[str] | None = None, *, probe=None,
             print("no completed epoch found", flush=True)
             return 1
     print(f"epoch={args.epoch}", flush=True)
+    if target_for_epoch(args.epoch) != TARGET:
+        _loud("HF_REFRESH_GUARD_REFUSED", "refresh target does not match the resolved epoch")
+        return EXIT_REFUSED
 
     with db.connect() as conn:
         our_top50 = fetch_our_top50(conn)

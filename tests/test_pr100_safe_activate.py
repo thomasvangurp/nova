@@ -101,6 +101,33 @@ def test_attempt_started_during_preparation_is_not_stopped(deployment):
     assert a.read(base / 'pr100-controller.json') == old
 
 
+@pytest.mark.parametrize('stage', ['before', 'prepare', 'stop'])
+def test_force_never_bypasses_active_attempt_ownership(deployment, stage):
+    base, release, unit, root, old = deployment
+    events = []
+    def activate_attempt():
+        a.atomic(root / '25964/continuation.json', {**STATE, 'active': {'number': 9, 'phase': 'native'}})
+    if stage == 'before':
+        activate_attempt()
+    result = a.handoff(base, SHA, 'master', release, None, force=True,
+        clock_reader=lambda: CLOCK, now=lambda: 1000,
+        service_factory=service_factory(unit, events,
+            validation=activate_attempt if stage == 'prepare' else None,
+            stop=activate_attempt if stage == 'stop' else None))
+    assert result['status'] == ('boundary_race_old_service_restarted' if stage == 'stop'
+                                else 'waiting_for_clean_attempt')
+    assert a.read(base / 'pr100-controller.json') == old
+    assert unit.read_text() == 'original-unit'
+    assert 'install' not in events
+
+
+def test_force_never_bypasses_unqualified_predecessor(deployment):
+    *_, old = deployment
+    old['source_sha'] = 'f' * 40
+    with pytest.raises(ValueError, match='unexpected_current_release'):
+        a.proposed_config(old, SHA, CLOCK['epoch'], 'master', force=True)
+
+
 def test_stop_race_restarts_old_without_config_or_unit_change(deployment):
     base, release, unit, root, old = deployment; events = []
     def changed(): a.atomic(root / '25964/continuation.json', {**STATE, 'active': {'number': 3}})
@@ -827,4 +854,116 @@ def test_non_screen_activation_resets_native_screen_to_disabled(deployment):
     *_, old = deployment
     value = a.proposed_config(old, SHA, CLOCK['epoch'], 'master')
     assert value['worker']['native_screen']['enabled'] is False
+
+
+@pytest.fixture
+def recovery_receipt(deployment):
+    from nanobody_opt import pr100_native_screen as screen
+    base, _release, _unit, _root, old = deployment
+    old['hosts']['slave']['novelty_runtime'] = {'identity_sha256': 'b' * 64}
+    a.atomic(base / 'pr100-controller.json', old)
+    settings = screen.settings({'native_screen': {
+        'enabled': True, 'backend': 'cuda_refine', 'workers': 32, 'workers_per_gpu': 2,
+        'gpus': [1, 2], 'runtime_versions': {**screen.PINNED_VERSIONS, 'torch': '2.7.1+cu126'}}})
+    return {'schema': 'pr100-recovery-rollout-v1', 'source_sha': SHA,
+        'native_screen_hosts': {'master': {'settings': settings, 'smoke': {
+            'source_sha': SHA, 'host': 'master', 'status': 'complete',
+            'settings_sha256': screen.digest(settings),
+            'protocol_sha256': screen.digest(screen.protocol(settings['backend'], settings['runtime_versions'])),
+            'measured_count': 2, 'runtime_inconclusive_count': 0,
+            'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}}}},
+        'reference_bank': {'path': '/root/pr100-rival-bank/input.json', 'sha256': 'c' * 64, 'rows': 12,
+            'annotation_qualification': {'source_sha': SHA, 'host': 'slave', 'status': 'complete',
+                'bank_sha256': 'c' * 64, 'annotated_rows': 12, 'runtime_sha256': 'b' * 64}},
+        'edit_generation': {'settings': {'enabled': False, 'limit': 300}}}
+
+
+def test_measured_recovery_configuration_is_applied_inside_atomic_handoff(deployment, recovery_receipt):
+    base, release, unit, root, old = deployment; events = []
+    state = (root / '25964/continuation.json').read_bytes()
+    publication = (base / 'publication.json').read_bytes()
+    result = a.handoff(base, SHA, 'master', release, None, recovery_rollout_receipt=recovery_receipt,
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'activated'
+    assert events == ['validate', 'stop', 'install', 'start', 'verify']
+    new = a.read(base / 'pr100-controller.json')
+    assert new['native_worker_overrides']['master']['native_screen'] == recovery_receipt['native_screen_hosts']['master']['settings']
+    assert new['native_gpu_by_host']['master'] == [1, 2]
+    assert new['hosts']['slave']['references'] == '/root/pr100-rival-bank/input.json'
+    assert new['hosts']['slave']['reference_bank_sha256'] == 'c' * 64
+    assert new['worker']['edit_generation'] == {'enabled': False, 'limit': 300}
+    assert (root / '25964/continuation.json').read_bytes() == state
+    assert (base / 'publication.json').read_bytes() == publication
+
+
+@pytest.mark.parametrize('bad', ['source', 'unknown', 'smoke_host', 'count', 'inconclusive',
+    'cleanup', 'settings_binding', 'protocol_binding', 'runtime', 'bank_count', 'bank_runtime',
+    'bank_path', 'edit_unqualified'])
+def test_unqualified_recovery_receipt_never_stops_or_reconfigures_service(deployment, recovery_receipt, bad):
+    base, release, unit, root, old = deployment; events = []
+    receipt = copy.deepcopy(recovery_receipt)
+    smoke = receipt['native_screen_hosts']['master']['smoke']
+    bank = receipt['reference_bank']
+    if bad == 'source': receipt['source_sha'] = 'f' * 40
+    if bad == 'unknown': receipt['gpu'] = [0]
+    if bad == 'smoke_host': smoke['host'] = 'slave'
+    if bad == 'count': smoke['measured_count'] = 0
+    if bad == 'inconclusive': smoke['runtime_inconclusive_count'] = 1
+    if bad == 'cleanup': smoke['cleanup']['remaining_descendants'] = 1
+    if bad == 'settings_binding': smoke['settings_sha256'] = 'f' * 64
+    if bad == 'protocol_binding': smoke['protocol_sha256'] = 'f' * 64
+    if bad == 'runtime': receipt['native_screen_hosts']['master']['settings']['runtime_versions']['torch'] = 'unqualified'
+    if bad == 'bank_count': bank['rows'] += 1
+    if bad == 'bank_runtime': bank['annotation_qualification']['runtime_sha256'] = 'f' * 64
+    if bad == 'bank_path': bank['path'] = '/root/../unapproved.json'
+    if bad == 'edit_unqualified': receipt['edit_generation']['settings']['enabled'] = True
+    before = (base / 'pr100-controller.json').read_bytes()
+    with pytest.raises(ValueError):
+        a.handoff(base, SHA, 'master', release, None, recovery_rollout_receipt=receipt,
+            clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert events == []
+    assert (base / 'pr100-controller.json').read_bytes() == before
+
+
+def test_recovery_receipt_does_not_bypass_a_stop_race(deployment, recovery_receipt):
+    base, release, unit, root, old = deployment; events = []
+    def changed(): a.atomic(root / '25964/continuation.json', {**STATE, 'active': {'number': 3}})
+    before = (base / 'pr100-controller.json').read_bytes()
+    result = a.handoff(base, SHA, 'master', release, None, recovery_rollout_receipt=recovery_receipt,
+        clock_reader=lambda: CLOCK, now=lambda: 1000,
+        service_factory=service_factory(unit, events, stop=changed), force=True)
+    assert result['status'] == 'boundary_race_old_service_restarted'
+    assert events == ['validate', 'stop', 'start']
+    assert (base / 'pr100-controller.json').read_bytes() == before
+
+
+def test_edit_rollout_requires_measured_novelty_with_exact_settings_and_bank(deployment, recovery_receipt):
+    from nanobody_opt import rules
+    *_, old = deployment
+    candidate = a.proposed_config(old, SHA, CLOCK['epoch'], 'master')
+    edits = recovery_receipt['edit_generation']
+    edits['settings']['enabled'] = True
+    edits['qualification'] = {'source_sha': SHA, 'status': 'complete', 'bank_sha256': 'c' * 64,
+        'settings_sha256': a.digest(edits['settings']), 'archive_sha256': 'd' * 64,
+        'filter_sha': rules.FILTER_SHA, 'tested_candidates': 20, 'novelty_passed_count': 3,
+        'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}}
+    assert a.recovery_rollout(candidate, recovery_receipt, SHA)['worker']['edit_generation']['enabled']
+    edits['settings']['limit'] += 1
+    with pytest.raises(ValueError, match='novelty_not_qualified'):
+        a.recovery_rollout(candidate, recovery_receipt, SHA)
+
+
+def test_cli_loads_recovery_receipt_for_handoff(deployment, recovery_receipt, monkeypatch):
+    base, *_ = deployment; stage = base / 'stage.json'; stage.write_text('{}')
+    receipt = base / 'recovery.json'; a.atomic(receipt, recovery_receipt)
+    calls = []
+    monkeypatch.setattr(a, 'BASE', base)
+    monkeypatch.setattr(a, 'verify_prerequisites', lambda *args, **kwargs: None)
+    monkeypatch.setattr(a, 'verify_novelty_qualification', lambda *args: {})
+    def handoff(*args, **kwargs):
+        calls.append(kwargs['recovery_rollout_receipt']); return {'status': 'activated'}
+    monkeypatch.setattr(a, 'handoff', handoff)
+    assert a.main([SHA, 'preserve', '--staging-receipt', str(stage),
+        '--novelty-qualification-receipt', str(stage), '--recovery-rollout-receipt', str(receipt)]) == 0
+    assert calls == [recovery_receipt]
 

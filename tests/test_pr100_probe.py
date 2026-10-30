@@ -31,6 +31,14 @@ def test_probe_diagnostics_do_not_persist_backend_output():
     assert 'private backend detail' not in json.dumps(result)
 
 
+def test_probe_preserves_only_explicit_inherited_lease_descriptor(tmp_path):
+    with (tmp_path/'gpu-1.lock').open('w') as handle:
+        fd = handle.fileno()
+        command = [sys.executable, '-c', 'import os,sys;os.fstat(int(sys.argv[1]))', str(fd)]
+        assert bounded(command, {}, 5, pass_fds=(fd,))['exit'] == 0
+        assert bounded(command, {}, 5)['exit'] != 0
+
+
 @pytest.mark.parametrize('replicates', [False, True])
 @pytest.mark.parametrize('fault', [None, 'wrong_target', 'nan_metric', 'missing_replica',
                                  'wrong_sample_count', 'corrupt_structure', 'escaped_structure'])

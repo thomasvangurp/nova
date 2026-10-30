@@ -4,34 +4,11 @@ This is a deliberately simple, reproducible baseline for the new challenge,
 not a production generator. Every emitted sequence still needs annotation,
 native developability, archive novelty and target scoring.
 
-CDR3 sampling is length-split:
-
-* L >= 12 uses the positional recipe derived from the beat-5EHS analysis and
-  the actually-submitted beater sequences::
-
-      CDR3 = anchor(2) + head(5) + body(L-10) + tail(3)
-
-  anchor ``S-K``/``S-R``/``A-K``, head ``Y-P-Y-[R/H]-F`` (three aromatics,
-  positive R or relocated H at position 4), body drawn from the charged,
-  balanced beater pool ``D/K/T/R/S/E`` (each K/R paired with D/E), tail the
-  fixed IGHJ4-style ``FDY``. Zero L/I/V/M/W anywhere in the loop.
-* L < 12 uses a short-regime template modeled on the rival's winning ``RAFDY``
-  junction: head ``R[A/H]`` + fixed ``FDY`` tail, extended with the polar
-  ``T/S/H/G`` pool for longer loops. This replaces the flat
-  ``AMINO_ACID_WEIGHTS`` draw, whose flat heads (``HDFDY``, ``RSFDY``, ...)
-  collapsed interface confidence ~2x below the rival's ``RAFDY``/``RHFDY``.
-
-The framework applies the full charged CDR2 motif ``DISSQGDQTD`` to all nine
-genes ONLY in the long regime (L >= 12), FR1 ``E->D`` (1) + ``V->Q`` (2), and
-the FR2 hallmarks ``G->E`` (49) + ``L->R`` (50) with germline K (48). In the
-short regime (L < 12) the germline CDR2 is kept per gene instead of the charged
-motif, matching the rival's short-regime winning scaffold, AND the winners'
-FR1 swaps V5/G9/V13/K20 are applied while FR2 keeps the germline K48
-(``GKERE``). This is a partial restoration: the winners' R17/F42/E52 are NOT
-applied. It is short-regime only; the long regime keeps germline residues at
-those positions. V identity is not what limits it: on the long-regime scaffold
-the same set adds one extra V mismatch for most genes (K20) and two for
-IGHV3-23 (L5V) and IGHV3-53 (I13V), worst case 85.6%, above the >= 82% gate.
+The default pool mixes a diverse cold-start arm (90% of ordinals) with the
+previous positional template (10%). The diverse arm restores six CDR1/CDR2
+substitutions and independent CDR3 sampling; template chemistry is an explicit
+experimental arm, never evidence of eligibility. Both still go through the same
+annotation, native developability, archive novelty and target scoring gates.
 """
 from __future__ import annotations
 
@@ -123,7 +100,8 @@ STRATA = ('same_v_same_length', 'same_v_other_length', 'other_v', 'no_parent')
 GENES = ('IGHV3-23', 'IGHV3-66', 'IGHV3-74', 'IGHV3-7', 'IGHV3-11',
          'IGHV3-43', 'IGHV3-48', 'IGHV3-53', 'IGHV3-64')
 CELLS = (('IGHV3-23', 16), ('IGHV3-23', 18), ('IGHV3-7', 16), ('IGHV3-23', 5))
-PROTOCOL = 'pr100-conditional-germline-loop-v1'
+PROTOCOL = 'pr100-conditional-germline-loop-v2'
+TEMPLATE_PERIOD = 10
 
 
 def _seed(*parts):
@@ -333,21 +311,33 @@ def _graft_reference(rng, reference_cdr3, n):
     return loop
 
 
-def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
+def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None, proposal_arm=None):
     if gene not in GENES or not 5 <= length <= 23:
         raise ValueError('pilot cell outside declared scope')
-    rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal))
+    arm = proposal_arm or ('template' if ordinal % TEMPLATE_PERIOD == 0 else 'diverse')
+    if arm not in ('template', 'diverse'):
+        raise ValueError('unknown proposal arm')
+    rng = random.Random(_seed(PROTOCOL, gene, length, seed, ordinal, arm))
     prefix, tail, suffix, v, j = scaffold(panels, gene)
     _apply_framework_edits(prefix, rng,
                            short_regime=length < CDR3_TEMPLATE_MIN_LENGTH)
     ordered = sorted(prefix)
     base = ''.join(prefix[p] for p in ordered)
-    if length >= CDR3_TEMPLATE_MIN_LENGTH:
+    if arm == 'template' and length >= CDR3_TEMPLATE_MIN_LENGTH:
         base = _apply_cdr2_edit(base, CDR2_MOTIF)
     prefix = {p: c for p, c in zip(ordered, base)}
+    if arm == 'diverse':
+        positions = [p for p in ordered if 27 <= p <= 38 or 56 <= p <= 65]
+        if len(positions) < 6:
+            raise ValueError('insufficient mutable loop positions')
+        for p in rng.sample(positions, 6):
+            prefix[p] = _weighted_choice(rng, exclude=prefix[p])
+        base = ''.join(prefix[p] for p in ordered)
     n = length - len(tail)
     if reference_cdr3 is None:
-        if length >= CDR3_TEMPLATE_MIN_LENGTH:
+        if arm == 'diverse':
+            loop = [_weighted_choice(rng) for _ in range(n)]
+        elif length >= CDR3_TEMPLATE_MIN_LENGTH:
             loop = _build_cdr3_loop(rng, n)
         else:
             loop = _build_short_cdr3_loop(rng, n)
@@ -363,7 +353,7 @@ def propose(panels, gene, length, *, seed, ordinal, reference_cdr3=None):
     sequence = base + ''.join(loop) + tail + suffix
     if sequence in RIVAL_5EHS_SEQUENCES:
         raise ValueError('emitted a byte-identical 5EHS leader sequence')
-    return {'sequence': sequence, 'proposal_type': PROTOCOL,
+    return {'sequence': sequence, 'proposal_type': PROTOCOL, 'proposal_arm': arm,
             'requested_v': gene, 'requested_cdr3_length': length,
             'v_reference_allele': v, 'j_reference_allele': j,
             'seed': seed, 'ordinal': ordinal, 'acceptance_qualified': False,

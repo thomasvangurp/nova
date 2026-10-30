@@ -416,7 +416,8 @@ def test_verified_fleet_accepts_same_target_previous_epoch_artifact(replay):
     accepted = rules.verified_fleet(artifact, replay.challenge['epoch'],
                                     replay.challenge['epoch_start_block_hash'],
                                     replay.challenge['epoch_length'],
-                                    get_block_hash=historical_hash)
+                                    get_block_hash=historical_hash,
+                                    current_archive_sha256=artifact['archive_sha256'])
     assert accepted['sequence_pool'] == artifact['sequence_pool']
     assert accepted['handoff_diagnostics']['stale_epoch_downgrade'] is True
     assert accepted['handoff_diagnostics']['accepted_count'] == 2

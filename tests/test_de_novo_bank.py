@@ -130,3 +130,18 @@ def test_cli_writes_schema_exact_bank_and_summary(tmp_path, monkeypatch):
          "sequence_hash": rules.sequence_hash("S2"), "source": "de_novo_recombine_ts"},
     ]
     assert json.loads(summary.read_text())["kept"] == 2
+
+
+def test_conversion_preserves_named_evidence_but_not_arbitrary_fields():
+    evidence = [{'target': rules.TARGET, 'epoch': 26000, 'kind': 'public_validator_percentile',
+                 'value': 0.1, 'field_size': 30, 'passes': 1, 'raw_score': 18}]
+    incoming = {'sequence': ' s1 ', 'quality_evidence': evidence,
+                'developability': {'cdr3_length': 16}, 'unrelated_field': 'not retained'}
+    rows, _ = de_novo_bank.convert([incoming], source='test', annotate=annotator({'S1': anno('IGHV3-23', 16)}))
+    assert rows[0]['sequence'] == 'S1'
+    assert rows[0]['sequence_hash'] == rules.sequence_hash('S1')
+    assert rows[0]['quality_evidence'] == evidence
+    assert rows[0]['developability'] == incoming['developability']
+    assert 'unrelated_field' not in rows[0]
+    incoming['quality_evidence'][0]['value'] = 0.9
+    assert rows[0]['quality_evidence'][0]['value'] == 0.1

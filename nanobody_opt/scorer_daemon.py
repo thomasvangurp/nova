@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import struct
 import threading
@@ -79,6 +80,69 @@ WORKERS_PER_GPU_FILE = os.environ.get("NANOBODY_SCORER_WORKERS_FILE",
 #: A job only gets the extra workers when it has at least this many sequences per worker, so
 #: small rounds (a shortlist of a few dozen) keep their single-worker layout unchanged.
 MIN_SEQUENCES_PER_WORKER = 4
+
+# The PR100 controller uses owned, bounded direct scorer jobs. Its dedicated
+# devices must not be occupied by this legacy resident pool or adapter fallback.
+# Install/update the reservation atomically after draining the previous owner;
+# a file is an allocation policy, not a mechanism for cancelling in-flight work.
+GPU_RESERVATION_FILE = os.environ.get("NANOBODY_GPU_RESERVATION_FILE",
+                                     "/root/artifacts/pr100-reserved-gpus.json")
+
+
+def reserved_gpus() -> frozenset[str]:
+    """Read the current allocation on every admission; malformed means stop."""
+    try:
+        with open(GPU_RESERVATION_FILE) as handle:
+            raw = handle.read(16385)
+        if len(raw) > 16384:
+            raise ValueError("reservation_too_large")
+        value = json.loads(raw)
+    except FileNotFoundError:
+        # A broken link is not an absent policy.
+        if not os.path.lexists(GPU_RESERVATION_FILE):
+            return frozenset()
+        raise RuntimeError("gpu_reservation_unreadable") from None
+    except (OSError, ValueError):
+        raise RuntimeError("gpu_reservation_unreadable") from None
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "gpus", "owner"}
+            or value.get("schema") != "pr100-gpu-reservation-v1"
+            or value.get("owner") != "pr100-live-controller"
+            or not isinstance(value.get("gpus"), list)
+            or len(value["gpus"]) > 256
+            or any(type(gpu) is not int or gpu < 0 for gpu in value["gpus"])
+            or len(set(value["gpus"])) != len(value["gpus"])):
+        raise RuntimeError("gpu_reservation_invalid")
+    return frozenset(str(gpu) for gpu in value["gpus"])
+
+
+def ensure_unreserved_gpus(gpus, *, allow_production_lease=False) -> bool:
+    """Refuse an entire legacy job that touches a production-reserved device.
+
+    Never silently remove GPUs: doing so changes shard composition and scoring.
+    Only the adapter may accept an inherited kernel-attested production lease;
+    the daemon never warms resident workers on production-reserved devices.
+    """
+    reserved = reserved_gpus()
+    if not reserved:
+        return False
+    requested = []
+    for gpu in gpus:
+        value = str(gpu).strip()
+        if isinstance(gpu, bool) or not re.fullmatch(r"[0-9]+", value):
+            # UUID/alias allocation cannot be compared safely with index policy.
+            raise RuntimeError("gpu_reservation_requires_device_indices")
+        requested.append(str(int(value)))
+    if reserved.intersection(requested):
+        if allow_production_lease:
+            try:
+                from nanobody_opt.pr100_live_gpu import inherited_lease_fd
+                if inherited_lease_fd(requested) is not None:
+                    return True
+            except ImportError:
+                pass
+        raise RuntimeError("gpu_reserved_for_pr100")
+    return False
 
 
 def workers_per_gpu() -> int:
@@ -611,7 +675,9 @@ class Daemon:
         from the dict still holding its share of device memory.
         """
         import concurrent.futures
+        gpus = list(gpus)
         with self._registry_lock:
+            ensure_unreserved_gpus(gpus)
             missing = []
             for gpu in gpus:
                 gpu = str(gpu)
@@ -814,6 +880,7 @@ class Daemon:
         import concurrent.futures
 
         gpus = [g for g in str(job["gpus"]).split(",") if g]
+        ensure_unreserved_gpus(gpus)
         schema = job.get("worker_argument_schema", "base-v1")
         if schema not in {"base-v1", "replicates-v1"}:
             raise RuntimeError("unknown scorer worker argument schema")
@@ -843,6 +910,8 @@ class Daemon:
         with contextlib.ExitStack() as stack:
             for lock in self._locks_for(gpus):
                 stack.enter_context(lock)
+            # A job can wait behind another round while allocation changes.
+            ensure_unreserved_gpus(gpus)
             if cancelled is not None and cancelled():
                 raise RuntimeError("scoring client disconnected before dispatch")
             started = time.time()

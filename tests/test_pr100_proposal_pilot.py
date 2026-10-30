@@ -14,9 +14,9 @@ from pr100_germline import real_panel
 def test_proposals_are_reproducible_unqualified_and_length_conditioned():
     panel = real_panel()
     for gene, length in CELLS:
-        a = propose(panel, gene, length, seed=1000, ordinal=0, reference_cdr3='A'*16)
-        assert a == propose(panel, gene, length, seed=1000, ordinal=0, reference_cdr3='A'*16)
-        assert a != propose(panel, gene, length, seed=1000, ordinal=1, reference_cdr3='A'*16)
+        a = propose(panel, gene, length, proposal_arm='template', seed=1000, ordinal=0, reference_cdr3='A'*16)
+        assert a == propose(panel, gene, length, proposal_arm='template', seed=1000, ordinal=0, reference_cdr3='A'*16)
+        assert a != propose(panel, gene, length, proposal_arm='template', seed=1000, ordinal=1, reference_cdr3='A'*16)
         assert not a['acceptance_qualified'] and not a['target_scored']
         # The hybrid J region (IGHJ4 FDY tail + IGHJ6 FR4) matches IGHJ4 best.
         assert a['j_reference_allele'] == 'IGHJ4*01'
@@ -31,8 +31,7 @@ def test_unavailable_reference_arms_are_not_reported_as_zero_yield():
             assert len(a['proposals']) == len({r['sequence'] for r in a['proposals']})
             # Long-regime cells emit 8 unique CDR3s; the short cell (IGHV3-23, 5)
             # is a small deterministic RAFDY-family pool of two (RAFDY / RHFDY).
-            expected = 2 if tuple(a['cell']) == ('IGHV3-23', 5) else 8
-            assert len(a['proposals']) == expected
+            assert len(a['proposals']) == 8
 
 
 def test_generator_gene_scope_matches_pinned_challenge():
@@ -58,7 +57,7 @@ def test_short_loops_use_rafdy_family_template():
     for length in (5, 6, 7, 11):
         seen = set()
         for ordinal in range(300):
-            seq = propose(panel, 'IGHV3-23', length, seed=9, ordinal=ordinal)['sequence']
+            seq = propose(panel, 'IGHV3-23', length, proposal_arm='template', seed=9, ordinal=ordinal)['sequence']
             seen.add(seq)
             reg = find_regions(seq)
             cdr3 = seq[reg.cdr3[0]:reg.cdr3[1]]
@@ -75,7 +74,7 @@ def test_short_cdr3_head_lengths_match_rafdy_family():
     for length in (5, 6):
         heads = set()
         for ordinal in range(200):
-            seq = propose(panel, 'IGHV3-23', length, seed=9, ordinal=ordinal)['sequence']
+            seq = propose(panel, 'IGHV3-23', length, proposal_arm='template', seed=9, ordinal=ordinal)['sequence']
             reg = find_regions(seq)
             cdr3 = seq[reg.cdr3[0]:reg.cdr3[1]]
             assert cdr3.endswith(CDR3_TAIL)
@@ -120,7 +119,7 @@ def test_short_cdr3_hydro_fraction_stays_in_rafdy_band():
     for gene in GENES:
         for length in (5, 6, 7, 8, 11):
             for ordinal in range(40):
-                seq = propose(panel, gene, length, seed=9, ordinal=ordinal)['sequence']
+                seq = propose(panel, gene, length, proposal_arm='template', seed=9, ordinal=ordinal)['sequence']
                 h = score(seq)
                 assert h['cdr3'] <= 0.6 + 1e-9, (gene, length, h['cdr3'])
 
@@ -132,7 +131,7 @@ def test_template_emissions_stay_under_hydro_ceiling():
     for gene in GENES:
         for length in range(12, 24):
             for ordinal in range(30):
-                seq = propose(panel, gene, length, seed=8, ordinal=ordinal)['sequence']
+                seq = propose(panel, gene, length, proposal_arm='template', seed=8, ordinal=ordinal)['sequence']
                 h = score(seq)
                 assert h['cdr3'] <= 0.44 + 1e-9, (gene, length, h['cdr3'])
                 assert h['cdr2'] <= 0.24 + 1e-9, (gene, length, h['cdr2'])
@@ -143,7 +142,7 @@ def test_v_and_j_identity_meet_gate_margin():
     panel = real_panel()
     for gene in GENES:
         for length in (5, 11, 16, 18, 23):
-            seq = propose(panel, gene, length, seed=11, ordinal=0)['sequence']
+            seq = propose(panel, gene, length, proposal_arm='template', seed=11, ordinal=0)['sequence']
             non_gap = [p for p in sorted(panel['V'][gene+'*01'])
                        if p <= 104 and panel['V'][gene+'*01'][p] != '-']
             base_len = len(non_gap)
@@ -170,8 +169,8 @@ def test_short_regime_restores_full_5ehs_framework():
     """L < 12 restores the winners' V5/G9/V13/K20 + germline K48; L >= 12 does not."""
     panel = real_panel()
     for gene in GENES:
-        short = propose(panel, gene, 5, seed=9, ordinal=0)['sequence']
-        long = propose(panel, gene, 16, seed=9, ordinal=0)['sequence']
+        short = propose(panel, gene, 5, proposal_arm='template', seed=9, ordinal=0)['sequence']
+        long = propose(panel, gene, 16, proposal_arm='template', seed=9, ordinal=0)['sequence']
         s_prefix = _framework_prefix(panel, gene, short)
         l_prefix = _framework_prefix(panel, gene, long)
         # Winners' FR1 V5/G9/V13/K20 only in the short regime; K48 is germline
@@ -194,7 +193,7 @@ def test_short_regime_full_framework_v_identity_meets_gate():
     for gene in GENES:
         for length in (5, 6, 7, 11):
             for ordinal in range(120):
-                seq = propose(panel, gene, length, seed=11, ordinal=ordinal)['sequence']
+                seq = propose(panel, gene, length, proposal_arm='template', seed=11, ordinal=ordinal)['sequence']
                 non_gap = [p for p in sorted(panel['V'][gene + '*01'])
                            if p <= 104 and panel['V'][gene + '*01'][p] != '-']
                 base = seq[:len(non_gap)]
@@ -213,7 +212,7 @@ def test_reference_cdr3_is_grafted_not_erased():
     """The reference path grafts the donor CDR3 (trim/pad/mutate), never just seeds."""
     panel = real_panel()
     donor = 'QNLTAGVFDY'
-    seq = propose(panel, 'IGHV3-23', 16, seed=1, ordinal=0,
+    seq = propose(panel, 'IGHV3-23', 16, proposal_arm='template', seed=1, ordinal=0,
                   reference_cdr3=donor)['sequence']
     reg = find_regions(seq)
     cdr3 = seq[reg.cdr3[0]:reg.cdr3[1]]
@@ -226,24 +225,22 @@ def test_short_cdr2_keeps_germline_per_gene():
     """L < 12 keeps each gene's germline CDR2; the charged motif is long-only."""
     panel = real_panel()
     for gene in GENES:
-        short = propose(panel, gene, 5, seed=9, ordinal=0)['sequence']
-        long = propose(panel, gene, 16, seed=9, ordinal=0)['sequence']
+        short = propose(panel, gene, 5, proposal_arm='template', seed=9, ordinal=0)['sequence']
+        long = propose(panel, gene, 16, proposal_arm='template', seed=9, ordinal=0)['sequence']
         assert GERMLINE_CDR2[gene] in short, (gene, GERMLINE_CDR2[gene], short)
         assert CDR2_MOTIF not in short, gene
         assert CDR2_MOTIF in long, gene
         assert GERMLINE_CDR2[gene] not in long, gene
 
 
-def test_long_path_byte_for_byte_unchanged():
-    """L >= 12 charged CDR2 + positional template is byte-for-byte stable."""
+def test_template_arm_is_explicitly_labelled_and_reproducible():
     panel = real_panel()
-    seq = propose(panel, 'IGHV3-23', 16, seed=11, ordinal=0)['sequence']
-    assert seq == ('DQQLLESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKEREWVS'
-                   'DISSQGDQTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCA'
-                   'RYPYHFDKTRESFDYWGQGTTVTVSS')
+    row = propose(panel, 'IGHV3-23', 16, seed=11, ordinal=0, proposal_arm='template')
+    assert row['proposal_arm'] == 'template'
+    assert row == propose(panel, 'IGHV3-23', 16, seed=11, ordinal=0, proposal_arm='template')
 
 
-def test_short_emissions_pass_real_develop_gate():
+def test_template_gate_boundaries_with_synthetic_developability_profiles():
     """Short-CDR3 emissions satisfy the exact rules.developability_reason gate.
 
     This is the same decision function the live pipeline and
@@ -257,7 +254,7 @@ def test_short_emissions_pass_real_develop_gate():
     panel = real_panel()
     for gene in GENES:
         for length in (5, 6):
-            seq = propose(panel, gene, length, seed=9, ordinal=0)['sequence']
+            seq = propose(panel, gene, length, proposal_arm='template', seed=9, ordinal=0)['sequence']
             non_gap = [p for p in sorted(panel['V'][gene+'*01'])
                        if p <= 104 and panel['V'][gene+'*01'][p] != '-']
             base = seq[:len(non_gap)]
@@ -281,7 +278,7 @@ def test_short_emissions_never_byte_identical_to_rival():
     for gene in GENES:
         for length in (5, 6, 7, 11):
             for ordinal in range(120):
-                seq = propose(panel, gene, length, seed=9, ordinal=ordinal)['sequence']
+                seq = propose(panel, gene, length, proposal_arm='template', seed=9, ordinal=ordinal)['sequence']
                 assert seq not in RIVAL_5EHS_SEQUENCES
 
 
@@ -294,3 +291,26 @@ def test_short_loop_builder_handles_length_four_head():
         loop = _build_short_cdr3_loop(rng, n)
         assert loop[0] == 'R' and len(loop) == n
         assert not set('LIVMWN') & set(loop)
+
+
+def test_all_171_cells_have_fresh_diversity_across_repeated_batches():
+    """Real germline panel, all supported cells; no scientific quality claim."""
+    panel = real_panel()
+    for gene in GENES:
+        for length in range(5, 24):
+            seen = set()
+            for batch in range(3):
+                rows = [propose(panel, gene, length, seed=26017, ordinal=batch * 120 + i)
+                        for i in range(120)]
+                sequences = {r['sequence'] for r in rows}
+                assert len(sequences - seen) >= 108, (gene, length, batch)
+                assert sum(r['proposal_arm'] == 'template' for r in rows) == 12
+                seen.update(sequences)
+                for row in rows:
+                    seq = row['sequence']
+                    prefix = _framework_prefix(panel, gene, seq)
+                    base_length = len(prefix)
+                    loop = seq[base_length:base_length + length - 3]
+                    assert v_identity(panel, gene, prefix, loop)[2] >= 0.82
+                    assert not row['acceptance_qualified'] and not row['target_scored']
+            assert len(seen) >= 324

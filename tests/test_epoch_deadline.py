@@ -166,6 +166,36 @@ def test_future_timestamp_is_jitter_not_staleness(tmp_path):
     assert EpochDeadline(state, 72).remaining() >= 0
 
 
+@pytest.mark.parametrize('stamp', [float('nan'), float('inf'), -float('inf'), 87400.0])
+def test_invalid_or_far_future_timestamp_cannot_grant_a_window(tmp_path, monkeypatch, stamp):
+    from nanobody_opt import epoch_deadline as module
+    state = tmp_path / 'clock.json'
+    clock(state)
+    data = json.loads(state.read_text()); data['updated_at_unix'] = stamp
+    state.write_text(json.dumps(data))
+    monkeypatch.setattr(module.time, 'time', lambda: 1000.0)
+    with pytest.raises(EpochDeadlineExceeded):
+        EpochDeadline(state, 72).remaining()
+
+
+def test_wall_clock_rollback_does_not_rejuvenate_unchanged_chain_state(tmp_path, monkeypatch):
+    from nanobody_opt import epoch_deadline as module
+    state = tmp_path / 'clock.json'
+    clock(state)
+    data = json.loads(state.read_text()); data['updated_at_unix'] = 1000.0
+    state.write_text(json.dumps(data))
+    wall, elapsed = [1000.0], [100.0]
+    monkeypatch.setattr(module.time, 'time', lambda: wall[0])
+    monkeypatch.setattr(module.time, 'monotonic', lambda: elapsed[0])
+    deadline = EpochDeadline(state, 72)
+    before = deadline.remaining()
+    wall[0], elapsed[0] = 997.0, 110.0
+    assert deadline.remaining() == pytest.approx(before - 10.0)
+    elapsed[0] = 281.0
+    with pytest.raises(EpochDeadlineExceeded, match='stale'):
+        deadline.remaining()
+
+
 def test_publisher_thin_strict_pool_never_expands_to_entire_screen(monkeypatch, tmp_path):
     publisher = import_shipping('tools.publish_current_nanobody', monkeypatch)
     def rank(command):

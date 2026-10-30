@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -111,6 +112,11 @@ class RunTests(unittest.TestCase):
             self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'], '1')
             self.assertNotIn('AWS_SECRET_ACCESS_KEY', kwargs['env'])
             self.assertTrue(kwargs['start_new_session'])
+            inherited = int(kwargs['env']['PR100_GPU_LEASE_FD'])
+            self.assertEqual(kwargs['pass_fds'], (inherited,))
+            self.assertEqual(kwargs['env']['PR100_GPU_LEASE_GPU'], '1')
+            self.assertEqual(kwargs['env']['PR100_GPU_LEASE_OWNER_PID'], str(os.getpid()))
+            self.assertGreater(os.fstat(inherited).st_ino, 0)
             return proc
         snap = Mock(side_effect=snapshots) if isinstance(snapshots, list) else snapshots
         result = gpu.run_reserved(job, snapshot=snap, control=control, launch=launch,
@@ -151,9 +157,44 @@ class RunTests(unittest.TestCase):
     def test_invalid_limits_and_secret_environment_refuse_before_any_work(self):
         base = {'gpu': 1, 'ttl_seconds': 10, 'command': ['/bin/public-program']}
         for change in [{'ttl_seconds': float('inf')}, {'ttl_seconds': 1801},
-                       {'gpu': True}, {'env': {'AWS_SECRET_ACCESS_KEY': 'not-a-real-secret'}}]:
+                       {'gpu': True}, {'env': {'AWS_SECRET_ACCESS_KEY': 'not-a-real-secret'}},
+                       {'env': {'PR100_GPU_LEASE_FD': '7'}}]:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 gpu.run_reserved({**base, **change})
+
+
+class InheritedLeaseTests(unittest.TestCase):
+    def test_kernel_owned_lock_and_live_ancestor_are_both_required(self):
+        # Use a real open file identity and a synthetic proc view so this test
+        # runs on the Mac CI host as well as Linux. Live Linux smoke validates
+        # the actual proc fdinfo rendering before deployment.
+        modes = ('valid', 'missing_lock', 'foreign_owner', 'foreign_parent',
+                 'dead_owner', 'wrong_inode', 'wrong_gpu', 'wrong_name')
+        for mode in modes:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); proc = root/'proc'
+                lock = root/('gpu-2.lock' if mode=='wrong_name' else 'gpu-1.lock')
+                with lock.open('w') as handle:
+                    fd=handle.fileno(); info=os.fstat(fd)
+                    (proc/'self/fd').mkdir(parents=True)
+                    (proc/'self/fdinfo').mkdir(parents=True)
+                    (proc/'self/fd'/str(fd)).symlink_to(lock)
+                    owner = 501 if mode=='foreign_owner' else 500
+                    inode = info.st_ino + (mode=='wrong_inode')
+                    data = f'lock:\t1: FLOCK ADVISORY WRITE {owner} {os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{inode} 0 EOF\n'
+                    (proc/'self/fdinfo'/str(fd)).write_text('' if mode=='missing_lock' else data)
+                    (proc/'500').mkdir()
+                    (proc/'500/stat').write_text('500 (owner) '+('Z' if mode=='dead_owner' else 'S')+' 1')
+                    (proc/'600').mkdir(); (proc/'600/stat').write_text('600 (intermediate) S 500')
+                    env={'PR100_GPU_LEASE_FD':str(fd), 'PR100_GPU_LEASE_GPU':'1', 'PR100_GPU_LEASE_OWNER_PID':'500'}
+                    with patch.object(gpu.os, 'getppid', return_value=1 if mode=='foreign_parent' else 600):
+                        result=gpu.inherited_lease_fd(['2' if mode=='wrong_gpu' else '1'], environment=env, proc_root=proc)
+                    self.assertEqual(result, fd if mode=='valid' else None)
+
+    def test_environment_claim_without_open_descriptor_is_not_a_lease(self):
+        env={'PR100_GPU_LEASE_FD':'999999', 'PR100_GPU_LEASE_GPU':'1', 'PR100_GPU_LEASE_OWNER_PID':'500'}
+        self.assertIsNone(gpu.inherited_lease_fd(['1'], environment=env))
+        self.assertIsNone(gpu.inherited_lease_fd(['1'], environment={}))
 
 
 if __name__ == '__main__':

@@ -199,13 +199,16 @@ def test_remote_dispatch_still_detaches_stdin(monkeypatch):
     assert seen["argv"] == ["ssh", "host", "-n", "echo hi"]
 
 
-def test_the_producer_probe_reads_the_epoch_it_pulled(monkeypatch, tmp_path):
-    artifact = Path("/opt/nova-submit/nanobody_result.json")
+def test_the_producer_probe_reads_the_local_controller_artifact(monkeypatch, tmp_path):
+    artifact = tmp_path / 'nanobody_result.json'
+    artifact.write_text(json.dumps({'epoch': 26018, 'sequence_pool': ['QVQ']}))
+    monkeypatch.setattr(loop, 'Path', lambda value: artifact if str(value) ==
+                        '/opt/nova-submit/nanobody_result.json' else Path(value))
     monkeypatch.setattr(loop, "run",
                         lambda where, cmd, timeout=240: type("R", (), {"returncode": 0})())
-    if not artifact.is_file():
-        pytest.skip("probe reads the submit host's own artifact path")
-    assert isinstance(loop.producer_epoch_here(None, 0, 3), int)
+    assert loop.producer_epoch_here(None, 26018, 3) == 26018
+    artifact.unlink()
+    assert loop.producer_epoch_here(None, 26018, 3) is None
 
 
 def test_a_failed_pull_reports_unknown_rather_than_zero(monkeypatch):

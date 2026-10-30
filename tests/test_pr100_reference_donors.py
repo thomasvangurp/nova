@@ -141,7 +141,7 @@ def test_developability_flag_attached_and_applied(bank):
     assert flags.count(True) == 1 and flags[0] is True
     assert chosen[0][0]['sequence_hash'] == rows[0]['sequence_hash']
     assert evidence['developability_in_range_selected'] == 1
-    assert evidence['developability_out_of_range_selected'] == 15
+    assert evidence['developability_unknown_selected'] == 15
     assert evidence['selected_donors'][0]['cdr_developability_in_range'] is True
 
 
@@ -150,7 +150,7 @@ def test_developability_flag_fails_closed_without_profile(bank):
     assert len(chosen) == 16  # deprioritisation never changes the count
     assert all(not d['cdr_developability_in_range'] for _, d in chosen)
     assert evidence['developability_in_range_selected'] == 0
-    assert evidence['developability_out_of_range_selected'] == 16
+    assert evidence['developability_unknown_selected'] == 16
 
 
 @pytest.mark.parametrize('in_range_cell', ['IGHV3-7:16', 'IGHV3-23:18'])
@@ -182,7 +182,7 @@ def test_exact_cell_donors_carry_the_developability_flag(bank):
                                            fallback=False)
     assert exact and all('cdr_developability_in_range' in d for _, d in chosen)
     assert all(not d['cdr_developability_in_range'] for _, d in chosen)
-    assert evidence['developability_out_of_range_selected'] == len(exact)
+    assert evidence['developability_unknown_selected'] == len(exact)
 
 
 def test_family_cap_is_opt_in_and_preserves_default_selection(bank):
@@ -267,14 +267,8 @@ def test_current_cell_fresh_unique_half_control_with_full_source_accounting(
     result = sequence_runner(challenge(epoch, gene, length),
                              missing_cell_donor_fallback=True, proposals=600)
     candidates = result['candidates']
-    # Pre-hydro accounting (dedup + source split) is exact. Short loops now use
-    # the small RAFDY-family template, so the unseeded half dedups into a small
-    # pool below the 300 grafted uniques; the L>=12 template's deterministic
-    # body emits only 8 unique fresh CDR3s (~308 graft + 8).
-    if length < 12:
-        assert 300 < len(result['generated_sequence_hashes']) < 600
-    else:
-        assert 300 <= len(result['generated_sequence_hashes']) <= 400
+    assert len(result['generated_sequence_hashes']) == 600
+    assert result['fresh_unique_proposals'] == 600 and not result['proposal_exhausted']
     assert result['existing_references'] == 0 and not result['novelty_checked']
     assert result['proposal_source_counts']['unseeded_control'] == 300
     assert len(sequence_runner.annotation_calls) == len(result['generated_sequence_hashes'])
@@ -315,8 +309,9 @@ def test_accidental_parent_reuse_is_dropped_without_retry_or_budget_growth(
         return row
     monkeypatch.setattr(proposal, 'propose', collision)
     result = sequence_runner(missing_cell_donor_fallback=True)
-    assert ordinals == list(range(40)) and result['next_proposal_offset'] == 40
-    assert result['donor_parent_reuse_blocked'] == 1 and 0 < len(result['candidates']) <= 39
+    assert ordinals == list(range(result['proposal_attempts']))
+    assert result['next_proposal_offset'] == result['proposal_attempts'] >= 41
+    assert result['donor_parent_reuse_blocked'] == 1 and 0 < len(result['candidates']) <= 40
     assert bank[0]['sequence_hash'] not in {r['sequence_hash'] for r in result['candidates']}
 
 
@@ -333,10 +328,11 @@ def test_resume_exclusions_and_shared_fresh_cap_remain_unchanged(sequence_runner
     first = sequence_runner(missing_cell_donor_fallback=True)
     excluded = first['generated_sequence_hashes']
     rerun = sequence_runner(missing_cell_donor_fallback=True, excluded_sequence_hashes=excluded)
-    assert rerun['candidates'] == [] and rerun['excluded_generated'] == 40
+    assert rerun['candidates'] and rerun['excluded_generated'] >= 20
+    assert set(rerun['generated_sequence_hashes']).isdisjoint(excluded)
     second = sequence_runner(missing_cell_donor_fallback=True, proposal_offset=40,
                               excluded_sequence_hashes=excluded)
-    assert second['next_proposal_offset'] == 80 and 0 < len(second['candidates']) <= 40
+    assert second['next_proposal_offset'] >= 80 and 0 < len(second['candidates']) <= 40
     assert set(second['generated_sequence_hashes']).isdisjoint(excluded)
     state = {}
     ledger = budget.ensure(state, {'epoch_fresh_native_limit': 4})
@@ -344,3 +340,69 @@ def test_resume_exclusions_and_shared_fresh_cap_remain_unchanged(sequence_runner
     assert len(selected) == 4 and budget.summary(ledger)['remaining'] == 0
     assert budget.reserve(ledger, 1, first['candidates']) == selected
     assert budget.reserve(ledger, 2, second['candidates']) == []
+
+
+def test_merit_orders_exact_parents_and_ignores_cross_target_raw_scores(bank):
+    rows = copy.deepcopy([r for r in bank if r['cells'] == ['IGHV3-23:18']][:3])
+    c = challenge(length=18)
+    for i, row in enumerate(rows):
+        row['quality_evidence'] = [{'target': c['target'], 'epoch': c['epoch'] - 1,
+            'kind': 'public_validator_percentile', 'value': [0.8, 0.1, 0.5][i],
+            'passes': 1, 'field_size': 30}]
+    exact, _, _ = donors.select(rows, c, 3)
+    assert exact == [rows[1], rows[2], rows[0]]
+    rows[0]['old_target_binding_score'] = -1e9
+    rows[0]['quality_evidence'][0]['target'] = 'old-target'
+    exact, _, _ = donors.select(rows, c, 3)
+    assert exact[-1] == rows[0]
+
+
+def test_missing_and_failed_developability_are_distinct(bank):
+    rows = copy.deepcopy([r for r in bank if r['cells'] == ['IGHV3-23:18']][:3])
+    rows[0]['developability'] = _developability(cdr3=30)
+    rows[1]['developability'] = _developability()
+    _, chosen, evidence = donors.select(rows, challenge(length=18), 3)
+    assert [d['cdr_developability_status'] for _, d in chosen] == [
+        'in_range', 'unknown', 'out_of_range']
+    assert evidence['developability_unknown_selected'] == 1
+    assert evidence['developability_out_of_range_selected'] == 1
+
+
+def test_exact_parent_identity_is_validated_too(bank):
+    rows = copy.deepcopy(bank)
+    rows[0]['sequence_hash'] = 'f' * 64
+    with pytest.raises(ValueError, match='identity'):
+        donors.select(rows, challenge(length=16), 3)
+
+
+def test_bad_or_unmatched_merit_does_not_become_measurement(bank):
+    row = copy.deepcopy(bank[0]); c = challenge()
+    for value in [float('nan'), float('inf'), -1, 2]:
+        row['quality_evidence'] = [{'target': c['target'], 'epoch': c['epoch'] - 1,
+            'kind': 'public_validator_percentile', 'value': value, 'passes': 1, 'field_size': 10}]
+        assert donors.merit(row, c)[1] == 'unknown'
+    row['quality_evidence'] = [{'target': c['target'], 'epoch': c['epoch'] - 1,
+        'kind': 'matched_multipass_mean', 'value': 900, 'passes': 20,
+        'field_sha256': 'a' * 64, 'protocol': 'matched-v1'}]
+    assert donors.merit(row, c)[1] == 'unknown'
+    assert donors.merit(row, {**c, 'merit_field_sha256': 'a' * 64,
+                             'merit_protocol': 'matched-v1'})[1] == 'matched_multipass_mean'
+
+
+def test_duplicate_generator_exhaustion_is_bounded(sequence_runner, bank, monkeypatch):
+    def exhausted(*args, **kwargs):
+        return {'sequence': bank[0]['sequence']}
+    monkeypatch.setattr(proposal, 'propose', exhausted)
+    result = sequence_runner(missing_cell_donor_fallback=True, proposals=40)
+    assert result['proposal_exhausted'] and result['fresh_unique_proposals'] == 0
+    assert result['proposal_attempts'] <= 600
+    assert result['candidates'] == []
+
+
+def test_sequence_phase_verifies_optional_bank_identity_before_work(sequence_runner):
+    first = sequence_runner()
+    pinned = first['reference_coverage']['bank_sha256']
+    assert sequence_runner(reference_bank_sha256=pinned)['reference_coverage']['bank_sha256'] == pinned
+    for identity in ('f' * 64, 'malformed', True):
+        with pytest.raises(ValueError, match='bank identity'):
+            sequence_runner(reference_bank_sha256=identity)

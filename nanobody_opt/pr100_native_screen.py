@@ -1,6 +1,7 @@
 """Resident CPU / CUDA screens: never authoritative publication evidence."""
 from __future__ import annotations
 import argparse
+from collections import Counter
 from contextlib import contextmanager
 from functools import lru_cache
 import hashlib
@@ -26,6 +27,12 @@ PINNED_SOURCES = {
     'theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner': '71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46',
 }
 PINNED_VERSIONS = {'torch': '2.7.1', 'openmm': '8.5.1', 'pdbfixer': '1.12.0', 'numpy': '1.26.4'}
+# These are distinct screen runtimes, not numerically interchangeable builds.
+# A host using the CUDA wheel must explicitly select its exact version; its
+# profiles still need the authoritative CPU confirmation path.
+SCREEN_VERSION_PROFILES = (PINNED_VERSIONS, {**PINNED_VERSIONS, 'torch': '2.7.1+cu126'})
+INITIALIZATION_STAGES = frozenset({'environment', 'native_import', 'source_identity',
+    'version_identity', 'model_identity', 'model_load', 'analyzer_setup'})
 _STATE = {}
 
 @lru_cache(maxsize=1)
@@ -73,25 +80,32 @@ def check_weights(captured, root):
         if expected != Path(asset['path']).resolve() or asset_stat(expected) != asset['stat']:
             raise ValueError('model_identity_changed')
 
-def protocol(backend):
+def expected_versions(configured):
+    versions = configured.get('runtime_versions', PINNED_VERSIONS)
+    if not isinstance(versions, dict) or versions not in SCREEN_VERSION_PROFILES:
+        raise ValueError('unregistered_screen_version_profile')
+    return dict(versions)
+
+def protocol(backend, versions=None):
     if backend not in BACKENDS:
         raise ValueError('invalid_screen_backend')
     return {'schema': SCHEMA, 'backend': backend, 'authoritative': False,
             'prediction_device': 'cpu', 'torch_threads': 1,
             'refinement_platform': 'CUDA' if backend == 'cuda_refine' else 'CPU',
             'checks': True, 'tries': 3, 'iterations': 6,
-            'sources': PINNED_SOURCES, 'versions': PINNED_VERSIONS}
+            'sources': PINNED_SOURCES,
+            'versions': expected_versions({} if versions is None else {'runtime_versions': versions})}
 
-def discover_local_gpus(minimum_free_mib):
-    """Discover this host's own GPUs for the ``cuda_refine`` screen.
+def discover_local_gpus(minimum_free_mib, allowed_gpus):
+    """Intersect this host's explicit allocation with current free memory.
 
-    The screen runs on the host inside ``_coordinate``, so a single global
-    config device list is wrong per host (master has 8 devices, slave has 4).
-    Return every local GPU index whose ``memory.free`` is at least
-    ``minimum_free_mib`` MiB. Any telemetry failure degrades to ``[]`` so the
-    worker falls back to the CPU path instead of inventing or trusting a device
-    index that may not exist on this host.
+    Discovery never grants ownership of an unallocated device. Host-specific
+    allocation belongs in native_worker_overrides, not telemetry. The lease
+    performs the subsequent idle/ownership check. Missing telemetry or an empty
+    allocation yields CPU fallback.
     """
+    if not allowed_gpus:
+        return []
     try:
         completed = subprocess.run(
             ['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader'],
@@ -100,7 +114,7 @@ def discover_local_gpus(minimum_free_mib):
         return []
     if completed.returncode:
         return []
-    devices = []
+    available = set()
     for line in completed.stdout.splitlines():
         fields = [field.strip() for field in line.split(',')]
         if len(fields) < 2:
@@ -110,9 +124,9 @@ def discover_local_gpus(minimum_free_mib):
             free = int(fields[1].split()[0])
         except (TypeError, ValueError, IndexError):
             continue
-        if free >= minimum_free_mib:
-            devices.append(index)
-    return devices
+        if index in allowed_gpus and free >= minimum_free_mib:
+            available.add(index)
+    return [gpu for gpu in allowed_gpus if gpu in available]
 
 def settings(job):
     value = job.get('native_screen', {})
@@ -128,11 +142,13 @@ def settings(job):
         raise ValueError('screen_cpu_limit')
     if type(minimum) is not int or not 8192 <= minimum <= 200000:
         raise ValueError('screen_memory_limit')
-    if (not isinstance(gpus, list) or len(gpus) > 8 or len(set(gpus)) != len(gpus)
-            or any(type(gpu) is not int or gpu < 0 for gpu in gpus)):
+    if (not isinstance(gpus, list) or len(gpus) > 8
+            or any(type(gpu) is not int or gpu < 0 for gpu in gpus)
+            or len(set(gpus)) != len(gpus)):
         raise ValueError('invalid_screen_devices')
     return dict(enabled=value.get('enabled', False), backend=backend,
-                workers_per_gpu=workers, workers=cpu, gpu_minimum_free_mib=minimum, gpus=gpus)
+                workers_per_gpu=workers, workers=cpu, gpu_minimum_free_mib=minimum, gpus=gpus,
+                runtime_versions=expected_versions(value))
 
 @contextmanager
 def refinement_observer(native, builder, *, cuda):
@@ -203,7 +219,7 @@ def _initialize_worker(request):
             raise ValueError('unregistered_native_source')
         _STATE['initialization_stage'] = 'version_identity'
         versions = {name: importlib.metadata.version(name) for name in PINNED_VERSIONS}
-        if versions != PINNED_VERSIONS:
+        if versions != expected_versions(request['settings']):
             raise ValueError('unregistered_native_version')
         import torch
         torch.set_num_threads(1)
@@ -255,7 +271,8 @@ def _screen_one(sequence):
     record = dict(schema=SCHEMA, evidence_backend=backend, authoritative=False,
                   sequence_hash=key, epoch=request['challenge']['epoch'],
                   challenge_sha256=digest(request['challenge']),
-                  protocol_sha256=digest(protocol(backend)), request_sha256=request['request_sha256'])
+                  protocol_sha256=digest(protocol(backend, expected_versions(request['settings']))),
+                  request_sha256=request['request_sha256'])
     started = time.monotonic()
     try:
         if _STATE.get('initialization_error'):
@@ -309,12 +326,15 @@ def _coordinate(request):
     started = time.monotonic()
     try:
         os.environ['CUDA_VISIBLE_DEVICES'] = ''
-        request['model_assets'] = capture_weights()
-        atomic(root / 'runtime-assets.json', request['model_assets'])
         configured = request['settings']
         cuda = configured['backend'] == 'cuda_refine'
-        devices = discover_local_gpus(configured['gpu_minimum_free_mib']) if cuda else [None]
+        devices = discover_local_gpus(configured['gpu_minimum_free_mib'], configured['gpus']) if cuda else [None]
+        if cuda and any(gpu not in configured['gpus'] for gpu in devices):
+            raise ValueError('unallocated_screen_device')
         receipt['devices'] = devices
+        if devices:
+            request['model_assets'] = capture_weights()
+            atomic(root / 'runtime-assets.json', request['model_assets'])
         for index, gpu in enumerate(devices):
             sequences = request['sequences'][index::len(devices)]
             if not sequences:
@@ -345,7 +365,9 @@ def _coordinate(request):
                                              stderr=subprocess.DEVNULL, start_new_session=True, env=env))
         while any(child.poll() is None for child in children):
             time.sleep(.1)
-        receipt['status'] = 'finished'
+        receipt['status'] = 'finished' if devices else 'unavailable'
+        if not devices:
+            receipt['reason'] = 'no_allocated_gpu_available'
     except BaseException as error:
         receipt.update(status='interrupted', error_kind=type(error).__name__)
     finally:
@@ -396,7 +418,7 @@ def _valid_record(record, *, request, sequence):
     calls = provenance.get('refinement', {}).get('calls', [])
     platforms = provenance.get('refinement', {}).get('platforms', [])
     expected = 'CUDA' if backend == 'cuda_refine' else 'CPU'
-    if (len(identity) != 8 or identity.get('versions') != PINNED_VERSIONS
+    if (len(identity) != 8 or identity.get('versions') != expected_versions(request['settings'])
             or identity.get('model_hash_scope') != 'coordinator_hash_worker_path_stat_before_after_load'
             or identity.get('prediction_device') != 'cpu' or set(weights) != {'1', '2', '3', '4'}
             or weights != request.get('expected_model_weights')
@@ -416,7 +438,7 @@ def _valid_record(record, *, request, sequence):
             and record.get('epoch') == request['challenge']['epoch']
             and record.get('challenge_sha256') == digest(request['challenge'])
             and record.get('request_sha256') == request['request_sha256']
-            and record.get('protocol_sha256') == digest(protocol(backend))
+            and record.get('protocol_sha256') == digest(protocol(backend, expected_versions(request['settings'])))
             and record.get('runtime_identity_sha256') == digest(identity)
             and record.get('screen_outcome') in ('passed', 'rejected') and not record.get('error')
             and provenance.get('sources') == PINNED_SOURCES
@@ -429,6 +451,7 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
     began, configured = time.monotonic(), settings(job)
     backend = configured['backend']
     empty = {'schema': SCHEMA, 'status': 'unavailable', 'profiles': {},
+             'candidate_count': len(sequences), 'measured_count': 0,
              'provenance': {'authoritative': False, 'evidence_backend': backend}}
     if not configured['enabled'] or not sequences:
         return {**empty, 'reason': 'disabled_or_no_devices'}
@@ -460,19 +483,32 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
         except subprocess.TimeoutExpired:
             process.kill(); process.wait(timeout=2)
         raise
-    profiles = {}
+    profiles, outcomes, initialization_failures = {}, Counter(), Counter()
+    def finish(value):
+        # Safe bounded fields persist even when all children exit successfully
+        # but initialization failed. Process exit is not a measured profile.
+        value = {**value, 'outcome_counts': dict(outcomes),
+                 'initialization_failure_counts': dict(initialization_failures)}
+        atomic(root / 'summary.json', {k: v for k, v in value.items() if k != 'profiles'})
+        return value
     try:
         receipt = json.loads((root / 'guard.json').read_text())
         cleanup = receipt.get('cleanup', {})
         if cleanup.get('remaining_descendants') != 0 or cleanup.get('fixed_point_reached') is not True:
-            return {**empty, 'reason': 'accelerator_cleanup_unverified'}
+            return finish({**empty, 'reason': 'accelerator_cleanup_unverified'})
         if backend == 'cuda_refine':
             coordinator = json.loads((root / 'coordinator.json').read_text())
             devices = coordinator.get('devices')
-            if not isinstance(devices, list):
-                devices = []
+            if (not isinstance(devices, list)
+                    or any(type(gpu) is not int or gpu not in configured['gpus'] for gpu in devices)
+                    or len(devices) != len(set(devices))):
+                return finish({**empty, 'reason': 'unallocated_screen_device'})
         else:
             devices = [None]
+        if not devices:
+            outcomes['not_started'] = len(sequences)
+            return finish({**empty, 'reason': 'no_allocated_gpu_available',
+                           'provenance': {**empty['provenance'], 'gpus': [], 'cleanup': cleanup}})
         assets = json.loads((root / 'runtime-assets.json').read_text())
         request['expected_model_weights'] = {key: value['sha256'] for key, value in assets.items()}
         for index, gpu in enumerate(devices):
@@ -482,9 +518,16 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
                 try:
                     record = json.loads((shard / 'results' / (key + '.json')).read_text())
                 except (OSError, ValueError):
+                    outcomes['missing_record'] += 1
                     continue
                 if not valid_record(record, request=request, sequence=sequence):
+                    outcome = 'inconclusive' if isinstance(record, dict) and record.get('screen_outcome') == 'inconclusive' else 'invalid_record'
+                    outcomes[outcome] += 1
+                    stage = record.get('initialization_stage') if isinstance(record, dict) else None
+                    if stage is not None:
+                        initialization_failures[stage if isinstance(stage, str) and stage in INITIALIZATION_STAGES else 'unknown'] += 1
                     continue
+                outcomes[record['screen_outcome']] += 1
                 fields = ('evidence_backend', 'authoritative', 'sequence_hash', 'epoch', 'challenge_sha256',
                           'protocol_sha256', 'runtime_identity_sha256', 'screen_outcome', 'screen_reason', 'provenance')
                 profile = {**record['profile'], **{name: record[name] for name in fields}}
@@ -492,13 +535,14 @@ def screen_batch(sequences, *, job, directory, timeout_seconds, on_result=None):
                 if on_result is not None:
                     on_result(sequence, profile)
     except (OSError, ValueError, KeyError, TypeError):
-        return {**empty, 'reason': 'accelerator_receipt_unavailable'}
-    return {**empty, 'status': 'complete' if len(profiles) == len(sequences) else 'partial' if profiles else 'unavailable',
+        return finish({**empty, 'reason': 'accelerator_receipt_unavailable'})
+    return finish({**empty, 'status': 'complete' if len(profiles) == len(sequences) else 'partial' if profiles else 'unavailable',
+            'reason': None if profiles else 'no_valid_profiles',
             'profiles': profiles, 'elapsed_seconds': time.monotonic() - began,
             'candidate_count': len(sequences), 'measured_count': len(profiles),
             'provenance': {**empty['provenance'], 'request_sha256': request['request_sha256'],
                            'source_sha': job['source_sha'], 'workers_per_gpu': configured['workers_per_gpu'],
-                           'gpus': devices if backend == 'cuda_refine' else configured['gpus'], 'cleanup': cleanup}}
+                           'gpus': devices if backend == 'cuda_refine' else configured['gpus'], 'cleanup': cleanup}})
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nanobody_opt.diffusion_sample_selection import (  # noqa: E402
     EXPECTED_DIFFUSION_SAMPLES,
 )
+from nanobody_opt.scorer_daemon import ensure_unreserved_gpus  # noqa: E402
 
 try:
     from nanobody_opt import scorer_daemon as _scorer_daemon
@@ -189,6 +190,7 @@ def main() -> None:
         help="box-specific scorer settings; defaults to the documented location",
     )
     args = parser.parse_args()
+    leased = ensure_unreserved_gpus((g for g in args.gpus.split(",") if g), allow_production_lease=True)
 
     settings = load_settings(args.settings)
     samples = settings.get("fold_diffusion_samples")
@@ -215,7 +217,7 @@ def main() -> None:
     # runs the same shards, the same chunk composition and the same merge --
     # the metric is unchanged, and a daemon fault falls back to this very
     # subprocess rather than losing the wave.
-    if (not args.no_daemon and _scorer_daemon is not None
+    if (not leased and not args.no_daemon and _scorer_daemon is not None
             and (_scorer_daemon.ENABLED or settings.get("use_daemon") is True)):
         try:
             if _scorer_daemon.available():
@@ -232,6 +234,10 @@ def main() -> None:
                 flush=True,
             )
 
+    # A reservation installed while the daemon request ran must also block the
+    # direct fallback, including --no-daemon callers. Otherwise rejecting a
+    # resident job would simply move the same contention into a new process.
+    ensure_unreserved_gpus((g for g in args.gpus.split(",") if g), allow_production_lease=True)
     completed = subprocess.run(command)
     raise SystemExit(completed.returncode)
 

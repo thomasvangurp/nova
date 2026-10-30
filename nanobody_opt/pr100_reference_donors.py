@@ -1,29 +1,13 @@
-"""Bounded, score-free donor choice for an explicitly enabled missing cell.
+"""Select compatible proposal parents by measured merit, preserving uncertainty.
 
-The input is the controller's frozen native-pass reference bank. A donor is
-only a proposal input, never current-cell validation or binding evidence.
-
-Two v2 parent gates are wired here (v2 port #3):
-
-* ``cdr_developability_in_range`` (from ``pr100_parent_gates``) is evaluated
-  for every donor from its measured developability profile and attached to the
-  donor descriptor as ``cdr_developability_in_range``. It is a *deprioritising*
-  gate, never a silent drop: an out-of-range donor sorts after every in-range
-  donor at the same stratum/length-distance, so the ``slots`` count is
-  unchanged. A donor whose profile is missing or malformed fails closed
-  (out-of-range), matching the v2 selector.
-
-* ``same_cdr3_family`` powers an *opt-in* per-clonotype ceiling
-  (``family_cap``), disabled by default. It is off by default because the
-  synthetic native-pass bank's CDR3s differ by one residue and collapse to a
-  single family under the 0.15 threshold, so a hard dedup would regress
-  selection-count behaviour. Callers opt in with ``family_cap`` and a
-  ``cdr3_of`` extractor.
+Parent scores guide search only: children still need current annotation, native
+and novelty evidence. Raw rank-sums from different target fields are never mixed.
 """
 from __future__ import annotations
 
 from collections import Counter
 import re
+import math
 
 from nanobody_opt import rules
 from nanobody_opt import pr100_parent_gates as parent_gates
@@ -73,45 +57,72 @@ def _cap_families(ordered, *, family_cap, cdr3_of):
     return capped
 
 
-def select(bank, challenge, slots, *, fallback=False, family_cap=None, cdr3_of=None):
-    """Keep the old exact-cell order; fill missing cells from ranked donors.
+def developability_status(row):
+    profile = row.get('developability')
+    if not isinstance(profile, dict):
+        evidence = row.get('pr100_evidence')
+        profile = evidence.get('developability') if isinstance(evidence, dict) else None
+    try:
+        values = [profile[key] for key in parent_gates.CDR_DEVELOPABILITY_RED_REGION]
+        if any(type(value) not in (float, int) or not math.isfinite(value) for value in values):
+            return 'unknown'
+    except (KeyError, TypeError):
+        return 'unknown'
+    return 'in_range' if parent_gates.cdr_developability_in_range(profile) else 'out_of_range'
 
-    Same V takes precedence over length distance, then another V is allowed.
-    The epoch/hash tie break is deterministic and ignores all score fields.
-    The existing reference-slot bound also bounds donor diversity.
 
-    ``family_cap`` optionally bounds the per-clonotype donor count (opt-in).
-    When set it must be a positive integer and ``cdr3_of`` must be a callable
-    that extracts the CDR3 string from a donor row.
+def merit(row, challenge):
+    """Use comparable field-normalized public evidence, never unlabeled scores.
+
+    Single-validator percentiles are a search prior, explicitly not multipass
+    qualification. A matched-field replay mean has precedence only when the
+    challenge explicitly identifies that replay field and protocol.
     """
+    accepted = []
+    values = row.get('quality_evidence', [])
+    if not isinstance(values, list):
+        return (2, 0.0, 0), 'unknown'
+    for value in values:
+        if (not isinstance(value, dict) or value.get('target') != challenge['target']
+                or type(value.get('epoch')) is not int or value['epoch'] >= challenge['epoch']
+                or type(value.get('value')) not in (float, int)
+                or not math.isfinite(value['value'])):
+            continue
+        if (value.get('kind') == 'matched_multipass_mean'
+                and type(value.get('passes')) is int and value['passes'] >= 10
+                and challenge.get('merit_field_sha256')
+                and value.get('field_sha256') == challenge['merit_field_sha256']
+                and value.get('protocol') == challenge.get('merit_protocol')
+                and value.get('protocol')):
+            accepted.append((0, value))
+        elif (value.get('kind') == 'public_validator_percentile'
+                and 0 <= value['value'] <= 1
+                and type(value.get('field_size')) is int and value['field_size'] > 1
+                and value.get('passes') == 1):
+            accepted.append((1, value))
+    if not accepted:
+        return (2, 0.0, 0), 'unknown'
+    best_class = min(kind for kind, _ in accepted)
+    evidence = max((v for kind, v in accepted if kind == best_class), key=lambda v: v['epoch'])
+    return (best_class, evidence['value'], -evidence['epoch']), evidence['kind']
+
+
+def select(bank, challenge, slots, *, fallback=False, family_cap=None, cdr3_of=None):
+    """Rank exact-cell parents or, when enabled, compatible missing-cell donors.
+
+    Compatibility comes first; at equal compatibility measured in-range CDRs
+    precede unknown and known-failing CDRs, then comparable merit breaks ties.
+    All identity and cell checks apply to exact-cell parents as well as fallback.
+    """
+    if type(slots) is not int or slots < 1:
+        raise ValueError('slots must be a positive integer')
     if family_cap is not None:
-        if isinstance(family_cap, bool) or not isinstance(family_cap, int) or family_cap < 1:
+        if type(family_cap) is not int or family_cap < 1:
             raise ValueError('family_cap must be a positive integer when set')
         if not callable(cdr3_of):
             raise ValueError('cdr3_of must be a callable row -> CDR3 string when family_cap is set')
     gene, length = challenge['allowed_v'], challenge['allowed_cdr3_length']
     cell = f'{gene}:{length}'
-    exact = sorted((r for r in bank if cell in r['cells']),
-                   key=lambda r: rules.digest([challenge['epoch'], r['sequence_hash']]))[:slots]
-    evidence = {'requested_cell': cell, 'bank_rows': len(bank),
-                'bank_cells': dict(sorted(Counter(c for r in bank for c in r['cells']).items())),
-                'exact_cell_available': sum(cell in r['cells'] for r in bank),
-                'exact_selected': len(exact), 'fallback_enabled': fallback,
-                'fallback_used': False, 'available_by_stratum': {},
-                'selected_by_stratum': {}, 'selected_donors': [],
-                'developability_in_range_selected': 0,
-                'developability_out_of_range_selected': 0}
-    if exact or not fallback:
-        chosen_exact = [(r, {'reference_stratum': 'exact_cell', 'reference_cell': cell,
-                             'reference_length_distance': 0,
-                             'cdr_developability_in_range':
-                                 _donor_cdr_developability_in_range(r)}) for r in exact]
-        evidence.update(
-            developability_in_range_selected=sum(d['cdr_developability_in_range']
-                                                 for _, d in chosen_exact),
-            developability_out_of_range_selected=sum(not d['cdr_developability_in_range']
-                                                     for _, d in chosen_exact))
-        return exact, chosen_exact, evidence
     found = {}
     for row in bank:
         digest = row.get('sequence_hash')
@@ -120,7 +131,7 @@ def select(bank, challenge, slots, *, fallback=False, family_cap=None, cdr3_of=N
                 or rules.sequence_hash(row['sequence']) != digest):
             raise ValueError('invalid native-pass donor identity')
         cells = []
-        for value in row['cells']:
+        for value in row.get('cells', []):
             match = re.fullmatch(r'(IGHV3-\d+):(\d+)', value) if isinstance(value, str) else None
             if not match or match[1] not in GENES or not 5 <= int(match[2]) <= 23:
                 raise ValueError('invalid native-pass donor cell')
@@ -128,35 +139,40 @@ def select(bank, challenge, slots, *, fallback=False, family_cap=None, cdr3_of=N
         if not cells:
             raise ValueError('native-pass donor has no cell')
         other_v, distance, source_cell = min(cells)
-        stratum = 'other_v_nearby_length' if other_v else 'same_v_nearby_length'
-        in_range = _donor_cdr_developability_in_range(row)
+        stratum = ('exact_cell' if source_cell == cell else
+                   'other_v_nearby_length' if other_v else 'same_v_nearby_length')
+        status = developability_status(row)
+        merit_rank, merit_kind = merit(row, challenge)
         descriptor = {'reference_stratum': stratum, 'reference_cell': source_cell,
                       'reference_length_distance': distance,
-                      'cdr_developability_in_range': in_range}
-        # Developability deprioritises (fail-closed), never drops: in-range
-        # donors sort ahead of out-of-range donors at equal stratum/distance,
-        # and the total selection count is unchanged.
-        rank = (other_v, distance, not in_range, rules.digest([challenge['epoch'], digest]))
-        # A repeated bank identity is one donor. Its metadata must agree.
-        if digest in found and found[digest][2] != descriptor:
-            raise ValueError('conflicting native-pass donor cells')
+                      'cdr_developability_in_range': status == 'in_range',
+                      'cdr_developability_status': status, 'merit_kind': merit_kind}
+        rank = (other_v, distance, {'in_range': 0, 'unknown': 1, 'out_of_range': 2}[status],
+                *merit_rank, rules.digest([challenge['epoch'], digest]))
+        if digest in found and found[digest] != (rank, row, descriptor):
+            raise ValueError('conflicting native-pass donor cells or evidence')
         found[digest] = (rank, row, descriptor)
     ranked = sorted(found.values(), key=lambda item: item[0])
-    available_by_stratum = dict(Counter(d['reference_stratum'] for _, _, d in ranked))
-    selected = (_cap_families(ranked, family_cap=family_cap, cdr3_of=cdr3_of)
-                if family_cap is not None else ranked)
+    exact_pool = [item for item in ranked if item[2]['reference_stratum'] == 'exact_cell']
+    pool = exact_pool if exact_pool else ranked if fallback else []
+    selected = (_cap_families(pool, family_cap=family_cap, cdr3_of=cdr3_of)
+                if family_cap is not None else pool)
     chosen = [(row, descriptor) for _, row, descriptor in selected[:slots]]
-    evidence.update(fallback_used=bool(chosen),
-                    available_by_stratum=available_by_stratum,
-                    selected_by_stratum=dict(Counter(d['reference_stratum'] for _, d in chosen)),
-                    selected_donors=[{'reference_hash': r['sequence_hash'], **d} for r, d in chosen],
-                    developability_in_range_selected=sum(d['cdr_developability_in_range']
-                                                         for _, d in chosen),
-                    developability_out_of_range_selected=sum(not d['cdr_developability_in_range']
-                                                             for _, d in chosen))
+    exact = [row for row, descriptor in chosen if descriptor['reference_stratum'] == 'exact_cell']
+    status_counts = Counter(d['cdr_developability_status'] for _, d in chosen)
+    evidence = {'requested_cell': cell, 'bank_rows': len(bank),
+                'bank_cells': dict(sorted(Counter(c for r in bank for c in r['cells']).items())),
+                'exact_cell_available': len(exact_pool), 'exact_selected': len(exact),
+                'fallback_enabled': fallback, 'fallback_used': bool(chosen and not exact_pool),
+                'available_by_stratum': dict(Counter(d['reference_stratum'] for _, _, d in pool)),
+                'selected_by_stratum': dict(Counter(d['reference_stratum'] for _, d in chosen)),
+                'selected_donors': [{'reference_hash': r['sequence_hash'], **d} for r, d in chosen],
+                'developability_in_range_selected': status_counts['in_range'],
+                'developability_out_of_range_selected': status_counts['out_of_range'],
+                'developability_unknown_selected': status_counts['unknown']}
     if family_cap is not None:
         evidence.update(family_cap=family_cap,
                         family_cap_families_selected=parent_gates.family_count(
                             [r for r, _ in chosen], cdr3_of=cdr3_of),
-                        family_cap_trimmed=len(ranked) != len(selected))
+                        family_cap_trimmed=len(pool) != len(selected))
     return exact, chosen, evidence

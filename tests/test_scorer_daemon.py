@@ -21,6 +21,128 @@ import pytest
 from nanobody_opt import scorer_daemon as sd
 
 
+@pytest.fixture
+def reservation(tmp_path, monkeypatch):
+    path = tmp_path / 'reservation.json'
+    monkeypatch.setattr(sd, 'GPU_RESERVATION_FILE', str(path))
+    return path
+
+
+def write_reservation(path, gpus):
+    path.write_text(json.dumps({'schema':'pr100-gpu-reservation-v1',
+                               'owner':'pr100-live-controller', 'gpus':gpus}))
+
+
+def fake_daemon(monkeypatch):
+    spawned, scored = [], []
+    class Worker:
+        def __init__(self, gpu, *_args): spawned.append(gpu)
+        def alive(self): return True
+        def run(self, args, *_args):
+            scored.append(args[1])
+            return {'ok':True}
+    monkeypatch.setattr(sd, 'ShardWorker', Worker)
+    monkeypatch.setattr(sd, 'workers_per_gpu', lambda:1)
+    daemon = sd.Daemon('unused')
+    daemon._module = object()
+    monkeypatch.setattr(daemon, '_rerun_short_shards', lambda *a, **kw:None)
+    monkeypatch.setattr(daemon, '_merge', lambda *a, **kw:None)
+    return daemon, spawned, scored
+
+
+def daemon_job(tmp_path, gpus):
+    return {'gpus':gpus, 'target':'TEST', 'sequences':['AAAA'],
+            'out_path':str(tmp_path/'out.json'), 'shard_root':str(tmp_path/'work'),
+            'observation_id':'test', 'batch_size':1, 'subnet_config':{}}
+
+
+def test_reservation_absent_preserves_legacy_worker_allocation(reservation, monkeypatch):
+    daemon, spawned, _ = fake_daemon(monkeypatch)
+    daemon.start_workers(['1','5'])
+    assert sorted(spawned) == ['1','5']
+
+
+def test_reserved_start_workers_refuses_whole_request_before_any_spawn(reservation, monkeypatch):
+    write_reservation(reservation, [1,2,3,4])
+    daemon, spawned, _ = fake_daemon(monkeypatch)
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        daemon.start_workers(['5','1'])
+    assert spawned == [] and daemon._workers == {}
+
+
+def test_reserved_handle_does_not_create_workers_or_output(reservation, monkeypatch, tmp_path):
+    write_reservation(reservation, [1,2,3,4])
+    daemon, spawned, scored = fake_daemon(monkeypatch)
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        daemon.handle(daemon_job(tmp_path, '1,5'))
+    assert spawned == scored == [] and not (tmp_path/'work').exists()
+
+
+def test_reservation_reread_blocks_reuse_of_already_resident_worker(reservation, monkeypatch, tmp_path):
+    daemon, spawned, scored = fake_daemon(monkeypatch)
+    assert daemon.handle(daemon_job(tmp_path, '5'))['ok']
+    assert spawned == scored == ['5']
+    write_reservation(reservation, [5])
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        daemon.handle(daemon_job(tmp_path, '5'))
+    assert spawned == scored == ['5']
+
+
+def test_nonreserved_job_still_scores(reservation, monkeypatch, tmp_path):
+    write_reservation(reservation, [1,2,3,4])
+    daemon, spawned, scored = fake_daemon(monkeypatch)
+    assert daemon.handle(daemon_job(tmp_path, '5'))['ok']
+    assert spawned == scored == ['5']
+
+
+@pytest.mark.parametrize('value', [None, [], {}, {'schema':'bad'},
+    {'schema':'pr100-gpu-reservation-v1','owner':'wrong','gpus':[1]},
+    {'schema':'pr100-gpu-reservation-v1','owner':'pr100-live-controller','gpus':[True]},
+    {'schema':'pr100-gpu-reservation-v1','owner':'pr100-live-controller','gpus':['1']},
+    {'schema':'pr100-gpu-reservation-v1','owner':'pr100-live-controller','gpus':[1,1]},
+    {'schema':'pr100-gpu-reservation-v1','owner':'pr100-live-controller','gpus':[-1]},
+    {'schema':'pr100-gpu-reservation-v1','owner':'pr100-live-controller','gpus':[{}]}])
+def test_malformed_reservation_fails_closed(reservation, monkeypatch, value):
+    reservation.write_text(json.dumps(value))
+    daemon, spawned, _ = fake_daemon(monkeypatch)
+    with pytest.raises(RuntimeError, match='gpu_reservation_invalid'):
+        daemon.start_workers(['5'])
+    assert not spawned
+
+
+@pytest.mark.parametrize('mode', ['invalid_json','directory','broken_link','oversized'])
+def test_unreadable_reservation_fails_closed(reservation, mode):
+    if mode=='invalid_json': reservation.write_text('{')
+    elif mode=='directory': reservation.mkdir()
+    elif mode=='broken_link': reservation.symlink_to(reservation.parent/'missing')
+    else: reservation.write_text(' ' * 16385)
+    with pytest.raises(RuntimeError, match='gpu_reservation_unreadable'):
+        sd.ensure_unreserved_gpus(['5'])
+
+
+@pytest.mark.parametrize('gpu', ['01', ' 1 ', 1])
+def test_reserved_index_aliases_cannot_bypass_policy(reservation, gpu):
+    write_reservation(reservation, [1])
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        sd.ensure_unreserved_gpus([gpu])
+
+
+def test_gpu_uuid_cannot_bypass_index_reservation(reservation):
+    write_reservation(reservation, [1])
+    with pytest.raises(RuntimeError, match='gpu_reservation_requires_device_indices'):
+        sd.ensure_unreserved_gpus(['GPU-unknown'])
+
+
+def test_daemon_does_not_accept_adapter_lease_exemption(reservation, monkeypatch):
+    from nanobody_opt import pr100_live_gpu
+    write_reservation(reservation, [1])
+    monkeypatch.setattr(pr100_live_gpu, 'inherited_lease_fd', lambda *a:pytest.fail('daemon must never exempt resident workers'))
+    daemon, spawned, _ = fake_daemon(monkeypatch)
+    with pytest.raises(RuntimeError, match='gpu_reserved_for_pr100'):
+        daemon.start_workers(['1'])
+    assert spawned == []
+
+
 def test_model_reuse_repeats_forward_without_caching_results(monkeypatch):
     from types import SimpleNamespace
     from nanobody_opt import resident_scorer as resident

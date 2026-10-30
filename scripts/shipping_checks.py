@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import py_compile
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -13,6 +14,9 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
+# Every suite changed since this audited production baseline must be in the
+# blocking list. New tests cannot silently exist outside release certification.
+REGRESSION_BASELINE = 'd9b13d773651066b396fcd52835b9f48456b6408'
 TEST_FILES = (
     'tests/test_pr100.py', 'tests/test_pr100_proposal_pilot.py', 'tests/test_pr100_publication_hold.py',
     'tests/test_pr100_replay.py',
@@ -28,6 +32,7 @@ TEST_FILES = (
     'tests/test_pr100_continuation_lifecycle.py',
     'tests/test_pr100_epoch_continuation.py',
     'tests/test_pr100_fresh_native_budget.py',
+    'tests/test_pr100_zero_yield.py',
     'tests/test_pr100_native_execution_identity.py',
     'tests/test_pr100_safe_activate.py',
     'tests/test_pr100_native_throughput.py',
@@ -41,6 +46,11 @@ TEST_FILES = (
     'tests/test_pr100_live_worker.py',
     'tests/test_pr100_terminal_invalidation.py',
     'tests/test_pr100_reference_donors.py',
+    'tests/test_pr100_rival_merit.py',
+    'tests/test_pr100_edit_generation.py',
+    'tests/test_pr100_hydrophobicity.py',
+    'tests/test_pr100_parent_gates.py',
+    'tests/test_pr100_stale_handoff.py',
     'tests/test_pr100_novelty_runtime_adversarial.py',
     'tests/test_pr100_native_journal.py',
     'tests/test_pr100_native_screen.py',
@@ -77,6 +87,8 @@ TEST_FILES = (
     'tests/validate_against_validator.py',
     'tests/test_ci_guardrails.py',
     'tests/test_shipping_producer.py',
+    'tests/test_shipping_checks_inventory.py',
+    'tests/test_backfill_target_assets.py',
     'tests/test_deploy_stamp.py',
     'tests/test_release_pipeline.py',
     'tests/test_release_promotion.py',
@@ -89,18 +101,61 @@ TEST_FILES = (
     'tests/test_compound_dashboard.py',
     'tests/test_nanobody_rank_exact.py',
     'tests/test_topup_slave.py',
+    'tests/test_build_rival_bank.py',
+    'tests/test_chain_state.py',
+    'tests/test_de_novo_bank.py',
+    'tests/test_hf_field_refresh.py',
+    'tests/test_run_live_producer.py',
+    'tests/test_submit_host_loop.py',
     'nanobody_opt_v2/tests/test_flags.py',
     'nanobody_opt_v2/tests/test_replication.py',
     'nanobody_opt_v2/tests/test_compute_budget.py',
 )
 
 
+def validate_test_inventory(changed_paths, *, suites=TEST_FILES):
+    if len(set(suites)) != len(suites):
+        raise ValueError('duplicate required regression suite')
+    changed = {name for name in changed_paths
+               if name.startswith(('tests/', 'nanobody_opt_v2/tests/'))
+               and Path(name).name.startswith('test_') and name.endswith('.py')}
+    missing = changed - set(suites)
+    if missing:
+        raise ValueError('changed regression suites omitted from shipping: ' + ', '.join(sorted(missing)))
+
+
+def stage_submit_host(artifact: Path, destination: Path, files):
+    """Exercise the Pi layout from exact release bytes, without a live-host dependency.
+
+    This certifies the packaged submitter. Deployment must separately compare
+    installed hashes; a local package is never evidence about a remote install.
+    """
+    destination.mkdir(parents=True, exist_ok=False)
+    for name in files:
+        if name.startswith(('nanobody_opt/', 'compound_miner/', 'utils/', 'config/')):
+            target = destination / name
+        elif name == 'deploy/submit_host/pi_submit.py':
+            target = destination / 'pi_submit.py'
+        else:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact / name, target)
+    required = ('pi_submit.py', 'nanobody_opt/rules.py', 'nanobody_opt/commit_submission.py',
+                'nanobody_opt/pr100_filter.py', 'nanobody_opt/publication_gates.py',
+                'compound_miner/nanobody_provider.py')
+    if any(not (destination / name).is_file() for name in required):
+        raise ValueError('staged submit-host runtime is incomplete')
+
+
 def run(root: Path, output: Path, *, profile: str = 'application') -> int:
     sys.path.insert(0, str(root))
-    from scripts.release_manifest import stage, verify
+    from scripts.release_manifest import git, stage, verify
     output.mkdir(parents=True, exist_ok=True)
     artifact = output / 'staged'
     manifest = stage(root, artifact, profile=profile)
+    changed = git(root, 'diff', '--name-only', '--diff-filter=ACMR', REGRESSION_BASELINE,
+                  manifest['git_sha'], '--', 'tests', 'nanobody_opt_v2/tests').splitlines()
+    validate_test_inventory(changed)
     for name in TEST_FILES:
         if not (artifact / name).is_file():
             raise ValueError(f'missing required regression suite: {name}')
@@ -108,8 +163,11 @@ def run(root: Path, output: Path, *, profile: str = 'application') -> int:
     for name in manifest['files']:
         if name.endswith('.py'):
             py_compile.compile(str(artifact / name), doraise=True)
+    submit_host = output / 'submit-host-runtime'
+    stage_submit_host(artifact, submit_host, manifest['files'])
     env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', PYTHONDONTWRITEBYTECODE='1',
                PYTHONPATH=str(artifact), NOVA_LOCAL_SQLITE='1',
+               NOVA_PI_MIRROR=str(submit_host),
                SN68_DEPLOY_ARTIFACT_ROOT=str(artifact), SN68_TESTED_SHA=manifest['git_sha'])
     commands = (
         [sys.executable, 'scripts/ci_guardrails.py'],

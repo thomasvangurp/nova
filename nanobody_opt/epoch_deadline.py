@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -21,22 +22,33 @@ class EpochDeadline:
     epoch: int
     reserve_blocks: int = 0
     maximum_state_age: float = 180.0
+    maximum_future_skew: float = 5.0
+    _observation: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
     def remaining(self) -> float:
         try:
             state = json.loads(self.chain_state.read_text())
             stamp = float(state.get('updated_at_unix', self.chain_state.stat().st_mtime))
-            age = time.time() - stamp
+            now, monotonic = time.time(), time.monotonic()
+            if (not all(math.isfinite(value) for value in
+                        (stamp, now, monotonic, self.maximum_state_age, self.maximum_future_skew))
+                    or min(self.maximum_state_age, self.maximum_future_skew) < 0):
+                raise EpochDeadlineExceeded('invalid chain clock; work cancelled')
+            age = now - stamp
             length, block = int(state['epoch_length']), int(state['block'])
             current = int(state['epoch'])
             if length <= 0 or current != block // length or current != self.epoch:
                 raise EpochDeadlineExceeded('epoch changed; old work cancelled')
-            # A timestamp in the near future is wall-clock jitter (an NTP step,
-            # or the reader clock running a touch ahead of the writer), not a
-            # stale chain. Clamp it — the same convention as the controller's
-            # blocks_remaining() — so a transient backward clock step cannot
-            # cancel work spuriously, and the deadline stays conservative.
+            if age < -self.maximum_future_skew:
+                raise EpochDeadlineExceeded('chain clock is too far in the future; work cancelled')
+            # Permit bounded writer/reader skew, but a backward wall-clock step
+            # must never rejuvenate an unchanged observation or extend its work.
             age = max(0.0, age)
+            identity = (stamp, length, block, current)
+            previous = self._observation
+            if previous is not None and previous[0] == identity:
+                age = max(age, previous[2] + max(0.0, monotonic - previous[1]))
+            object.__setattr__(self, '_observation', (identity, monotonic, age))
             if age > self.maximum_state_age:
                 raise EpochDeadlineExceeded('chain clock is stale; work cancelled')
             seconds = (length - block % length - self.reserve_blocks) * 12.0 - age

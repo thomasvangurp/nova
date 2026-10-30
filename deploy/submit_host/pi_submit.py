@@ -128,6 +128,16 @@ def attest_epoch(chain, epoch: int, netuid: int) -> dict:
             "netuid": netuid, "epoch_length_source": "SubtensorModule.Tempo+1"}
 
 
+def current_archive_digest(target):
+    """Fetch the public archive inside the Pi process; emit no response body."""
+    import hashlib
+    from nanobody_opt.pr100_live_controller import fetch_archive
+    try:
+        return hashlib.sha256(fetch_archive(target)).hexdigest()
+    except Exception:
+        return None  # No fresh proof: keep molecules, refuse stale nanobodies.
+
+
 def sequences_by_uid(artifact: dict, epoch: int,
                      allow_stale: bool = False,
                      crew=None, epoch_start_block_hash=None,
@@ -154,8 +164,11 @@ def sequences_by_uid(artifact: dict, epoch: int,
     from nanobody_opt import rules
     stale_epoch_downgrade = False
     if epoch >= rules.ACTIVATION_EPOCH:
+        archive_digest = (current_archive_digest(rules.target_for_epoch(epoch))
+                          if artifact.get("epoch") == epoch - 1 else None)
         verified = rules.verified_fleet(artifact, epoch, epoch_start_block_hash, epoch_length,
-                                        get_block_hash=get_block_hash)
+                                        get_block_hash=get_block_hash,
+                                        current_archive_sha256=archive_digest)
         print(json.dumps(dict(event="pr100_fleet_verification", epoch=epoch,
                               **verified["handoff_diagnostics"])), flush=True)
         artifact = verified

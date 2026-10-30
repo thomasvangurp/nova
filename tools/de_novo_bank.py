@@ -1,4 +1,4 @@
-"""Convert ``nanobody_opt/recombine.py`` candidates into a native-pass reference bank.
+"""Convert proposals into an annotated donor bank, not a native-pass certificate.
 
 ``recombine.py`` emits a proxy-ranked CSV of gate-passing, novel recombinants::
 
@@ -7,7 +7,8 @@
 The live sequence phase consumes a reference bank at ``hosts.slave.references``,
 whose rows are validated by ``nanobody_opt.pr100_reference_donors.select``. A row
 is a donor only: the pipeline grafts its CDR3 into a freshly generated scaffold,
-so the bank carries no scores and no target evidence. The schema is::
+and named quality/native evidence is preserved as parent provenance, never as
+validation of a newly generated child. The schema is::
 
     {"rows": [{"cells": ["IGHV3-23:16"],
                "sequence": "<AA seq>",
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import copy
 import json
 import os
 import re
@@ -55,7 +57,8 @@ def allowed_v_genes(annotation):
 def convert(sequences, *, source, annotate=None):
     """Return ``(rows, summary)`` for the reference bank.
 
-    ``sequences`` is an iterable of raw amino-acid strings. Deduplication is by
+    ``sequences`` contains amino-acid strings or records with a sequence and named
+    evidence fields. Deduplication is by
     ``rules.sequence_hash`` and keeps the first occurrence (the recombine CSV is
     already proxy-ranked, so first occurrence preserves the best ranking).
     ``annotate`` defaults to the pinned ``_annotate_uncached`` and may be
@@ -74,11 +77,14 @@ def convert(sequences, *, source, annotate=None):
         "v_gene_distribution": Counter(),
         "cdr3_length_distribution": Counter(),
     }
-    for sequence in sequences:
+    for incoming in sequences:
         summary["input"] += 1
+        metadata = incoming if isinstance(incoming, dict) else {}
+        sequence = metadata.get('sequence') if metadata else incoming
         if not isinstance(sequence, str) or not sequence.strip():
             summary["annotation_failed"] += 1
             continue
+        sequence = sequence.strip().upper()
         key = rules.sequence_hash(sequence)
         if key in seen:
             summary["dedup_dropped"] += 1
@@ -100,12 +106,18 @@ def convert(sequences, *, source, annotate=None):
         if not genes:
             summary["no_allowed_v_gene"] += 1
             continue
-        rows.append({
+        row = {
             "cells": [f"{gene}:{length}" for gene in genes],
             "sequence": sequence.strip().upper(),
             "sequence_hash": key,
             "source": source,
-        })
+        }
+        # Preserve named scientific provenance only; do not copy arbitrary
+        # transport/config fields into a reusable bank.
+        for name in ('quality_evidence', 'developability', 'pr100_evidence', 'novelty'):
+            if name in metadata:
+                row[name] = copy.deepcopy(metadata[name])
+        rows.append(row)
         summary["v_gene_distribution"][genes[0]] += 1
         summary["cdr3_length_distribution"][length] += 1
     summary["kept"] = len(rows)

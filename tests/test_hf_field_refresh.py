@@ -67,8 +67,12 @@ def _isolated_failure_log(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def real():
+def real(monkeypatch):
     data = json.loads(FIXTURE.read_text())
+    # These measurements were made before PR100. Exercise them as historical
+    # evidence; never relabel measured biology to the current target.
+    assert {p['target'] for p in data['passes']} == {'P20809'}
+    monkeypatch.setattr(R, 'TARGET', 'P20809')
     archive = pd.DataFrame(data["archive"])
     archive["sequence"] = archive["sequence"].str.upper()
     return archive, data["passes"]
@@ -202,24 +206,60 @@ def test_score_matches_the_dashboard_pass_scorer(real):
     archive, passes = real
     mp = _mp()
     for payload in passes:
-        want_ranks, _structs, want_raw = mp.rank_pass_payload(payload, archive)
+        want_ranks, _structs, want_raw = mp.rank_pass_payload(payload, archive, R.TARGET)
         raw = R.raw_metrics_from_payload(payload)
         assert raw == want_raw
         assert R.rank_pass(raw, archive) == pytest.approx(want_ranks)
-    # including a batch member that is also in the archive (dedup, keep the pass)
+    # Including a batch member also present in the archive: the declared field
+    # remains fixed; the candidate's newly measured value is ranked against it.
     dup = json.loads(json.dumps(passes[0]))
     arch_seq = archive["sequence"].iloc[0]
     first = _seqs(passes)[0]
     dup["per_nanobody_components"]["0"][arch_seq] = dup["per_nanobody_components"]["0"][first]
-    want, _s, _r = mp.rank_pass_payload(dup, archive)
+    want, _s, _r = mp.rank_pass_payload(dup, archive, R.TARGET)
     assert R.rank_pass(R.raw_metrics_from_payload(dup), archive) == pytest.approx(want)
+
+
+def test_rank_is_independent_of_other_candidates_in_the_batch(real):
+    archive, passes = real
+    raw = R.raw_metrics_from_payload(passes[0])
+    full = R.rank_pass(raw, archive)
+    for sequence, metrics in raw.items():
+        assert R.rank_pass({sequence: metrics}, archive)[sequence] == full[sequence]
+
+
+def test_historical_measurements_cannot_be_read_as_the_current_target(monkeypatch, real):
+    _archive, passes = real
+    monkeypatch.setattr(R, 'TARGET', 'Q9NZQ7')
+    with pytest.raises(ValueError, match='another target'):
+        R.raw_metrics_from_payload(passes[0])
+
+
+def test_current_target_cannot_be_written_under_a_historical_epoch(monkeypatch):
+    _no_db(monkeypatch)
+    monkeypatch.setattr(R, 'TARGET', 'Q9NZQ7')
+    assert R.main(['--allow-unconsumed', '--epoch', '25640'], probe=FakeProbe()) == R.EXIT_REFUSED
+
+
+def test_latest_epoch_lookup_is_bound_to_the_measured_target():
+    calls = []
+    class Connection:
+        def execute(self, sql, args):
+            calls.append((sql, args))
+            return self
+        def fetchall(self):
+            return []
+    result = R.latest_epochs(Connection(), ['AAAA'], 26018)
+    assert result == {'AAAA': (26018, 'run epoch (no prior epoch)')}
+    assert 'n.target=%s' in calls[0][0]
+    assert calls[0][1][0] == R.TARGET
 
 
 def test_row_shape_matches_the_multipass_contract(monkeypatch, tmp_path, real):
     """Every key the dashboard writer puts on a pass row is on ours too."""
     archive, passes = real
     mp = _mp()
-    ranks, structs, raw = mp.rank_pass_payload(passes[0], archive)
+    ranks, structs, raw = mp.rank_pass_payload(passes[0], archive, R.TARGET)
     theirs = mp.pass_observations(epoch=25640, run=1, passes=10, ranks=ranks, raw=raw,
                                   structs=structs, cohort_of={}, field={
                                       "field": "hf_archive_full", "field_path": "x",

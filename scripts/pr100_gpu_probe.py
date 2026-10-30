@@ -21,9 +21,9 @@ import sys
 import time
 
 
-def bounded(command, env, timeout):
+def bounded(command, env, timeout, *, pass_fds=()):
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=True)
+                               stderr=subprocess.PIPE, start_new_session=True, pass_fds=pass_fds)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -92,6 +92,7 @@ def main():
     sys.path.insert(0, str(args.release))
     from scripts.release_manifest import verify
     from nanobody_opt import rules
+    from nanobody_opt.pr100_live_gpu import inherited_lease_fd, LEASE_ENV_KEYS
     from tools.slave_runtime.slave_multipass_writeback import unpack
     import yaml
 
@@ -128,6 +129,9 @@ def main():
                PYTHONPATH=str(args.release),
                OMP_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2',
                CUDA_VISIBLE_DEVICES=args.gpu)
+    lease_fd = inherited_lease_fd([args.gpu])
+    if lease_fd is not None:
+        env.update({key: os.environ[key] for key in LEASE_ENV_KEYS})
     started = time.monotonic()
     report = {'candidate_sha': manifest['git_sha'], 'registered_scorer_sha256': scorer_hash,
               'target': rules.TARGET, 'scope': 'technical_only_not_publication_qualified',
@@ -150,7 +154,7 @@ def main():
                    '--gpus', args.gpu, '--shards-per-gpu', '1', '--batch-size', '1',
                    '--work-root', str(work/'work'), '--out', str(work/'exact_all.json'),
                    '--structure-dir', str(work/'structures'), '--require-structures',
-                   '--settings', str(settings_path)]
+                   '--settings', str(settings_path), '--no-daemon']
         if args.mode == 'replicates':
             command.append('--allow-replicates')
         remaining = args.timeout - (time.monotonic() - started)
@@ -158,7 +162,7 @@ def main():
             report['status'] = 'timed_out'
             break
         before = time.monotonic()
-        result = bounded(command, env, remaining)
+        result = bounded(command, env, remaining, pass_fds=() if lease_fd is None else (lease_fd,))
         result.update(length=length, candidates=len(group), seconds=round(time.monotonic()-before, 3))
         if result['exit'] == 0:
             try:

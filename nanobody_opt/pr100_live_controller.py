@@ -300,6 +300,8 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
         job['native_tools'] = runtime.get('native_tools', job['native_tools'])
     if phase == 'sequence':
         job['references'] = runtime['references']
+        if runtime.get('reference_bank_sha256') is not None:
+            job['reference_bank_sha256'] = runtime['reference_bank_sha256']
     if 'archive.csv' in files:
         # The worker runs novelty only when the archive snapshot it can verify is present,
         # so every phase that checks novelty is handed the archive and its binding.
@@ -315,10 +317,10 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks',
                    output_directory=directory + '/score')
         job['cpu_slots'] = max(2, len(config['gpu']))
-    if phase == 'native' and config['worker'].get('native_screen', {}).get('enabled') is True:
+    if phase == 'native' and job.get('native_screen', {}).get('enabled') is True:
         # The parent and all authoritative confirmations remain CPU-only.
         # The screen helper exposes one leased device inside each owned child.
-        job.update(gpus=list(config.get('native_gpu', config['gpu'])), release=release,
+        job.update(gpus=list(config.get('native_gpu_by_host', {}).get(host, config.get('native_gpu', config['gpu']))), release=release,
                    scorer=runtime['scorer'], source_sha=config['source_sha'],
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks')
     cap = phase_cap(phase, stop_at) if cap is None else cap
@@ -382,7 +384,8 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
                             'source_sha': config['source_sha'], 'worker': config['worker'],
                             'runtime': config['hosts']['slave' if phase == 'sequence' else
                                 config.get('_native_host', 'master') if phase == 'native' else 'master'],
-                            'gpus': config.get('gpu'), 'native_gpus': config.get('native_gpu')})
+                            'gpus': config.get('gpu'), 'native_gpus': config.get('native_gpu'),
+                            'native_gpus_by_host': config.get('native_gpu_by_host')})
     saved = json.loads(intent.read_text()) if intent.is_file() else None
     dispatch_started = (saved.get('created_at_unix', saved['request']['clock']['updated_at_unix'])
                         if saved else clock['updated_at_unix'])
@@ -730,6 +733,14 @@ def validate_config(config):
             or any(type(g) is not int or g < 0 for g in native_gpus)
             or len(set(native_gpus)) != len(native_gpus)):
         raise ValueError('native_gpu must contain one to eight distinct non-negative gpu ids')
+    host_gpus = config.get('native_gpu_by_host', {})
+    if not isinstance(host_gpus, dict) or set(host_gpus) - {'master', 'slave'}:
+        raise ValueError('invalid native GPU host allocation')
+    for devices in host_gpus.values():
+        if (not isinstance(devices, list) or len(devices) > 8
+                or any(type(g) is not int or g < 0 for g in devices)
+                or len(set(devices)) != len(devices)):
+            raise ValueError('invalid native GPU host allocation')
     for key in ('state_root', 'publication_path'):
         if not Path(config[key]).is_absolute():
             raise ValueError(f'{key} must be an absolute path')
@@ -750,19 +761,22 @@ def validate_config(config):
             or any(host not in ('master', 'slave') for host in native_hosts)):
         raise ValueError('native_hosts must name distinct master/slave hosts')
     overrides = config.get('native_worker_overrides', {})
-    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools', 'native_work_conserving'}
+    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools', 'native_work_conserving', 'native_screen'}
     if not isinstance(overrides, dict) or set(overrides) - {'master', 'slave'}:
         raise ValueError('invalid native worker host overrides')
     for host, value in overrides.items():
         if not isinstance(value, dict) or set(value) - allowed:
             raise ValueError('unsupported native worker override')
         if any(type(v) is not int or not 1 <= v <= 256 for k, v in value.items()
-               if k not in ('native_tools', 'native_work_conserving')):
+               if k not in ('native_tools', 'native_work_conserving', 'native_screen')):
             raise ValueError('invalid native worker resource bound')
         if 'native_work_conserving' in value and type(value['native_work_conserving']) is not bool:
             raise ValueError('native_work_conserving override must be a boolean')
         if value.get('native_work_conserving') is True and host not in native_hosts:
             raise ValueError('refill host must be enabled for native work')
+        if 'native_screen' in value:
+            from nanobody_opt.pr100_native_screen import settings as screen_settings
+            screen_settings({'native_screen': value['native_screen']})
         if 'native_tools' in value and not str(value['native_tools']).startswith('/'):
             raise ValueError('native tools must be an absolute path')
     screen = config['worker'].get('native_screen', {})
@@ -785,6 +799,9 @@ def validate_config(config):
         runtime = hosts[name]
         if not isinstance(runtime, dict):
             raise ValueError(f'hosts.{name} must be an object')
+        if runtime.get('reference_bank_sha256') is not None and not re.fullmatch(
+                r'[0-9a-f]{64}', str(runtime['reference_bank_sha256'])):
+            raise ValueError('invalid reference bank identity')
         absent = [k for k in HOST_KEYS if k not in runtime]
         if absent:
             raise ValueError(f'hosts.{name} is missing: ' + ', '.join(absent))

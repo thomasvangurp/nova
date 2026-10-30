@@ -62,6 +62,7 @@ def runtime(request, replay, monkeypatch):
     monkeypatch.setattr(sys, 'path', list(sys.path))
     load('nanobody_opt.commit_submission', root / 'nanobody_opt/commit_submission.py')
     submit = load('_stale_submitter', submit_path)
+    monkeypatch.setattr(submit, 'current_archive_digest', lambda target: artifact['archive_sha256'])
     return SimpleNamespace(name=request.param, rules=active_rules, submit=submit,
                            artifact=artifact, previous=replay.challenge,
                            epoch=25957, epoch_length=361)
@@ -176,3 +177,32 @@ def test_untrusted_marker_cannot_bypass_current_artifact_freshness(runtime):
             artifact, runtime.previous['epoch'], crew=[(1, 'owner')],
             epoch_start_block_hash=runtime.previous['epoch_start_block_hash'],
             epoch_length=runtime.epoch_length)
+
+
+@pytest.mark.parametrize('digest', [None, 'f' * 64])
+def test_stale_fleet_requires_independent_current_archive_identity(runtime, digest):
+    chain, _, value = chain_replay(runtime)
+    accepted = runtime.rules.verified_fleet(runtime.artifact, runtime.epoch, value,
+        runtime.epoch_length, get_block_hash=chain.determine_block_hash,
+        current_archive_sha256=digest)
+    assert accepted['sequence_pool'] == []
+    assert accepted['handoff_diagnostics']['reason_counts'] == {'current_novelty_evidence_required': 2}
+
+
+@pytest.mark.parametrize('fault', ['accelerated_developability', 'empty_confirmation'])
+def test_actual_submitter_rules_refuse_unqualified_evidence(runtime, fault):
+    checkpoint = next(iter(runtime.artifact['sequence_pool_checkpoints'].values()))
+    evidence = copy.deepcopy(checkpoint['pr100_evidence'])
+    if fault == 'accelerated_developability':
+        evidence['developability'].update(authoritative=False, evidence_backend='cuda_refine')
+    else:
+        evidence['native_screen_confirmation'] = {'minimum': 3, 'measurements': []}
+    with pytest.raises(ValueError):
+        runtime.rules.validate_evidence(evidence, checkpoint['sequences'][0], runtime.previous,
+            runtime.rules.pinned_config(runtime.previous['epoch']))
+
+
+def test_target_override_cannot_relabel_old_scientific_assets(runtime, monkeypatch):
+    monkeypatch.setattr(runtime.rules, 'TARGET', 'UNQUALIFIED')
+    with pytest.raises(ValueError, match='target override'):
+        runtime.rules.pinned_config(runtime.epoch)

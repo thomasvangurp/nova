@@ -103,6 +103,35 @@ def test_bounded_devices_and_contexts():
     assert value['gpus']==[5,6,7] and value['workers_per_gpu']==4
     with pytest.raises(ValueError):screen.settings({'native_screen':{'workers_per_gpu':48}})
 
+@pytest.mark.parametrize('devices', [[{}], [True], [1, 1], [-1]])
+def test_malformed_gpu_allocations_are_rejected(devices):
+    with pytest.raises(ValueError, match='invalid_screen_devices'):
+        screen.settings({'native_screen': {'gpus': devices}})
+
+def test_cuda_wheel_requires_explicit_exact_version_profile():
+    versions = {**screen.PINNED_VERSIONS, 'torch': '2.7.1+cu126'}
+    assert screen.settings({})['runtime_versions'] == screen.PINNED_VERSIONS
+    assert screen.settings({'native_screen': {'runtime_versions': versions}})['runtime_versions'] == versions
+    sequence, request, record = fixture('cuda_refine')
+    record['provenance']['versions'] = versions
+    identity = {k:v for k,v in record['provenance'].items() if k not in ('final_refinement_success','refinement')}
+    record['runtime_identity_sha256'] = screen.digest(identity)
+    record['protocol_sha256'] = screen.digest(screen.protocol('cuda_refine', versions))
+    assert not screen.valid_record(record, request=request, sequence=sequence)
+    request['settings']['runtime_versions'] = versions
+    assert screen.valid_record(record, request=request, sequence=sequence)
+    assert record['authoritative'] is False
+    record['provenance']['versions'] = screen.PINNED_VERSIONS
+    assert not screen.valid_record(record, request=request, sequence=sequence)
+
+@pytest.mark.parametrize('versions', [None, [], {},
+    {**screen.PINNED_VERSIONS, 'torch':'2.7.1+cu128'},
+    {**screen.PINNED_VERSIONS, 'torch':'2.7.1+cpu'},
+    {**screen.PINNED_VERSIONS, 'openmm':'8.6.0'}])
+def test_unregistered_screen_version_profiles_rejected(versions):
+    with pytest.raises(ValueError, match='unregistered_screen_version_profile'):
+        screen.settings({'native_screen': {'runtime_versions': versions}})
+
 def test_screen_accepts_high_worker_count_for_cuda():
     # Master runs 96 workers (native_worker_overrides.master.workers=96); cpu is
     # unused for cuda_refine, so a high worker count must not trip screen_cpu_limit.
@@ -179,7 +208,7 @@ def test_discover_local_gpus_parses_and_filters_by_free_mib(monkeypatch):
         calls.append((command,kwargs))
         return SimpleNamespace(returncode=0,stdout=output)
     monkeypatch.setattr(screen.subprocess,'run',fake_run)
-    assert screen.discover_local_gpus(8192)==[0,2,3]
+    assert screen.discover_local_gpus(8192,[3,1,2,4])==[3,2]
     command,kwargs=calls[0]
     assert command==['nvidia-smi','--query-gpu=index,memory.free','--format=csv,noheader']
     assert kwargs['capture_output'] is True and kwargs['timeout']==8
@@ -195,7 +224,11 @@ def test_discover_local_gpus_fails_safe_on_telemetry_problems(monkeypatch,failur
             return SimpleNamespace(returncode=1,stdout='')
         return SimpleNamespace(returncode=0,stdout='garbage\n0,not-a-number MiB\n')
     monkeypatch.setattr(screen.subprocess,'run',fake_run)
-    assert screen.discover_local_gpus(8192)==[]
+    assert screen.discover_local_gpus(8192,[0,1])==[]
+
+def test_empty_allocation_never_uses_an_idle_unallocated_gpu(monkeypatch):
+    monkeypatch.setattr(screen.subprocess, 'run', lambda *a, **k: pytest.fail('empty allocation must not probe'))
+    assert screen.discover_local_gpus(8192,[]) == []
 
 def test_screen_settings_allow_up_to_eight_devices():
     value=screen.settings({'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':list(range(8))}})
@@ -204,14 +237,17 @@ def test_screen_settings_allow_up_to_eight_devices():
         screen.settings({'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':list(range(9))}})
 
 @pytest.mark.parametrize('discovered',[[],[0,2,7]])
-def test_coordinate_uses_local_discovery_not_config_gpus(tmp_path,monkeypatch,discovered):
+def test_coordinate_intersects_host_allocation_with_local_discovery(tmp_path,monkeypatch,discovered):
     class Control:
         def dedicated_controller(self):pass
         def stop_descendants(self,children,timeout):
             return {'remaining_descendants':0,'fixed_point_reached':True}
     class Proc:
         def poll(self):return 0
-    monkeypatch.setattr(screen,'discover_local_gpus',lambda minimum:discovered)
+    def discover(minimum, allowed):
+        assert minimum == 8192 and allowed == [1,2,3,4]
+        return [gpu for gpu in discovered if gpu in allowed]
+    monkeypatch.setattr(screen,'discover_local_gpus',discover)
     monkeypatch.setattr(screen,'capture_weights',lambda:{str(i):{'sha256':'a'*64} for i in range(1,5)})
     monkeypatch.setattr(screen.signal,'signal',lambda *a:None)
     monkeypatch.setattr(screen.signal,'setitimer',lambda *a:None)
@@ -224,8 +260,9 @@ def test_coordinate_uses_local_discovery_not_config_gpus(tmp_path,monkeypatch,di
         'gpu_lock_directory':str(tmp_path/'locks')}
     screen._coordinate(request)
     receipt=screen.json.loads((tmp_path/'coordinator.json').read_text())
-    assert receipt['devices']==discovered
-    assert receipt['status']=='finished'
+    assert receipt['devices']==([2] if discovered else [])
+    assert receipt['status']==('finished' if discovered else 'unavailable')
+    assert not (tmp_path/'gpu-0').exists() and not (tmp_path/'gpu-7').exists()
 
 def test_screen_batch_cuda_with_no_discoverable_devices_falls_back(tmp_path,monkeypatch):
     class Proc:
@@ -250,3 +287,40 @@ def test_screen_batch_cuda_with_no_discoverable_devices_falls_back(tmp_path,monk
     assert result['status']=='unavailable'
     assert result['profiles']=={}
     assert result['provenance']['gpus']==[]
+    assert result['reason']=='no_allocated_gpu_available'
+    assert result['measured_count']==0 and result['outcome_counts']=={'not_started':1}
+
+@pytest.mark.parametrize('mode', ['inconclusive', 'valid', 'unallocated_device'])
+def test_successful_child_exit_does_not_mask_screen_failure(tmp_path, monkeypatch, mode):
+    sequence, _, record = fixture('cuda_refine')
+    class Proc:
+        def wait(self, timeout=None): return 0
+    def launch(command, **kwargs):
+        root = Path(command[-1]).parent
+        request = json.loads((root/'request.json').read_text())
+        (root/'guard.json').write_text(json.dumps({'cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}))
+        (root/'coordinator.json').write_text(json.dumps({'devices':[7 if mode=='unallocated_device' else 2]}))
+        (root/'runtime-assets.json').write_text(json.dumps({str(i):{'sha256':'a'*64} for i in range(1,5)}))
+        results = root/'gpu-2/results'; results.mkdir(parents=True)
+        value = {**record, 'request_sha256':request['request_sha256'], 'screen_reason':None}
+        if mode=='inconclusive':
+            value = {'screen_outcome':'inconclusive','error_kind':'ValueError','initialization_stage':'version_identity'}
+        (results/(hashlib.sha256(sequence.encode()).hexdigest()+'.json')).write_text(json.dumps(value))
+        return Proc()
+    monkeypatch.setattr(screen.subprocess, 'Popen', launch)
+    job={'native_screen':{'enabled':True,'backend':'cuda_refine','gpus':[2]},
+         'challenge':{'epoch':25962},'native_tools':'/tools','release':'/release','source_sha':'a'*40}
+    result=screen.screen_batch([sequence],job=job,directory=tmp_path/'batch',timeout_seconds=60)
+    summary=json.loads((tmp_path/'batch/summary.json').read_text())
+    assert 'profiles' not in summary
+    if mode=='valid':
+        assert result['status']=='complete' and result['measured_count']==1
+        assert summary['outcome_counts']=={'passed':1}
+    else:
+        assert result['status']=='unavailable' and result['measured_count']==0 and result['profiles']=={}
+        if mode=='inconclusive':
+            assert summary['initialization_failure_counts']=={'version_identity':1}
+            assert summary['outcome_counts']=={'inconclusive':1}
+            assert summary['reason']=='no_valid_profiles'
+        else:
+            assert summary['reason']=='unallocated_screen_device'

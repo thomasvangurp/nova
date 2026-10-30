@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 SOURCE_PATHS = (
     'external_tools/fast_nanobody_scorer',
     'nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons', 'compound_miner',
+    'scoring_backfill/score_worker.py',
     'utils', 'config', 'combinatorial_db/reactions.py', 'tests', 'scripts',
     'deploy', 'ansible', '.github/workflows', 'requirements',
     'pixi.toml', 'pixi.lock', 'go_live_v2.sh', 'restart_v2.sh', 'deploy_gate.sh',
@@ -39,7 +40,7 @@ RESEARCH_FILES = frozenset({
 })
 RUNTIME_DIRS = ('nanobody_opt', 'nanobody_opt_v2', 'nanobody_dash', 'tools', 'neurons',
                 'compound_miner', 'utils', 'config', 'combinatorial_db',
-                'tests', 'scripts', 'deploy', 'NOVA-nanobody-filter', 'data')
+                'tests', 'scripts', 'deploy', 'NOVA-nanobody-filter', 'data', 'scoring_backfill')
 LIVE_CONFIG = {'config/config.yaml', 'config/boltzgen_config.yaml'}
 CONTROL_FILES = frozenset({
     'deploy_gate.sh', 'scripts/release_manifest.py', 'scripts/shipping_checks.py',

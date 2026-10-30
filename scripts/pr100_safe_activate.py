@@ -35,7 +35,8 @@ FORCE_ACTIVATION_RELEASE = 'd48b6be549210e94088c7951ed53850f3fa352cd'
 APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEASE,
                                     QUALIFIED_NOVELTY_RELEASE, ARCHIVE_CACHE_RELEASE,
                                     TERMINAL_INVALIDATION_RELEASE, PRODUCTION_YIELD_RELEASE,
-                                    FORCE_ACTIVATION_RELEASE})
+                                    FORCE_ACTIVATION_RELEASE,
+                                    'ca091f95553ec4302c2221f703883bd35488795d'})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -367,7 +368,8 @@ def enable_native_screen(value, backend):
     per-host work-conserving refill flag: the live controller treats those as
     mutually exclusive operating modes.
     """
-    value['worker']['native_screen'] = {'enabled': True, 'backend': backend}
+    value['worker']['native_screen'] = {**value['worker'].get('native_screen', {}),
+                                      'enabled': True, 'backend': backend}
     if value['worker'].get('native_interleave_confirmations'):
         value['worker']['native_interleave_confirmations'] = False
     for override in value.get('native_worker_overrides', {}).values():
@@ -398,10 +400,116 @@ def rollout_options(value, *, native_refill_hosts=(), missing_cell_donors=False)
     return value
 
 
+def recovery_rollout(value, receipt, sha):
+    """Apply only source-bound, measured recovery options to a candidate config.
+
+    This runs before service validation and the final boundary/race checks.
+    It never changes a live config, continuation, or scientific evidence file.
+    """
+    if receipt is None:
+        return value
+    allowed = {'schema', 'source_sha', 'native_screen_hosts', 'reference_bank', 'edit_generation'}
+    if (not isinstance(receipt, dict) or set(receipt) - allowed
+            or receipt.get('schema') != 'pr100-recovery-rollout-v1'
+            or receipt.get('source_sha') != sha):
+        raise ValueError('invalid_recovery_rollout_identity')
+    candidate = copy.deepcopy(value)
+
+    def positive(number):
+        return type(number) is int and number > 0
+
+    def clean(proof):
+        cleanup = proof.get('cleanup', {})
+        return (isinstance(cleanup, dict) and type(cleanup.get('remaining_descendants')) is int
+                and cleanup['remaining_descendants'] == 0 and cleanup.get('fixed_point_reached') is True)
+
+    def bound(proof):
+        return isinstance(proof, dict) and proof.get('source_sha') == sha and proof.get('status') == 'complete'
+
+    hosts = receipt.get('native_screen_hosts', {})
+    if (not isinstance(hosts, dict)
+            or set(hosts) - set(candidate.get('native_hosts', ['master']))):
+        raise ValueError('invalid_recovery_screen_hosts')
+    if hosts:
+        from nanobody_opt import pr100_native_screen as screen
+        keys = {'enabled', 'backend', 'workers_per_gpu', 'workers', 'gpu_minimum_free_mib',
+                'gpus', 'runtime_versions'}
+        for host, entry in hosts.items():
+            supplied = entry.get('settings') if isinstance(entry, dict) else None
+            if (not isinstance(entry, dict) or set(entry) - {'settings', 'smoke'}
+                    or not isinstance(supplied, dict) or set(supplied) - keys):
+                raise ValueError('invalid_recovery_screen_settings')
+            override = candidate.setdefault('native_worker_overrides', {}).setdefault(host, {})
+            worker = {**candidate['worker'], **override, 'native_screen': supplied}
+            normalized = screen.settings(worker)
+            if normalized['workers'] > worker.get('cpu_slots', worker.get('workers', 48)):
+                raise ValueError('recovery_screen_exceeds_cpu_allocation')
+            if normalized['enabled']:
+                smoke = entry.get('smoke', {})
+                if (not bound(smoke) or not clean(smoke)
+                        or smoke.get('host') != host
+                        or not positive(smoke.get('measured_count'))
+                        or type(smoke.get('runtime_inconclusive_count')) is not int
+                        or smoke['runtime_inconclusive_count'] != 0
+                        or smoke.get('settings_sha256') != screen.digest(normalized)
+                        or smoke.get('protocol_sha256') != screen.digest(screen.protocol(
+                            normalized['backend'], normalized['runtime_versions']))
+                        or normalized['backend'] == 'cuda_refine' and not normalized['gpus']):
+                    raise ValueError('recovery_screen_smoke_not_qualified')
+                if candidate['worker'].get('native_interleave_confirmations') is True:
+                    raise ValueError('recovery_screen_conflicts_with_interleaving')
+                if override.get('native_work_conserving') is True:
+                    raise ValueError('recovery_screen_conflicts_with_refill')
+                if normalized['backend'] == 'cuda_refine':
+                    candidate.setdefault('native_gpu_by_host', {})[host] = normalized['gpus']
+            override['native_screen'] = normalized
+
+    bank = receipt.get('reference_bank')
+    if bank is not None:
+        if (not isinstance(bank, dict)
+                or set(bank) - {'path', 'sha256', 'rows', 'annotation_qualification'}):
+            raise ValueError('invalid_recovery_reference_bank')
+        path, proof = bank.get('path'), bank.get('annotation_qualification', {})
+        runtime = candidate.get('hosts', {}).get('slave', {}).get('novelty_runtime', {}).get('identity_sha256')
+        if (not isinstance(path, str) or not re.fullmatch(r'/root/[A-Za-z0-9_./-]+[.]json', path)
+                or '..' in Path(path).parts or not hash_value(bank.get('sha256'))
+                or not positive(bank.get('rows')) or not bound(proof)
+                or proof.get('host') != 'slave'
+                or proof.get('bank_sha256') != bank['sha256']
+                or type(proof.get('annotated_rows')) is not int or proof['annotated_rows'] != bank['rows']
+                or not hash_value(runtime) or proof.get('runtime_sha256') != runtime):
+            raise ValueError('recovery_reference_bank_not_qualified')
+        candidate['hosts']['slave'].update(references=path, reference_bank_sha256=bank['sha256'])
+
+    edits = receipt.get('edit_generation')
+    if edits is not None:
+        from nanobody_opt.pr100_live_worker import edit_generation_settings
+        supplied = edits.get('settings') if isinstance(edits, dict) else None
+        if (not isinstance(edits, dict) or set(edits) - {'settings', 'qualification'}
+                or not isinstance(supplied, dict) or set(supplied) - {'enabled', 'limit'}):
+            raise ValueError('invalid_recovery_edit_settings')
+        settings = edit_generation_settings({'edit_generation': supplied})
+        if settings['enabled']:
+            from nanobody_opt import rules
+            proof = edits.get('qualification', {})
+            bank_hash = candidate['hosts']['slave'].get('reference_bank_sha256')
+            if (not bound(proof) or not clean(proof) or not hash_value(bank_hash)
+                    or proof.get('bank_sha256') != bank_hash
+                    or proof.get('settings_sha256') != digest(settings)
+                    or not hash_value(proof.get('archive_sha256'))
+                    or proof.get('filter_sha') != rules.FILTER_SHA
+                    or not positive(proof.get('tested_candidates'))
+                    or not positive(proof.get('novelty_passed_count'))
+                    or proof['novelty_passed_count'] > proof['tested_candidates']):
+                raise ValueError('recovery_edit_novelty_not_qualified')
+        candidate['worker']['edit_generation'] = settings
+    return candidate
+
+
 def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_runtimes=None,
                     interleave_confirmations=False, native_refill_hosts=(), missing_cell_donors=False,
                     native_screen=None, force=False):
-    if not force and current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
+    if current.get('source_sha') not in APPROVED_PREDECESSORS | {sha}:
         raise ValueError('unexpected_current_release')
     mode = selected_mode(current, mode)
     if mode not in ('master', 'both'):
@@ -543,21 +651,23 @@ def recovery_required(sha, epoch, error, *, start_attempted):
 
 
 def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
-            native_refill_hosts=(), missing_cell_donors=False, native_screen=None, clock_reader=current_clock,
+            native_refill_hosts=(), missing_cell_donors=False, native_screen=None, recovery_rollout_receipt=None,
+            clock_reader=current_clock,
             service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
     clock = clock_reader()
     migration = (novelty_runtimes is not None and any(
         config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
         != runtime.get('identity_sha256') for host, runtime in novelty_runtimes.items()))
-    protect_partial = bool(native_refill_hosts) and config.get('source_sha') != sha
-    if not force and not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
+    protect_partial = config.get('source_sha') != sha
+    if not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
                                interleave_confirmations=interleave_confirmations,
                                native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors,
                                native_screen=native_screen, force=force)
+    proposal = recovery_rollout(proposal, recovery_rollout_receipt, sha)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -577,11 +687,11 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     changed, start_attempted = False, False
     # Keep the short pause between attempts free of another slow chain RPC.
     # The fresh chain check under the lock below still precedes any install.
-    if not force and (path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
+    if (path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
                                                     protect_partial_native=protect_partial)):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     # The prepared config must use the same current epoch as the final check.
-    if not force and proposal['start_epoch'] != clock['epoch']:
+    if proposal['start_epoch'] != clock['epoch']:
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     try:
         service.stop()
@@ -589,9 +699,9 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
         with (Path(config['state_root']) / 'controller.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fresh = clock_reader()
-            raced = (not force and (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
+            raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
                      or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration,
-                                     protect_partial_native=protect_partial)))
+                                     protect_partial_native=protect_partial))
             if not raced:
                 # Do not rewrite continuation state or the publication artifact.
                 changed = True
@@ -638,6 +748,8 @@ def main(argv=None):
                         help='Enable the non-authoritative native developability pre-filter on the chosen backend')
     parser.add_argument('--missing-cell-donors', action='store_true',
                         help='Enable bounded missing-cell donors with unchanged validation and unseeded controls')
+    parser.add_argument('--recovery-rollout-receipt', type=Path,
+                        help='Source-bound measured screen, annotated bank and novelty-qualified edit rollout')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if args.native_screen is not None and args.interleave_confirmations:
@@ -669,7 +781,9 @@ def main(argv=None):
                                         native_refill_hosts=args.native_refill_host,
                                         missing_cell_donors=args.missing_cell_donors,
                                         native_screen=args.native_screen,
-                                        force=os.environ.get('SN68_FORCE_ACTIVATION') == '1')
+                                        recovery_rollout_receipt=(read(args.recovery_rollout_receipt, {})
+                                            if args.recovery_rollout_receipt else None),
+                                        force=False)
                     except ClockUnavailable:
                         value = {'status': 'waiting_for_fresh_clock'}
                 atomic(report, {**value, 'source_sha': args.sha, 'mode': args.mode, 'updated_at_unix': time.time()})

@@ -121,3 +121,44 @@ the experimental accelerated-screen combination.
 Subprocess stdout/stderr is captured. Reports contain only operational status,
 release identifiers, counts and error classes. No credential values or raw
 authentication output are retained.
+
+## Recovery lessons from epochs 26014–26018
+
+The October 29 audit found independent failures: release changes invalidated
+active dispatch identities; a legacy resident scorer pool left production GPUs
+below their admission threshold; the unseeded generator repeated only a handful
+of sequences; novelty removed complete native passers; and the slave accelerated
+screen rejected its installed CUDA wheel version. Aggregation failures alone did
+not explain the incident.
+
+`SN68_FORCE_ACTIVATION` no longer bypasses ownership, epoch, configuration-race
+or predecessor checks. Preserve frozen dispatch provenance. Never rewrite an old
+attempt's SHA or remove its evidence to force a release change. An emergency
+recovery must collect or stop its identified owners and verify cleanup first.
+
+Reserve production GPUs explicitly in `pr100-reserved-gpus.json`, using schema
+`pr100-gpu-reservation-v1`, owner `pr100-live-controller`, and the allocated
+integer GPU IDs. Drain the identified old daemon before restart. The legacy
+daemon and adapter fallback refuse these devices; production adapter access
+requires an inherited kernel lease. A larger free-memory claim or a bare
+`--no-daemon` flag is not ownership. Background replay must use its own allocation.
+
+`--recovery-rollout-receipt PATH` applies measured per-host screen settings and
+an annotated, hash-pinned parent bank inside the same atomic handoff. Screen
+qualification binds the exact source, host, settings and protocol and requires
+completed profiles and verified cleanup. A zero-exit process with no profiles
+does not qualify. The optional parent-edit lane additionally requires measured
+novelty survivors. These checks do not establish native scientific parity or
+competitive superiority; those need separately measured evidence.
+
+Shipping CI now tests the packaged Pi layout from the same release bytes and
+rejects changed test suites omitted from its blocking list. After deployment,
+compare actual installed hashes. Historical scientific fixtures retain their
+original targets; changing a label cannot create current-target evidence.
+
+Monitor the full funnel: unique new proposals, annotation, native admissions,
+developability, novelty, GPU admission, scored candidates, publications and
+validator acceptance. Fresh evaluations and repeat measurements are separate
+counters. Compare candidate quality against rivals on the same target, field
+and scoring protocol. Diversity and throughput benchmarks alone do not prove
+competitive scoring.

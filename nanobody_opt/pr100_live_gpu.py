@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -31,6 +32,7 @@ ENV_KEYS = {'PATH', 'HOME', 'USER', 'LANG', 'LD_LIBRARY_PATH', 'PYTHONPATH',
             'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
             'NANOBODY_FAST_SCORER_CONFIG', 'NANOBODY_SCORER_DAEMON',
             'NANOBODY_SCORER_SOCKET', 'PYTHONDONTWRITEBYTECODE'}
+LEASE_ENV_KEYS = ('PR100_GPU_LEASE_FD', 'PR100_GPU_LEASE_GPU', 'PR100_GPU_LEASE_OWNER_PID')
 
 
 class Unavailable(RuntimeError):
@@ -53,6 +55,47 @@ def atomic(path, value):
         Path(name).unlink(missing_ok=True)
 
 
+def inherited_lease_fd(gpus, *, environment=None, proc_root=Path('/proc')):
+    """Verify an inherited Linux kernel lease, not an environment-only claim.
+
+    The locked descriptor must refer to this GPU's lock and its kernel-reported
+    owner must still be a live ancestor. Only the lease runner creates these
+    variables; supplied worker environments cannot set them.
+    """
+    import stat
+    environment = os.environ if environment is None else environment
+    try:
+        values = [environment[key] for key in LEASE_ENV_KEYS]
+        if any(not isinstance(v, str) or not re.fullmatch(r'[0-9]+', v) for v in values):
+            return None
+        fd, gpu, owner = map(int, values)
+        if fd < 3 or owner <= 1 or [str(gpu)] != [str(int(g)) for g in gpus]:
+            return None
+        info = os.fstat(fd)
+        target = Path(os.readlink(proc_root / 'self' / 'fd' / str(fd)))
+        if not stat.S_ISREG(info.st_mode) or target.name != f'gpu-{gpu}.lock':
+            return None
+        locks = re.findall(r'^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+WRITE\s+(\d+)\s+'
+                           r'([0-9a-fA-F]+):([0-9a-fA-F]+):(\d+)\s+0\s+EOF\s*$',
+                           (proc_root / 'self' / 'fdinfo' / str(fd)).read_text(), re.MULTILINE)
+        expected = (owner, os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+        if not any((int(pid), int(major, 16), int(minor, 16), int(inode)) == expected
+                   for pid, major, minor, inode in locks):
+            return None
+        parent, seen = os.getppid(), set()
+        while parent > 1 and parent not in seen and len(seen) < 64:
+            seen.add(parent)
+            fields = (proc_root / str(parent) / 'stat').read_text().rsplit(')', 1)[1].split()
+            if fields[0] == 'Z':
+                return None
+            if parent == owner:
+                return fd
+            parent = int(fields[1])
+    except (KeyError, OSError, TypeError, ValueError, IndexError):
+        pass
+    return None
+
+
 @contextmanager
 def lease_locks(gpu, directory, dispatcher_locks=()):
     """Kernel-owned leases cannot survive the owning process's death."""
@@ -62,6 +105,7 @@ def lease_locks(gpu, directory, dispatcher_locks=()):
     if len({str(p.resolve()) for p in paths}) != len(paths):
         raise Unavailable('duplicate_coordination_lock')
     with ExitStack() as stack:
+        own_fd = None
         for path in sorted(paths, key=lambda p: str(p.resolve())):
             if path != own and (not path.is_file() or path.suffix != '.lock'):
                 raise Unavailable('dispatcher_lock_missing')
@@ -74,7 +118,9 @@ def lease_locks(gpu, directory, dispatcher_locks=()):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Unavailable('coordination_lock_busy') from None
-        yield
+            if path == own:
+                own_fd = fd
+        yield own_fd
 
 
 def _query(fields, kind):
@@ -218,7 +264,7 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
             raise Unavailable('existing_process_deadline')
         prior[signal.SIGALRM] = signal.signal(signal.SIGALRM, expired)
         signal.setitimer(signal.ITIMER_REAL, ttl - 4)
-        with lease_locks(gpu, job['lock_directory'], job.get('dispatcher_locks', [])):
+        with lease_locks(gpu, job['lock_directory'], job.get('dispatcher_locks', [])) as lease_fd:
             try:
                 first = snapshot(gpu, job['scorer'])
                 sleep(2)
@@ -227,11 +273,14 @@ def run_reserved(job, *, snapshot=gpu_snapshot, control=None, launch=subprocess.
                 result.update(status='reserved', admission=second)
                 atomic(job['receipt'], result)
                 env = dict(supplied_env, CUDA_VISIBLE_DEVICES=str(gpu))
+                env.update(PR100_GPU_LEASE_FD=str(lease_fd), PR100_GPU_LEASE_GPU=str(gpu),
+                           PR100_GPU_LEASE_OWNER_PID=str(os.getpid()))
                 if clock() >= deadline - 5:
                     raise Unavailable('reservation_expired_before_launch')
                 child = launch(job['command'], env=env, cwd=job['cwd'],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=True)
+                               stderr=subprocess.DEVNULL, start_new_session=True,
+                               pass_fds=(lease_fd,))
                 children.append(child); result.update(status='running', child_pid=child.pid)
                 atomic(job['receipt'], result)
                 while child.poll() is None:

@@ -170,6 +170,31 @@ def test_native_screen_job_has_lease_context_but_keeps_cpu_confirmation_environm
     assert scoring['spec']['environment']['CUDA_VISIBLE_DEVICES'] == '0,1'
 
 
+def test_native_screen_uses_host_allocation_and_exact_runtime_profile(tmp_path, monkeypatch):
+    import base64
+    from nanobody_opt.pr100_native_screen import PINNED_VERSIONS, settings
+    value = config(tmp_path, native_hosts=['master', 'slave'], native_gpu_by_host={'slave': [0]})
+    value['worker']['native_screen'] = {'enabled': True, 'backend': 'cuda_refine'}
+    monkeypatch.setattr(controller, 'verify_build_stamp', lambda config: None)
+    selected = {**PINNED_VERSIONS, 'torch': '2.7.1+cu126'}
+    value['native_worker_overrides'] = {'slave': {'native_screen': {
+        'enabled': True, 'backend': 'cuda_refine', 'runtime_versions': selected}}}
+    controller.validate_config(value)
+    host, request = controller.phase_request({**value, '_native_host': 'slave'}, challenge(),
+        'native', {'archive.csv': b'x'}, time.time() + 2000, clock())
+    job = json.loads(base64.b64decode(request['files']['job.json']))
+    assert host == 'slave'
+    assert settings(job)['gpus'] == [0]
+    assert settings(job)['runtime_versions'] == selected
+    assert request['spec']['environment']['CUDA_VISIBLE_DEVICES'] == ''
+
+
+@pytest.mark.parametrize('devices', [[True], [0, 0], [-1], list(range(9)), '0'])
+def test_native_host_allocation_rejects_invalid_devices(tmp_path, devices):
+    with pytest.raises(ValueError, match='native GPU host allocation'):
+        controller.validate_config(config(tmp_path, native_gpu_by_host={'slave': devices}))
+
+
 @pytest.mark.parametrize('devices', [[], [1, 1], [True], [-1], list(range(9)), '5,6,7'])
 def test_native_screen_rejects_invalid_device_allocation(tmp_path, monkeypatch, devices):
     value = config(tmp_path, native_gpu=devices)

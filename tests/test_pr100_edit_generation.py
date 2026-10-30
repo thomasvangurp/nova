@@ -239,7 +239,9 @@ def test_generate_limit_counts_only_kept_candidates():
 def _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=('AAA',)):
     panel = real_panel()
     monkeypatch.setitem(sys.modules, 'abnumber', types.SimpleNamespace(
-        Chain=lambda sequence, **kw: types.SimpleNamespace(cdr3_seq=sequence[96:-11])))
+        Chain=lambda sequence, **kw: types.SimpleNamespace(**{
+            key + '_seq': sequence[slice(*getattr(find_regions(sequence), key))]
+            for key in ('cdr1', 'cdr2', 'cdr3')})))
     monkeypatch.setattr(worker.rules, 'pinned_config', lambda epoch: {'nanobody_requirements': {}})
     monkeypatch.setattr(worker.pr100_filter, 'validate_annotation_runtime', lambda: None)
     monkeypatch.setattr(worker.pr100_filter, 'helper', lambda name:
@@ -279,8 +281,8 @@ def test_worker_edit_lane_off_by_default_and_on_emits_gate_passing_children(
     parent1 = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
     pos = _safe_framework_position(parent1)
     parent2 = _variant(parent1, pos, 'S')
-    background = _variant(parent1, pos, 'T')
-    background2 = _variant(parent1, pos, 'N')
+    background = _variant(_variant(parent1, pos, 'T'), 0, 'E')
+    background2 = _variant(_variant(parent1, pos, 'N'), 0, 'E')
     bank_rows = [
         {'sequence': parent1, 'sequence_hash': rules.sequence_hash(parent1),
          'cells': ['IGHV3-23:5'], 'source': 'rival_bank_test'},
@@ -302,6 +304,7 @@ def test_worker_edit_lane_off_by_default_and_on_emits_gate_passing_children(
     assert on['edit_generation_enabled'] is True
     assert on['edit_generation_candidates'] >= 2
     assert set(on['edit_generation_source_counts']) <= {
+        'novelty_aware_multi_edit',
         'framework_single_substitution', 'n_terminal_single_substitution',
         'c_terminal_single_substitution', 'framework_haplotype',
         'n_terminal_haplotype', 'c_terminal_haplotype',
@@ -320,7 +323,7 @@ def test_worker_edit_lane_off_by_default_and_on_emits_gate_passing_children(
 def test_worker_edit_lane_limit_counts_only_non_excluded_candidates(monkeypatch, tmp_path):
     panel = real_panel()
     parent = propose(panel, 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
-    archive = _lane_rich_pool(parent)
+    archive = [_variant(s, 0, 'E') for s in _lane_rich_pool(parent)]
     bank_rows = [{'sequence': parent, 'sequence_hash': rules.sequence_hash(parent),
                   'cells': ['IGHV3-23:5'], 'source': 'rival_bank_test'}]
     run = _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=tuple(archive))
@@ -332,8 +335,8 @@ def test_worker_edit_lane_limit_counts_only_non_excluded_candidates(monkeypatch,
     assert first['excluded_generated'] == 0
     # A continuation excluding every prior edit child must still receive a full
     # ``limit`` of fresh ones; the cap is applied after exclusion, not before.
-    prior = edit.generate([parent], background_sequences=archive, limit=3)
-    assert len(prior) == 3
+    prior = [r for r in first['candidates'] if r.get('source') == 'edit_generation']
+    assert prior
     second = run(challenge, edit_generation=settings,
                  excluded_sequence_hashes=[rules.sequence_hash(c['sequence']) for c in prior])
     assert second['edit_generation_candidates'] == 3
@@ -369,8 +372,73 @@ def test_worker_rejects_non_standard_residues_before_annotation(monkeypatch, tmp
                  'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
 
     result = run(challenge, edit_generation={'enabled': True, 'limit': 50})
-    assert result['annotation_reasons'].get('basic_sequence', 0) >= 1
+    assert result['edit_generation_stats'].get('parent_annotation_failed', 0) == 1
     assert annotated and all(set(s) <= gates.ALLOWED_AAS for s in annotated)
     assert all(set(r['sequence']) <= gates.ALLOWED_AAS for r in result['candidates'])
-    assert result['edit_generation_stats'] == {'malformed_parents': 0}
+    assert result['edit_generation_stats'] == {'malformed_parents': 1, 'parent_annotation_failed': 1}
     assert result['edit_generation_candidates'] <= 50
+
+
+def test_mixed_length_parents_each_receive_round_robin_slot():
+    panel = real_panel()
+    parents = [propose(panel, 'IGHV3-23', length, seed=9, ordinal=0)['sequence']
+               for length in (5, 16)]
+    background = []
+    for parent in parents:
+        pos = _safe_framework_position(parent)
+        background.extend([_variant(parent, pos, 'S'), _variant(parent, pos, 'T')])
+    children = edit.generate(parents, background_sequences=background, limit=2)
+    assert [c['parent_sequence'] for c in children] == parents
+    assert {len(c['sequence']) for c in children} == {len(p) for p in parents}
+
+
+def test_zero_edit_limit_emits_no_work():
+    parent = propose(real_panel(), 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    assert edit.generate([parent], background_sequences=_lane_rich_pool(parent), limit=0) == []
+
+
+def test_worker_never_sends_exact_archive_repeats_to_annotation(monkeypatch, tmp_path):
+    parent = propose(real_panel(), 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    row = {'sequence': parent, 'sequence_hash': rules.sequence_hash(parent),
+           'cells': ['IGHV3-23:5'], 'source': 'test'}
+    run = _edit_runner(monkeypatch, tmp_path, [row], archive_sequences=(parent,))
+    calls = []
+    monkeypatch.setattr(worker.pr100_filter, '_annotate_uncached',
+        lambda sequence: calls.append(sequence) or {'fixture_annotation': True})
+    c = {'epoch': 25969, 'target': rules.TARGET,
+         'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
+    result = run(c)
+    assert parent not in calls
+    assert parent not in {r['sequence'] for r in result['candidates']}
+    assert result['historical_exact_reuse_blocked'] == 1
+
+
+def test_multi_edit_arm_strict_parent_identity_and_immutable_framework():
+    panel = real_panel()
+    for length in (5, 6, 12, 16, 23):
+        parent = propose(panel, 'IGHV3-23', length, seed=9, ordinal=0)['sequence']
+        regions = find_regions(parent)
+        cdrs = {key: parent[slice(*getattr(regions, key))] for key in ('cdr1', 'cdr2', 'cdr3')}
+        rows = edit.generate([parent], limit=32, novelty_aware=True, parent_cdrs={parent: cdrs})
+        assert len(rows) == 32
+        mutable = set(regions.cdr_positions())
+        c3 = list(range(*regions.cdr3))
+        for row in rows:
+            child = row['sequence']
+            assert row['proposal_lane'] == 'novelty_aware_multi_edit'
+            assert sum(a == b for a, b in zip(parent, child)) / len(parent) < 0.95
+            assert sum(parent[i] == child[i] for i in c3) / len(c3) < 0.85
+            assert all(child[i] == parent[i] for i in range(len(parent))
+                       if i not in mutable or parent[i] == 'C' or i in c3[-3:])
+            assert child.count('C') == parent.count('C')
+        assert rows == edit.generate([parent], limit=32, novelty_aware=True, parent_cdrs={parent: cdrs})
+
+
+def test_multi_edit_requires_annotation_and_retains_mixed_length_parents():
+    parents = [propose(real_panel(), 'IGHV3-23', length, seed=9, ordinal=0)['sequence']
+               for length in (5, 16)]
+    cdrs = {p: {key: p[slice(*getattr(find_regions(p), key))]
+                for key in ('cdr1', 'cdr2', 'cdr3')} for p in parents}
+    assert edit.generate(parents, limit=2, novelty_aware=True) == []
+    rows = edit.generate(parents, limit=2, novelty_aware=True, parent_cdrs=cdrs)
+    assert [r['parent_sequence'] for r in rows] == parents

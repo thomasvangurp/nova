@@ -8,6 +8,70 @@ from nanobody_opt import rules, pr100_fresh_budget as fresh_budget
 
 SCHEMA = 'pr100-epoch-continuation-v1'
 
+
+def failure_details(error):
+    """Identify refusals without persisting exception text, locals or raw tracebacks."""
+    codes = {
+        'saved phase input or source identity mismatch': 'phase_binding_mismatch',
+        'saved phase epoch mismatch': 'phase_epoch_mismatch',
+        'native dispatch routing or settings changed': 'native_dispatch_binding_mismatch',
+        'saved fresh admission plan input changed': 'fresh_plan_input_changed',
+        'saved native input exceeds or conflicts with fresh reservation': 'fresh_saved_input_conflict',
+        'fresh admission outside persisted epoch reservation': 'fresh_admission_outside_reservation',
+        'fresh admission and never-started evidence conflict': 'fresh_admission_conflict',
+        'incomplete carried native validity': 'native_validity_incomplete',
+        'score phase returned no scored group': 'score_no_group',
+        'scorer target changed': 'score_target_mismatch',
+        'duplicate scorer group': 'score_duplicate_group',
+        'continuation scoring identity changed': 'score_identity_mismatch',
+        'continuation target changed': 'continuation_target_mismatch',
+    }
+    message = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    result = {'error_code': codes.get(message, 'unclassified')}
+    root = Path(__file__).resolve().parent
+    allowed = {'pr100_epoch_continuation.py', 'pr100_live_controller.py',
+               'pr100_native_dispatch.py', 'pr100_fresh_budget.py', 'rules.py',
+               'pr100_novelty_runtime.py'}
+    trace = error.__traceback__
+    while trace is not None:
+        source = Path(trace.tb_frame.f_code.co_filename).resolve()
+        if source.parent == root and source.name in allowed:
+            result['error_location'] = f'{source.name}:{trace.tb_lineno}'
+        trace = trace.tb_next
+    return result
+
+
+def empty_score_attempt(files, challenge, rows):
+    """Recognize an explicit zero-score result without inventing scorer identity.
+
+    A partial run (including unavailable GPU leases) can finish with no groups
+    and therefore no scorer settings. Missing/malformed artifacts still follow
+    the strict merge path. Admission evidence decides which rows may be retried.
+    """
+    value = json.loads(files.get('result.json', b'{}'))
+    report = json.loads(files.get('score/report.json', b'{}'))
+    if not isinstance(value, dict) or not isinstance(report, dict):
+        return False
+    if (value.get('challenge') != challenge or value.get('epoch') != challenge['epoch']
+            or value.get('status') not in ('complete', 'partial')
+            or value.get('status') != report.get('status')
+            or value.get('input_count') != len(rows) or value.get('candidates') != []
+            or type(value.get('scored_candidates')) is not int or value['scored_candidates'] != 0
+            or report.get('schema') != 'pr100-live-score-v1' or report.get('groups') != []
+            or type(report.get('scored_candidates')) is not int or report['scored_candidates'] != 0
+            or report.get('registered_scorer_sha256') is not None
+            or 'score/scorer_settings.json' in files):
+        return False
+    attempted, deferred = value.get('attempted_sequence_hashes'), value.get('deferred_sequence_hashes')
+    if (not isinstance(attempted, list) or not isinstance(deferred, list)
+            or any(type(h) is not str for h in attempted + deferred)
+            or report.get('attempted_sequence_hashes') != attempted):
+        return False
+    expected = {rules.sequence_hash(r['sequence']) for r in rows}
+    return (len(set(attempted + deferred)) == len(attempted) + len(deferred)
+            and set(attempted + deferred) == expected)
+
+
 def read(path, default=None):
     try:
         return json.loads(Path(path).read_text())
@@ -400,17 +464,20 @@ def migrate(local, challenge, config, *, ownership_verified=False):
             state['legacy_uncertain_phase'] = phase
     return state
 
-def mode_for(state):
+def mode_for(state, *, now=None):
+    now = time.time() if now is None else now
     if state.get('pending_publication'):
         return 'publish'
     scored, attempted = set(state['score_rows']), set(state['score_attempted_hashes'])
-    if any(r['sequence'] not in scored and rules.sequence_hash(r['sequence']) not in attempted
-           for r in state['native_rows']):
+    unscored = any(r['sequence'] not in scored and rules.sequence_hash(r['sequence']) not in attempted
+                   for r in state['native_rows'])
+    score_ready = now >= state.get('score_retry_after_unix', 0)
+    if unscored and score_ready:
         return 'score'
     if state.get('pending_confirmation'):
         return 'native'
     if state.get('fresh_native_budget') and fresh_budget.summary(state['fresh_native_budget'])['remaining'] == 0:
-        return 'fresh_budget_exhausted'
+        return 'score_backoff' if unscored else 'fresh_budget_exhausted'
     seen = set(state['native_attempted_hashes'])
     if any(rules.sequence_hash(r['sequence']) not in seen for r in state['pending_native']):
         return 'native'
@@ -480,10 +547,18 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     mode = state['active']['phase'] if state.get('active') else mode_for(state)
     if not c.admissible(clock, epoch, reserve=config.get('reserve_blocks', c.RESERVE_BLOCKS)):
         return {'status': 'epoch_cutoff', 'epoch': epoch}
-    if mode == 'fresh_budget_exhausted':
-        return {'status': mode, 'epoch': epoch, 'fresh_native_budget': fresh_budget.summary(budget)}
+    if mode in ('fresh_budget_exhausted', 'score_backoff'):
+        return {'status': mode, 'epoch': epoch, 'fresh_native_budget': fresh_budget.summary(budget),
+                'score_retry_after_unix': state.get('score_retry_after_unix')}
     if not state.get('active') and stop_at - time.time() < required_seconds(mode, config):
-        return {'status': 'insufficient_remaining_window', 'epoch': epoch, 'next_phase': mode}
+        # Do not let useful-work scheduling hide the last viable score window.
+        # The persisted resource backoff is capped at that window's start.
+        score_due = (mode_for(state, now=time.time()) == 'score')
+        if score_due and stop_at - time.time() >= required_seconds('score', config):
+            mode = 'score'
+        else:
+            return {'status': 'insufficient_remaining_window', 'epoch': epoch, 'next_phase': mode}
+
     if not state.get('active'):
         number = state['next_attempt']; state['next_attempt'] += 1
         state['active'] = {'number': number, 'phase': mode, 'proposal_offset': state['proposal_offset']}
@@ -545,6 +620,10 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 raise ValueError('incomplete sequence phase')
             state['generated_hashes'] = sorted(set(state['generated_hashes']) |
                 set(value.get('generated_sequence_hashes', [rules.sequence_hash(r['sequence']) for r in value['candidates']])))
+            next_offset = value.get('next_proposal_offset', state['proposal_offset'])
+            if type(next_offset) is not int or next_offset < active['proposal_offset']:
+                raise ValueError('invalid sequence continuation offset')
+            state['proposal_offset'] = max(state['proposal_offset'], next_offset)
             state['pending_native'] = union_rows(state['pending_native'], value['candidates'])
             active['phase'] = 'native'; save()
         if active['phase'] == 'native':
@@ -611,11 +690,28 @@ def run_epoch(config, chain, clock, *, dry_run=False):
             seen = set(state['score_attempted_hashes'])
             rows = [r for r in state['native_rows'] if r['sequence'] not in state['score_rows']
                     and rules.sequence_hash(r['sequence']) not in seen]
-            if rows:
+            if rows and time.time() >= state.get('score_retry_after_unix', 0):
                 files = phase('score', {'input.json': json.dumps({'sequences': [r['sequence'] for r in rows]}).encode()})
-                scores, settings, scorer_hash = c.merge_scores(files, challenge['target'])
-                merge_scoring(state, scores, settings, scorer_hash,
-                    hashlib.sha256(files['score/scorer_settings.json']).hexdigest())
+                if empty_score_attempt(files, challenge, rows):
+                    receipt['score_outcome'] = 'no_scored_candidate'
+                    if not json.loads(files['result.json'])['attempted_sequence_hashes']:
+                        failures = state.get('score_resource_failures', 0) + 1
+                        delay = min(300, 30 * (2 ** min(failures - 1, 4)))
+                        report = json.loads(files['score/report.json'])
+                        state.update(score_resource_failures=failures,
+                                     score_retry_after_unix=min(time.time() + delay,
+                                         stop_at - required_seconds('score', config)),
+                                     score_resource_reasons=sorted({v['lease_reason'] for v in report.get('shards', [])
+                                         if v.get('lease_reason') in ('insufficient_gpu_headroom', 'gpu_not_idle',
+                                             'coordination_lock_busy', 'gpu_missing', 'gpu_telemetry_failed')}))
+                        receipt['score_retry_after_unix'] = state['score_retry_after_unix']
+                else:
+                    scores, settings, scorer_hash = c.merge_scores(files, challenge['target'])
+                    state.pop('score_retry_after_unix', None)
+                    state.pop('score_resource_failures', None)
+                    state.pop('score_resource_reasons', None)
+                    merge_scoring(state, scores, settings, scorer_hash,
+                        hashlib.sha256(files['score/scorer_settings.json']).hexdigest())
                 admitted = json.loads(files.get('result.json', b'{}')).get('attempted_sequence_hashes',
                     [rules.sequence_hash(r['sequence']) for r in rows])
                 state['score_attempted_hashes'] = sorted(seen | set(admitted))
@@ -683,7 +779,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                                  else 'dry_run' if any(p.get('status') == 'dry_run' for p in receipt['publications'])
                                  else 'unchanged')
         else:
-            receipt['status'] = 'no_passing_candidate'
+            receipt['status'] = receipt.get('score_outcome', 'no_passing_candidate')
         state.pop('pending_publication', None)
         if active.get('native_unresolved'):
             active['phase'] = 'native'
@@ -692,6 +788,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         save()
     except Exception as error:
         receipt.update(status='recoverable_failure', stage=active['phase'], error_type=type(error).__name__)
+        receipt.update(failure_details(error))
         terminal_dir = (attempt_dir / 'novelty-rechecks' / active['novelty_operation']
                         if active['phase'] == 'novelty' and active.get('novelty_operation') else attempt_dir)
         if active['phase'] == 'score' and active.get('score_operation'):
