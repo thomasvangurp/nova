@@ -125,14 +125,19 @@ IDENTITY = {'scorer_sha256': 'a' * 64, 'settings_sha256': 'b' * 64,
             'settings_file_sha256': 'c' * 64, 'target': TARGET}
 
 
-def test_completed_epochs_selects_only_finished_epochs_in_the_last_window(tmp_path):
-    for epoch in range(26021, 26031):
-        _recorded_epoch(tmp_path, epoch, scores={}, rows=[],
-                        status='published' if epoch != 26025 else 'recoverable_failure')
-    assert lineage.completed_epochs(tmp_path, 26031, 10) == [
-        26021, 26022, 26023, 26024, 26026, 26027, 26028, 26029, 26030]
-    # A shorter window ignores older finished epochs.
+def test_completed_epochs_is_the_fixed_strictly_past_window_not_receipt_filtered(tmp_path):
+    # Only a few epochs have any recorded state; the window must not skip to
+    # older epochs or depend on receipt status.
+    for epoch in (26021, 26022, 26029, 26030):
+        _recorded_epoch(tmp_path, epoch, scores={}, rows=[], status='published')
+    assert lineage.completed_epochs(tmp_path, 26031, 10) == list(range(26021, 26031))
     assert lineage.completed_epochs(tmp_path, 26031, 3) == [26028, 26029, 26030]
+    # Never leaks the current or future epoch.
+    window = lineage.completed_epochs(tmp_path, 26030, 10)
+    assert window == list(range(26020, 26030))
+    assert all(epoch < 26030 for epoch in window)
+    # Clamped at the PR100 activation epoch.
+    assert lineage.completed_epochs(tmp_path, 25960, 10) == list(range(25955, 25960))
 
 
 def test_top_bottom5_orders_within_one_protocol_and_isolates_other_fields(tmp_path):
@@ -247,6 +252,36 @@ def test_published_flag_distinguishes_scored_from_published_without_inventing_ch
                                     'published_unknown': 0, 'validator_scored': 0}
 
 
+def test_published_evidence_survives_a_later_recoverable_failure(tmp_path):
+    sequence = _seq('SURVIVE')
+    _recorded_epoch(tmp_path, 26029,
+        scores={sequence: {TARGET: {'design_iiptm': 0.5}}},
+        rows=[{'sequence': sequence, 'sequence_hash': rules.sequence_hash(sequence),
+               'source': 'fresh_baseline_proposal', 'reference_stratum': 'unseeded_control'}],
+        identity=IDENTITY, status='published', published=[sequence])
+    # A later attempt in the same epoch failed; the earlier publication remains.
+    (tmp_path / '26029' / 'receipt.json').write_text(json.dumps(
+        {'epoch': 26029, 'status': 'recoverable_failure', 'attempt': 3}))
+    before = 26030
+    assert 26029 in lineage.completed_epochs(tmp_path, before, 10)
+    value = lineage.build(tmp_path, None, {'epoch': before, 'target': TARGET})
+    assert value['epoch_evidence']['26029']['receipt_status'] == 'recoverable_failure'
+    assert value['epoch_evidence']['26029']['published_count'] == 1
+    assert value['outcome_count'] == 1
+    assert value['top'][0]['published'] is True
+    assert value['populations']['published'] == 1
+
+
+def test_missing_epochs_are_exposed_not_backfilled(tmp_path):
+    value = lineage.build(tmp_path, None, {'epoch': 26030, 'target': TARGET})
+    assert value['completed_epochs'] == list(range(26020, 26030))
+    assert value['outcome_count'] == 0
+    for epoch in value['completed_epochs']:
+        assert value['epoch_evidence'][str(epoch)]['state_recorded'] is False
+        assert value['epoch_evidence'][str(epoch)]['receipt_status'] is None
+        assert value['epoch_evidence'][str(epoch)]['published_count'] is None
+
+
 def test_build_exports_lineage_and_honest_unknowns_for_unmeasured_sequences(tmp_path):
     index = lineage.bank_index(public_rows())
     parent = public_rows()[0]
@@ -273,7 +308,7 @@ def test_build_exports_lineage_and_honest_unknowns_for_unmeasured_sequences(tmp_
     value = lineage.build(tmp_path, public_rows(), {'epoch': before, 'target': TARGET},
                           metric_field='design_iiptm')
     assert value['schema'] == lineage.SCHEMA
-    assert value['completed_epochs'] == [26021, 26022, 26023, 26024, 26025]
+    assert value['completed_epochs'] == list(range(26016, 26026))
     assert value['outcome_count'] == 10
     assert len(value['top']) == 5 and value['bottom'] == []
     top = value['top'][0]

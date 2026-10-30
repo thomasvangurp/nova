@@ -35,10 +35,6 @@ SCHEMA = 'pr100-lineage-outcomes-v1'
 DEFAULT_METRIC_FIELD = 'design_iiptm'
 DEFAULT_EPOCHS = 10
 
-#: Receipt statuses that mark an epoch as finished (never the in-flight epoch).
-TERMINAL_STATUSES = frozenset({'published', 'dry_run', 'withdrawn', 'unchanged',
-                               'no_passing_candidate', 'no_scored_candidate'})
-
 #: Fields a scoring identity must carry before its measurements are comparable.
 SCORING_IDENTITY_FIELDS = ('scorer_sha256', 'settings_sha256',
                            'settings_file_sha256', 'target')
@@ -193,18 +189,33 @@ def read_epoch_state(state_root, epoch):
 
 
 def completed_epochs(state_root, before_epoch, count=DEFAULT_EPOCHS):
-    """The most recent ``count`` finished epochs strictly before ``before_epoch``."""
+    """The ``count`` strictly-past chain epochs, never skipping to older ones.
+
+    An epoch is finished once the chain clock passes ``before_epoch``, not when
+    its last attempt happened to be terminal. A later ``recoverable_failure``
+    attempt must not erase an earlier publication from this window, and missing
+    epochs are reported explicitly rather than silently replaced with older
+    epochs. The window is clamped at ``rules.ACTIVATION_EPOCH``.
+    """
     if type(count) is not int or count < 1:
         raise ValueError('count must be a positive integer')
-    finished = []
-    for epoch in range(before_epoch - 1, rules.ACTIVATION_EPOCH - 1, -1):
+    start = max(rules.ACTIVATION_EPOCH, before_epoch - count)
+    return list(range(start, before_epoch))
+
+
+def epoch_evidence(state_root, epochs):
+    """Per-window-epoch recorded evidence, so missing/failed is never silent."""
+    evidence = {}
+    for epoch in epochs:
         receipt = read_receipt(state_root, epoch)
-        if receipt is not None and receipt.get('status') in TERMINAL_STATUSES:
-            finished.append(epoch)
-            if len(finished) >= count:
-                break
-    finished.reverse()
-    return finished
+        state = read_epoch_state(state_root, epoch)
+        published = published_members(state_root, epoch)
+        evidence[str(epoch)] = {
+            'receipt_status': receipt.get('status') if isinstance(receipt, dict) else None,
+            'state_recorded': state is not None,
+            'published_recorded': published is not None,
+            'published_count': len(published) if published is not None else None}
+    return evidence
 
 
 def historical_challenge(state, epoch):
@@ -360,7 +371,8 @@ def build(state_root, bank_rows, challenge, *, metric_field=DEFAULT_METRIC_FIELD
             'before_epoch': challenge['epoch'], 'metric_field': metric_field,
             'metric_direction': direction, 'metric_source': 'our_scorer',
             'validator_outcome_source': 'not_available_locally',
-            'completed_epochs': epochs, 'outcome_count': len(outcomes),
+            'completed_epochs': epochs, 'epoch_evidence': epoch_evidence(state_root, epochs),
+            'outcome_count': len(outcomes),
             'populations': populations(outcomes),
             'protocols': _protocol_summary(outcomes),
             'top': ranking['top'], 'bottom': ranking['bottom'],
