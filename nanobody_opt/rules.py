@@ -203,8 +203,16 @@ def developability_reason(result, requirements, *, sequence=None):
     if psh > requirements["psh_strict_rejection_threshold"]:
         return "psh_threshold"
     score = result.get("aggrescan3d")
-    if not isinstance(score, dict) or score.get("status") != "ok" or score.get("passed") is not True:
+    if not isinstance(score, dict) or score.get("status") != "ok":
         return "aggrescan_unavailable_or_failed"
+    if score.get("passed") is not True:
+        # The pinned native A3D wrapper returns measured values and provenance,
+        # without the legacy pipeline's derived `passed` field. Only a complete
+        # authenticated registered receipt may omit that field; all numerical
+        # limits and provenance are still independently checked below.
+        if ("passed" in score or result.get("evidence_backend") != "native_reference"
+                or not authoritative_cpu_measurement(result)):
+            return "aggrescan_unavailable_or_failed"
     if sequence is not None and score.get("sequence_hash") != sequence_hash(sequence):
         return "aggrescan_sequence_mismatch"
     try:

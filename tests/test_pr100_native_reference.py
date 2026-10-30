@@ -12,6 +12,68 @@ from nanobody_opt import pr100_validator_reference as reference
 from test_pr100_validator_reference import receipt as reference_receipt
 
 
+def real_gate_observations():
+    """Unmodified production draws; annotation/publication scaffolding is synthetic."""
+    path = Path(__file__).parent / 'fixtures/pr100/registered_gate_real_26030.json'
+    return json.loads(path.read_text())['observations']
+
+
+def test_real_registered_pass_reaches_selection_repeat_and_publication():
+    from nanobody_opt import rules, pr100_live_selection as selection
+    from test_pr100 import EPOCH, evidence
+    row = real_gate_observations()[0]
+    sequence, value = row['sequence'], row['measurement']
+    requirements = rules.pinned_config(EPOCH)['nanobody_requirements']
+    policy = {'kind': 'pr100-observed-fleet-v1', 'minimum_smoothed_fraction': .4}
+    assert 'passed' not in value['aggrescan3d']  # Exact upstream wrapper contract.
+    assert native.authoritative_measurement(value)
+    assert rules.developability_reason(value, requirements, sequence=sequence) == ''
+    verdict = selection.decide([value], requirements, sequence=sequence, fleet_policy=policy)
+    assert verdict['tier'] == 'B'
+    assert verdict['probability_summary']['native_authority_validated'] is True
+    assert selection.should_repeat([value], requirements, sequence=sequence,
+                                   fleet_policy=policy, repeats=3)
+    item = evidence(sequence)  # Synthetic annotation, not a live eligibility claim.
+    item['developability'] = value
+    item['native_fleet_selection'] = verdict['native_fleet_selection']
+    rules.validate_evidence(item, sequence, item['challenge'], rules.pinned_config(EPOCH))
+
+
+def test_real_registered_failure_is_retained_for_bounded_rescue():
+    from nanobody_opt import rules, pr100_live_selection as selection
+    row = real_gate_observations()[1]
+    sequence, value = row['sequence'], row['measurement']
+    requirements = rules.pinned_config(26030)['nanobody_requirements']
+    policy = {'kind': 'pr100-observed-fleet-v1', 'minimum_smoothed_fraction': .4}
+    assert native.authoritative_measurement(value)
+    assert value['passed'] is False
+    assert rules.developability_reason(value, requirements, sequence=sequence)
+    verdict = selection.decide([value], requirements, sequence=sequence, fleet_policy=policy)
+    assert verdict['tier'] is None and verdict['reason'] == 'no_measured_pass'
+    assert verdict['probability_summary']['failing_draws'] == 1
+    assert not selection.should_repeat([value], requirements, sequence=sequence,
+                                       fleet_policy=policy, repeats=3)
+    assert selection.should_repeat([value], requirements, sequence=sequence,
+                                   fleet_policy=policy, repeats=3,
+                                   failed_first_rescue_available=True)
+
+
+@pytest.mark.parametrize('change', ['unknown_registration', 'missing_receipt', 'changed_metric',
+                                   'explicit_false', 'explicit_null', 'legacy_backend'])
+def test_missing_legacy_aggregation_flag_requires_authentic_registered_receipt(change):
+    from nanobody_opt import rules
+    row = real_gate_observations()[0]
+    value = row['measurement']
+    if change == 'unknown_registration': value['native_reference']['registration_sha256'] = '0' * 64
+    elif change == 'missing_receipt': value['native_reference'].pop('receipt')
+    elif change == 'changed_metric': value['aggrescan3d']['a3d_maximum'] = 0.
+    elif change == 'explicit_false': value['aggrescan3d']['passed'] = False
+    elif change == 'explicit_null': value['aggrescan3d']['passed'] = None
+    else: value['evidence_backend'] = 'cpu_native'
+    assert rules.developability_reason(value, rules.pinned_config(26030)['nanobody_requirements'],
+                                       sequence=row['sequence']) == 'aggrescan_unavailable_or_failed'
+
+
 def atom(serial, name, x, element):
     return f'ATOM  {serial:5d} {name:>4s} ALA H   1    {x:8.3f}{2.:8.3f}{3.:8.3f}{1.:6.2f}{0.:6.2f}          {element:>2s}  \n'
 
