@@ -5,11 +5,17 @@ internal cuts are the numbered central junctions 109/110, 110/111, 111/112 and
 112/113; raw sequence offsets are never crossover decisions. Every emitted
 residue has an exact donor interval. Ranking is an explicit search prior, not
 a measured fitness prediction. All children still require ordinary live gates.
+
+Capacity search is a bounded, deterministic rotation of the immutable search
+core (numbering, splice library, region pools and known joins are built once
+per call); each round only re-windows those pools. The per-CDR3 cap is global
+across rounds, and the reported counters always reflect actual emissions.
 """
 from __future__ import annotations
 
 from collections import Counter
 import itertools
+import math
 
 from nanobody_opt import rules
 from nanobody_opt.pr100_reference_donors import merit
@@ -19,6 +25,10 @@ PROTOCOL = 'imgt-multi-donor-v1'
 REGIONS = ('fr1', 'cdr1', 'fr2', 'cdr2', 'fr3', 'cdr3', 'fr4')
 ENDS = (26, 38, 55, 65, 104, 117, 128)
 AA = frozenset('ACDEFGHIKLMNPQRSTVWY')
+#: Hard ceiling on rotated search rounds; a bounded fallback, not a target.
+MAX_ROUNDS = 64
+#: Region-pool window width, unchanged from the audited single-pass search.
+OPTION_WIDTH = 8
 
 
 def settings(job):
@@ -26,9 +36,9 @@ def settings(job):
     if (not isinstance(supplied, dict) or type(supplied.get('enabled', False)) is not bool
             or set(supplied) - {'enabled', 'limit', 'max_donors', 'beam_width', 'max_per_cdr3'}):
         raise ValueError('invalid segment_generation settings')
-    result = {'enabled': False, 'limit': 128, 'max_donors': 32, 'beam_width': 128,
+    result = {'enabled': False, 'limit': 2400, 'max_donors': 32, 'beam_width': 128,
               'max_per_cdr3': 8, **supplied}
-    for key, low, high in (('limit', 1, 512), ('max_donors', 2, 64), ('beam_width', 8, 512),
+    for key, low, high in (('limit', 1, 4800), ('max_donors', 2, 64), ('beam_width', 8, 512),
                            ('max_per_cdr3', 1, 64)):
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValueError('invalid segment_generation bound')
@@ -140,7 +150,8 @@ def _window(options, width, offset):
     return options[:keep] + (rest + rest)[start:start + width - keep]
 
 
-def _loops(donors, challenge, width, offset, stats):
+def _loop_pool(donors, challenge, stats):
+    """Full, unwindowed CDR3 splice library, built once per generate call."""
     known = {d['segments']['cdr3']['sequence'] for d in donors}
     found = {}
     ordered = sorted(donors, key=lambda d: _quality(d, challenge))
@@ -175,10 +186,11 @@ def _loops(donors, challenge, width, offset, stats):
                     found[key] = option
     options = sorted(found.values(), key=lambda o: (o['rank'], rules.digest(o)))
     stats['novel_loop_options'] = len(options)
-    return _window(options, width, offset)
+    return options
 
 
-def _options(donors, names, challenge, width, offset):
+def _option_pool(donors, names, challenge):
+    """Full, unwindowed region pool, built once per generate call."""
     gene = challenge['allowed_v'] + ':'
     ordered = sorted(donors, key=lambda d: (
         not any(c.startswith(gene) for c in d.get('cells', [])), _quality(d, challenge)))
@@ -187,7 +199,7 @@ def _options(donors, names, challenge, width, offset):
         parts = [donor['segments'][n] for n in names]
         seq = ''.join(p['sequence'] for p in parts)
         unique.setdefault(seq, {'parts': parts, 'rank': rank})
-    return _window(list(unique.values()), width, offset)
+    return list(unique.values())
 
 
 def _join_key(left, right):
@@ -229,9 +241,67 @@ def reconstruct(row, references):
     return ''.join(assembled)
 
 
+def _coverage_rounds(pools):
+    """Rounds until every rotating window has cycled; one when nothing rotates.
+
+    Each pool advances by its own width-tied stride, so its rotation period is
+    ``len(rest) // gcd(stride, len(rest))``. The maximum across pools bounds the
+    rounds needed before a zero-yield round proves the library is exhausted.
+    """
+    periods = []
+    for pool, width, stride in pools:
+        if len(pool) <= width:
+            continue
+        rest = len(pool) - width // 2
+        periods.append(rest // math.gcd(stride, rest))
+    return max(periods, default=1)
+
+
+def _search_round(framework_pools, loop_window, donors, known_joins, challenge, stats,
+                  beam_width, round_offset):
+    """One deterministic beam pass over windowed pools; no gate or native calls."""
+    pools = list(framework_pools) + [loop_window]
+    beam = [{'parts': [], 'rank': 0, 'unsupported_joins': 0}]
+    for index, pool in enumerate(pools):
+        is_loops = index == len(pools) - 1
+        next_beam = {}
+        for previous in beam:
+            for option in pool:
+                stats['beam_expansions'] += 1
+                parts = previous['parts'] + option['parts']
+                if is_loops and source_cdr_conflict(parts, donors):
+                    stats['source_conserved_cdr_conflicts'] += 1
+                    continue
+                seq = ''.join(p['sequence'] for p in parts)
+                # Source interval hashes are scientific lineage, never fitness evidence.
+                joins = sum(_join_key(a, b) not in known_joins
+                            for a, b in zip(parts, parts[1:])
+                            if not a['region'].startswith('cdr3') and not b['region'].startswith('cdr3'))
+                candidate = {'parts': parts, 'rank': previous['rank'] + option['rank'],
+                             'unsupported_joins': joins,
+                             'splice': option.get('splice', previous.get('splice'))}
+                key = (joins, candidate['rank'],
+                       rules.digest([challenge['epoch'], round_offset, seq]))
+                if seq not in next_beam or key < next_beam[seq][0]:
+                    next_beam[seq] = key, candidate
+        ordered = [value for _, value in sorted(next_beam.values(), key=lambda x: x[0])]
+        if is_loops:
+            # Preserve loop diversity before the last beam truncation; a
+            # strong framework prior must not fill it with one clonotype.
+            by_loop = {}
+            for value in ordered:
+                loop = ''.join(p['sequence'] for p in value['parts']
+                               if p['region'].startswith('cdr3'))
+                by_loop.setdefault(loop, []).append(value)
+            ordered = [value for group in itertools.zip_longest(*by_loop.values())
+                       for value in group if value is not None]
+        beam = ordered[:beam_width]
+    return beam
+
+
 def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
              offset=0, excluded=(), stats=None):
-    """Two bounded beam searches; no target scoring/native calls or gate claims."""
+    """Bounded rotated-round capacity search; no target scoring/native gate claims."""
     bounds = settings({'segment_generation': {'enabled': True, 'limit': limit,
                                               'beam_width': beam_width,
                                               'max_per_cdr3': max_per_cdr3}})
@@ -244,7 +314,6 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
     for donor in donors:
         if prepare(donor, donor['numbered'])['segments'] != donor['segments']:
             raise ValueError('prepared donor segment drift')
-    loops = _loops(donors, challenge, min(beam_width, 64), offset, counters)
     counters['prepared_donors'] = len(donors)
     excluded = set(excluded) | {d['sequence_hash'] for d in donors}
     known_joins = {_join_key(d['segments'][a], d['segments'][b]) for d in donors
@@ -252,83 +321,94 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
     references = {d['sequence_hash']: d['sequence'] for d in donors}
     layouts = {'linked_v': [('fr1', 'cdr1', 'fr2'), ('cdr2', 'fr3')],
                'region': [(name,) for name in REGIONS[:5]]}
-    streams = []
-    for layout, groups in layouts.items():
-        pools = [_options(donors, names, challenge, 8, offset) for names in groups] + [loops]
-        beam = [{'parts': [], 'rank': 0, 'unsupported_joins': 0}]
-        for pool in pools:
-            next_beam = {}
-            for previous in beam:
-                for option in pool:
-                    counters['beam_expansions'] += 1
-                    parts = previous['parts'] + option['parts']
-                    if pool is loops and source_cdr_conflict(parts, donors):
-                        counters['source_conserved_cdr_conflicts'] += 1
-                        continue
-                    seq = ''.join(p['sequence'] for p in parts)
-                    # Source interval hashes are scientific lineage, never fitness evidence.
-                    joins = sum(_join_key(a, b) not in known_joins
-                                for a, b in zip(parts, parts[1:])
-                                if not a['region'].startswith('cdr3') and not b['region'].startswith('cdr3'))
-                    candidate = {'parts': parts, 'rank': previous['rank'] + option['rank'],
-                                 'unsupported_joins': joins,
-                                 'splice': option.get('splice', previous.get('splice'))}
-                    key = (joins, candidate['rank'], rules.digest([challenge['epoch'], offset, seq]))
-                    if seq not in next_beam or key < next_beam[seq][0]:
-                        next_beam[seq] = key, candidate
-            ordered = [value for _, value in sorted(next_beam.values(), key=lambda x: x[0])]
-            if pool is loops:
-                # Preserve loop diversity before the last beam truncation; a
-                # strong framework prior must not fill it with one clonotype.
-                by_loop = {}
-                for value in ordered:
-                    loop = ''.join(p['sequence'] for p in value['parts']
-                                   if p['region'].startswith('cdr3'))
-                    by_loop.setdefault(loop, []).append(value)
-                ordered = [value for group in itertools.zip_longest(*by_loop.values())
-                           for value in group if value is not None]
-            beam = ordered[:beam_width]
-        records = []
-        for candidate in beam:
-            seq = ''.join(p['sequence'] for p in candidate['parts']); sha = rules.sequence_hash(seq)
-            if sha in excluded:
-                counters['exact_or_resume_collisions'] += 1
-                continue
-            provenance, cursor = [], 0
-            for part in candidate['parts']:
-                end = cursor + len(part['sequence'])
-                provenance.append({k: v for k, v in part.items() if k != 'sequence'} |
-                                  {'child_start': cursor, 'child_end': end})
-                cursor = end
-            row = {'sequence': seq, 'sequence_hash': sha, 'source': SOURCE,
-                   'proposal_type': PROTOCOL, 'proposal_lane': 'segment_' + layout,
-                   'segment_layout': layout, 'segment_provenance': provenance,
-                   'segment_splice': candidate['splice'],
-                   'segment_search_prior': {'donor_rank_sum': candidate['rank'],
-                                            'unsupported_joins': candidate['unsupported_joins']},
-                   'requested_v': challenge['allowed_v'],
-                   'requested_cdr3_length': challenge['allowed_cdr3_length'],
-                   'acceptance_qualified': False, 'target_scored': False}
-            reconstruct(row, references)
-            records.append(row)
-        streams.append(records)
+
+    # Immutable search core: numbering was validated above, and the loop
+    # library, region pools and known joins are built exactly once. Rotated
+    # rounds only re-window these cached lists; nothing is re-prepared or
+    # re-spliced per round.
+    loop_pool = _loop_pool(donors, challenge, counters)
+    framework = {layout: [_option_pool(donors, names, challenge) for names in groups]
+                 for layout, groups in layouts.items()}
+    loop_width = min(beam_width, 64)
+    loop_stride = max(1, loop_width - loop_width // 2)
+    option_stride = max(1, OPTION_WIDTH - OPTION_WIDTH // 2)
+    coverage_rounds = _coverage_rounds([(loop_pool, loop_width, loop_stride)]
+                                       + [(pool, OPTION_WIDTH, option_stride)
+                                          for pools in framework.values() for pool in pools])
+
     result, seen, loop_counts = [], set(), Counter()
-    for pair in itertools.zip_longest(*streams):
-        for row in pair:
-            if row is not None and row['sequence_hash'] not in seen:
+    rounds, empty_streak, filled, exhausted = 0, 0, False, False
+    for r in range(MAX_ROUNDS):
+        rounds = r + 1
+        loop_offset = offset + r * loop_stride
+        option_offset = offset + r * option_stride
+        streams = []
+        for layout, groups in layouts.items():
+            windows = [_window(pool, OPTION_WIDTH, option_offset) for pool in framework[layout]]
+            candidates = _search_round(windows, _window(loop_pool, loop_width, loop_offset),
+                                       donors, known_joins, challenge, counters,
+                                       beam_width, loop_offset)
+            records = []
+            for candidate in candidates:
+                seq = ''.join(p['sequence'] for p in candidate['parts'])
+                sha = rules.sequence_hash(seq)
+                if sha in excluded:
+                    counters['exact_or_resume_collisions'] += 1
+                    continue
+                provenance, cursor = [], 0
+                for part in candidate['parts']:
+                    end = cursor + len(part['sequence'])
+                    provenance.append({k: v for k, v in part.items() if k != 'sequence'} |
+                                      {'child_start': cursor, 'child_end': end})
+                    cursor = end
+                row = {'sequence': seq, 'sequence_hash': sha, 'source': SOURCE,
+                       'proposal_type': PROTOCOL, 'proposal_lane': 'segment_' + layout,
+                       'segment_layout': layout, 'segment_provenance': provenance,
+                       'segment_splice': candidate['splice'],
+                       'segment_search_prior': {'donor_rank_sum': candidate['rank'],
+                                                'unsupported_joins': candidate['unsupported_joins']},
+                       'requested_v': challenge['allowed_v'],
+                       'requested_cdr3_length': challenge['allowed_cdr3_length'],
+                       'acceptance_qualified': False, 'target_scored': False}
+                reconstruct(row, references)
+                records.append(row)
+            streams.append(records)
+        produced = 0
+        for pair in itertools.zip_longest(*streams):
+            for row in pair:
+                if row is None or row['sequence_hash'] in seen:
+                    continue
                 loop = ''.join(row['sequence'][p['child_start']:p['child_end']]
                                for p in row['segment_provenance'] if p['region'].startswith('cdr3'))
                 if loop_counts[loop] >= max_per_cdr3:
                     counters['cdr3_cap_drops'] += 1
                     continue
                 result.append(row); seen.add(row['sequence_hash'])
-                loop_counts[loop] += 1
+                loop_counts[loop] += 1; produced += 1
                 if len(result) == bounds['limit']:
                     break
+            if len(result) == bounds['limit']:
+                break
         if len(result) == bounds['limit']:
+            filled = True
             break
+        if produced == 0:
+            empty_streak += 1
+            if empty_streak >= coverage_rounds:
+                exhausted = True
+                break
+        else:
+            empty_streak = 0
+    else:
+        # The rotated window has cycled through every bounded round without
+        # filling the requested quota: report exhaustion instead of a filled
+        # claim. Emitted counters below still reflect exactly what was produced.
+        exhausted = True
     counters['emitted'] = len(result)
     counters['emitted_distinct_cdr3s'] = len(loop_counts)
+    counters['rounds_run'] = rounds
+    counters['filled'] = filled
+    counters['exhausted'] = exhausted
     if stats is not None:
         stats.update(counters)
     return result

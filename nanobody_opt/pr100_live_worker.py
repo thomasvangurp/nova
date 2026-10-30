@@ -31,6 +31,51 @@ NATIVE_EXECUTION_ENV_KEYS = (
 )
 
 
+def interleave_segment_controls(eligible, *, segment_source, edit_source='edit_generation'):
+    """Order eligible rows for native admission: four segment rows per one control.
+
+    Edit and baseline controls alternate while both arms still hold rows, and
+    each arm keeps its internal order. An exhausted arm releases its slots to
+    the remaining arms (work-conserving), so native capacity is never left idle
+    while another arm still has eligible work. This reorders only the admission
+    order of rows that already passed eligibility filters; it changes no gate,
+    budget or biological rule.
+    """
+    from collections import deque
+    segment_pool = deque(row for row in eligible if row.get('source') == segment_source)
+    edit_pool = deque(row for row in eligible if row.get('source') == edit_source)
+    baseline_pool = deque(row for row in eligible
+                          if row.get('source') not in (segment_source, edit_source))
+    edit_next = True
+
+    def next_control():
+        nonlocal edit_next
+        if edit_next and edit_pool:
+            edit_next = False
+            return edit_pool.popleft()
+        if not edit_next and baseline_pool:
+            edit_next = True
+            return baseline_pool.popleft()
+        if edit_pool:
+            edit_next = False
+            return edit_pool.popleft()
+        if baseline_pool:
+            edit_next = True
+            return baseline_pool.popleft()
+        return None
+
+    ordered = []
+    while segment_pool or edit_pool or baseline_pool:
+        for _ in range(4):
+            if not segment_pool:
+                break
+            ordered.append(segment_pool.popleft())
+        control = next_control() if (edit_pool or baseline_pool) else None
+        if control is not None:
+            ordered.append(control)
+    return ordered
+
+
 def screen_settings(job):
     supplied = job.get('native_screen', {})
     if not isinstance(supplied, dict) or not isinstance(supplied.get('enabled', False), bool):
@@ -389,13 +434,10 @@ def sequence_phase(job, directory):
         # and balanced policy retain their existing order exactly.
         eligible.sort(key=lambda row: not chemistry_row(row))
     if segment_settings['enabled']:
-        # Give the bounded experimental arm actual native admission without
-        # increasing the shared fresh-evaluation budget or starving controls.
-        from itertools import zip_longest
-        pools = [[row for row in eligible if row.get('source') == segments.SOURCE],
-                 [row for row in eligible if row.get('source') == 'edit_generation'],
-                 [row for row in eligible if row.get('source') not in (segments.SOURCE, 'edit_generation')]]
-        eligible = [row for group in zip_longest(*pools) for row in group if row is not None]
+        # Give the bounded experimental arm most native opportunity: four
+        # segment rows per one combined control, alternating edit/baseline and
+        # work-conserving when an arm is exhausted (see interleave_segment_controls).
+        eligible = interleave_segment_controls(eligible, segment_source=segments.SOURCE)
     # Novelty is deliberately NOT run here: the archive search now runs after
     # native developability, so it is spent only on native passers.
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'], **history,
