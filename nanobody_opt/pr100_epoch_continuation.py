@@ -985,13 +985,19 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 fresh_budget.reconcile(budget, active['number'], partial, cleanup_verified=True)
                 assigned = read(attempt_dir / 'native-input.json', {}).get('candidates', [])
                 try:
-                    reconcile_native_histories(state, partial,
+                    # Both helpers replace their state fields. Commit the draft
+                    # only after scientific history AND recovery metadata pass.
+                    recovered_state = {**state}
+                    reconcile_native_histories(recovered_state, partial,
                         {rules.sequence_hash(r['sequence']) for r in assigned})
-                    recover_native_checkpoints(state, partial, assigned,
+                    recover_native_checkpoints(recovered_state, partial, assigned,
                         worker.get('repeats', 3))
                 except (ValueError, TypeError, KeyError):
                     receipt['native_history_recovery_rejected'] = True
                 else:
+                    if 'native_reference_histories' in recovered_state:
+                        state['native_reference_histories'] = recovered_state['native_reference_histories']
+                    state['native_rows'] = recovered_state['native_rows']
                     rejected = set(partial.get('terminal_native_outcomes', {}))
                     state['invalidated_native_hashes'] = sorted(
                         set(state.get('invalidated_native_hashes', [])) | rejected)

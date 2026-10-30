@@ -229,7 +229,8 @@ def test_rule_configuration_disagreement_cannot_be_blessed_by_native_pass(authen
 from tests.test_pr100_epoch_continuation import legacy, replay, write
 
 
-@pytest.mark.parametrize('partial_kind', ['conflicting', 'extended_rejection', 'complete_positive'])
+@pytest.mark.parametrize('partial_kind', ['conflicting', 'extended_rejection',
+                                         'complete_positive', 'positive_bad_host'])
 def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_history(
         legacy, authenticated_draws, monkeypatch, partial_kind):
     import json
@@ -265,10 +266,12 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
     continuation.reconcile_native_histories(saved, history(initial), {key})
     saved['pending_confirmation'] = [checkpoint(initial)]
     prior_pending = copy.deepcopy(saved['pending_confirmation'])
+    prior_history = copy.deepcopy(saved['native_reference_histories'])
+    prior_native = copy.deepcopy(saved['native_rows'])
     write(x.local / 'continuation.json', saved)
     if partial_kind == 'conflicting':
         values = [authenticated_draws('changed-prefix', 82., sequence=sequence)]
-    elif partial_kind == 'complete_positive':
+    elif partial_kind in ('complete_positive', 'positive_bad_host'):
         values = initial + [authenticated_draws(f'complete-{i}', 82., sequence=sequence) for i in range(2)]
     else:
         values = initial + [authenticated_draws(f'later-{i}', 90. + i, sequence=sequence) for i in range(3)]
@@ -276,6 +279,8 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
                'attempted_sequence_hashes': [key], 'fresh_admitted_sequence_hashes': [],
                'fresh_never_started_sequence_hashes': [],
                'deferred_confirmations': [checkpoint(values)] if partial_kind == 'conflicting' else []}
+    if partial_kind == 'positive_bad_host':
+        partial['native_complete_histories'][0]['execution_host'] = 'master'
 
     def interrupted_phase(_config, _challenge, phase, _files, _stop, _chain, directory, **_kwargs):
         assert phase == 'native'
@@ -288,10 +293,11 @@ def test_cleaned_partial_native_failure_cannot_replace_or_erase_authoritative_hi
     outcome = controller.run_epoch(x.config, x.chain, controller.clock_state(x.chain))
     restored = json.loads((x.local / 'continuation.json').read_text())
     assert outcome['status'] == 'recoverable_failure'
-    if partial_kind == 'conflicting':
+    if partial_kind in ('conflicting', 'positive_bad_host'):
         assert outcome['native_history_recovery_rejected'] is True
         assert restored['pending_confirmation'] == prior_pending
-        assert restored['native_reference_histories'][key]['complete_draws'] == 1
+        assert restored['native_reference_histories'] == prior_history
+        assert restored['native_rows'] == prior_native
     elif partial_kind == 'complete_positive':
         assert restored['native_reference_histories'][key]['complete_draws'] == 3
         assert restored['native_reference_histories'][key]['admitted'] is True
