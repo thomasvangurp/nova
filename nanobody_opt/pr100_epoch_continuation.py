@@ -308,6 +308,16 @@ def cleanup_verified(receipt):
     cleanup = receipt.get('cleanup', {})
     return cleanup.get('remaining_descendants') == 0 and cleanup.get('fixed_point_reached') is True
 
+
+def record_lineage(config, challenge):
+    """Read-only lineage/outcome analysis; never raises and never fails an epoch."""
+    try:
+        from nanobody_opt import pr100_lineage_outcomes as lineage
+        return lineage.record(config['state_root'], challenge, config)
+    except Exception:
+        return {'status': 'unavailable'}
+
+
 def novelty_runtime_ids(config):
     """Qualified annotation identities, independent of native CPU identity."""
     result = {}
@@ -1088,12 +1098,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                    wall_seconds=time.time() - receipt['started_at_unix'],
                    continuation_pending=True, cumulative_scored_candidates=len(state['score_rows']))
     receipt['fresh_native_budget'] = fresh_budget.summary(budget)
-    try:
-        from nanobody_opt import pr100_lineage_outcomes as lineage
-        receipt['lineage_outcomes'] = lineage.record(config['state_root'], challenge, config)
-    except Exception:
-        # Read-only analysis: a lineage write failure can never fail an epoch.
-        receipt['lineage_outcomes'] = {'status': 'unavailable'}
+    receipt['lineage_outcomes'] = record_lineage(config, challenge)
     c.atomic(attempt_dir / 'receipt.json', receipt)
     c.atomic(local / 'receipt.json', receipt)
     if 'native' in diagnostics:

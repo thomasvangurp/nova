@@ -7,10 +7,18 @@ lane's emitted lineage (``parent_sequence`` / ``proposal_lane`` /
 cell it was selected for, then tracks the top/bottom measured outcomes over the
 last ten completed epochs under one honest metric field/protocol.
 
+Each historical epoch is read from its own recorded ``challenge`` (gene/CDR3
+cell and target), never from the current challenge, so a previous epoch's cell
+is never relabelled. Outcomes are ``locally_scored``: the metric is our own
+scorer's measurement under a named scoring identity, explicitly NOT the
+leaderboard/on-chain final score. Whether a sequence was published is read from
+the epoch's published-quality record; an on-chain validator result is never
+invented.
+
 Nothing here changes a gate, a budget, or a publication decision. Unknowns are
 exported explicitly: a missing parent, a missing owner coldkey/epoch, a missing
-cell, a non-measured metric and a non-comparable scoring identity are all
-labelled rather than guessed or silently mixed.
+cell, a missing historical challenge, a non-measured metric and a non-comparable
+scoring identity are all labelled rather than guessed or silently mixed.
 """
 from __future__ import annotations
 
@@ -30,6 +38,10 @@ DEFAULT_EPOCHS = 10
 #: Receipt statuses that mark an epoch as finished (never the in-flight epoch).
 TERMINAL_STATUSES = frozenset({'published', 'dry_run', 'withdrawn', 'unchanged',
                                'no_passing_candidate', 'no_scored_candidate'})
+
+#: Fields a scoring identity must carry before its measurements are comparable.
+SCORING_IDENTITY_FIELDS = ('scorer_sha256', 'settings_sha256',
+                           'settings_file_sha256', 'target')
 
 _GENE = re.compile(r'IGHV3-\d+')
 
@@ -165,28 +177,28 @@ def selected_lineage(row, bank_index, challenge):
     return value
 
 
-def read_receipt(state_root, epoch):
+def read_json(state_root, *parts):
     try:
-        return json.loads((Path(state_root) / str(epoch) / 'receipt.json').read_text())
+        return json.loads((Path(state_root).joinpath(*parts)).read_text())
     except (OSError, ValueError):
         return None
+
+
+def read_receipt(state_root, epoch):
+    return read_json(state_root, str(epoch), 'receipt.json')
 
 
 def read_epoch_state(state_root, epoch):
-    try:
-        return json.loads((Path(state_root) / str(epoch) / 'continuation.json').read_text())
-    except (OSError, ValueError):
-        return None
+    return read_json(state_root, str(epoch), 'continuation.json')
 
 
 def completed_epochs(state_root, before_epoch, count=DEFAULT_EPOCHS):
     """The most recent ``count`` finished epochs strictly before ``before_epoch``."""
     if type(count) is not int or count < 1:
         raise ValueError('count must be a positive integer')
-    root = Path(state_root)
     finished = []
     for epoch in range(before_epoch - 1, rules.ACTIVATION_EPOCH - 1, -1):
-        receipt = read_receipt(root, epoch)
+        receipt = read_receipt(state_root, epoch)
         if receipt is not None and receipt.get('status') in TERMINAL_STATUSES:
             finished.append(epoch)
             if len(finished) >= count:
@@ -195,15 +207,49 @@ def completed_epochs(state_root, before_epoch, count=DEFAULT_EPOCHS):
     return finished
 
 
-def scored_outcomes(state_root, epochs, bank_index, challenge, metric_field):
-    """One outcome record per scored sequence, with lineage and protocol identity."""
+def historical_challenge(state, epoch):
+    """The epoch's own recorded challenge, or ``None`` when unverifiable."""
+    challenge = state.get('challenge') if isinstance(state, dict) else None
+    if (isinstance(challenge, dict) and challenge.get('epoch') == epoch
+            and isinstance(challenge.get('target'), str) and challenge['target']):
+        return challenge
+    return None
+
+
+def scoring_protocol(identity, target):
+    """Comparable scoring identity, or ``(None, unknown_reason)`` when unusable."""
+    if not isinstance(identity, dict):
+        return None, 'scoring_identity_incomplete'
+    for key in SCORING_IDENTITY_FIELDS:
+        if not isinstance(identity.get(key), str) or not identity[key]:
+            return None, 'scoring_identity_incomplete'
+    if not isinstance(target, str) or not target or identity['target'] != target:
+        return None, 'scoring_identity_target_mismatch'
+    return rules.digest(identity), None
+
+
+def published_members(state_root, epoch):
+    """Sequence hashes published this epoch, or ``None`` when unrecorded."""
+    record = read_json(state_root, str(epoch), 'published-quality.json')
+    if not isinstance(record, dict):
+        return None
+    members = record.get('quality', {}).get('members')
+    if not isinstance(members, list):
+        return None
+    return {m['sequence_hash'] for m in members
+            if isinstance(m, dict) and isinstance(m.get('sequence_hash'), str)}
+
+
+def scored_outcomes(state_root, epochs, bank_index, metric_field):
+    """One outcome record per scored sequence, using each epoch's own challenge."""
     outcomes = []
     for epoch in epochs:
         state = read_epoch_state(state_root, epoch)
         if not isinstance(state, dict):
             continue
-        identity = state.get('scoring_identity')
-        protocol = rules.digest(identity) if isinstance(identity, dict) else None
+        epoch_challenge = historical_challenge(state, epoch)
+        target = epoch_challenge['target'] if epoch_challenge is not None else None
+        protocol, protocol_unknown = scoring_protocol(state.get('scoring_identity'), target)
         score_rows = state.get('score_rows', {})
         if not isinstance(score_rows, dict):
             score_rows = {}
@@ -211,26 +257,39 @@ def scored_outcomes(state_root, epochs, bank_index, challenge, metric_field):
         for row in state.get('pending_native', []) + state.get('native_rows', []):
             if isinstance(row, dict) and isinstance(row.get('sequence'), str):
                 lineage_rows[row['sequence']] = row
+        published = published_members(state_root, epoch)
         for sequence, per_target in score_rows.items():
-            metrics = (per_target or {}).get(challenge['target']) if isinstance(per_target, dict) else None
+            metrics = (per_target or {}).get(target) if isinstance(per_target, dict) else None
             value = metrics.get(metric_field) if isinstance(metrics, dict) else None
             row = lineage_rows.get(sequence)
-            lineage = (selected_lineage(row, bank_index, challenge)
-                       if row is not None else {'sequence': sequence,
+            if row is not None:
+                lineage = selected_lineage(row, bank_index, epoch_challenge or {})
+            else:
+                lineage = {'sequence': sequence,
                            'sequence_hash': rules.sequence_hash(sequence),
-                           'cell': cell_of({}, challenge), 'edit_kind': edit_kind({}),
+                           'cell': cell_of({}, epoch_challenge or {}),
+                           'edit_kind': edit_kind({}),
                            'parent_origin': {'resolved': False, 'parent_hash': None,
                                              'unknown_reason': 'lineage_row_not_in_state'},
-                           'unknowns': ['lineage_row_not_in_state']})
+                           'unknowns': ['lineage_row_not_in_state']}
             unknowns = list(lineage.get('unknowns', []))
+            if epoch_challenge is None:
+                unknowns.append('historical_challenge_unknown')
             if value is None or not _finite(value):
                 unknowns.append('metric_not_measured')
-            if protocol is None:
-                unknowns.append('protocol_unknown')
-            outcomes.append({'epoch': epoch, 'sequence': sequence,
-                             'sequence_hash': lineage['sequence_hash'],
-                             'protocol': protocol, 'scoring_identity': identity,
+            if protocol_unknown:
+                unknowns.append(protocol_unknown)
+            sequence_hash = lineage['sequence_hash']
+            published_flag = (sequence_hash in published if published is not None else None)
+            if published is None:
+                unknowns.append('published_unknown')
+            outcomes.append({'epoch': epoch, 'target': target, 'sequence': sequence,
+                             'sequence_hash': sequence_hash,
+                             'protocol': protocol, 'scoring_identity': state.get('scoring_identity'),
                              'measured': {metric_field: value} if _finite(value) else None,
+                             'published': published_flag,
+                             # On-chain result is never read or inferred here.
+                             'validator_outcome': None,
                              'lineage': lineage, 'unknowns': unknowns})
     return outcomes
 
@@ -274,6 +333,14 @@ def top_bottom5(outcomes, *, metric_field, direction, count=5):
             'comparable_count': len(pool), 'non_comparable': non_comparable}
 
 
+def populations(outcomes):
+    published = sum(1 for o in outcomes if o.get('published') is True)
+    published_unknown = sum(1 for o in outcomes if o.get('published') is None)
+    return {'locally_scored': len(outcomes), 'published': published,
+            'published_unknown': published_unknown,
+            'validator_scored': 0}
+
+
 def build(state_root, bank_rows, challenge, *, metric_field=DEFAULT_METRIC_FIELD,
           direction=None, count=DEFAULT_EPOCHS):
     """Durable lineage/outcome record over the last ``count`` completed epochs."""
@@ -287,18 +354,21 @@ def build(state_root, bank_rows, challenge, *, metric_field=DEFAULT_METRIC_FIELD
         raise ValueError('metric_direction_mismatch')
     index = bank_index(bank_rows) if bank_rows is not None else None
     epochs = completed_epochs(state_root, challenge['epoch'], count)
-    outcomes = scored_outcomes(state_root, epochs, index, challenge, metric_field)
+    outcomes = scored_outcomes(state_root, epochs, index, metric_field)
     ranking = top_bottom5(outcomes, metric_field=metric_field, direction=direction, count=5)
     return {'schema': SCHEMA, 'target': challenge['target'],
             'before_epoch': challenge['epoch'], 'metric_field': metric_field,
             'metric_direction': direction, 'metric_source': 'our_scorer',
+            'validator_outcome_source': 'not_available_locally',
             'completed_epochs': epochs, 'outcome_count': len(outcomes),
+            'populations': populations(outcomes),
             'protocols': _protocol_summary(outcomes),
             'top': ranking['top'], 'bottom': ranking['bottom'],
             'comparable_count': ranking['comparable_count'],
             'non_comparable': ranking['non_comparable'],
             'limitations': ['our_scorer metric, not the leaderboard final_score',
-                            'top/bottom are compared only within one scoring identity']}
+                            'top/bottom are compared only within one scoring identity',
+                            'validator/on-chain outcomes are not read locally and are never inferred']}
 
 
 def load_bank_rows(config, challenge):
@@ -306,12 +376,9 @@ def load_bank_rows(config, challenge):
     from nanobody_opt import pr100_parent_bank as bank
     try:
         cfg = bank.settings(config)
-    except (ValueError, KeyError, TypeError):
-        return None
-    if cfg is None:
-        return None
-    root = Path(cfg['state_directory']) / challenge['target']
-    try:
+        if cfg is None:
+            return None
+        root = Path(cfg['state_directory']) / challenge['target']
         pointer = json.loads(bank.read(root / 'current.json'))
         if (not isinstance(pointer, dict) or not bank.hex64(pointer.get('bank_sha256'))
                 or pointer.get('target') != challenge['target']):
@@ -321,7 +388,7 @@ def load_bank_rows(config, challenge):
         if bank.sha(raw) != pointer['bank_sha256']:
             return None
         value = json.loads(raw)
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception:
         return None
     rows = value.get('rows') if isinstance(value, dict) else None
     return rows if isinstance(rows, list) else None
@@ -329,17 +396,28 @@ def load_bank_rows(config, challenge):
 
 def record(state_root, challenge, config, *, metric_field=DEFAULT_METRIC_FIELD,
            count=DEFAULT_EPOCHS):
-    """Controller wiring: build and persist the durable analysis, never failing an epoch."""
+    """Controller wiring: build and persist the durable analysis, never raising.
+
+    Optional analytics must not abort publication or the next epoch, so every
+    failure path (bank read, parse, build, disk write) returns a status instead
+    of raising.
+    """
     root = Path(state_root)
-    bank_rows = load_bank_rows(config, challenge)
     try:
+        bank_rows = load_bank_rows(config, challenge)
         value = build(root, bank_rows, challenge, metric_field=metric_field, count=count)
         value.update(status='complete', generated_at_unix=time.time())
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        value = {'schema': SCHEMA, 'status': 'unavailable', 'target': challenge['target'],
-                 'before_epoch': challenge['epoch'], 'error_type': type(error).__name__,
-                 'generated_at_unix': time.time()}
-    pr100_filter.atomic(root / 'lineage-outcomes.json', value)
-    return {'status': value['status'], 'outcome_count': value.get('outcome_count'),
-            'completed_epochs': value.get('completed_epochs', []),
-            'top_count': len(value.get('top', [])), 'bottom_count': len(value.get('bottom', []))}
+        pr100_filter.atomic(root / 'lineage-outcomes.json', value)
+        return {'status': 'complete', 'outcome_count': value.get('outcome_count'),
+                'completed_epochs': value.get('completed_epochs', []),
+                'top_count': len(value.get('top', [])),
+                'bottom_count': len(value.get('bottom', []))}
+    except Exception as error:
+        unavailable = {'schema': SCHEMA, 'status': 'unavailable',
+                       'target': challenge.get('target'), 'before_epoch': challenge.get('epoch'),
+                       'error_type': type(error).__name__, 'generated_at_unix': time.time()}
+        try:
+            pr100_filter.atomic(root / 'lineage-outcomes.json', unavailable)
+        except Exception:
+            pass  # The analytics disk is optional; the epoch must proceed regardless.
+        return {'status': 'unavailable', 'outcome_count': 0, 'completed_epochs': []}

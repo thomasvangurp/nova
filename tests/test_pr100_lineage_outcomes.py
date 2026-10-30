@@ -96,18 +96,25 @@ def test_selected_lineage_combines_cell_edit_kind_and_parent_origin_with_unknown
     assert 'parent_not_in_bank' in unknown['unknowns']
 
 
-def _recorded_epoch(root, epoch, *, scores, rows, status='published', identity=None):
+def _recorded_epoch(root, epoch, *, scores, rows, status='published', identity=None,
+                    cell=('IGHV3-74', 10), challenge=None, published=None):
     directory = root / str(epoch)
     directory.mkdir(parents=True, exist_ok=True)
-    state = {'schema': 'pr100-epoch-continuation-v1',
-             'challenge': {'epoch': epoch, 'target': TARGET, 'epoch_length': 361,
-                           'allowed_v': 'IGHV3-74', 'allowed_cdr3_length': 10},
+    if challenge is None and cell is not None:
+        challenge = {'epoch': epoch, 'target': TARGET, 'epoch_length': 361,
+                     'allowed_v': cell[0], 'allowed_cdr3_length': cell[1]}
+    state = {'schema': 'pr100-epoch-continuation-v1', 'challenge': challenge,
              'score_rows': scores, 'scoring_identity': identity,
              'native_rows': rows, 'pending_native': [], 'generated_hashes': [],
              'native_attempted_hashes': [], 'score_attempted_hashes': [],
              'next_attempt': 1, 'proposal_offset': 0}
     (directory / 'continuation.json').write_text(json.dumps(state))
     (directory / 'receipt.json').write_text(json.dumps({'epoch': epoch, 'status': status, 'attempt': 1}))
+    if published is not None:
+        members = [{'sequence_hash': rules.sequence_hash(s), 'tier_rank': 0, 'psh_mean': None}
+                   for s in published]
+        (directory / 'published-quality.json').write_text(json.dumps(
+            {'epoch': epoch, 'quality': {'tier_a': 0, 'count': len(members), 'members': members}}))
 
 
 def _seq(tag, length=120):
@@ -141,7 +148,7 @@ def test_top_bottom5_orders_within_one_protocol_and_isolates_other_fields(tmp_pa
         _recorded_epoch(tmp_path, i, scores=scores, rows=rows, identity=IDENTITY)
     before = 26031
     outcomes = lineage.scored_outcomes(tmp_path, lineage.completed_epochs(tmp_path, before, 10),
-                                       None, {'epoch': before, 'target': TARGET}, 'design_iiptm')
+                                       None, 'design_iiptm')
     ranking = lineage.top_bottom5(outcomes, metric_field='design_iiptm', direction='max')
     assert ranking['primary_protocol'] == rules.digest(IDENTITY)
     assert len(ranking['top']) == 5 and len(ranking['bottom']) == 5
@@ -165,11 +172,79 @@ def test_top_bottom5_never_mixes_different_scoring_identities(tmp_path):
             identity=other)
     before = 26025
     outcomes = lineage.scored_outcomes(tmp_path, lineage.completed_epochs(tmp_path, before, 10),
-                                       None, {'epoch': before, 'target': TARGET}, 'design_iiptm')
+                                       None, 'design_iiptm')
     ranking = lineage.top_bottom5(outcomes, metric_field='design_iiptm', direction='max')
     assert ranking['primary_protocol'] == rules.digest(dict(IDENTITY, scorer_sha256='d' * 64))
     assert ranking['comparable_count'] == 1
     assert len(ranking['non_comparable']) == 3
+
+
+def test_scored_outcomes_uses_each_epochs_own_cell_and_unknown_challenge(tmp_path):
+    for i, cell in ((26021, ('IGHV3-74', 10)), (26022, ('IGHV3-66', 12))):
+        sequence = _seq(str(i))
+        _recorded_epoch(tmp_path, i,
+            scores={sequence: {TARGET: {'design_iiptm': 0.5}}},
+            rows=[{'sequence': sequence, 'sequence_hash': rules.sequence_hash(sequence),
+                   'source': 'fresh_baseline_proposal',
+                   'reference_stratum': 'unseeded_control'}],
+            identity=IDENTITY, cell=cell)
+    missing = _seq('MISSING')
+    directory = tmp_path / '26023'
+    directory.mkdir(parents=True)
+    (directory / 'continuation.json').write_text(json.dumps({
+        'schema': 'x', 'score_rows': {missing: {TARGET: {'design_iiptm': 0.5}}},
+        'scoring_identity': IDENTITY, 'native_rows': [
+            {'sequence': missing, 'sequence_hash': rules.sequence_hash(missing),
+             'source': 'fresh_baseline_proposal', 'reference_stratum': 'unseeded_control'}],
+        'pending_native': []}))
+    (directory / 'receipt.json').write_text(json.dumps({'epoch': 26023, 'status': 'published'}))
+    outcomes = lineage.scored_outcomes(tmp_path, [26021, 26022, 26023], None, 'design_iiptm')
+    by_epoch = {o['epoch']: o for o in outcomes}
+    assert by_epoch[26021]['lineage']['cell']['cell'] == 'IGHV3-74:10'
+    assert by_epoch[26022]['lineage']['cell']['cell'] == 'IGHV3-66:12'
+    assert 'cell_unknown' in by_epoch[26023]['lineage']['unknowns']
+    assert 'historical_challenge_unknown' in by_epoch[26023]['unknowns']
+    assert 'scoring_identity_target_mismatch' in by_epoch[26023]['unknowns']
+    assert by_epoch[26023]['target'] is None
+    assert by_epoch[26023]['protocol'] is None
+
+
+def test_incomplete_or_mismatched_scoring_identity_is_unknown(tmp_path):
+    sequence = _seq('X')
+    _recorded_epoch(tmp_path, 26021,
+        scores={sequence: {TARGET: {'design_iiptm': 0.5}}},
+        rows=[{'sequence': sequence, 'sequence_hash': rules.sequence_hash(sequence),
+               'source': 'fresh_baseline_proposal', 'reference_stratum': 'unseeded_control'}],
+        identity={'scorer_sha256': 'a' * 64})
+    outcomes = lineage.scored_outcomes(tmp_path, [26021], None, 'design_iiptm')
+    assert outcomes[0]['protocol'] is None
+    assert 'scoring_identity_incomplete' in outcomes[0]['unknowns']
+    _recorded_epoch(tmp_path, 26022,
+        scores={sequence: {TARGET: {'design_iiptm': 0.5}}},
+        rows=[{'sequence': sequence, 'sequence_hash': rules.sequence_hash(sequence),
+               'source': 'fresh_baseline_proposal', 'reference_stratum': 'unseeded_control'}],
+        identity=dict(IDENTITY, target='OTHER'))
+    outcomes = lineage.scored_outcomes(tmp_path, [26022], None, 'design_iiptm')
+    assert 'scoring_identity_target_mismatch' in outcomes[0]['unknowns']
+
+
+def test_published_flag_distinguishes_scored_from_published_without_inventing_chain(tmp_path):
+    published_seq, unpublished = _seq('PUB'), _seq('UNPUB')
+    rows = [{'sequence': s, 'sequence_hash': rules.sequence_hash(s),
+             'source': 'fresh_baseline_proposal', 'reference_stratum': 'unseeded_control'}
+            for s in (published_seq, unpublished)]
+    _recorded_epoch(tmp_path, 26021,
+        scores={published_seq: {TARGET: {'design_iiptm': 0.6}},
+                unpublished: {TARGET: {'design_iiptm': 0.4}}},
+        rows=rows, identity=IDENTITY, published=[published_seq])
+    outcomes = {o['sequence_hash']: o
+                for o in lineage.scored_outcomes(tmp_path, [26021], None, 'design_iiptm')}
+    assert outcomes[rules.sequence_hash(published_seq)]['published'] is True
+    assert outcomes[rules.sequence_hash(unpublished)]['published'] is False
+    assert all(o['validator_outcome'] is None for o in outcomes.values())
+    value = lineage.build(tmp_path, None, {'epoch': 26022, 'target': TARGET})
+    assert value['populations'] == {'locally_scored': 2, 'published': 1,
+                                    'published_unknown': 0, 'validator_scored': 0}
 
 
 def test_build_exports_lineage_and_honest_unknowns_for_unmeasured_sequences(tmp_path):
@@ -237,6 +312,30 @@ def test_record_writes_a_durable_artifact_and_survives_a_missing_bank(tmp_path):
     assert all(o['lineage']['parent_origin']['parent_hash'] == rules.sequence_hash(parent)
                and o['lineage']['parent_origin']['unknown_reason'] == 'parent_bank_unavailable'
                for o in value['top'])
+
+
+def test_record_never_raises_on_disk_or_parse_failure(tmp_path, monkeypatch):
+    from test_pr100_live_controller import config as controller_config
+    config = controller_config(tmp_path)
+    challenge = {'epoch': 26024, 'target': TARGET}
+
+    def boom(*args, **kwargs):
+        raise OSError('disk full')
+    monkeypatch.setattr(lineage, 'build', boom)
+    assert lineage.record(str(tmp_path), challenge, config)['status'] == 'unavailable'
+    value = json.loads((tmp_path / 'lineage-outcomes.json').read_text())
+    assert value['status'] == 'unavailable' and value['error_type'] == 'OSError'
+
+
+def test_controller_lineage_hook_never_fails_the_epoch(monkeypatch):
+    from nanobody_opt import pr100_epoch_continuation as continuation
+
+    def boom(*args, **kwargs):
+        raise OSError('disk full')
+    monkeypatch.setattr('nanobody_opt.pr100_lineage_outcomes.record', boom)
+    result = continuation.record_lineage({'state_root': '/nonexistent'},
+                                         {'epoch': 26030, 'target': TARGET})
+    assert result == {'status': 'unavailable'}
 
 
 def test_load_bank_rows_binds_the_qualified_bank_and_refuses_drift(tmp_path):
