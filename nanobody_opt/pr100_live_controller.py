@@ -305,6 +305,14 @@ def remote(config, host, request, *, sleep=time.sleep):
     return reply
 
 
+def native_collection_reserve(config):
+    value = config.get('native_collection_reserve_seconds', 0)
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or value != 0 and not 30 <= value <= 180):
+        raise ValueError('invalid_native_collection_reserve_seconds')
+    return float(value)
+
+
 def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     host = 'slave' if phase == 'sequence' else config.get('_native_host', 'master') if phase == 'native' else 'master'
     runtime = config['hosts'][host]
@@ -385,11 +393,20 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                   usable - downstream)
         if cap < (native_minimum if phase == 'native' else PHASE_FLOORS['sequence']):
             raise TimeoutError('insufficient remaining phase window')
-    if phase == 'native' and 'phase_budget_seconds' not in config['worker']:
+    collection = native_collection_reserve(config) if phase == 'native' else 0.0
+    if collection:
+        # Pay for evidence transfer before admitting scientific work, inside
+        # the existing phase/epoch window, never by extending its deadline.
+        cap -= collection
+        minimum = native_minimum if config.get('_continuation') else PHASE_FLOORS['native']
+        if cap < minimum:
+            raise TimeoutError('insufficient remaining native collection window')
+    if phase == 'native' and ('phase_budget_seconds' not in config['worker'] or collection):
         # Without this the worker measures until the supervisor kills it, and a killed
         # native phase returns no candidates at all. Leave room for the novelty pass.
         reserve = float(config.get('novelty_reserve_seconds', NOVELTY_RESERVE_SECONDS))
-        job['phase_budget_seconds'] = max(1.0, cap - reserve)
+        budget = max(1.0, cap - reserve)
+        job['phase_budget_seconds'] = min(float(job.get('phase_budget_seconds', budget)), budget)
     if phase == 'score':
         # The worker bounds each GPU lease inside the supervisor's wall cap.
         job['wall_seconds'] = max(30.0, cap - 15.0)
@@ -402,6 +419,7 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
             'epoch_length': challenge['epoch_length'], 'reserve_blocks': RESERVE_BLOCKS}
     return host, {'operation': 'start', 'directory': directory, 'python': python,
                   'transport_deadline_unix': stop_at + 15,
+                  'collection_reserve_seconds': collection,
                   'source_sha': config['source_sha'],
                   'supervisor': release + '/scripts/pr100_live_supervisor.py', 'spec': spec,
                   'clock': clock, 'files': {k: base64.b64encode(v).decode() for k, v in files.items()}}
@@ -434,7 +452,8 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
                             'runtime': config['hosts']['slave' if phase == 'sequence' else
                                 config.get('_native_host', 'master') if phase == 'native' else 'master'],
                             'gpus': config.get('gpu'), 'native_gpus': config.get('native_gpu'),
-                            'native_gpus_by_host': config.get('native_gpu_by_host')})
+                            'native_gpus_by_host': config.get('native_gpu_by_host'),
+                            'native_collection_reserve_seconds': native_collection_reserve(config)})
     saved = json.loads(intent.read_text()) if intent.is_file() else None
     dispatch_started = (saved.get('created_at_unix', saved['request']['clock']['updated_at_unix'])
                         if saved else clock['updated_at_unix'])
@@ -461,7 +480,8 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
     transport_config = {**config, '_refresh_clock': lambda: clock_state(chain)} if transport is remote else config
     poll_deadline = stop_at + 15
     if config.get('_bounded_phase_collection'):
-        poll_deadline = min(poll_deadline, request['spec']['wall_seconds'] + dispatch_started + 30)
+        collection_slack = max(30, request.get('collection_reserve_seconds', 0))
+        poll_deadline = min(poll_deadline, request['spec']['wall_seconds'] + dispatch_started + collection_slack)
         if poll_deadline <= time.time():
             # The old wall budget elapsed. Probe its ownership once; never
             # restart scientific work under the old launch identity.
@@ -764,6 +784,7 @@ def publish(config, chain, challenge, validity, scores, settings, scorer_hash, s
 
 
 def validate_config(config):
+    native_collection_reserve(config)
     missing = [k for k in ('start_epoch', 'hosts', 'remote_root', 'state_root', 'publication_path',
                            'source_sha', 'worker', 'gpu') if k not in config]
     if missing:

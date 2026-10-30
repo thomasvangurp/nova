@@ -134,6 +134,38 @@ def test_phase_request_passes_the_gpu_list_and_worker_knobs_to_the_score_job(tmp
     assert 0 < request['spec']['wall_seconds'] <= stop_at - time.time()
 
 
+def test_native_collection_reserve_is_paid_before_worker_admission(tmp_path):
+    value = config(tmp_path, native_collection_reserve_seconds=90)
+    stop_at = time.time() + 2000
+    _, request = controller.phase_request(value, challenge(), 'native', {}, stop_at, clock(), cap=1000)
+    job = json.loads(__import__('base64').b64decode(request['files']['job.json']))
+    assert request['spec']['wall_seconds'] == 910
+    assert job['phase_budget_seconds'] == 610  # Existing300s novelty reserve is retained.
+    assert request['collection_reserve_seconds'] == 90
+    assert request['spec']['deadline_unix'] == stop_at
+    assert request['spec']['wall_seconds'] + request['collection_reserve_seconds'] == 1000
+
+
+def test_collection_reserve_cannot_be_bypassed_by_explicit_worker_budget(tmp_path):
+    value = config(tmp_path, native_collection_reserve_seconds=90)
+    value['worker']['phase_budget_seconds'] = 9999
+    _, request = controller.phase_request(value, challenge(), 'native', {}, time.time()+2000, clock(), cap=1000)
+    job = json.loads(__import__('base64').b64decode(request['files']['job.json']))
+    assert job['phase_budget_seconds'] == 610
+
+
+@pytest.mark.parametrize('reserve', [True, -1, 20, 181, float('nan'), float('inf')])
+def test_native_collection_reserve_is_finite_and_bounded(reserve):
+    with pytest.raises(ValueError, match='invalid_native_collection'):
+        controller.native_collection_reserve({'native_collection_reserve_seconds': reserve})
+
+
+def test_native_collection_reserve_refuses_too_short_window(tmp_path):
+    value = config(tmp_path, native_collection_reserve_seconds=90)
+    with pytest.raises(TimeoutError, match='collection window'):
+        controller.phase_request(value, challenge(), 'native', {}, time.time()+1000, clock(), cap=100)
+
+
 def test_native_phase_carries_the_archive_so_the_worker_can_check_novelty(tmp_path):
     import base64
     files = {'input.json': b'{}', 'archive.csv': b'sequence\nAAA\n'}
