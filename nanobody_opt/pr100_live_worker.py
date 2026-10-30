@@ -394,6 +394,17 @@ def novelty_phase(job, directory, *, novelty=None):
 
 def native_resume_identity(job, directory, requirements):
     """Same-runtime checkpoint binding; deliberately no model-equivalence claim."""
+    from nanobody_opt import pr100_native_reference
+    registered = pr100_native_reference.settings_for(job)
+    if registered is not None:
+        row = registered['registration']
+        return {'challenge_sha256': rules.digest(job['challenge']), 'resume_eligible': True,
+                'requirements_sha256': rules.digest(requirements), 'filter_sha': rules.FILTER_SHA,
+                'backend': pr100_native_reference.BACKEND,
+                'registration_sha256': registered['registration_sha256'],
+                'runtime_identity_sha256': row['runtime_sha256'],
+                'policy_sha256': rules.digest(row['policy']),
+                'runtime_identity_status': 'registered_native_reference'}
     import importlib.util
     from nanobody_opt.pr100_native_journal import _context
     context = _context(directory, job, requirements)
@@ -451,6 +462,7 @@ def terminal_rejection_reason(values, requirements, sequence, reason):
 def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=None, screen=None,
                  refill=None):
     from nanobody_opt import pr100_native_journal as journal_module
+    reference_phase_started = clock() if job.get('native_reference', {}).get('enabled') is True else None
     incoming = json.loads((directory / 'input.json').read_text())
     if incoming['challenge'] != job['challenge']:
         raise ValueError('native input challenge mismatch')
@@ -460,6 +472,15 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     tools = Path(job['native_tools'])
     pr100_filter.helper('aggrescan3d').tool_paths = lambda: (tools / 'aggrescan3d-rs', tools / 'freesasa')
     workers = worker_count(job)
+    from nanobody_opt import pr100_native_reference
+    reference_settings = pr100_native_reference.settings_for(job)
+    native_adapter = None
+    if reference_settings is not None:
+        if measure is not None or screen_settings(job)['enabled']:
+            raise ValueError('registered reference cannot mix measurement overrides or screens')
+        native_adapter = pr100_native_reference.Adapter(job, directory)
+        preparation_threads = reference_settings['registration']['policy']['preparation_threads']
+        workers = min(workers, native_adapter.capacity, max(1, available_cores() // preparation_threads))
     fresh_limit = fresh_budget.validate_limit(job.get('fresh_admission_limit', fresh_budget.DEFAULT_LIMIT), allow_zero=True)
     budget = candidate_budget(job)
     timed_admission = 'native_minimum_call_window_seconds' in job
@@ -494,6 +515,18 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         raise ValueError('native slot refill cannot use a batch measurement override')
     config = rules.pinned_config(job['challenge']['epoch'])
     requirements = config['nanobody_requirements']
+    fleet_policy = job.get('native_fleet_policy')
+    if fleet_policy is not None:
+        fleet_policy = selection.fleet_policy_settings(fleet_policy)
+        if native_adapter is None:
+            raise ValueError('native fleet policy requires registered reference evidence')
+    elif native_adapter is not None:
+        raise ValueError('registered reference requires explicit native fleet policy')
+
+    def decide_native(values, requirements, **options):
+        return selection.decide(values, requirements,
+            **({'fleet_policy': fleet_policy} if fleet_policy is not None else {}), **options)
+
     resume_identity = native_resume_identity(job, directory, requirements)
     rows = incoming['candidates']
     if len({r['sequence'] for r in rows}) != len(rows):
@@ -524,6 +557,17 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'recall_guarantee': False, 'authoritative': False},
                   measurement_outcomes={'passed': 0, 'rejected': 0, 'inconclusive': 0})
     result['fresh_admission_limit'] = fresh_limit
+    if fleet_policy is not None:
+        result['native_fleet_policy'] = fleet_policy
+        result['native_inconclusive_observations'] = []
+        result['native_first_failure_rescue'] = {'fraction_of_fresh': .25, 'new_reservations': 0,
+                                                'carried_reservations': 0, 'available_quota': 0}
+    if native_adapter is not None:
+        result['evaluation_counter_scope'] = 'registered_native_reference_calls'
+        result['native_reference'] = {'registration_sha256': reference_settings['registration_sha256'],
+            'policy': reference_settings['registration']['policy'], 'gpus': reference_settings['gpus'],
+            'workers_per_gpu': reference_settings['workers_per_gpu'],
+            'actual_validator_worker_attested': False}
     result['native_admission'] = {'deadline_clamped': timed_admission,
         'minimum_call_window_seconds': minimum_window, 'cleanup_reserve_seconds': cleanup_reserve,
         'candidate_timeout_cap_seconds': budget, 'allocations': []}
@@ -532,6 +576,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         result['rejection_counts'][reason] = result['rejection_counts'].get(reason, 0) + 1
 
     def checkpoint_measurements(values, sequence):
+        if fleet_policy is not None:
+            if any(not pr100_native_reference.authoritative_measurement(value) for value in values):
+                raise ValueError('non_authoritative_native_history')
+            return list(values)  # Complete biological failures are never erased.
         kept = []
         for value in values:
             if not selection.authoritative_cpu_measurement(value):
@@ -542,6 +590,26 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             if observed['outcome'] == 'passed':
                 kept.append(value)
         return kept
+
+    def wants_repeat(values, sequence, required, *, claim=False, for_checkpoint=False):
+        if fleet_policy is None:
+            return (len(values) < required and decide_native(values, requirements,
+                sequence=sequence, repeats=repeats, margin=margin)['tier'] is not None)
+        if sequence in inconclusive_sequences and not for_checkpoint:
+            return False
+        quota = int(len(fresh_admitted) * .25)
+        available = sequence in rescue_reserved or len(rescue_new) < quota
+        wanted = selection.should_repeat(values, requirements, sequence=sequence,
+            repeats=required, margin=margin, fleet_policy=fleet_policy,
+            failed_first_rescue_available=available)
+        first_failure = len(values) == 1 and values[0].get('passed') is False
+        if wanted and first_failure and claim and sequence not in rescue_reserved:
+            rescue_reserved.add(sequence); rescue_new.add(sequence)
+            if sequence in confirmation_progress:
+                confirmation_progress[sequence]['native_resume']['failed_first_rescue_reserved'] = True
+            result['native_first_failure_rescue']['new_reservations'] = len(rescue_new)
+        result['native_first_failure_rescue']['available_quota'] = quota
+        return wanted
 
     def flush():
         result['observation_journal'] = journal.progress()
@@ -557,14 +625,26 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             key = row['sequence']; values = checkpoint_measurements(measurements.get(key, []), key)
             required = max(confirmation_count if key in screen_evidence else repeats,
                            resumed_required.get(key, 0))
-            if values and len(values) < required and selection.decide(values, requirements,
-                    sequence=key, repeats=repeats, margin=margin)['tier'] is not None:
+            if values and wants_repeat(values, key, required, claim=fleet_policy is not None,
+                                       for_checkpoint=True):
                 result['deferred_confirmations'].append({**row, 'native_resume': {
                     'schema': 'pr100-native-confirmation-checkpoint-v1',
                     'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
                     'measurements': values, 'required_cpu_observations': required,
                     'accelerated_screen': screen_evidence.get(key),
+                    **({'failed_first_rescue_reserved': key in rescue_reserved,
+                        'fleet_policy': fleet_policy} if fleet_policy is not None else {}),
                     'execution_host': job.get('native_host', 'master')}})
+        if fleet_policy is not None:
+            result['native_complete_histories'] = [
+                {'sequence_hash': rules.sequence_hash(key), 'measurements': values,
+                 'fleet_policy': fleet_policy, 'identity': resume_identity,
+                 'request_sha256s': [value['native_reference']['receipt']['request_sha256'] for value in values]}
+                for key, values in measurements.items()]
+            # Every complete draw stays in this attempt's current-history file,
+            # including terminal support failures used to revoke older evidence.
+            pr100_filter.atomic(directory / 'native-confirmations.json', {
+                'challenge': job['challenge'], 'records': list(confirmation_progress.values())})
         pr100_filter.atomic(directory / 'result.json', result)
 
     phase_budget = job.get('phase_budget_seconds')
@@ -574,13 +654,15 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         raise ValueError('phase_budget_seconds must be a positive number')
     # Without an explicit phase budget the controller owns the wall clock; we do
     # not invent a deadline that would mark candidates not_run for no reason.
-    deadline = None if phase_budget is None else clock() + float(phase_budget)
+    deadline = (None if phase_budget is None else
+                (reference_phase_started if reference_phase_started is not None else clock()) + float(phase_budget))
 
     def out_of_time():
         return deadline is not None and clock() + minimum_window + cleanup_reserve > deadline
 
     measurements = {}
     confirmation_progress = {}
+    rescue_reserved, rescue_new, inconclusive_sequences = set(), set(), set()
     started = set()
     fresh_admitted = set()
     screened = set()
@@ -601,17 +683,26 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             continue
         values = saved.get('measurements') if isinstance(saved, dict) else None
         required = saved.get('required_cpu_observations') if isinstance(saved, dict) else None
+        if fleet_policy is not None:
+            if saved.get('fleet_policy') != fleet_policy:
+                raise ValueError('native fleet checkpoint policy mismatch')
+            if saved.get('failed_first_rescue_reserved') is True:
+                rescue_reserved.add(row['sequence'])
+                result['native_first_failure_rescue']['carried_reservations'] += 1
         if (not resume_identity['resume_eligible']
                 or saved.get('schema') != 'pr100-native-confirmation-checkpoint-v1'
                 or saved.get('identity') != resume_identity
                 or saved.get('sequence_hash') != rules.sequence_hash(row['sequence'])
                 or not isinstance(values, list) or not 1 <= len(values) < 64
                 or type(required) is not int or not len(values) <= required <= 64
-                or selection.decide(values, requirements, sequence=row['sequence'],
-                                    repeats=repeats, margin=margin)['tier'] is None):
+                or not (wants_repeat(values, row['sequence'], required)
+                        or decide_native(values, requirements, sequence=row['sequence'],
+                                         repeats=repeats, margin=margin)['tier'] is not None)):
             raise ValueError('invalid native confirmation checkpoint')
         key = row['sequence']
         measurements[key] = list(values); started.add(key); resumed_required[key] = required
+        if fleet_policy is not None:
+            confirmation_progress[key] = {**row, 'native_resume': {**saved, 'measurements': list(values)}}
         if saved.get('accelerated_screen') is not None:
             identity = screen_identity(saved['accelerated_screen'], key, job['challenge'])
             if identity is None:
@@ -652,8 +743,31 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         # must never cause these candidates to be blindly evaluated again.
         flush()
 
+        completed_attempts = set()
         def completed(key, value):
-            if len(measurements.get(key, [])) >= expected[key]:
+            if key in completed_attempts or len(measurements.get(key, [])) >= expected[key]:
+                return
+            if (fleet_policy is not None
+                    and not isinstance(value, pr100_native_reference.Inconclusive)
+                    and not pr100_native_reference.authoritative_measurement(value)):
+                # Validate before marking completion. Adapter callbacks may
+                # report diagnostic errors; the final collection must still
+                # raise on an unauthenticated scientific result.
+                raise ValueError('unattested_native_result')
+            completed_attempts.add(key)
+            if fleet_policy is not None and isinstance(value, pr100_native_reference.Inconclusive):
+                inconclusive_sequences.add(key)
+                if value.get('native_started') is False and not measurements.get(key):
+                    started.discard(key); fresh_admitted.discard(key)
+                    result['not_started'] = result['input_count'] - len(started)
+                result['in_flight'] -= 1
+                result['measurement_outcomes']['inconclusive'] += 1
+                result['native_inconclusive_observations'].append({
+                    'sequence_hash': rules.sequence_hash(key), 'after_complete_draws': len(measurements.get(key, [])),
+                    'error': dict(value)})
+                # This process-local type can only be produced by the owned
+                # runner. An arbitrary serialized error cannot erase a failure.
+                flush()
                 return
             measurements.setdefault(key, []).append(value)
             result['completed'] += 1
@@ -667,7 +781,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             # Save each completion before a slower sibling can exhaust the phase.
             required = max(confirmation_count if key in screen_evidence else repeats,
                            resumed_required.get(key, 0))
-            verdict = selection.decide(measurements[key], requirements, sequence=key,
+            verdict = decide_native(measurements[key], requirements, sequence=key,
                                        repeats=repeats, margin=margin)
             confirmed = checkpoint_measurements(measurements[key], key)
             if confirmed:
@@ -676,6 +790,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                     'sequence_hash': rules.sequence_hash(key), 'identity': resume_identity,
                     'measurements': confirmed, 'required_cpu_observations': required,
                     'accelerated_screen': screen_evidence.get(key),
+                    **({'failed_first_rescue_reserved': key in rescue_reserved,
+                        'fleet_policy': fleet_policy} if fleet_policy is not None else {}),
                     'execution_host': job.get('native_host', 'master')}}
             else:
                 confirmation_progress[key] = {'sequence_hash': rules.sequence_hash(key),
@@ -711,6 +827,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             values, acquired, elapsed = measure_batch(
                 [r['sequence'] for r in batch], workers, clock=clock,
                 on_result=completed, on_result_error=observation_error,
+                **({'develop': native_adapter.develop} if native_adapter is not None else {}),
                 **deadline_options)
         else:
             values, acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
@@ -832,7 +949,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             measured_rows.extend(batch)
             result['last_batch_seconds'] = elapsed
             flush()
-            disagreements = [row for row in batch if row['sequence'] in audited and selection.decide(
+            disagreements = [row for row in batch if row['sequence'] in audited and decide_native(
                 measurements[row['sequence']], requirements, sequence=row['sequence'],
                 repeats=repeats, margin=margin)['tier'] is not None]
             inconclusive = [row for row in batch if row['sequence'] in audited and (
@@ -862,11 +979,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             needed = lambda row: max(confirmation_count if row['sequence'] in screen_evidence else repeats,
                                      resumed_required.get(row['sequence'], 0))
             for _ in range(max((needed(r) - 1 for r in batch), default=0)):
-                # Recheck the full native gate after every observation. Once a
-                # candidate fails, a later lucky draw cannot restore eligibility.
-                pending = [row for row in pending if len(measurements[row['sequence']]) < needed(row) and selection.decide(
-                    measurements[row['sequence']], requirements, sequence=row['sequence'],
-                    repeats=repeats, margin=margin)['tier'] is not None]
+                # Repeat eligibility is independent of fleet admission. The
+                # registered route has a bounded first-failure rescue quota.
+                pending = [row for row in pending if wants_repeat(
+                    measurements.get(row['sequence'], []), row['sequence'], needed(row), claim=True)]
                 if not pending or out_of_time():
                     break
                 _acquired, elapsed = measure_and_record(pending)
@@ -922,9 +1038,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             flush()
             for row in batch:
                 key = row['sequence']
-                if (len(measurements.get(key, [])) < needed(row)
-                        and selection.decide(measurements.get(key, []), requirements,
-                            sequence=key, repeats=repeats, margin=margin)['tier'] is not None):
+                if wants_repeat(measurements.get(key, []), key, needed(row), claim=True):
                     pending.append(row)
         return [r for r in rows if r['sequence'] in measured]
 
@@ -973,14 +1087,13 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             measured.add(key)
             # The preceding complete call has released its scientific worker.
             # This candidate's next draw gets priority on the newly free slot.
-            if (len(measurements.get(key, [])) < needed(row)
-                    and selection.decide(measurements.get(key, []), requirements,
-                        sequence=key, repeats=repeats, margin=margin)['tier'] is not None):
+            if wants_repeat(measurements.get(key, []), key, needed(row), claim=True):
                 pending.append(row)
             flush()
 
         result['native_refill'] = (refill or pr100_native_refill.run)(
-            next_calls, completed, workers, clock=clock)
+            next_calls, completed, workers, clock=clock,
+            **({'develop': native_adapter.develop} if native_adapter is not None else {}))
         return [r for r in rows if r['sequence'] in measured]
 
     try:
@@ -994,10 +1107,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     passers = []
     for row in survivors:
         key = row['sequence']
-        verdict = selection.decide(measurements[key], requirements, sequence=key,
+        verdict = decide_native(measurements.get(key, []), requirements, sequence=key,
                                    repeats=repeats, margin=margin,
                                    cpu_confirmation_minimum=max(confirmation_count if key in screen_evidence else 0,
-                                                                resumed_required.get(key, 0)))
+                                                                resumed_required.get(key, 0) if fleet_policy is None else 0))
         verdicts[key] = verdict
         if verdict['tier'] is None:
             record(verdict['reason'] or 'rejected')
@@ -1005,8 +1118,10 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
         record('passed' if verdict['tier'] == 'A' else verdict['reason'])
         evidence = {'challenge': job['challenge'], 'filter_sha': rules.FILTER_SHA,
                     'annotation': row['pr100_annotation'],
-                    'developability': verdict['measurements'][0]}
-        if key in screen_evidence or key in resumed_required:
+                    'developability': verdict['measurements'][verdict.get('primary_passing_index', 0)]}
+        if fleet_policy is not None:
+            evidence['native_fleet_selection'] = verdict['native_fleet_selection']
+        if fleet_policy is None and (key in screen_evidence or key in resumed_required):
             # Carry the confirmation requirement across export and Pi validation;
             # a forged tier label cannot discard it at a publication boundary.
             evidence['native_screen_confirmation'] = {
@@ -1027,8 +1142,12 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     result['native_passed'] = len(passers)
     result['terminal_native_outcomes'] = {}
     for key, verdict in verdicts.items():
-        reason = terminal_rejection_reason(measurements[key], requirements, key, verdict['reason'])
-        if verdict['tier'] is None and reason in journal_module.REJECTION_REASONS:
+        reason = terminal_rejection_reason(measurements.get(key, []), requirements, key, verdict['reason'])
+        fleet_terminal = (fleet_policy is not None and measurements.get(key)
+                          and reason in ('observed_support_too_low', 'no_measured_pass')
+                          and not wants_repeat(measurements[key], key,
+                              max(repeats, resumed_required.get(key, 0)), for_checkpoint=True))
+        if verdict['tier'] is None and (reason in journal_module.REJECTION_REASONS or fleet_terminal):
             result['terminal_native_outcomes'][rules.sequence_hash(key)] = reason
     result['native_classification_complete'] = True
     flush()

@@ -323,6 +323,13 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
         job.update(gpus=list(config.get('native_gpu_by_host', {}).get(host, config.get('native_gpu', config['gpu']))), release=release,
                    scorer=runtime['scorer'], source_sha=config['source_sha'],
                    gpu_lock_directory=config['remote_root'] + '/gpu-locks')
+    if phase == 'native' and job.get('native_reference', {}).get('enabled') is True:
+        # The outer orchestration remains CPU-only. Only an owned lease child
+        # exposes a GPU for the separately registered upstream prediction path.
+        allowed_gpus = config.get('native_gpu_by_host', {}).get(host, config.get('native_gpu', []))
+        job['source_sha'] = config['source_sha']
+        job['native_reference'] = {**job['native_reference'], 'gpu_allowlist': list(allowed_gpus),
+            'lock_directory': config['remote_root'] + '/gpu-locks', 'scorer': runtime['scorer']}
     cap = phase_cap(phase, stop_at) if cap is None else cap
     if config.get('_continuation') and phase in ('sequence', 'native'):
         usable = stop_at - time.time() - PUBLISH_RESERVE_SECONDS
@@ -761,14 +768,16 @@ def validate_config(config):
             or any(host not in ('master', 'slave') for host in native_hosts)):
         raise ValueError('native_hosts must name distinct master/slave hosts')
     overrides = config.get('native_worker_overrides', {})
-    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools', 'native_work_conserving', 'native_screen'}
+    allowed = {'workers', 'max_workers', 'cpu_slots', 'native_tools', 'native_work_conserving',
+               'native_screen', 'native_reference', 'native_fleet_policy'}
     if not isinstance(overrides, dict) or set(overrides) - {'master', 'slave'}:
         raise ValueError('invalid native worker host overrides')
     for host, value in overrides.items():
         if not isinstance(value, dict) or set(value) - allowed:
             raise ValueError('unsupported native worker override')
         if any(type(v) is not int or not 1 <= v <= 256 for k, v in value.items()
-               if k not in ('native_tools', 'native_work_conserving', 'native_screen')):
+               if k not in ('native_tools', 'native_work_conserving', 'native_screen',
+                            'native_reference', 'native_fleet_policy')):
             raise ValueError('invalid native worker resource bound')
         if 'native_work_conserving' in value and type(value['native_work_conserving']) is not bool:
             raise ValueError('native_work_conserving override must be a boolean')
@@ -777,6 +786,12 @@ def validate_config(config):
         if 'native_screen' in value:
             from nanobody_opt.pr100_native_screen import settings as screen_settings
             screen_settings({'native_screen': value['native_screen']})
+        if 'native_reference' in value and (not isinstance(value['native_reference'], dict)
+                or type(value['native_reference'].get('enabled', False)) is not bool):
+            raise ValueError('invalid registered native reference override')
+        if 'native_fleet_policy' in value:
+            from nanobody_opt.pr100_live_selection import fleet_policy_settings
+            fleet_policy_settings(value['native_fleet_policy'])
         if 'native_tools' in value and not str(value['native_tools']).startswith('/'):
             raise ValueError('native tools must be an absolute path')
     screen = config['worker'].get('native_screen', {})

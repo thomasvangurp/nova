@@ -1,0 +1,30 @@
+{
+  "schema": "pr100-native-reference-registry-v1",
+  "registrations": [
+    {
+      "name": "published-source-cuda-prediction-cpu-refinement-prep1",
+      "qualification_scope": "bounded_observed_reference_trial_not_external_worker_attestation",
+      "runtime_sha256": "3395babeb39f64a814777c920e71b49e36450c772d8f529fb870ca7b7dc1d67f",
+      "observer_sha256": "9806c6e5b9a346059c02477f687bdc6bd48bcf892a5f10413bfe8da45bcfaff5",
+      "implementation_sha256": "c5190d71e640ee39fc37f5fc61d0285f9c738b86fe6f3d79f842b2a1c6c7402a",
+      "environment_manifest_sha256": "4e9316d4dd7db9dccb5d55e5cefeabf942cf1579ce100db28d132df2c4bf1875",
+      "bundle_manifest_sha256": "5987cd030870eefba1d88133840e7944fee9170f172e8c150608a5cfc761baf6",
+      "actual_validator_worker_attested": false,
+      "weights": {
+        "1": "2f8f398a95e2fd3fe38527415471a60346cb131864a1a4ef081e11816d74e995",
+        "2": "41c163511ad20d1aa67fbd50f64ced9a25381d0618847b16a19d5e14df73297e",
+        "3": "8de57b3f0b6b89acb0e87fc7b647522666dd90e86ed3138417cbcd785c982c4d",
+        "4": "96f3cfba8de00e4c833bc73efa821f6022ed65e951a4289c7e3b5409527964e0"
+      },
+      "numpy": "2.0.2",
+      "policy": {
+        "prediction": "auto_cuda",
+        "final_refinement": {
+          "platform": "CPU",
+          "threads": 1
+        },
+        "preparation_threads": 1
+      }
+    }
+  ]
+}

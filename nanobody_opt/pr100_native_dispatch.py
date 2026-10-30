@@ -34,6 +34,9 @@ def host_artifacts(files, incoming, rows, terminal, owned, detail):
             raise ValueError('contradictory fresh admission result')
         if set(value.get('terminal_native_outcomes', {})) - hashes:
             raise ValueError('host rejection outside assigned batch')
+        for history in value.get('native_complete_histories', []):
+            if not isinstance(history, dict) or history.get('sequence_hash') not in hashes:
+                raise ValueError('host native history outside assigned batch')
         if any(type(value.get(k, 0)) is not int or value.get(k, 0) < 0 for k in COUNTERS):
             raise ValueError('invalid host counters')
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -159,6 +162,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
             results[host] = value; records.extend(observed); host_diagnostics[host] = detail
             if owned: pending.append(host)
     candidates, deferred, confirmations, attempted, rejected = [], [], [], set(), {}
+    histories = []
     fresh_admitted, fresh_uncertain, never_started = set(), set(), set()
     for host, value in results.items():
         fresh = {rules.sequence_hash(r['sequence']) for r in groups[host] if r.get('native_resume') is None}
@@ -177,6 +181,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         blocked.extend(value.get('blocked_confirmations', []))
         attempted.update(value.get('attempted_sequence_hashes', []))
         rejected.update(value.get('terminal_native_outcomes', {}))
+        histories.extend(value.get('native_complete_histories', []))
     # The merged candidates are individually complete, even when a peer is
     # still unresolved. Only every bound, cleaned-up host can establish that
     # an omitted fully measured checkpoint was conclusively classified.
@@ -188,6 +193,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
               'deferred_candidates': deferred, 'deferred_confirmations': confirmations,
               'blocked_confirmations': blocked, 'attempted_sequence_hashes': sorted(attempted),
               'terminal_native_outcomes': rejected, 'unresolved_native_hosts': sorted(pending),
+              'native_complete_histories': histories,
               'fresh_admitted_sequence_hashes': sorted(fresh_admitted),
               'fresh_admission_uncertain_sequence_hashes': sorted(fresh_uncertain),
               'verified_fresh_never_started_sequence_hashes': sorted(never_started),

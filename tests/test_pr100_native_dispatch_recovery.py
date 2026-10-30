@@ -12,6 +12,41 @@ from tests.test_pr100_epoch_continuation import legacy, score_files, write
 from tests.test_pr100_live_controller import config as route_config
 
 
+def test_both_host_dispatch_preserves_assigned_complete_native_histories(tmp_path):
+    rows = [{'sequence': 'A' * 60}, {'sequence': 'C' * 60}]
+    challenge = {'epoch': 26020}
+    incoming = {'challenge': challenge, 'epoch': 26020, 'target': 'test',
+                'archive_sha256': 'a' * 64, 'candidates': rows}
+    def phase(config, current, name, payload, stop, chain, directory, **kwargs):
+        local = json.loads(payload['input.json'])
+        histories = [{'sequence_hash': rules.sequence_hash(row['sequence']),
+                      'measurements': [{'passed': False}], 'request_sha256s': ['b' * 64]}
+                     for row in local['candidates']]
+        write(directory / 'native-supervisor.json', {'cleanup': {
+            'fixed_point_reached': True, 'remaining_descendants': 0}})
+        value = {**local, 'candidates': [], 'status': 'complete', 'novelty_checked': True,
+                 'native_classification_complete': True, 'native_complete_histories': histories}
+        return {'result.json': json.dumps(value).encode()}
+    config = {'worker': {'workers': 1}, 'native_hosts': ['master', 'slave'], 'source_sha': 'c' * 40}
+    result = dispatch.run(config, challenge, {'input.json': json.dumps(incoming).encode()},
+                          100, object(), tmp_path, run_phase=phase)
+    histories = json.loads(result['result.json'])['native_complete_histories']
+    assert {row['sequence_hash'] for row in histories} == {rules.sequence_hash(row['sequence']) for row in rows}
+    assert all(row['measurements'] == [{'passed': False}] for row in histories)
+
+
+def test_foreign_native_history_cannot_enter_dispatch_merge():
+    rows = [{'sequence': 'A' * 60}]
+    incoming = {'challenge': {'epoch': 26020}, 'epoch': 26020, 'target': 'test', 'archive_sha256': 'a' * 64}
+    value = {**incoming, 'candidates': [], 'native_complete_histories': [
+        {'sequence_hash': rules.sequence_hash('C' * 60), 'measurements': []}]}
+    detail = {}
+    result, _ = dispatch.host_artifacts({'result.json': json.dumps(value).encode()}, incoming,
+                                        rows, {}, False, detail)
+    assert result['status'] == 'failed'
+    assert detail['artifact_error'] == 'unusable_native_result'
+
+
 def confirmation(row, count=3):
     return {**row, 'native_resume': {
         'identity': {'resume_eligible': True}, 'measurements': [{}] * count,
