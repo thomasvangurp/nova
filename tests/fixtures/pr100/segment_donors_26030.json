@@ -1,0 +1,1878 @@
+{
+  "target": "Q9NZQ7",
+  "before_epoch": 26030,
+  "source": "Public historical CSV and boards; IMGT projected by qualified annotation runtime",
+  "annotation_runtime_sha256": "9851767c681498521c7e86cc0f46159d32e1115acf674c71f1f9ada863d22fb9",
+  "rows": [
+    {
+      "sequence": "EQQLQESGTGLVQPGGSLRLSCAASGFTFSSYAMHWVRQAPGKEREWVSDINSDGDQTDYADSVKGRFTISRDNAKNTLYLQMNSLRAEDTAVYYCSRFPFDYWGQGTTVTVSS",
+      "sequence_hash": "319fa1aa406378b5aa0261d37efdea6a75293d00d6d52b36405a0db99183030a",
+      "cells": [
+        "IGHV3-74:7"
+      ],
+      "quality_evidence": [
+        {
+          "epoch": 25991,
+          "field_size": 25,
+          "kind": "public_validator_percentile",
+          "passes": 1,
+          "raw_score": 44.0,
+          "target": "Q9NZQ7",
+          "value": 0.041666666666666664
+        },
+        {
+          "epoch": 25991,
+          "field_size": 25,
+          "kind": "public_validator_percentile",
+          "metrics": {
+            "confidence_rank": 9.0,
+            "delta_sasa_refolded": 635.36768,
+            "design_iiptm": 0.47608,
+            "design_ptm": 0.78445,
+            "design_to_target_iptm": 0.39411,
+            "developability_rank": 7.0,
+            "final_score": 44.0,
+            "interaction_pae": 14.41967,
+            "liability_num_violations": 22.0,
+            "liability_score": 200.0,
+            "min_design_to_target_pae": 5.67729,
+            "physical_interaction_rank": 28.0,
+            "plip_hbonds_refolded": 3.0,
+            "plip_saltbridge_refolded": 3.0
+          },
+          "passes": 1,
+          "raw_score": 44.0,
+          "source_url": "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/25991/nanobodies?limit=10000",
+          "target": "Q9NZQ7",
+          "value": 0.041666666666666664
+        }
+      ],
+      "numbered": [
+        {
+          "number": 1,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 2,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 3,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 4,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 5,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 6,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 7,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 8,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 9,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 11,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 12,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 13,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 14,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 15,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 16,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 17,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 18,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 19,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 20,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 21,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 22,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 23,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 24,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 25,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 26,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 27,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 28,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 29,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 30,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 35,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 36,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 37,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 38,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 39,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 40,
+          "letter": "",
+          "aa": "H"
+        },
+        {
+          "number": 41,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 42,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 43,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 44,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 45,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 46,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 47,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 48,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 49,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 50,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 51,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 52,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 53,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 54,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 55,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 56,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 57,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 58,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 59,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 62,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 63,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 64,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 65,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 66,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 67,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 68,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 69,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 70,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 71,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 72,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 74,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 75,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 76,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 77,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 78,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 79,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 80,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 81,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 82,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 83,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 84,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 85,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 86,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 87,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 88,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 89,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 90,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 91,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 92,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 93,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 94,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 95,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 96,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 97,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 98,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 99,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 100,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 101,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 102,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 103,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 104,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 105,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 106,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 107,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 108,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 115,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 116,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 117,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 118,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 119,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 120,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 121,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 122,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 123,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 124,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 125,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 126,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 127,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 128,
+          "letter": "",
+          "aa": "S"
+        }
+      ]
+    },
+    {
+      "sequence": "EVQLVESGGGHVQPTGSLRLTCAATGFTFSSYAMHWVRQAPGKQRVWVSRINSDGDQTDYADSVKGRFTISRDNAKNTLYLQMNGLRAEDTADYYCARFEPRYPKSRFDYWGQGTTVTVSS",
+      "sequence_hash": "33b6b8958fda95355bb557f83041e388e553a9bd2c9568e8d2b10d7b49bfad2d",
+      "cells": [
+        "IGHV3-74:14"
+      ],
+      "quality_evidence": [
+        {
+          "epoch": 26023,
+          "field_size": 22,
+          "kind": "public_validator_percentile",
+          "metrics": {
+            "confidence_rank": 15.0,
+            "delta_sasa_refolded": 917.98682,
+            "design_iiptm": 0.63565,
+            "design_ptm": 0.79164,
+            "design_to_target_iptm": 0.55084,
+            "developability_rank": 13.0,
+            "final_score": 34.0,
+            "interaction_pae": 10.96213,
+            "liability_num_violations": 26.0,
+            "liability_score": 240.0,
+            "min_design_to_target_pae": 3.1312,
+            "physical_interaction_rank": 6.0,
+            "plip_hbonds_refolded": 6.0,
+            "plip_saltbridge_refolded": 5.0
+          },
+          "passes": 1,
+          "raw_score": 34.0,
+          "source_url": "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/26023/nanobodies?limit=10000",
+          "target": "Q9NZQ7",
+          "value": 0.047619047619047616
+        }
+      ],
+      "numbered": [
+        {
+          "number": 1,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 2,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 3,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 4,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 5,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 6,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 7,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 8,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 9,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 11,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 12,
+          "letter": "",
+          "aa": "H"
+        },
+        {
+          "number": 13,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 14,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 15,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 16,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 17,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 18,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 19,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 20,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 21,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 22,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 23,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 24,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 25,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 26,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 27,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 28,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 29,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 30,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 35,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 36,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 37,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 38,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 39,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 40,
+          "letter": "",
+          "aa": "H"
+        },
+        {
+          "number": 41,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 42,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 43,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 44,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 45,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 46,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 47,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 48,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 49,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 50,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 51,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 52,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 53,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 54,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 55,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 56,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 57,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 58,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 59,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 62,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 63,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 64,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 65,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 66,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 67,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 68,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 69,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 70,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 71,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 72,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 74,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 75,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 76,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 77,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 78,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 79,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 80,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 81,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 82,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 83,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 84,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 85,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 86,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 87,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 88,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 89,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 90,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 91,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 92,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 93,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 94,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 95,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 96,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 97,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 98,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 99,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 100,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 101,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 102,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 103,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 104,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 105,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 106,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 107,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 108,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 109,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 110,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 111,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 112,
+          "letter": "A",
+          "aa": "P"
+        },
+        {
+          "number": 112,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 113,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 114,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 115,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 116,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 117,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 118,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 119,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 120,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 121,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 122,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 123,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 124,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 125,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 126,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 127,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 128,
+          "letter": "",
+          "aa": "S"
+        }
+      ]
+    },
+    {
+      "sequence": "EVQLVESGGGLVQPGGSLRLSCAASGFTVSSYSMSWVRQAPGKEREWVSVINSDGDQTEYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCARFPHFDHWGQGTMVTVSS",
+      "sequence_hash": "b7df13425bc0566a16038d113dd7d906bf20c695bf4a367e9b0a28806aa9da50",
+      "cells": [
+        "IGHV3-66:8"
+      ],
+      "quality_evidence": [
+        {
+          "epoch": 26027,
+          "field_size": 31,
+          "kind": "public_validator_percentile",
+          "metrics": {
+            "confidence_rank": 43.0,
+            "delta_sasa_refolded": 687.93555,
+            "design_iiptm": 0.4153,
+            "design_ptm": 0.78004,
+            "design_to_target_iptm": 0.36944,
+            "developability_rank": 14.0,
+            "final_score": 77.0,
+            "interaction_pae": 15.92365,
+            "liability_num_violations": 23.0,
+            "liability_score": 205.0,
+            "min_design_to_target_pae": 7.46626,
+            "physical_interaction_rank": 20.0,
+            "plip_hbonds_refolded": 5.0,
+            "plip_saltbridge_refolded": 4.0
+          },
+          "passes": 1,
+          "raw_score": 77.0,
+          "source_url": "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/26027/nanobodies?limit=10000",
+          "target": "Q9NZQ7",
+          "value": 0.16666666666666666
+        }
+      ],
+      "numbered": [
+        {
+          "number": 1,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 2,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 3,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 4,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 5,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 6,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 7,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 8,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 9,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 11,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 12,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 13,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 14,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 15,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 16,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 17,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 18,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 19,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 20,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 21,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 22,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 23,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 24,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 25,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 26,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 27,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 28,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 29,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 30,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 35,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 36,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 37,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 38,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 39,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 40,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 41,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 42,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 43,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 44,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 45,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 46,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 47,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 48,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 49,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 50,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 51,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 52,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 53,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 54,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 55,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 56,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 57,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 58,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 59,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 62,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 63,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 64,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 65,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 66,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 67,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 68,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 69,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 70,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 71,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 72,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 74,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 75,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 76,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 77,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 78,
+          "letter": "",
+          "aa": "I"
+        },
+        {
+          "number": 79,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 80,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 81,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 82,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 83,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 84,
+          "letter": "",
+          "aa": "K"
+        },
+        {
+          "number": 85,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 86,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 87,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 88,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 89,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 90,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 91,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 92,
+          "letter": "",
+          "aa": "N"
+        },
+        {
+          "number": 93,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 94,
+          "letter": "",
+          "aa": "L"
+        },
+        {
+          "number": 95,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 96,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 97,
+          "letter": "",
+          "aa": "E"
+        },
+        {
+          "number": 98,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 99,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 100,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 101,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 102,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 103,
+          "letter": "",
+          "aa": "Y"
+        },
+        {
+          "number": 104,
+          "letter": "",
+          "aa": "C"
+        },
+        {
+          "number": 105,
+          "letter": "",
+          "aa": "A"
+        },
+        {
+          "number": 106,
+          "letter": "",
+          "aa": "R"
+        },
+        {
+          "number": 107,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 108,
+          "letter": "",
+          "aa": "P"
+        },
+        {
+          "number": 114,
+          "letter": "",
+          "aa": "H"
+        },
+        {
+          "number": 115,
+          "letter": "",
+          "aa": "F"
+        },
+        {
+          "number": 116,
+          "letter": "",
+          "aa": "D"
+        },
+        {
+          "number": 117,
+          "letter": "",
+          "aa": "H"
+        },
+        {
+          "number": 118,
+          "letter": "",
+          "aa": "W"
+        },
+        {
+          "number": 119,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 120,
+          "letter": "",
+          "aa": "Q"
+        },
+        {
+          "number": 121,
+          "letter": "",
+          "aa": "G"
+        },
+        {
+          "number": 122,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 123,
+          "letter": "",
+          "aa": "M"
+        },
+        {
+          "number": 124,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 125,
+          "letter": "",
+          "aa": "T"
+        },
+        {
+          "number": 126,
+          "letter": "",
+          "aa": "V"
+        },
+        {
+          "number": 127,
+          "letter": "",
+          "aa": "S"
+        },
+        {
+          "number": 128,
+          "letter": "",
+          "aa": "S"
+        }
+      ]
+    }
+  ]
+}

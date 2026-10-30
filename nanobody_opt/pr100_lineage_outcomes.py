@@ -78,6 +78,9 @@ def cell_of(row, challenge):
 def edit_kind(row):
     """The proposal/edit lane that produced a selected sequence."""
     source = row.get('source')
+    if source == 'segment_recombination':
+        return {'kind': row.get('proposal_lane') or 'segment_lane_unknown',
+                'policy': row.get('proposal_type'), 'source': source}
     if source == 'edit_generation':
         return {'kind': row.get('proposal_lane') or 'edit_generation_lane_unknown',
                 'policy': row.get('edit_policy'), 'source': source}
@@ -113,6 +116,18 @@ def parent_origin(row, bank_index):
     provenance is exported as an explicit unknown, never invented.
     """
     source = row.get('source')
+    if source == 'segment_recombination':
+        parts = row.get('segment_provenance', [])
+        hashes = sorted({p['source_hash'] for p in parts if isinstance(p, dict) and p.get('source_hash')})
+        contributors = []
+        for sha in hashes:
+            origin = parent_origin({'reference_hash': sha}, bank_index)
+            origin['kind'] = 'segment_donor'
+            origin['copied_segments'] = [p for p in parts if p.get('source_hash') == sha]
+            contributors.append(origin)
+        return {'resolved': len(contributors) >= 2 and all(c['resolved'] for c in contributors),
+                'kind': 'multi_donor_segments', 'parent_hash': None,
+                'contributors': contributors, 'segment_layout': row.get('segment_layout')}
     parent_sequence = row.get('parent_sequence')
     if isinstance(parent_sequence, str) and parent_sequence:
         parent_hash = rules.sequence_hash(parent_sequence)

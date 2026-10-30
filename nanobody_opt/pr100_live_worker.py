@@ -174,6 +174,7 @@ def sequence_phase(job, directory):
     from nanobody_opt import pr100_reference_donors as donors
     from nanobody_opt import pr100_edit_generation
     from nanobody_opt import pr100_v_identity_budget
+    from nanobody_opt import pr100_segment_generation as segments
     from collections import Counter
     expected = job['challenge']
     config = rules.pinned_config(expected['epoch'])
@@ -203,6 +204,7 @@ def sequence_phase(job, directory):
     slots = job.get('reference_slots', DEFAULT_REFERENCE_SLOTS)
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
     proposal_offset = job.get('proposal_offset', 0)
+    segment_settings = segments.settings(job)
     if type(proposal_offset) is not int or proposal_offset < 0:
         raise ValueError('proposal_offset must be a nonnegative integer')
     excluded = job.get('excluded_sequence_hashes', [])
@@ -316,6 +318,27 @@ def sequence_phase(job, directory):
                          'requested_v': expected['allowed_v'],
                          'requested_cdr3_length': expected['allowed_cdr3_length']})
             edit_source_counts[edit['proposal_lane']] += 1
+    segment_stats = {}
+    segment_donors = []
+    if segment_settings['enabled']:
+        # Segment donors need not already occupy the child's challenge cell.
+        # Only the independently annotated child can satisfy that constraint.
+        for donor in segments.choose_donors(bank, expected, segment_settings['max_donors']):
+            try:
+                chain = Chain(donor['sequence'], scheme='imgt', cdr_definition='imgt', use_anarcii=False)
+                numbered = [{'number': pos.number, 'letter': pos.letter, 'aa': aa}
+                            for pos, aa in chain]
+                segment_donors.append(segments.prepare(donor, numbered))
+            except Exception:
+                # Bad source annotation drops only that donor; the baseline
+                # and other measured generation arms remain runnable.
+                segment_stats['donor_numbering_failed'] = segment_stats.get('donor_numbering_failed', 0) + 1
+        rows.extend(segments.generate(segment_donors, expected,
+            limit=segment_settings['limit'], beam_width=segment_settings['beam_width'],
+            max_per_cdr3=segment_settings['max_per_cdr3'],
+            offset=proposal_offset // max(1, proposals_wanted),
+            excluded=excluded | archive_hashes | {rules.sequence_hash(r['sequence']) for r in rows},
+            stats=segment_stats))
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
     unique = {r['sequence']: r for r in rows
               if rules.sequence_hash(r['sequence']) not in blocked}
@@ -323,7 +346,7 @@ def sequence_phase(job, directory):
     # candidates. A background importer owns SQLite writes; mining never waits
     # on a database or reconstructs parentage from sequence similarity.
     from nanobody_opt.pr100_history import generation_records
-    history = generation_records(list(unique.values()), [row for row, _ in proposal_donors])
+    history = generation_records(list(unique.values()), bank)
     try:
         pr100_filter.atomic(directory / 'generation-history.json', {'challenge': expected, **history})
         history['history_capture_status'] = 'sidecar_saved'
@@ -365,6 +388,14 @@ def sequence_phase(job, directory):
         # window. Stable sorting preserves both lanes' internal order; default
         # and balanced policy retain their existing order exactly.
         eligible.sort(key=lambda row: not chemistry_row(row))
+    if segment_settings['enabled']:
+        # Give the bounded experimental arm actual native admission without
+        # increasing the shared fresh-evaluation budget or starving controls.
+        from itertools import zip_longest
+        pools = [[row for row in eligible if row.get('source') == segments.SOURCE],
+                 [row for row in eligible if row.get('source') == 'edit_generation'],
+                 [row for row in eligible if row.get('source') not in (segments.SOURCE, 'edit_generation')]]
+        eligible = [row for group in zip_longest(*pools) for row in group if row is not None]
     # Novelty is deliberately NOT run here: the archive search now runs after
     # native developability, so it is spent only on native passers.
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'], **history,
@@ -378,6 +409,10 @@ def sequence_phase(job, directory):
               'edit_generation_source_counts': dict(edit_source_counts),
               'edit_generation_candidates': sum(edit_source_counts.values()),
               'edit_generation_stats': dict(edit_stats),
+              'segment_generation_enabled': segment_settings['enabled'],
+              'segment_generation_settings': segment_settings,
+              'segment_generation_stats': segment_stats,
+              'eligible_segment_generation': sum(r.get('source') == segments.SOURCE for r in eligible),
               'eligible_proposal_source_counts': dict(Counter(
                   r['reference_stratum'] for r in eligible if 'reference_stratum' in r)),
               'eligible_edit_generation_source_counts': dict(Counter(

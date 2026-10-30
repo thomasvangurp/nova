@@ -25,6 +25,8 @@ MAX_BYTES = 32 * 1024 * 1024
 GENERATION_FIELDS = ('sequence', 'sequence_hash', 'source', 'parent_sequence',
                      'reference_hash', 'reference_stratum', 'proposal_lane',
                      'edit_policy', 'mutations', 'requested_v', 'requested_cdr3_length')
+GENERATION_FIELDS += ('segment_layout', 'segment_provenance', 'segment_splice',
+                      'segment_search_prior', 'proposal_type')
 
 
 def canonical(value):
@@ -122,6 +124,8 @@ def generation_records(rows, donors):
     """Small generation journal, including rejected candidates but no native blobs."""
     projected = [{k: row[k] for k in GENERATION_FIELDS if k in row} for row in rows]
     used = {row.get('reference_hash') for row in projected if row.get('reference_hash')}
+    used.update(part['source_hash'] for row in projected
+                for part in row.get('segment_provenance', []))
     references = [{'sequence': row['sequence'], 'sequence_hash': row['sequence_hash']}
                   for row in donors if row.get('sequence_hash') in used]
     return {'generation_rows': projected, 'lineage_references': references,
@@ -236,7 +240,23 @@ def import_generation(conn, raw, *, locator, references=None, before_epoch=None)
             parent, kind = refs.get(ref), 'recorded_cdr3_template'
             if parent is None:
                 missing = {'reason': 'reference_sequence_unresolved', 'reference_hash': ref}
-        prepared.append((row, child, parent, kind, missing))
+        links = [(parent, kind)] if parent is not None else []
+        missing_items = [missing] if missing else []
+        if row.get('source') == 'segment_recombination':
+            from nanobody_opt.pr100_segment_generation import reconstruct
+            parts = row.get('segment_provenance')
+            if not isinstance(parts, list) or not parts:
+                raise ValueError('segment_provenance_missing')
+            hashes = {part['source_hash'] for part in parts}
+            if any(not isinstance(sha, str) or HEX.fullmatch(sha) is None for sha in hashes):
+                raise ValueError('invalid_segment_reference_hash')
+            missing_items = [{'reason': 'segment_donor_unresolved:' + sha, 'reference_hash': sha}
+                             for sha in sorted(hashes - refs.keys())]
+            links = []
+            if not missing_items:
+                reconstruct(row, refs)
+                links = [(refs[sha], 'recorded_segment_donor') for sha in sorted(hashes)]
+        prepared.append((row, child, links, missing_items))
     relationships = unresolved = 0
     with conn:
         ident = source(conn, 'pr100_generation_artifact', raw, locator, epoch, len(rows),
@@ -244,29 +264,35 @@ def import_generation(conn, raw, *, locator, references=None, before_epoch=None)
                         'generation_capture_complete': data.get('generation_capture_complete'),
                         'generation_capture_scope': data.get('generation_capture_scope'),
                         'origin_artifact_sha256': data.get('origin_artifact_sha256')})
-        for row, child, parent, kind, missing in prepared:
+        for row, child, links, missing_items in prepared:
             cid = node(conn, child)
             conn.execute('INSERT OR IGNORE INTO history_membership VALUES(?,?)', (ident, cid))
-            if missing:
+            for missing in missing_items:
                 conn.execute('INSERT OR IGNORE INTO history_unresolved VALUES(?,?,?,?)',
                              (ident, cid, missing['reason'], canonical(missing)))
                 unresolved += 1
-            if parent is None or parent == child:
-                continue
-            pid = node(conn, parent)
-            metadata = {'relationship_kind': kind, 'inferred': False, 'source_id': ident,
-                        'artifact_sha256': digest(raw), 'parent_hash': digest(parent.encode()),
-                        'child_hash': digest(child.encode()), 'edit_policy': row.get('edit_policy'),
-                        'proposal_lane': row.get('proposal_lane'), 'challenge': challenge}
-            conn.execute('INSERT OR IGNORE INTO lineage_edges('
-                         'parent_node_id,child_node_id,epoch,source,proposal_type,mutations_json,metadata_json) '
-                         'VALUES(?,?,?,?,?,?,?)',
-                         (pid, cid, epoch, 'pr100_recorded:' + kind, kind,
-                          canonical(row.get('mutations') or edit_descriptors(parent, child)),
-                          canonical(metadata)))
-            conn.execute('INSERT OR IGNORE INTO history_lineage_evidence VALUES(?,?,?,?,?)',
-                         (ident, pid, cid, epoch, kind))
-            relationships += 1
+            for parent, kind in links:
+                if parent == child:
+                    continue
+                pid = node(conn, parent)
+                metadata = {'relationship_kind': kind, 'inferred': False, 'source_id': ident,
+                            'artifact_sha256': digest(raw), 'parent_hash': digest(parent.encode()),
+                            'child_hash': digest(child.encode()), 'edit_policy': row.get('edit_policy'),
+                            'proposal_lane': row.get('proposal_lane'), 'challenge': challenge}
+                mutations = row.get('mutations') or edit_descriptors(parent, child)
+                if kind == 'recorded_segment_donor':
+                    mutations = []  # A segment contribution is not a whole-parent mutation path.
+                    metadata['copied_segments'] = [part for part in row['segment_provenance']
+                        if part['source_hash'] == digest(parent.encode())]
+                    metadata['segment_layout'] = row['segment_layout']
+                conn.execute('INSERT OR IGNORE INTO lineage_edges('
+                             'parent_node_id,child_node_id,epoch,source,proposal_type,mutations_json,metadata_json) '
+                             'VALUES(?,?,?,?,?,?,?)',
+                             (pid, cid, epoch, 'pr100_recorded:' + kind, kind,
+                              canonical(mutations), canonical(metadata)))
+                conn.execute('INSERT OR IGNORE INTO history_lineage_evidence VALUES(?,?,?,?,?)',
+                             (ident, pid, cid, epoch, kind))
+                relationships += 1
     return {'source_id': ident, 'epoch': epoch, 'rows': len(rows),
             'recorded_relationships': relationships, 'unresolved_references': unresolved}
 
