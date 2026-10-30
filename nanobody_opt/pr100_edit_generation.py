@@ -41,6 +41,28 @@ from nanobody_opt.regions import find_regions
 
 #: Proposal record source tag emitted by the in-process edit lane.
 SOURCE = "edit_generation"
+BALANCED_POLICY = "balanced_v2"
+CHEMISTRY_POLICY = "chemistry_conservative_v3"
+EDIT_POLICIES = frozenset((BALANCED_POLICY, CHEMISTRY_POLICY))
+CONSERVATIVE_GROUPS = ("DE", "KR", "NQST", "ILVM", "FYW")
+
+
+def validate_policy(policy):
+    if not isinstance(policy, str) or policy not in EDIT_POLICIES:
+        raise ValueError("unknown edit generation policy")
+    return policy
+
+
+def conservative_substitutions(residue):
+    """Keep charge/aromatic classes; do not move C/G/P/A/H positions.
+
+    This is a bounded proposal heuristic, never a developability or fitness
+    prediction. Every emitted child still requires the full scientific gates.
+    """
+    for group in CONSERVATIVE_GROUPS:
+        if residue in group:
+            return tuple(aa for aa in group if aa != residue)
+    return ()
 
 
 def supported_framework_candidates(
@@ -256,7 +278,8 @@ def _annotated_spans(parent, cdrs):
     return spans
 
 
-def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
+def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget,
+                             policy=BALANCED_POLICY):
     """Bounded parent-guided multi-edits; parent-relative proxies are not novelty.
 
     CDR spans come from qualified annotation, not the heuristic region finder.
@@ -264,6 +287,7 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
     unchanged. The final pipeline must still annotate, profile and search the
     full current archive using the validator implementation.
     """
+    policy = validate_policy(policy)
     spans = _annotated_spans(parent, cdrs)
     if (spans is None or len(allowed) != len(parent) or identity_budget is None
             or identity_budget.parent != parent):
@@ -283,8 +307,10 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
     candidates = []
     seen = set()
     for ordinal in range(limit):
+        seed_prefix = ('pr100-parent-chemistry-v3:' if policy == CHEMISTRY_POLICY
+                       else 'pr100-parent-v-budget-v2:')
         seed = int.from_bytes(hashlib.sha256(
-            ('pr100-parent-v-budget-v2:' + parent + ':' + str(ordinal)).encode()).digest(), 'big')
+            (seed_prefix + parent + ':' + str(ordinal)).encode()).digest(), 'big')
         rng = random.Random(seed)
         candidate = list(parent)
         used = set()
@@ -296,9 +322,12 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
                     continue
                 observed = [aa for aa in allowed[position]
                             if aa in gates.ALLOWED_AAS and aa not in (parent[position], 'C')]
-                population = observed if observed and ordinal % 2 == 0 else broad
-                restore = identity_budget.restoration(position)
-                population = sorted(set(population) | ({restore} if restore else set()))
+                if policy == CHEMISTRY_POLICY:
+                    population = conservative_substitutions(parent[position])
+                else:
+                    population = observed if observed and ordinal % 2 == 0 else broad
+                    restore = identity_budget.restoration(position)
+                    population = sorted(set(population) | ({restore} if restore else set()))
                 for aa in population:
                     if aa in (parent[position], 'C'):
                         continue
@@ -308,11 +337,16 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
                     # novelty without consuming its narrow identity allowance.
                     if delta < 0:
                         continue
-                    # Keep the minimum CDR3 edits, then use restoration/old
+                    # Keep the minimum CDR3 edits, then use permitted
                     # CDR1/2 mismatches. Concentrating all edits in CDR3 failed
                     # real archive novelty despite whole-sequence Hamming<95%:
                     # the validator uses local alignment against every length.
-                    priority = 0 if delta > 0 else 1
+                    if policy == CHEMISTRY_POLICY:
+                        # Prefer observed class-preserving residues on alternate
+                        # draws; a germline restoration is not a quality score.
+                        priority = 0 if ordinal % 2 == 0 and aa in observed else 1
+                    else:
+                        priority = 0 if delta > 0 else 1
                     options.append((priority, rng.random(), position, aa))
             if not options:
                 return False
@@ -333,7 +367,9 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
                 or candidate in seen or not identity_budget.accepts(candidate)):
             continue
         seen.add(candidate)
-        candidates.append((candidate, 'novelty_aware_multi_edit'))
+        lane = ('novelty_aware_multi_edit_chemistry_conservative_v3'
+                if policy == CHEMISTRY_POLICY else 'novelty_aware_multi_edit')
+        candidates.append((candidate, lane))
     return candidates
 
 
@@ -352,6 +388,7 @@ def generate(
     novelty_aware: bool = False,
     parent_cdrs: dict[str, dict[str, str]] | None = None,
     parent_identity_budgets: dict | None = None,
+    policy: str = BALANCED_POLICY,
 ) -> list[dict[str, str]]:
     """Emit edit children round-robin, with separate contexts for each parent length.
 
@@ -359,6 +396,11 @@ def generate(
     parent-relative identity proxies are emitted, using supplied annotation
     CDRs and HMM identity budgets. These projections are never current-archive
     novelty or child annotation evidence.
+
+    ``policy`` defaults to ``balanced_v2`` and reproduces its proposal order.
+    The opt-in ``chemistry_conservative_v3`` preserves residue classes without
+    prioritizing germline restoration. Its independent seed reproduces the
+    measured prototype; it does not promise native or binding-score success.
 
     Parents are proposal CENTRES, never submissions. Each parent seeds the
     framework lane (CDR3-preserving singles/haplotypes) and the lineage lane
@@ -381,6 +423,9 @@ def generate(
     the ``allowed`` table or the parent filter. Pass a ``stats`` dict to
     receive the count under ``malformed_parents``.
     """
+    policy = validate_policy(policy)
+    if policy != BALANCED_POLICY and not novelty_aware:
+        raise ValueError("chemistry policy requires qualified novelty-aware parent contexts")
     if limit is not None and (type(limit) is not int or limit < 0):
         raise ValueError('limit must be a nonnegative integer')
     if limit == 0:
@@ -429,7 +474,7 @@ def generate(
         if novelty_aware:
             framework = novelty_aware_candidates(parent,
                 cdrs=(parent_cdrs or {}).get(parent), allowed=allowed,
-                identity_budget=(parent_identity_budgets or {}).get(parent),
+                identity_budget=(parent_identity_budgets or {}).get(parent), policy=policy,
                 limit=max(16, min(2048, (limit or 300) * 4)))
             lineage = []
         else:
@@ -449,7 +494,8 @@ def generate(
                 candidate, lane = candidate_lane
                 if candidate not in parent_set:
                     records.append({"sequence": candidate, "parent_sequence": parent,
-                                    "proposal_lane": lane, "source": SOURCE})
+                                    "proposal_lane": lane, "source": SOURCE,
+                                    **({"edit_policy": policy} if novelty_aware else {})})
         # Dedup/filter before round-robin so a parent's redundant leading
         # records cannot starve the other parents under a small output limit.
         own_seen = set()

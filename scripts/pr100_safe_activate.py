@@ -487,7 +487,7 @@ def recovery_rollout(value, receipt, sha):
         from nanobody_opt.pr100_live_worker import edit_generation_settings
         supplied = edits.get('settings') if isinstance(edits, dict) else None
         if (not isinstance(edits, dict) or set(edits) - {'settings', 'qualification'}
-                or not isinstance(supplied, dict) or set(supplied) - {'enabled', 'limit'}):
+                or not isinstance(supplied, dict) or set(supplied) - {'enabled', 'limit', 'policy'}):
             raise ValueError('invalid_recovery_edit_settings')
         settings = edit_generation_settings({'edit_generation': supplied})
         if settings['enabled']:

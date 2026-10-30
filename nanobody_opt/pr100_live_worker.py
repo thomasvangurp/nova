@@ -118,10 +118,19 @@ def edit_generation_settings(job):
     ``nanobody_opt/local_neighborhood``) fed by rival parents from the reference
     bank. ``limit`` caps the number of emitted edit candidates and defaults to
     ``DEFAULT_EDIT_LIMIT``; an enabled lane is never unlimited, so it must be >= 1.
+    Optional ``policy`` selects ``balanced_v2`` (default) or the separately
+    qualified ``chemistry_conservative_v3``. Policy is retained in settings
+    identity and emitted lineage; it does not alter any downstream gate.
     """
     supplied = job.get('edit_generation', {})
     if not isinstance(supplied, dict) or not isinstance(supplied.get('enabled', False), bool):
         raise ValueError('edit_generation must contain a boolean enabled flag')
+    if set(supplied) - {'enabled', 'limit', 'policy'}:
+        raise ValueError('unknown edit_generation setting')
+    from nanobody_opt.pr100_edit_generation import BALANCED_POLICY, validate_policy
+    validate_policy(supplied.get('policy', BALANCED_POLICY))
+    # Preserve legacy normalized settings/digest when policy is omitted. An
+    # explicit policy is retained and therefore needs its own qualification.
     settings = {'enabled': False, 'limit': DEFAULT_EDIT_LIMIT, **supplied}
     limit = settings['limit']
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
@@ -289,7 +298,8 @@ def sequence_phase(job, directory):
             edit_parents, background_sequences=edit_background,
             limit=edit_settings['limit'], excluded_hashes=excluded | archive_hashes | seen,
             stats=edit_stats, novelty_aware=True, parent_cdrs=parent_cdrs,
-            parent_identity_budgets=parent_identity_budgets)
+            parent_identity_budgets=parent_identity_budgets,
+            policy=edit_settings.get('policy', pr100_edit_generation.BALANCED_POLICY))
         for edit in edit_candidates:
             rows.append({**edit, 'source': 'edit_generation',
                          'requested_v': expected['allowed_v'],
@@ -328,6 +338,7 @@ def sequence_phase(job, directory):
               'reference_coverage': reference_coverage,
               'proposal_source_counts': dict(source_counts),
               'edit_generation_enabled': edit_settings['enabled'],
+              'edit_generation_policy': edit_settings.get('policy', pr100_edit_generation.BALANCED_POLICY),
               'edit_generation_source_counts': dict(edit_source_counts),
               'edit_generation_candidates': sum(edit_source_counts.values()),
               'edit_generation_stats': dict(edit_stats),

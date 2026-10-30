@@ -953,6 +953,27 @@ def test_edit_rollout_requires_measured_novelty_with_exact_settings_and_bank(dep
         a.recovery_rollout(candidate, recovery_receipt, SHA)
 
 
+def test_chemistry_policy_cannot_reuse_balanced_qualification(deployment, recovery_receipt):
+    from nanobody_opt import rules, pr100_edit_generation as edit
+    *_, old = deployment
+    candidate = a.proposed_config(old, SHA, CLOCK['epoch'], 'master')
+    edits = recovery_receipt['edit_generation']
+    edits['settings'] = {'enabled': True, 'limit': 60}
+    edits['qualification'] = {'source_sha': SHA, 'status': 'complete', 'bank_sha256': 'c' * 64,
+        'settings_sha256': a.digest(edits['settings']), 'archive_sha256': 'd' * 64,
+        'filter_sha': rules.FILTER_SHA, 'tested_candidates': 60, 'novelty_passed_count': 37,
+        'cleanup': {'remaining_descendants': 0, 'fixed_point_reached': True}}
+    edits['settings']['policy'] = edit.CHEMISTRY_POLICY
+    with pytest.raises(ValueError, match='novelty_not_qualified'):
+        a.recovery_rollout(candidate, recovery_receipt, SHA)
+    edits['qualification']['settings_sha256'] = a.digest(edits['settings'])
+    activated = a.recovery_rollout(candidate, recovery_receipt, SHA)
+    assert activated['worker']['edit_generation'] == edits['settings']
+    edits['settings']['policy'] = 'unrecognized'
+    with pytest.raises(ValueError, match='policy'):
+        a.recovery_rollout(candidate, recovery_receipt, SHA)
+
+
 def test_cli_loads_recovery_receipt_for_handoff(deployment, recovery_receipt, monkeypatch):
     base, *_ = deployment; stage = base / 'stage.json'; stage.write_text('{}')
     receipt = base / 'recovery.json'; a.atomic(receipt, recovery_receipt)

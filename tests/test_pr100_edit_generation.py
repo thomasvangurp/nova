@@ -135,6 +135,59 @@ def test_edit_generation_settings_defaults_off_and_validates():
         {'edit_generation': {'enabled': False, 'limit': 0}})['enabled'] is False
 
 
+@pytest.mark.parametrize('policy', [None, '', 'chemistry', [], True])
+def test_edit_policy_rejects_unknown_values_even_when_disabled(policy):
+    with pytest.raises(ValueError, match='policy'):
+        worker.edit_generation_settings({'edit_generation': {'policy': policy}})
+    with pytest.raises(ValueError, match='policy'):
+        edit.generate([], policy=policy)
+
+
+def test_chemistry_requires_bounded_lane_and_annotated_parent_context():
+    with pytest.raises(ValueError, match='limit'):
+        worker.edit_generation_settings({'edit_generation': {
+            'enabled': True, 'policy': edit.CHEMISTRY_POLICY, 'limit': 0}})
+    with pytest.raises(ValueError, match='qualified'):
+        edit.generate([], policy=edit.CHEMISTRY_POLICY)
+    settings = {'enabled': True, 'limit': 60, 'policy': edit.CHEMISTRY_POLICY}
+    assert worker.edit_generation_settings({'edit_generation': settings}) == settings
+
+
+@pytest.mark.parametrize('policy,expected', [
+    # Ordered sequence digests measured from the immutable pre-change sources:
+    # d95cd301 baseline and 0aa2adb chemistry prototype. All 60 chemistry rows
+    # are the exact inputs to the real 60-annotation/37-novel/8-native experiment.
+    (edit.BALANCED_POLICY, '628534da4a128d733c72b3d51057eaf38f87686ed34868c14cddd748e1c2bcce'),
+    (edit.CHEMISTRY_POLICY, '4917b2840a51de813daac2924dadbb007166db40c8e02caefa5094b0894cd7e2'),
+])
+def test_real_parent_policy_sequences_reproduce_frozen_experiments(policy, expected):
+    import hashlib
+    fixture, _, contexts = _recorded_hmm_budgets()
+    cdrs = {row['sequence']: row['cdrs'] for row in fixture['parents']}
+    options = dict(limit=60, novelty_aware=True, parent_cdrs=cdrs,
+                   parent_identity_budgets=contexts)
+    rows = edit.generate(list(contexts), **options, policy=policy)
+    assert len(rows) == 60
+    assert hashlib.sha256('\n'.join(row['sequence'] for row in rows).encode()).hexdigest() == expected
+    assert rows == edit.generate(list(contexts), **options, policy=policy)
+    assert all(row['edit_policy'] == policy for row in rows)
+    assert [row['parent_sequence'] for row in rows[:3]] == list(contexts)
+    if policy == edit.BALANCED_POLICY:
+        assert rows == edit.generate(list(contexts), **options)
+    else:
+        assert all(row['proposal_lane'].endswith(edit.CHEMISTRY_POLICY) for row in rows)
+        for row in rows:
+            parent, child = row['parent_sequence'], row['sequence']
+            assert contexts[parent].accepts(child)
+            assert all(a == b or b in edit.conservative_substitutions(a)
+                       for a, b in zip(parent, child))
+    excluded = {rules.sequence_hash(row['sequence']) for row in rows}
+    continued = edit.generate(list(contexts), **options, policy=policy, excluded_hashes=excluded)
+    assert len(continued) == 60
+    assert all(rules.sequence_hash(row['sequence']) not in excluded for row in continued)
+    assert [row['parent_sequence'] for row in continued[:3]] == list(contexts)
+
+
 def test_haplotypes_skip_donors_with_non_standard_residues():
     """A haplotype copies donor residues verbatim; one bad residue drops it all."""
     parent = 'ACDEFGHIKLMNPQRSTVWY' * 2
@@ -601,6 +654,31 @@ def test_worker_builds_budgets_for_exact_current_challenge(monkeypatch, tmp_path
     assert calls == [(parent, {'allowed_gene': 'IGHV3-23', 'minimum_identity_pct': 82})]
     assert result['challenge'] == challenge
     assert result['edit_generation_candidates'] == 4
+
+
+def test_worker_propagates_bounded_chemistry_policy_and_lineage(monkeypatch, tmp_path):
+    fixture, _, contexts = _recorded_hmm_budgets()
+    bank = [{'sequence': row['sequence'], 'sequence_hash': row['sequence_hash'],
+             'cells': ['IGHV3-23:19'], 'source': 'recorded_parent_wiring_fixture'}
+            for row in fixture['parents']]
+    run = _edit_runner(monkeypatch, tmp_path, bank)
+    from nanobody_opt import pr100_v_identity_budget
+    cdrs = {row['sequence']: row['cdrs'] for row in fixture['parents']}
+    monkeypatch.setattr(pr100_v_identity_budget, 'build', lambda sequence, **kw: contexts[sequence])
+    monkeypatch.setitem(sys.modules, 'abnumber', types.SimpleNamespace(Chain=lambda sequence, **kw:
+        types.SimpleNamespace(**{key + '_seq': value for key, value in cdrs[sequence].items()})))
+    result = run({'epoch': 26019, 'target': rules.TARGET,
+                  'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 19},
+                 edit_generation={'enabled': True, 'limit': 6, 'policy': edit.CHEMISTRY_POLICY})
+    assert result['edit_generation_policy'] == edit.CHEMISTRY_POLICY
+    assert result['edit_generation_candidates'] == 6
+    rows = [row for row in result['candidates'] if row.get('source') == 'edit_generation']
+    assert len(rows) == 6
+    assert all(row['edit_policy'] == edit.CHEMISTRY_POLICY for row in rows)
+    assert all(row['proposal_lane'] == 'novelty_aware_multi_edit_chemistry_conservative_v3' for row in rows)
+    # Bank merit sorting decides parent order; each receives its bounded share.
+    assert {parent: sum(row['parent_sequence'] == parent for row in rows)
+            for parent in contexts} == {parent: 2 for parent in contexts}
 
 
 def test_recorded_local_alignment_rejects_cdr3_only_hamming_novel_child():
