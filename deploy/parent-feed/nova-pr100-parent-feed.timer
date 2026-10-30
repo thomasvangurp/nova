@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll public PR100 parent updates every five minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=300s
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -196,3 +196,23 @@ def test_terminal_novelty_failure_retries_publication_without_new_scientific_cal
     assert pending['active'] is None and continuation.mode_for(pending) == 'publish'
     assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'published'
     assert calls == [('novelty', 1), ('novelty', 2)]
+
+
+def test_running_attempt_keeps_frozen_parent_bank_when_pointer_changes(legacy, monkeypatch):
+    from nanobody_opt import pr100_parent_bank
+    x = legacy; snapshots = []; dispatched = []
+    first = {'status': 'fresh', 'references': '/bank/first.json',
+             'reference_bank_sha256': '1' * 64}
+    def snapshot(*args):
+        snapshots.append(1)
+        return first if len(snapshots) == 1 else {'references': '/bank/new.json',
+                                                  'reference_bank_sha256': '2' * 64}
+    monkeypatch.setattr(pr100_parent_bank, 'snapshot', snapshot)
+    def phase(cfg, *args, **kwargs):
+        dispatched.append(dict(cfg['worker']['parent_bank_snapshot']))
+        raise RuntimeError('fixture interrupted before remote dispatch')
+    monkeypatch.setattr(c, 'run_phase', phase)
+    for _ in range(2):
+        assert c.run_epoch(x.config, x.chain, c.clock_state(x.chain))['status'] == 'recoverable_failure'
+    assert snapshots == [1]
+    assert dispatched == [first, first]

@@ -1,0 +1,486 @@
+{
+  "data": [
+    {
+      "coldkey": "5GhREcsKiqXyafTNd7HsVDm3y22bp5HMnZYMjtLccQWmnLpK",
+      "nanobodies": [
+        {
+          "confidence_rank": 7.0,
+          "delta_sasa_refolded": 930.85742,
+          "design_iiptm": 0.63501,
+          "design_ptm": 0.80137,
+          "design_to_target_iptm": 0.59415,
+          "developability_rank": 18.0,
+          "final_score": 30.0,
+          "interaction_pae": 10.4279,
+          "liability_num_violations": 27.0,
+          "liability_score": 245.0,
+          "min_design_to_target_pae": 2.73128,
+          "physical_interaction_rank": 5.0,
+          "plip_hbonds_refolded": 12.0,
+          "plip_saltbridge_refolded": 7.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYSMNWVRQAPGKQREWVSYISSDGEQTEYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCARFQPRYPRSRSRDFDVWGQGTMVTVSS"
+        }
+      ],
+      "uid": 59
+    },
+    {
+      "coldkey": "5GZDZJZok82n7cY7XZ3M77WjfCowWwAVaCRk9pNXGtnN4zzx",
+      "nanobodies": [
+        {
+          "confidence_rank": 20.0,
+          "delta_sasa_refolded": 926.41113,
+          "design_iiptm": 0.59504,
+          "design_ptm": 0.78909,
+          "design_to_target_iptm": 0.55437,
+          "developability_rank": 18.0,
+          "final_score": 49.0,
+          "interaction_pae": 10.97119,
+          "liability_num_violations": 27.0,
+          "liability_score": 245.0,
+          "min_design_to_target_pae": 3.14294,
+          "physical_interaction_rank": 11.0,
+          "plip_hbonds_refolded": 9.0,
+          "plip_saltbridge_refolded": 6.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "QVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMQWVRQAPGKEREWVSYINSDGDQGEYTDSVKTRFTISRDNAKNSLYLQMNSLRSEDTSVYYCARFAHRYHKTRGSNFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 19
+    },
+    {
+      "coldkey": "5GhREcsKiqXyafTNd7HsVDm3y22bp5HMnZYMjtLccQWmnLpK",
+      "nanobodies": [
+        {
+          "confidence_rank": 19.0,
+          "delta_sasa_refolded": 839.08789,
+          "design_iiptm": 0.64575,
+          "design_ptm": 0.801,
+          "design_to_target_iptm": 0.5505,
+          "developability_rank": 15.0,
+          "final_score": 50.0,
+          "interaction_pae": 10.99624,
+          "liability_num_violations": 26.0,
+          "liability_score": 235.0,
+          "min_design_to_target_pae": 3.26843,
+          "physical_interaction_rank": 16.0,
+          "plip_hbonds_refolded": 13.0,
+          "plip_saltbridge_refolded": 4.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYSMNWVRQAPGKQREWVSYISSDGDQTEYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCARFYPRYPKSSTRSMDVWGQGTVVTVSS"
+        }
+      ],
+      "uid": 7
+    },
+    {
+      "coldkey": "5GhREcsKiqXyafTNd7HsVDm3y22bp5HMnZYMjtLccQWmnLpK",
+      "nanobodies": [
+        {
+          "confidence_rank": 24.0,
+          "delta_sasa_refolded": 827.28467,
+          "design_iiptm": 0.65031,
+          "design_ptm": 0.7965,
+          "design_to_target_iptm": 0.55349,
+          "developability_rank": 10.0,
+          "final_score": 57.0,
+          "interaction_pae": 11.10497,
+          "liability_num_violations": 24.0,
+          "liability_score": 220.0,
+          "min_design_to_target_pae": 3.37108,
+          "physical_interaction_rank": 23.0,
+          "plip_hbonds_refolded": 7.0,
+          "plip_saltbridge_refolded": 4.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVQPGGSLTLSCAASGFTFSSYSMNWVRQPPGKEREWVSYISSDGDQTEYADSVKGRFTISRHNAKNSLYLQMNSLRAEDTAVYYCARFQPRYPRTTSSQFDPWGQGTLVTVSS"
+        }
+      ],
+      "uid": 33
+    },
+    {
+      "coldkey": "5GhREcsKiqXyafTNd7HsVDm3y22bp5HMnZYMjtLccQWmnLpK",
+      "nanobodies": [
+        {
+          "confidence_rank": 20.0,
+          "delta_sasa_refolded": 817.43457,
+          "design_iiptm": 0.59222,
+          "design_ptm": 0.79846,
+          "design_to_target_iptm": 0.59222,
+          "developability_rank": 13.0,
+          "final_score": 60.0,
+          "interaction_pae": 11.0527,
+          "liability_num_violations": 25.0,
+          "liability_score": 230.0,
+          "min_design_to_target_pae": 3.25623,
+          "physical_interaction_rank": 27.0,
+          "plip_hbonds_refolded": 5.0,
+          "plip_saltbridge_refolded": 3.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVETGGGLVQPGGSLRLSCAASGFTFSSYSMSWVRQAPGKQREWVSRISSDGDQTDYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCSRYPHHYKPTDDRQFDHWGQGTLVTVSS"
+        }
+      ],
+      "uid": 6
+    },
+    {
+      "coldkey": "5DZXbYUsMahTTBxotNEegTKXT5FLyPjCvHs9nnnA73TtPNYh",
+      "nanobodies": [
+        {
+          "confidence_rank": 32.0,
+          "delta_sasa_refolded": 841.55566,
+          "design_iiptm": 0.58628,
+          "design_ptm": 0.78991,
+          "design_to_target_iptm": 0.55041,
+          "developability_rank": 15.0,
+          "final_score": 65.0,
+          "interaction_pae": 11.15573,
+          "liability_num_violations": 26.0,
+          "liability_score": 235.0,
+          "min_design_to_target_pae": 3.29038,
+          "physical_interaction_rank": 18.0,
+          "plip_hbonds_refolded": 8.0,
+          "plip_saltbridge_refolded": 5.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "QVQLVESGSGLVQPGGSLRLSCAASGFTFSSYAMQWVRQAPGKEREWVSYINSDGDQGEYTDSVKTRFTISRDNAKNSLYLQMNSLRTEDTSVYYCARFTHGYNKTRGHNFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 53
+    },
+    {
+      "coldkey": "5GZDZJZok82n7cY7XZ3M77WjfCowWwAVaCRk9pNXGtnN4zzx",
+      "nanobodies": [
+        {
+          "confidence_rank": 30.0,
+          "delta_sasa_refolded": 840.77832,
+          "design_iiptm": 0.59211,
+          "design_ptm": 0.78275,
+          "design_to_target_iptm": 0.54648,
+          "developability_rank": 18.0,
+          "final_score": 66.0,
+          "interaction_pae": 11.23431,
+          "liability_num_violations": 27.0,
+          "liability_score": 245.0,
+          "min_design_to_target_pae": 2.94993,
+          "physical_interaction_rank": 18.0,
+          "plip_hbonds_refolded": 11.0,
+          "plip_saltbridge_refolded": 3.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "NVQLVESGSGLVQPGGSLRLSCAASGFTFSSYAMQWVRQAPGKEREWVSYINSDGDQGEYTDSVKGRFTISRDNAKNSLYLQMNSLRTEDTSVYYCARFTHRYNKTRGANFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 62
+    },
+    {
+      "coldkey": "5CwisvtrcF386MhHuUdrV5pDbBniYP1HoXP8r631yxheX3tM",
+      "nanobodies": [
+        {
+          "confidence_rank": 36.0,
+          "delta_sasa_refolded": 884.48193,
+          "design_iiptm": 0.58297,
+          "design_ptm": 0.78407,
+          "design_to_target_iptm": 0.5412,
+          "developability_rank": 18.0,
+          "final_score": 69.0,
+          "interaction_pae": 11.34679,
+          "liability_num_violations": 27.0,
+          "liability_score": 245.0,
+          "min_design_to_target_pae": 3.11818,
+          "physical_interaction_rank": 15.0,
+          "plip_hbonds_refolded": 9.0,
+          "plip_saltbridge_refolded": 5.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "QVQLVESGTGLVQPGGSLRLSCAASGFTFSSYAMQWVRQAPGKEREWVSYINSDGDQGEYTDSVKTRFTISRDNAKNSLYLQMNSLRTEDTGVYYCARFTHRYNKTRGSNFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 47
+    },
+    {
+      "coldkey": "5F1RWsGeB9MbEeDi7yAmW2FpyUQi3AZ6uuqt7RbSE5DjpHQH",
+      "nanobodies": [
+        {
+          "confidence_rank": 38.0,
+          "delta_sasa_refolded": 902.05371,
+          "design_iiptm": 0.56995,
+          "design_ptm": 0.77973,
+          "design_to_target_iptm": 0.5419,
+          "developability_rank": 18.0,
+          "final_score": 69.0,
+          "interaction_pae": 11.36125,
+          "liability_num_violations": 27.0,
+          "liability_score": 245.0,
+          "min_design_to_target_pae": 3.01934,
+          "physical_interaction_rank": 13.0,
+          "plip_hbonds_refolded": 10.0,
+          "plip_saltbridge_refolded": 4.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "QVQLVESGSGLVQPGGSLRLSCAASGFTFSSYAMQWVRQAPGKEREWVSYINSDGDQGEYTDSVKTRFTISRDNAKNSLYLQMNSLRTEDTSVYYCARFTHRYNKTRGSNFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 4
+    },
+    {
+      "coldkey": "5EHSBSGW2PeoXaERK6DpfSuNBRJfh2Zh6diHoyi76yfK3vUX",
+      "nanobodies": [
+        {
+          "confidence_rank": 49.0,
+          "delta_sasa_refolded": 897.84814,
+          "design_iiptm": 0.55262,
+          "design_ptm": 0.77746,
+          "design_to_target_iptm": 0.52854,
+          "developability_rank": 10.0,
+          "final_score": 73.0,
+          "interaction_pae": 11.69657,
+          "liability_num_violations": 24.0,
+          "liability_score": 220.0,
+          "min_design_to_target_pae": 3.30253,
+          "physical_interaction_rank": 14.0,
+          "plip_hbonds_refolded": 8.0,
+          "plip_saltbridge_refolded": 6.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EQQLVESGGGLKQPGRSLKLSCAASGFTFSSYAMNWFRQAPGKEREFVSDISSQGDQTDYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCSQHPYRFKPRQGSEFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 50
+    },
+    {
+      "coldkey": "5F75KaeqejCgHmox6HQvh13jrmEjU8MhQaaUXy4SCpFdFu1W",
+      "nanobodies": [
+        {
+          "confidence_rank": 55.0,
+          "delta_sasa_refolded": 874.03467,
+          "design_iiptm": 0.46638,
+          "design_ptm": 0.77101,
+          "design_to_target_iptm": 0.46638,
+          "developability_rank": 2.0,
+          "final_score": 75.0,
+          "interaction_pae": 13.50486,
+          "liability_num_violations": 21.0,
+          "liability_score": 190.0,
+          "min_design_to_target_pae": 4.71042,
+          "physical_interaction_rank": 18.0,
+          "plip_hbonds_refolded": 7.0,
+          "plip_saltbridge_refolded": 5.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVQSGGGLVQPGGSLRLSCAASGFTFSSYSMNWVRQAPGKEREYVSDITSQGDQTDYADSVKSRFTISKDNAKNSIYLQMNSLRAEDTAVYYCSRYPYRYDTDQGHPFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 48
+    },
+    {
+      "coldkey": "5F75KaeqejCgHmox6HQvh13jrmEjU8MhQaaUXy4SCpFdFu1W",
+      "nanobodies": [
+        {
+          "confidence_rank": 60.0,
+          "delta_sasa_refolded": 771.30957,
+          "design_iiptm": 0.43142,
+          "design_ptm": 0.74394,
+          "design_to_target_iptm": 0.4026,
+          "developability_rank": 3.0,
+          "final_score": 85.0,
+          "interaction_pae": 15.36842,
+          "liability_num_violations": 21.0,
+          "liability_score": 200.0,
+          "min_design_to_target_pae": 7.09835,
+          "physical_interaction_rank": 22.0,
+          "plip_hbonds_refolded": 11.0,
+          "plip_saltbridge_refolded": 5.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYSKNWVRQAPGKEREGVSDISSQGDQTEQADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAEYYCARFSPAEKDRENPSFDYWGQGTLVTVSS"
+        }
+      ],
+      "uid": 2
+    },
+    {
+      "coldkey": "5H4QZzys1DDnBrHjureUniLrWSaH1ie7Sc5vFkhHhiuUxCBt",
+      "nanobodies": [
+        {
+          "confidence_rank": 73.0,
+          "delta_sasa_refolded": 928.81152,
+          "design_iiptm": 0.27231,
+          "design_ptm": 0.71963,
+          "design_to_target_iptm": 0.27231,
+          "developability_rank": 7.0,
+          "final_score": 99.0,
+          "interaction_pae": 19.68673,
+          "liability_num_violations": 23.0,
+          "liability_score": 210.0,
+          "min_design_to_target_pae": 11.56132,
+          "physical_interaction_rank": 19.0,
+          "plip_hbonds_refolded": 4.0,
+          "plip_saltbridge_refolded": 2.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVNPGGSLRLSCAASGHTFSSYSMNWVRQAPGKERDWVSYISSQGDQTYYADSVKGRFTISRDNAKQSLYLQMNSLRAEDSAVYYCSRYPYTRDPTYHSEFQHWGQGTLVTVSS"
+        }
+      ],
+      "uid": 18
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 79.0,
+          "delta_sasa_refolded": 988.67969,
+          "design_iiptm": 0.2248,
+          "design_ptm": 0.72187,
+          "design_to_target_iptm": 0.21105,
+          "developability_rank": 7.0,
+          "final_score": 102.0,
+          "interaction_pae": 20.7606,
+          "liability_num_violations": 23.0,
+          "liability_score": 210.0,
+          "min_design_to_target_pae": 13.95561,
+          "physical_interaction_rank": 16.0,
+          "plip_hbonds_refolded": 6.0,
+          "plip_saltbridge_refolded": 1.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASGFGFSSFHMNWVRQAPGKEREWVSYIQSSSGTHYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCATGRPSWTGKYEDYFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 13
+    },
+    {
+      "coldkey": "5H4QZzys1DDnBrHjureUniLrWSaH1ie7Sc5vFkhHhiuUxCBt",
+      "nanobodies": [
+        {
+          "confidence_rank": 67.0,
+          "delta_sasa_refolded": 723.95703,
+          "design_iiptm": 0.2878,
+          "design_ptm": 0.7248,
+          "design_to_target_iptm": 0.29667,
+          "developability_rank": 5.0,
+          "final_score": 106.0,
+          "interaction_pae": 19.03033,
+          "liability_num_violations": 22.0,
+          "liability_score": 205.0,
+          "min_design_to_target_pae": 11.12008,
+          "physical_interaction_rank": 34.0,
+          "plip_hbonds_refolded": 3.0,
+          "plip_saltbridge_refolded": 2.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "EVQLVESGGGLVQSGGSLRLSCAASGFTFTSYSMNWVRQAPGKEREWTSYITSQGDQTYYADSVKGRFTISRDNAKNSLYQQMNSLRAEDTAVYYCFRYPYRYDQAKSSEFDYWGQGTLVTVSS"
+        }
+      ],
+      "uid": 1
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 81.0,
+          "delta_sasa_refolded": 545.60303,
+          "design_iiptm": 0.18123,
+          "design_ptm": 0.72947,
+          "design_to_target_iptm": 0.18802,
+          "developability_rank": 9.0,
+          "final_score": 129.0,
+          "interaction_pae": 21.85061,
+          "liability_num_violations": 24.0,
+          "liability_score": 215.0,
+          "min_design_to_target_pae": 13.70744,
+          "physical_interaction_rank": 39.0,
+          "plip_hbonds_refolded": 2.0,
+          "plip_saltbridge_refolded": 1.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASGYHFRYYSMNWVRQAPGKEREWVSYISYHSSTIYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCAQYPHHRYKPYQGDFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 24
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 82.0,
+          "delta_sasa_refolded": 607.35742,
+          "design_iiptm": 0.23931,
+          "design_ptm": 0.713,
+          "design_to_target_iptm": 0.21174,
+          "developability_rank": 16.0,
+          "final_score": 131.0,
+          "interaction_pae": 21.66399,
+          "liability_num_violations": 26.0,
+          "liability_score": 240.0,
+          "min_design_to_target_pae": 14.58143,
+          "physical_interaction_rank": 33.0,
+          "plip_hbonds_refolded": 3.0,
+          "plip_saltbridge_refolded": 4.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASKRTFSSQSMNWVRQAPGKEREWVSYIESDSSTHYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCATGSAGWDPKYESDFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 29
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 87.0,
+          "delta_sasa_refolded": 771.47363,
+          "design_iiptm": 0.2055,
+          "design_ptm": 0.72659,
+          "design_to_target_iptm": 0.17504,
+          "developability_rank": 22.0,
+          "final_score": 133.0,
+          "interaction_pae": 22.17169,
+          "liability_num_violations": 32.0,
+          "liability_score": 295.0,
+          "min_design_to_target_pae": 15.39969,
+          "physical_interaction_rank": 24.0,
+          "plip_hbonds_refolded": 7.0,
+          "plip_saltbridge_refolded": 6.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASGFTFSKYRMNWVRQAPGKEREWVSYYDSSDRTIYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCARHAGWSCHKYESRFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 28
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 91.0,
+          "delta_sasa_refolded": 804.39404,
+          "design_iiptm": 0.19649,
+          "design_ptm": 0.71884,
+          "design_to_target_iptm": 0.17192,
+          "developability_rank": 20.0,
+          "final_score": 137.0,
+          "interaction_pae": 22.0744,
+          "liability_num_violations": 28.0,
+          "liability_score": 255.0,
+          "min_design_to_target_pae": 15.04098,
+          "physical_interaction_rank": 26.0,
+          "plip_hbonds_refolded": 5.0,
+          "plip_saltbridge_refolded": 5.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASYFTFSSYSMNWVRQAPGKEREWVSYIDKTRHTIYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCATGRSGWSCLPPEPFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 26
+    },
+    {
+      "coldkey": "5EkCwcNTfxeNbbhNSEJMSaGbW2XMVuhzouZkEan5ozvSsJdQ",
+      "nanobodies": [
+        {
+          "confidence_rank": 100.0,
+          "delta_sasa_refolded": 582.15039,
+          "design_iiptm": 0.17611,
+          "design_ptm": 0.71186,
+          "design_to_target_iptm": 0.16267,
+          "developability_rank": 12.0,
+          "final_score": 146.0,
+          "interaction_pae": 22.98792,
+          "liability_num_violations": 25.0,
+          "liability_score": 225.0,
+          "min_design_to_target_pae": 16.68983,
+          "physical_interaction_rank": 34.0,
+          "plip_hbonds_refolded": 4.0,
+          "plip_saltbridge_refolded": 3.0,
+          "protein_name": "Q9NZQ7",
+          "sequence": "DQQLVESGGGLVQPGGSLRLSCAASGFTFSPGAMNWVRQAPGKEREWVSYIQRSSSDIYYADSVKGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCARYPDRFKPTDESEFDYWGQGTTVTVSS"
+        }
+      ],
+      "uid": 30
+    }
+  ],
+  "meta": null,
+  "success": true
+}

@@ -190,7 +190,16 @@ def sequence_phase(job, directory):
     if expected_bank is not None and (not isinstance(expected_bank, str)
             or not re.fullmatch(r'[0-9a-f]{64}', expected_bank) or expected_bank != bank_digest):
         raise ValueError('reference bank identity mismatch')
-    bank = json.loads(bank_bytes)['rows']
+    bank_value = json.loads(bank_bytes)
+    frozen = job.get('parent_bank_snapshot')
+    if frozen and frozen.get('status') in ('fresh', 'retained_qualified'):
+        from nanobody_opt.pr100_parent_bank import require
+        require(bank_value.get('source_sha') == frozen.get('source_sha')
+                and bank_value.get('runtime_sha256') == frozen.get('runtime_sha256')
+                and bank_value.get('target') == expected['target']
+                and type(bank_value.get('before_epoch')) is int
+                and bank_value['before_epoch'] <= expected['epoch'], 'frozen_parent_bank_identity')
+    bank = bank_value['rows']
     slots = job.get('reference_slots', DEFAULT_REFERENCE_SLOTS)
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
     proposal_offset = job.get('proposal_offset', 0)
@@ -207,6 +216,8 @@ def sequence_phase(job, directory):
     refs, proposal_donors, reference_coverage = donors.select(bank, expected, slots,
                                                            fallback=fallback)
     reference_coverage['bank_sha256'] = bank_digest
+    if frozen is not None:
+        reference_coverage['parent_bank_snapshot'] = frozen
     panels, _ = pr100_filter.helper('germline_identity')._anarci_panel('human')
     archive_hashes = {rules.sequence_hash(str(value).strip().upper())
                       for value in frame['sequence'].dropna() if str(value).strip()}

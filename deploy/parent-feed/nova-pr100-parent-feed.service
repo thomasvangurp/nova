@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh qualified PR100 public parent bank on Pi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=thomasg
+ExecStart=/usr/bin/python3 /home/thomasg/pr100-parent-feed-launch.py
+TimeoutStartSec=180
+KillMode=control-group
+Nice=10
+

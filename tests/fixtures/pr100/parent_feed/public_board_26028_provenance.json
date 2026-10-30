@@ -1,0 +1,8 @@
+{
+  "source_url": "https://compound-api.metanova-labs.ai/api/competitions/leaderboard/26028/nanobodies?limit=10000",
+  "source_raw_sha256": "8489dc9c77775256e32439efc320d0c19109a12501cf257c7227e1f3675fa176",
+  "retrieved_at_unix": 1793367909.547245,
+  "allowlisted_fixture_sha256": "91e698a49f360a04d23cc1a557b846093522392110cf84778150a5ff421a1da9",
+  "transformation": "retain all board members and all fields consumed by parent parser; omit unrelated public fields",
+  "epoch": 26028
+}

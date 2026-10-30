@@ -757,6 +757,10 @@ def run_epoch(config, chain, clock, *, dry_run=False):
         number = state['next_attempt']; state['next_attempt'] += 1
         state['active'] = {'number': number, 'phase': mode, 'proposal_offset': state['proposal_offset']}
         if mode == 'sequence':
+            from nanobody_opt.pr100_parent_bank import snapshot as parent_bank_snapshot
+            frozen = parent_bank_snapshot(config, challenge)
+            if frozen is not None:
+                state['active']['parent_bank_snapshot'] = frozen
             state['proposal_offset'] += config['worker'].get('proposals', 600)
         c.atomic(path, state)
     active = state['active']
@@ -764,6 +768,8 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     attempt_dir.mkdir(parents=True, exist_ok=True)
     worker = active.get('worker') or {**config['worker'], 'proposal_offset': active['proposal_offset'],
               'excluded_sequence_hashes': sorted(set(state['generated_hashes']) | set(state['native_attempted_hashes']))}
+    if active.get('parent_bank_snapshot') is not None:
+        worker['parent_bank_snapshot'] = active['parent_bank_snapshot']
     active['worker'] = worker
     c.atomic(path, state)
     attempt_config = {**config, 'worker': worker, '_attempt': active['number'], '_continuation': True}

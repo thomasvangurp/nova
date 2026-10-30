@@ -352,6 +352,13 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
         job['references'] = runtime['references']
         if runtime.get('reference_bank_sha256') is not None:
             job['reference_bank_sha256'] = runtime['reference_bank_sha256']
+        frozen = job.get('parent_bank_snapshot')
+        if frozen is not None:
+            from nanobody_opt.pr100_parent_bank import require, hex64
+            require(isinstance(frozen, dict) and isinstance(frozen.get('references'), str)
+                    and Path(frozen['references']).is_absolute()
+                    and hex64(frozen.get('reference_bank_sha256')), 'invalid_frozen_parent_bank')
+            job.update(references=frozen['references'], reference_bank_sha256=frozen['reference_bank_sha256'])
     if 'archive.csv' in files:
         # The worker runs novelty only when the archive snapshot it can verify is present,
         # so every phase that checks novelty is handed the archive and its binding.
@@ -899,6 +906,8 @@ def validate_config(config):
     if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve <= MINIMUM_RESERVE_BLOCKS:
         raise ValueError(f'reserve_blocks must be an integer greater than {MINIMUM_RESERVE_BLOCKS}')
     verify_build_stamp(config)
+    from nanobody_opt.pr100_parent_bank import settings as parent_feed_settings
+    parent_feed_settings(config)
     return config
 
 
