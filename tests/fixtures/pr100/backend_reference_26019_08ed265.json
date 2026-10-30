@@ -1,0 +1,3257 @@
+{
+  "aggregate": {
+    "cpu_inconclusive_draws": 0,
+    "cpu_pass_draws": 13,
+    "gpu_inconclusive_draws": 0,
+    "gpu_pass_draws": 9,
+    "mean_within_cpu_sd": 3.807516285877437,
+    "mean_within_gpu_sd": 4.018403013676487,
+    "paired_mean_difference": 1.9390111111111128,
+    "paired_median_difference": 0.5216666666666683
+  },
+  "archive_sha256": "2d4b304fbcd2bb6d1bdaa1a46b1687e006e2942d419fa6360e01d776368c5198",
+  "artifact_sha256": {
+    "comparisons.json": "4624ea477d1f68c0b0480fcd6824c3096ff7b4dba0441c11ba8f73baad13fdb7",
+    "cpu/observations.json": "0d719662351c0ca0cbab3b6813b2b82fe4620f614823b1d586dd720188483676",
+    "gpu-observations.json": "01f1fe8874462122d750d35ba6cb7c44d10e0439925826f537adfe823c5d4b23",
+    "gpu-profiles-1.json": "fe4486ec6413cf8f22f890962946e2dd8afa8d018e813397de3017fe2b4fa43a",
+    "gpu-profiles-2.json": "97450cf3f5ca59690ae8b1273b83a532c30e4249c24e162802f7a7c46cbc8a69",
+    "gpu-profiles-3.json": "b487cb45fe16ef11498bbc5a139f4a0264afe6a92d7f97051c51129aeb311d61",
+    "qualification.json": "854ce79223f2775e98f8582333fbe8aa73a18ac97d21cb77761366c6cf4c90ab"
+  },
+  "challenge": {
+    "allowed_cdr3_length": 19,
+    "allowed_v": "IGHV3-23",
+    "epoch": 26019,
+    "epoch_length": 361,
+    "epoch_start_block": 9392859,
+    "epoch_start_block_hash": "0x0ac0c104f0e284335d6b1df37419c2efe52f4ed4fb77226dc93c3f61a1a0615b",
+    "ruleset_sha256": "4fd0e5cd97993ca854205d7288364577a2f7cca9f3c48ef9d8dc1e2ca76b268c",
+    "target": "Q9NZQ7"
+  },
+  "cpu_reference_kind": "controlled_local_original_CPU",
+  "critical_canary": {
+    "normative_reference_unestablished": true,
+    "observed_accelerated_full_gate_pass_draws": 0,
+    "observed_controlled_cpu_full_gate_pass_draws": 3,
+    "reason": "All3 localCPU native observations pass including production tierA margin; all3 CUDA-refinement observations fail despite similar aggregate variance. Mandatory per-candidate canary; globalSD similarity alone cannot establish recall.",
+    "reference_is_actual_validator_attestation": false,
+    "required_check": "Measure this candidate under the exact newly qualified upstream device path and compare accelerated classification with that reference; do not force acceptance from old controlled-CPU labels.",
+    "required_in_backend_qualification": true,
+    "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b"
+  },
+  "gpu_backend": "local_CUDA_refinement_screen",
+  "input_sha256": "b9f843ad98ec36538cea637cf512f8dc9b8ca29c499a4c63c22fefe40e7f075d",
+  "publication_authorized": false,
+  "rows": [
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 78.5325,
+          "pass_draws": 3,
+          "psh_values": [
+            76.3266,
+            77.242,
+            82.0289
+          ],
+          "reasons": [
+            "",
+            "",
+            ""
+          ],
+          "sd": 3.062368202878284
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 90.64926666666666,
+          "pass_draws": 0,
+          "psh_values": [
+            89.6347,
+            91.2241,
+            91.089
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 0.8812333081161547
+        },
+        "gpu_minus_cpu_draws2_3_mean": 11.01381666666667,
+        "gpu_minus_cpu_mean": 12.116766666666663,
+        "kind": "balanced_child",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+        "stratum": "below_86"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7698669293060233",
+            "a3d_maximum": "1.5540554031642215",
+            "a3d_minimum": "-2.987463056097939",
+            "a3d_positive_auc": "4.582393399354962",
+            "a3d_total": "-97.00323309255893",
+            "input_structure_sha256": "f1e59de10bc00f332e25148312195356f744747fc04a4211f38de703f77b27c7",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e51a9c07aa01bdbd6930fa473cfd2a844d2925314e8020ea37486140c1369a25",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4274984530521655,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2551,
+            "positive_charge_patches": 0.3685,
+            "surface_hydrophobic_patches": 76.3266,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7918909784017519",
+            "a3d_maximum": "1.5223998947987916",
+            "a3d_minimum": "-3.1769311450098296",
+            "a3d_positive_auc": "3.904600148638442",
+            "a3d_total": "-99.77826327862074",
+            "input_structure_sha256": "0f2171bff637f05720de7f2238973124de475b3915707a0fafb50619c54b7d19",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "ba6eccbff098d2217d5b24facac9002896d78ebd785b04f9f5de13ac6e658725",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.444633318096672,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3085,
+            "positive_charge_patches": 0.3598,
+            "surface_hydrophobic_patches": 77.242,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7602712705434972",
+            "a3d_maximum": "1.5072362081241852",
+            "a3d_minimum": "-3.0162565006251185",
+            "a3d_positive_auc": "4.460244403483123",
+            "a3d_total": "-95.79418008848064",
+            "input_structure_sha256": "c39bbd4a4ca0890943dbbb41a75eb7d4ec1a1e65ec5ddfc7ff90af86af1737ff",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "c062bbf0a833091adc55a46fafa69a8b92d43c96b6d369fd016c8efbe12d16d4",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.44649311991753,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2161,
+            "positive_charge_patches": 0.3831,
+            "surface_hydrophobic_patches": 82.0289,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6989623416771475",
+            "a3d_maximum": "1.5110036791282084",
+            "a3d_minimum": "-3.0629227801802714",
+            "a3d_positive_auc": "5.082235646868573",
+            "a3d_total": "-88.0692550513206",
+            "input_structure_sha256": "aeb1caabccdc3c0807bdc70113bd879ff4ddbab1d5a48d49b3fc70a3eb6318d5",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "3d3e2ab2fedc5826038832f67a2d2e87cc1c37f5f1910b6943a49d207a63c661",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4237533968336076,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2438,
+            "positive_charge_patches": 0.6782,
+            "surface_hydrophobic_patches": 89.6347,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7658485056428453",
+            "a3d_maximum": "1.5634042978135436",
+            "a3d_minimum": "-3.0058929180480742",
+            "a3d_positive_auc": "3.7341032889570567",
+            "a3d_total": "-96.49691171099852",
+            "input_structure_sha256": "bdb81343a936d612d21c645adf3463c68060e8b45c59b3db8de5075ec17ab8c3",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e8d3cd720e700010465d581b83ee8eb7d922119f298927041ab12780a4cd4afb",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4188774658797854,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2719,
+            "positive_charge_patches": 0.3587,
+            "surface_hydrophobic_patches": 91.2241,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7928440498424238",
+            "a3d_maximum": "1.2246306235068511",
+            "a3d_minimum": "-3.031509318240919",
+            "a3d_positive_auc": "3.272229672589452",
+            "a3d_total": "-99.89835028014541",
+            "input_structure_sha256": "f147f8e64197be0ae5df8f44997ee1474b36d793ff43263a69da91db6cd91d35",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "9ad225315f4690360dd1ea18640aa6d45f5255a1e503912c420645e803125c66",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4292371903842658,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2687,
+            "positive_charge_patches": 0.3583,
+            "surface_hydrophobic_patches": 91.089,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": 76.3266,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDIYSGGSSTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPYRYHKTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b",
+      "stratum": "below_86"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 92.17846666666667,
+          "pass_draws": 1,
+          "psh_values": [
+            80.4044,
+            97.3281,
+            98.8029
+          ],
+          "reasons": [
+            "",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 10.223269690433359
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 95.83096666666667,
+          "pass_draws": 1,
+          "psh_values": [
+            98.9787,
+            104.5151,
+            83.9991
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            ""
+          ],
+          "sd": 10.614034711330719
+        },
+        "gpu_minus_cpu_draws2_3_mean": -2.2345333333333315,
+        "gpu_minus_cpu_mean": 3.6525000000000034,
+        "kind": "balanced_child",
+        "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+        "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+        "stratum": "below_86"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.680739027185163",
+            "a3d_maximum": "1.0301279209530572",
+            "a3d_minimum": "-2.879913219664135",
+            "a3d_positive_auc": "2.7957577255455917",
+            "a3d_total": "-85.77311742533054",
+            "input_structure_sha256": "29856c560f77c29721087189f9a65cc76b5c8429092ed4506de12fc0a6fd68fc",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "6cdcb9eef93a2a79db9941ec1577d654f8337f09f69e0070fbaabfe84181eef3",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4997729090343213,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.2333,
+            "positive_charge_patches": 0.1107,
+            "surface_hydrophobic_patches": 80.4044,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7496732575896277",
+            "a3d_maximum": "1.1145592105259874",
+            "a3d_minimum": "-2.8714747750517775",
+            "a3d_positive_auc": "2.6560497671366985",
+            "a3d_total": "-94.45883045629309",
+            "input_structure_sha256": "1b1efc184106b8aa94f3a4115f6fc3bb7a1a4495532122851115d0db61a62344",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "0fd209ce1f2682bdca827e1193bbd4e1a0a9c6e35c180fe2269dd57a62069c33",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.5102784994619598,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1963,
+            "positive_charge_patches": 0.1108,
+            "surface_hydrophobic_patches": 97.3281,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.643924143967098",
+            "a3d_maximum": "0.923882614847957",
+            "a3d_minimum": "-2.838255433416176",
+            "a3d_positive_auc": "1.5390499564219502",
+            "a3d_total": "-81.13444213985434",
+            "input_structure_sha256": "3489c07583eea5fca87d3f3e340cb538c0434aa74fc5500e7d1ecc2915de0e2e",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "78c84b588ae10ee36f058dd1d2dfd406f20282bc77bb0398ebd2ab0412a7ebc5",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.5184946727054298,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.5283,
+            "positive_charge_patches": 0.171,
+            "surface_hydrophobic_patches": 98.8029,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7233505409841096",
+            "a3d_maximum": "1.034010403900675",
+            "a3d_minimum": "-2.842365540785864",
+            "a3d_positive_auc": "2.730464687354807",
+            "a3d_total": "-91.14216816399781",
+            "input_structure_sha256": "a0265d2f6cf33ea1939138cb5db8dc07250934b452742bbab57e712f260a6dc2",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "c012135ad8917ec1d2d19c34eff605d41b69c9a7bfa48622a68f68fdc89b7ccd",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.5295847722708438,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.217,
+            "positive_charge_patches": 0.1111,
+            "surface_hydrophobic_patches": 98.9787,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7421922639216645",
+            "a3d_maximum": "0.9612650255047049",
+            "a3d_minimum": "-2.9502122650805642",
+            "a3d_positive_auc": "1.828396495260384",
+            "a3d_total": "-93.51622525412972",
+            "input_structure_sha256": "6dd9b8bf0400ffdaa7da6350e08608e3b8cbb9f11d87cde4ad3cbd5610739b1e",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "a1441bda44446fad74320e562a0935e96096a208a24a38822a1ceb1f6e97be12",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.5085772441486203,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.216,
+            "positive_charge_patches": 0.1107,
+            "surface_hydrophobic_patches": 104.5151,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7339972552323109",
+            "a3d_maximum": "1.0223312130746658",
+            "a3d_minimum": "-2.833298136874634",
+            "a3d_positive_auc": "2.306272700222046",
+            "a3d_total": "-92.48365415927117",
+            "input_structure_sha256": "28ad268a502ad7d55c33d3815d56d3f348b2be9b3abf0dd212d983c9d4997522",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e71a9c2f4e930b277baee2b07ab3b02ccefeae674404429d7f964258940ea28f",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.5328590491847283,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.2288,
+            "positive_charge_patches": 0.1107,
+            "surface_hydrophobic_patches": 83.9991,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "selection_cpu_psh": 80.4044,
+      "sequence": "EQQLLESGGGLQQPGGSLTLSCAASGFTFSSYAMSWFRQAPGKEREFVSDISGSGGSTDYAESVKGRFTISRDNTQNTLYLQMNSLRAEDTAVYYCAKYPHRFDPRDGADSGFDYWGQGTTVTVSS",
+      "sequence_hash": "5d3afea4663d59adfaf7ce2d624273d8044eec2cf930c3e2f2129de72e38834f",
+      "stratum": "below_86"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 87.9328,
+          "pass_draws": 0,
+          "psh_values": [
+            85.6619,
+            92.609,
+            85.5275
+          ],
+          "reasons": [
+            "aggrescan_threshold",
+            "psh_threshold",
+            "aggrescan_threshold"
+          ],
+          "sd": 4.050265506111909
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 93.2311,
+          "pass_draws": 0,
+          "psh_values": [
+            89.1925,
+            89.6004,
+            100.9004
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 6.644939237494959
+        },
+        "gpu_minus_cpu_draws2_3_mean": 4.162849999999992,
+        "gpu_minus_cpu_mean": 5.298299999999998,
+        "kind": "balanced_child",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+        "stratum": "below_86"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7801594128715188",
+            "a3d_maximum": "1.616132762223135",
+            "a3d_minimum": "-2.8572159569265043",
+            "a3d_positive_auc": "4.257472851906479",
+            "a3d_total": "-98.30008602181137",
+            "input_structure_sha256": "f33f05437c0950e5c8ddeddba65fbcfbd4aefc717fec18e8969533db0a3afe91",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "aa316a75582f84f5036daca15d96bc645a784fa2f232ae72c8018ff5f99603ee",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "aggrescan_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3837443043541326,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2772,
+            "positive_charge_patches": 0.258,
+            "surface_hydrophobic_patches": 85.6619,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7467675368657833",
+            "a3d_maximum": "1.5981594117460127",
+            "a3d_minimum": "-2.8954374284583935",
+            "a3d_positive_auc": "4.404387206691311",
+            "a3d_total": "-94.0927096450887",
+            "input_structure_sha256": "86e3034a62125407a2a2fbce379944f00c46f7edfa7d7ee26fb7453fb40bcc8c",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "b95ec4b3bbcad049c548d341e4950f1424db48e91248149201af4fd533543ff9",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4150675682215106,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3233,
+            "positive_charge_patches": 0.2439,
+            "surface_hydrophobic_patches": 92.609,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7647946514035368",
+            "a3d_maximum": "1.6042839959998811",
+            "a3d_minimum": "-2.976261699543831",
+            "a3d_positive_auc": "4.331264805093925",
+            "a3d_total": "-96.36412607684564",
+            "input_structure_sha256": "3783e33fb8bdef2a4c3820c090c5926841dc5290df98c85428b9e0132d069a87",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "b69073529fe9b78564a3385dc9cded189b39daad8ec7032f3126ebe4b121f62f",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "aggrescan_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3856782786597508,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.214,
+            "positive_charge_patches": 0.2538,
+            "surface_hydrophobic_patches": 85.5275,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.77162761291992",
+            "a3d_maximum": "1.5628780726424156",
+            "a3d_minimum": "-2.932668876390529",
+            "a3d_positive_auc": "4.009621033434689",
+            "a3d_total": "-97.22507922790992",
+            "input_structure_sha256": "3602c97fc9a120f6866334ba3655c3fce53e9ccdc77cfb49e4e53688378bbda5",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "3320abb0687ae1f47cae9b289426c2d36412295b19628fec6cf513a1f8a6dc85",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3767159808583622,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2213,
+            "positive_charge_patches": 0.2487,
+            "surface_hydrophobic_patches": 89.1925,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7885958919025011",
+            "a3d_maximum": "1.7767136485306745",
+            "a3d_minimum": "-2.92278003620837",
+            "a3d_positive_auc": "4.141569403633335",
+            "a3d_total": "-99.36308237971514",
+            "input_structure_sha256": "c20572d0a22572d69a99837b43d753e882c7526bc9718385a7201c2fabdac271",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "19165455212e7cad7fefd1ab9996c7047f0087f5e2cd481b77a7026ad60da536",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3865996353381045,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3225,
+            "positive_charge_patches": 0.2435,
+            "surface_hydrophobic_patches": 89.6004,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7315856724524302",
+            "a3d_maximum": "1.5350776732631746",
+            "a3d_minimum": "-2.9813375759948455",
+            "a3d_positive_auc": "3.938738660622711",
+            "a3d_total": "-92.1797947290062",
+            "input_structure_sha256": "293b0be756fa01e3ec281cbeeebe3217e7df6fb07fc2eb32c75bef992acfe5b8",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "83717d68b2d2d2d3176047ecf8e6742ff3ab3fa50a493689f2053c9565759dbc",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3847003385405812,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.2877,
+            "positive_charge_patches": 0.7142,
+            "surface_hydrophobic_patches": 100.9004,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": 85.6619,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDIYSGGSSTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPFRYDKTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "6819c6bb1cdd212475340f09d56f1cfb6c765812e5a39ff9022ba3ff32080fca",
+      "stratum": "below_86"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 91.52556666666666,
+          "pass_draws": 0,
+          "psh_values": [
+            91.5702,
+            91.269,
+            91.7375
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "developability_red_flags"
+          ],
+          "sd": 0.23741769802045365
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 91.4262,
+          "pass_draws": 0,
+          "psh_values": [
+            91.7518,
+            91.3188,
+            91.208
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 0.2873685438596259
+        },
+        "gpu_minus_cpu_draws2_3_mean": -0.07705000000001405,
+        "gpu_minus_cpu_mean": -0.09936666666666838,
+        "kind": "balanced_child",
+        "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+        "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+        "stratum": "near_86_to_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7756410547170798",
+            "a3d_maximum": "1.0705081130386924",
+            "a3d_minimum": "-3.118751181556571",
+            "a3d_positive_auc": "1.2907541153449698",
+            "a3d_total": "-97.73077289435206",
+            "input_structure_sha256": "a986d3eabc7c8e51e5d89e1695cce72726a5e02f55ff1c3b2b9ff86b4774fda3",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "30fa13c6fc618b396439f390398fd586f94cfc226fc17b5e7e9a7305c32cf361",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4503580933109632,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8721,
+            "positive_charge_patches": 0.3505,
+            "surface_hydrophobic_patches": 91.5702,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.766508582359552",
+            "a3d_maximum": "1.0679065997530266",
+            "a3d_minimum": "-2.9215374399317096",
+            "a3d_positive_auc": "1.3147492145168187",
+            "a3d_total": "-96.58008137730356",
+            "input_structure_sha256": "20efdcf79857c1cbd0e949d6d0e200e65468971c1139c23af0402ac340521751",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "7588a267a4ff743ffc54d91b0556b9bc03daad749d63bff2de7b79a543fe5f05",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4527028774479136,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8261,
+            "positive_charge_patches": 0.3469,
+            "surface_hydrophobic_patches": 91.269,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7782552668977779",
+            "a3d_maximum": "1.0696983251901644",
+            "a3d_minimum": "-3.1090521813010197",
+            "a3d_positive_auc": "1.3136816317874682",
+            "a3d_total": "-98.06016362912001",
+            "input_structure_sha256": "bc5a7edd1fa4d84295f035afc5f4cf7fb27d721e7e1faa2e9398bddc813d3d52",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "272cb8a6c90174470e22f270bdb1936d777afc5a62ae5bf0d85e1e792e9cf623",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "developability_red_flags",
+          "has_red_flags": true,
+          "metrics": {
+            "cdr3_compactness": 1.450707170919926,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8831,
+            "positive_charge_patches": 0.349,
+            "surface_hydrophobic_patches": 91.7375,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7853890651769507",
+            "a3d_maximum": "1.0667428619484505",
+            "a3d_minimum": "-3.1076308087169027",
+            "a3d_positive_auc": "1.306057375050576",
+            "a3d_total": "-98.95902221229579",
+            "input_structure_sha256": "34d8e39417658d25186c8f74bcd523a9327b9e07847ed158b9fe50d07ffc31de",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "25a2f18d507c0260636f9d3a8d02c8710d5f736067a8346cb111229d0a881552",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4505291637473465,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8761,
+            "positive_charge_patches": 0.3507,
+            "surface_hydrophobic_patches": 91.7518,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7638887843622144",
+            "a3d_maximum": "1.076013662063169",
+            "a3d_minimum": "-3.0163387005270863",
+            "a3d_positive_auc": "1.3088102727937976",
+            "a3d_total": "-96.24998682963901",
+            "input_structure_sha256": "4877da48d52b144d5a6c975c1be1c72b0ce754f1e1105fb8c7a52d5f0bb3e9fd",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "b376680f9e589c2df883d24cedbdb0100d94e12b483c279e0bb3e4b1fe7222b3",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4578664533042929,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8513,
+            "positive_charge_patches": 0.274,
+            "surface_hydrophobic_patches": 91.3188,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7757803857919839",
+            "a3d_maximum": "1.069699776894986",
+            "a3d_minimum": "-2.964573499816633",
+            "a3d_positive_auc": "1.3212470521043804",
+            "a3d_total": "-97.74832860978998",
+            "input_structure_sha256": "2d154d27342125244a05926f8f7bc8b13b9ed369e5d0e6fa4ba58069272a2576",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "ccaf1aa0be916add2cf66c4c362f2ecc8e5742dbc28c9b7a1ec9a11b46b701f4",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4508531819561084,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.8428,
+            "positive_charge_patches": 0.2758,
+            "surface_hydrophobic_patches": 91.208,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "selection_cpu_psh": 91.5702,
+      "sequence": "EQQLLESGGGLQQPGGSLTLSCAASGFTFSSYAMSWFRQAPGKEREFVSDISGSGGSTDYAESVKGRFTISRDNTQNTLYLQMNSLRAEDTAVYYCAKYETRFKPRQGSDDGFDYWGQGTTVTVSS",
+      "sequence_hash": "02a09f6dee30e3d5ed3e4b1088970a9f3c9e3ad655c574beb617360956ebf34e",
+      "stratum": "near_86_to_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 90.5025,
+          "pass_draws": 1,
+          "psh_values": [
+            91.7738,
+            88.7677,
+            90.966
+          ],
+          "reasons": [
+            "psh_threshold",
+            "",
+            "psh_threshold"
+          ],
+          "sd": 1.5557260330790834
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 94.49576666666667,
+          "pass_draws": 0,
+          "psh_values": [
+            95.1506,
+            97.1027,
+            91.234
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 2.988647678019834
+        },
+        "gpu_minus_cpu_draws2_3_mean": 4.628916666666669,
+        "gpu_minus_cpu_mean": 3.9932666666666705,
+        "kind": "balanced_child",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+        "stratum": "near_86_to_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7502124600783229",
+            "a3d_maximum": "0.97573920217164",
+            "a3d_minimum": "-2.8854995922303406",
+            "a3d_positive_auc": "2.7111298829617168",
+            "a3d_total": "-94.52676996986868",
+            "input_structure_sha256": "e35ad45be114c0deec8f88cc74dc5c3f9dea606579a363edd82c23caafd26294",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "a453a53115727d74bbf7f4e37f81b4ca496ec575f7ee197e02b530ddb1cb3863",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3708778365573004,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3409,
+            "positive_charge_patches": 0.062,
+            "surface_hydrophobic_patches": 91.7738,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7402553258268324",
+            "a3d_maximum": "0.9198147584694107",
+            "a3d_minimum": "-2.8373152786802978",
+            "a3d_positive_auc": "2.0051882701782904",
+            "a3d_total": "-93.27217105418089",
+            "input_structure_sha256": "f23c508a8b7d178c44ad63ba5a23f337d8627f8c95206cf760ced41af49e7894",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e10b4ea6de99a76ffc260c4b4bda64335d5c19733d9eeac8dfe632b171cc9c82",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.377605793817552,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3362,
+            "positive_charge_patches": 0.0407,
+            "surface_hydrophobic_patches": 88.7677,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7609229923553426",
+            "a3d_maximum": "0.9673848770142859",
+            "a3d_minimum": "-2.9322527154653875",
+            "a3d_positive_auc": "2.223955823176761",
+            "a3d_total": "-95.87629703677317",
+            "input_structure_sha256": "fd59bbaee0ffff8ca2f800179b7f8aef7af75db76d4ca633d7d0a56f3338a4d2",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "69b9ac83f1c49e96a1ef747283e3eb1523ab1af42f74c367425c641ffed12f70",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3709353306564984,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.297,
+            "positive_charge_patches": 0.0467,
+            "surface_hydrophobic_patches": 90.966,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7965249087989686",
+            "a3d_maximum": "0.9115413750042529",
+            "a3d_minimum": "-2.8860247980090197",
+            "a3d_positive_auc": "1.2321517041749268",
+            "a3d_total": "-100.36213850867004",
+            "input_structure_sha256": "edaebd188d6618226794451ee752cbdc3e7074695214c91a8df66c505718efe5",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "06d7cd5a59c54c77f1b2f71d8a3f900c9506761e5b93e82d40bd647e5e05dd98",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4026170512317595,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.5481,
+            "positive_charge_patches": 0.0512,
+            "surface_hydrophobic_patches": 95.1506,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7810906716526997",
+            "a3d_maximum": "1.0019395408579568",
+            "a3d_minimum": "-2.9621456084114897",
+            "a3d_positive_auc": "2.6990852190139285",
+            "a3d_total": "-98.41742462824017",
+            "input_structure_sha256": "7a62b28c3b98c9124c7aae723adb9bed98ba357b0946bff58c437ab5598c5de9",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "182440c4277a4ff18924b2614a996340218956e50f1335ae45813ebaf3097587",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3686284753530733,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3109,
+            "positive_charge_patches": 0.0486,
+            "surface_hydrophobic_patches": 97.1027,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7880168725585156",
+            "a3d_maximum": "0.8974651495095592",
+            "a3d_minimum": "-2.93247468646102",
+            "a3d_positive_auc": "1.5634441366064469",
+            "a3d_total": "-99.29012594237297",
+            "input_structure_sha256": "ff2cc7d31441bf4b0b059dff4f4332fe06aa33ba355d600324bfb2d7af3b8070",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "6a7b0d3d3877d67eda4f36f3ba0dd6b261d96d8316fedc4a1adf0c593578ca7d",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3682085284530257,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3283,
+            "positive_charge_patches": 0.0402,
+            "surface_hydrophobic_patches": 91.234,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": 91.7738,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDIYSGGSSTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPYRYDFTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "118571a8f61aff667da80eb6ce42ac46b584d28f60e8f77c220c6356f4cd866f",
+      "stratum": "near_86_to_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 93.34156666666667,
+          "pass_draws": 1,
+          "psh_values": [
+            88.4431,
+            95.6207,
+            95.9609
+          ],
+          "reasons": [
+            "",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 4.245605466047606
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 93.4637,
+          "pass_draws": 1,
+          "psh_values": [
+            88.3516,
+            95.9178,
+            96.1217
+          ],
+          "reasons": [
+            "",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 4.428382166209234
+        },
+        "gpu_minus_cpu_draws2_3_mean": -2.3270999999999873,
+        "gpu_minus_cpu_mean": 0.12213333333333765,
+        "kind": "balanced_child",
+        "parent_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+        "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+        "stratum": "near_86_to_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9861014725311582",
+            "a3d_maximum": "1.0704598760168538",
+            "a3d_minimum": "-3.3159924412320434",
+            "a3d_positive_auc": "1.4774042108456806",
+            "a3d_total": "-124.24878553892593",
+            "input_structure_sha256": "7d4e226b44393fafc51f3112e375f0087c4499efea9895a03fe21e4d97709d57",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "748af4b3633e2ebe11f1674f946c3a2fded1fb3554e1607157a2ede229b1b5e4",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4800713027614467,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3655,
+            "positive_charge_patches": 0.5994,
+            "surface_hydrophobic_patches": 88.4431,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9728037303586764",
+            "a3d_maximum": "0.9742375866307186",
+            "a3d_minimum": "-3.2732843336751407",
+            "a3d_positive_auc": "0.946181370206912",
+            "a3d_total": "-122.57327002519322",
+            "input_structure_sha256": "f6ef7da088ae7632f92f4aa1349e055ec5c9e76a57397a515fe532d953373ef9",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "10f150ea7733ed81bfbcb0eefac63cd6ef0c779e8b291768500dd7195d384073",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4770878214105567,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3435,
+            "positive_charge_patches": 0.6256,
+            "surface_hydrophobic_patches": 95.6207,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9901511188896479",
+            "a3d_maximum": "0.9717387462049576",
+            "a3d_minimum": "-3.2975555222206054",
+            "a3d_positive_auc": "0.927308635355435",
+            "a3d_total": "-124.75904098009563",
+            "input_structure_sha256": "596d19177629a4a809480458d6733c33d356c7c108a4a67ca5005b1d2da7a849",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "a03103aa3a1a2be6325fbe273fb8ab315a315205b8f4ccbe4a764e8cf6693a80",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4786830203074253,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3521,
+            "positive_charge_patches": 0.6567,
+            "surface_hydrophobic_patches": 95.9609,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9902291661453071",
+            "a3d_maximum": "0.972745440666903",
+            "a3d_minimum": "-3.3153691931953326",
+            "a3d_positive_auc": "0.9086067683668608",
+            "a3d_total": "-124.7688749343087",
+            "input_structure_sha256": "77ea1fdb2be4c6103c08f534f67893b1e7961c81e0da529ea92d86692c2a15c8",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "49d311ae9041c3df2589feb0e087d146f05e47bd6e3bae44bb1738ce3f3d2062",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.477608068496908,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3519,
+            "positive_charge_patches": 0.6365,
+            "surface_hydrophobic_patches": 88.3516,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9970073052388132",
+            "a3d_maximum": "0.9797790600260828",
+            "a3d_minimum": "-3.311604967922556",
+            "a3d_positive_auc": "0.9113891935945809",
+            "a3d_total": "-125.62292046009047",
+            "input_structure_sha256": "1963b768b259472d95de84fd20567d06d5d7ec6d4d97ccb903905998fae2cd29",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "0ca27a122bc8c6500f73a1e751c7b182440553f4178a2277e25f22050f62a887",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.47592513634076,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3527,
+            "positive_charge_patches": 0.7483,
+            "surface_hydrophobic_patches": 95.9178,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.9750517845734846",
+            "a3d_maximum": "1.0628641139328383",
+            "a3d_minimum": "-3.302566175542483",
+            "a3d_positive_auc": "0.9581254109270185",
+            "a3d_total": "-122.85652485625906",
+            "input_structure_sha256": "77775f95aba89adf8555658fda1d59e5200dc29c911b356827c457413384a5e4",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "75e3fd25aa30fe7534859f25fa993155c7e39c3a3c26b97787f4216144420a87",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.476530508098232,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3512,
+            "positive_charge_patches": 0.6649,
+            "surface_hydrophobic_patches": 96.1217,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+      "selection_cpu_psh": 88.4431,
+      "sequence": "EQQLLESGGGLKKPGRSLQLSCAASGFTFSSYAMSWFRQAPGKERESVSDISGSGGSTDYAESVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPHRPKPQQGTDARFDYWGQGTTVTVSS",
+      "sequence_hash": "18e343f80442de50520e2b2c22823c407f2a6b5e90c35b56c0894d08ab42eb01",
+      "stratum": "near_86_to_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 108.57083333333333,
+          "pass_draws": 0,
+          "psh_values": [
+            102.9878,
+            106.2723,
+            116.4524
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 7.020420564562593
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 105.28436666666667,
+          "pass_draws": 0,
+          "psh_values": [
+            108.9989,
+            105.0062,
+            101.848
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 3.583556225780943
+        },
+        "gpu_minus_cpu_draws2_3_mean": -6.0779833333333215,
+        "gpu_minus_cpu_mean": -3.286466666666655,
+        "kind": "balanced_child",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+        "stratum": "above_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.729681558067629",
+            "a3d_maximum": "2.5280189932602735",
+            "a3d_minimum": "-2.846849821552383",
+            "a3d_positive_auc": "8.584591085775537",
+            "a3d_total": "-91.93987631652125",
+            "input_structure_sha256": "66b10d89d9c907cf63f1ee93ec733777117519d5ded7ed2d2a8e62ad27d71a12",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "88c0107d40ac8119d9b525d2fac5549df2e6c845bb1b53825e2a1cbb8e93bf44",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4487701482073225,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.4924,
+            "positive_charge_patches": 0.2232,
+            "surface_hydrophobic_patches": 102.9878,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6598470069184306",
+            "a3d_maximum": "2.5423886347847575",
+            "a3d_minimum": "-2.8532890829006647",
+            "a3d_positive_auc": "8.489530229455823",
+            "a3d_total": "-83.14072287172225",
+            "input_structure_sha256": "6ee1041b1128ca95a0198927fc4dd160a757b39115976b8738dfe54ffea37f18",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "788d03ba1357cac90d36113e43ee636de9235c7820b42e2a101d0c09564e6cd0",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4328104365926997,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.3158,
+            "positive_charge_patches": 0.2116,
+            "surface_hydrophobic_patches": 106.2723,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6899145743474829",
+            "a3d_maximum": "2.522617026854913",
+            "a3d_minimum": "-2.7940875329163184",
+            "a3d_positive_auc": "8.231902106113635",
+            "a3d_total": "-86.92923636778285",
+            "input_structure_sha256": "cef3f826900fe3664d0773698da5188f6d4416383c8bc095deb17d443612676e",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "972bce48bd914508261907ab731da30b6244f47c168eb93fd565ce90b8bd6a30",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3884690789586325,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.5058,
+            "positive_charge_patches": 0.2198,
+            "surface_hydrophobic_patches": 116.4524,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7389268869020907",
+            "a3d_maximum": "2.504050231162217",
+            "a3d_minimum": "-2.887432974463155",
+            "a3d_positive_auc": "8.161005482669855",
+            "a3d_total": "-93.10478774966343",
+            "input_structure_sha256": "f2059418330ad316db25a44f02214f50a02b82d8f05ae7fdb86e88799970c27c",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "37f5446d13ad187a5d2bcc8d2b36f34c7796ef3148e4ab349289ef7b288bc97e",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4354356805646398,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.5139,
+            "positive_charge_patches": 0.2208,
+            "surface_hydrophobic_patches": 108.9989,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7250878446093806",
+            "a3d_maximum": "2.4998975651514472",
+            "a3d_minimum": "-2.8772280422340892",
+            "a3d_positive_auc": "7.6038544280569536",
+            "a3d_total": "-91.36106842078195",
+            "input_structure_sha256": "d7e2ddb275d2cbf534206068a26e66058f3e1f85486da2a12c5b0ba6fd8deb4d",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "45aff1a035fcc028253ea8affa372b454802fe54b5991c097f626e815b1bcc0d",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4165112781733764,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.5433,
+            "positive_charge_patches": 0.1993,
+            "surface_hydrophobic_patches": 105.0062,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.672527138404618",
+            "a3d_maximum": "2.6482240539613455",
+            "a3d_minimum": "-2.9681091630931973",
+            "a3d_positive_auc": "9.119443544934976",
+            "a3d_total": "-84.73841943898186",
+            "input_structure_sha256": "dc9ea025d0bd21702c119b9bdeb446dc52fd5677f9f9a8ebfb109ec3e4994c2a",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "c96bef32316ee47f51c4af13afc4270585534f4fb607b0d6784f70e92b15a4ea",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4427179352418746,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6285,
+            "positive_charge_patches": 0.2388,
+            "surface_hydrophobic_patches": 101.848,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": 102.9878,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDIYSGGSSTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPYLYDKTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "02db1a692a55cb8c8ef2bd351ead85b02330682d0c4a060944cdd580f789d4fd",
+      "stratum": "above_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 96.06963333333333,
+          "pass_draws": 0,
+          "psh_values": [
+            96.6599,
+            96.2538,
+            95.2952
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 0.7007421375465682
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 98.62063333333333,
+          "pass_draws": 0,
+          "psh_values": [
+            103.5412,
+            96.1388,
+            96.1819
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 4.261390224249986
+        },
+        "gpu_minus_cpu_draws2_3_mean": 2.8461333333333414,
+        "gpu_minus_cpu_mean": 2.551000000000002,
+        "kind": "balanced_child",
+        "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+        "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+        "stratum": "above_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6749163296383083",
+            "a3d_maximum": "1.1622720784846423",
+            "a3d_minimum": "-2.7998060441255217",
+            "a3d_positive_auc": "3.2491973080031404",
+            "a3d_total": "-85.03945753442684",
+            "input_structure_sha256": "69f5e53d9a0ab5d5d152b1646022d1ac94a63e526323e7f11958d2de3bdc510d",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "6f35a5c195f180e95c9b30af74c07b63fc12f2e9eab2ba5c9a1ef53e30a655a1",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.468537731937189,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1543,
+            "positive_charge_patches": 0.3291,
+            "surface_hydrophobic_patches": 96.6599,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6740712533115629",
+            "a3d_maximum": "1.1706667299188065",
+            "a3d_minimum": "-2.800269992531055",
+            "a3d_positive_auc": "3.2673426140275454",
+            "a3d_total": "-84.93297791725693",
+            "input_structure_sha256": "ad90fc0ad0876d9e78ffba1b714bd1d0fc7a1cdc43096e2231a702e53a3579f7",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "b1291c652b5516577d7e0e48c00fe0a309cc939a2ea61df97cb8eba0f29ef684",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4704760718547476,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1912,
+            "positive_charge_patches": 0.3274,
+            "surface_hydrophobic_patches": 96.2538,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6904927116309766",
+            "a3d_maximum": "1.1295560204385926",
+            "a3d_minimum": "-2.8930362142213912",
+            "a3d_positive_auc": "3.1310251076786684",
+            "a3d_total": "-87.00208166550306",
+            "input_structure_sha256": "c631c021d389d63c6227dba29cf258cced74ca1c0583af01c32091aaad64e9dd",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "b26507ee2a479b5ca9c449bc8f11cc8739d2426f642106d2ac8799ce8484c518",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4658169552578817,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1549,
+            "positive_charge_patches": 0.3546,
+            "surface_hydrophobic_patches": 95.2952,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6814513113942323",
+            "a3d_maximum": "1.0731593875957472",
+            "a3d_minimum": "-2.840493705295126",
+            "a3d_positive_auc": "2.8183862544612155",
+            "a3d_total": "-85.86286523567327",
+            "input_structure_sha256": "79805e8ddeffe0b94707cc7420a5baee7ec5d74de677709a414583d376978747",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "8fe0355e2c6c10db0fe7e4b7c125820d71ec45cadce086fb90fd151fcb360358",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4693202311282783,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1523,
+            "positive_charge_patches": 0.3472,
+            "surface_hydrophobic_patches": 103.5412,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.679196602114144",
+            "a3d_maximum": "1.164371547160643",
+            "a3d_minimum": "-2.8108015856742306",
+            "a3d_positive_auc": "3.3171799786410756",
+            "a3d_total": "-85.57877186638214",
+            "input_structure_sha256": "cf942226279ecfe302fa236238b1b06ecc340212bca95118ef00c18535783c0b",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "684fd105d6d9bb187e71883c8e749cc3c40190baa7693d776b365dfcc552b60b",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4695161786025257,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.154,
+            "positive_charge_patches": 0.3562,
+            "surface_hydrophobic_patches": 96.1388,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6609083182121056",
+            "a3d_maximum": "1.0965525803481628",
+            "a3d_minimum": "-2.8899774543980143",
+            "a3d_positive_auc": "2.8364330341064203",
+            "a3d_total": "-83.2744480947253",
+            "input_structure_sha256": "cf78c8b33526d5cc757d574bc88b3b064cf7b172c170257fbc55a41472a27001",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e3a14401534d843ef88926abfb0e651773d9d0c61bfcfefcacb52fff13b35acf",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4698604357457963,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1504,
+            "positive_charge_patches": 0.3184,
+            "surface_hydrophobic_patches": 96.1819,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "selection_cpu_psh": 96.6599,
+      "sequence": "EQQLLESGGGLQQPGGSLTLSCAASGFTFSSYAMSWFRQAPGKEREFVSDISGSGGSTDYAESVKGRFTISRDNTQNTLYLQMNSLRAEDTAVYYCAKSPHRFKPMLGSDSGFDYWGQGTTVTVSS",
+      "sequence_hash": "0b39d4d1ef85514ad0923f58cb86156865a767924f4deb0f68e556678a208ecd",
+      "stratum": "above_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 98.15386666666667,
+          "pass_draws": 0,
+          "psh_values": [
+            100.8012,
+            96.8833,
+            96.7771
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 2.2932727581631682
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 98.7666,
+          "pass_draws": 0,
+          "psh_values": [
+            95.9038,
+            99.8386,
+            100.5574
+          ],
+          "reasons": [
+            "psh_threshold",
+            "psh_threshold",
+            "psh_threshold"
+          ],
+          "sd": 2.5051718982936064
+        },
+        "gpu_minus_cpu_draws2_3_mean": 1.936399999999992,
+        "gpu_minus_cpu_mean": 0.612733333333324,
+        "kind": "balanced_child",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+        "stratum": "above_92"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7146848306010272",
+            "a3d_maximum": "2.229552079353409",
+            "a3d_minimum": "-2.8651520535138433",
+            "a3d_positive_auc": "7.6342344919296075",
+            "a3d_total": "-90.05028865572942",
+            "input_structure_sha256": "b4705d29cdd161a7a861b99a5e53777470ac71639ececf4a246ac67521038360",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "4d8fff79e9d6088689b8b88ac0bf42e6cc7dee14fd55fc3637f76bcb7993efa1",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3913340952708333,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6862,
+            "positive_charge_patches": 0.1827,
+            "surface_hydrophobic_patches": 100.8012,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6977008468807899",
+            "a3d_maximum": "2.606019167707996",
+            "a3d_minimum": "-2.914775383751792",
+            "a3d_positive_auc": "8.50304513687257",
+            "a3d_total": "-87.91030670697953",
+            "input_structure_sha256": "2f24d16666d202e2ec62d4d1ab1a3f74df2f46efc28477ba118f6e49c7666ede",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "adf3129e5958523a39d8ed3384ee7cc9d21f1f1d8b748d98c8102d17e530e1c5",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3869811871340658,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6781,
+            "positive_charge_patches": 0.2035,
+            "surface_hydrophobic_patches": 96.8833,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7074514004859241",
+            "a3d_maximum": "2.578941880652926",
+            "a3d_minimum": "-2.9980345613950954",
+            "a3d_positive_auc": "8.222370058214784",
+            "a3d_total": "-89.13887646122645",
+            "input_structure_sha256": "55f3306772ccee0b9a4dea44f8ffc93a883e5a17459dadf64c435752bd2a2a8e",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "c1be1fb52ff520d475cb6246ac8ddf6e4cc5a5473fa502397ebf26c5f8699fb7",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.394659392645484,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6406,
+            "positive_charge_patches": 0.2301,
+            "surface_hydrophobic_patches": 96.7771,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7327708925145787",
+            "a3d_maximum": "2.216866216610497",
+            "a3d_minimum": "-2.933729597033955",
+            "a3d_positive_auc": "7.719229909822447",
+            "a3d_total": "-92.32913245683692",
+            "input_structure_sha256": "71ed0ef7ee6b7714c09f6ee72a0d7271f1b47f1c39b3f772dc51ce7a4706f293",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "9c013594cfa435a0b3d6b1a74476c7bdbab9bb8d9b85d23b3fff4ae240a352bd",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3852925116189325,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6329,
+            "positive_charge_patches": 0.1928,
+            "surface_hydrophobic_patches": 95.9038,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.7331741119650965",
+            "a3d_maximum": "2.4881467461919486",
+            "a3d_minimum": "-2.928389379394203",
+            "a3d_positive_auc": "8.2628859623651",
+            "a3d_total": "-92.37993810760216",
+            "input_structure_sha256": "0f922dad6465f589f01a26a9a971a826725380fa83d04a046575ee9c3ed87e95",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "5e1b2dd012c7ed2bdb27592568e07a56c4468e42a601735ddc0dce28e0049998",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.390624515325224,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6372,
+            "positive_charge_patches": 0.1911,
+            "surface_hydrophobic_patches": 99.8386,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.6896318517898371",
+            "a3d_maximum": "2.515845750776707",
+            "a3d_minimum": "-3.037227423144751",
+            "a3d_positive_auc": "8.416096867948529",
+            "a3d_total": "-86.89361332551948",
+            "input_structure_sha256": "23df07dff1a3d2c56b2658885fc0a279f7188c2b828124de9436ac6ee7a9ac25",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "561b6d48981ed3043c5666353c7ea39e8322c63d45523fafa63cced9d0b7216a",
+            "passed": false,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": false,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3898403509091093,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.5789,
+            "positive_charge_patches": 0.2383,
+            "surface_hydrophobic_patches": 100.5574,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "balanced_child",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": 100.8012,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDIYSGGSSTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPYVYDKTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "0c63c4f59e863cd642de0dd4ba2a0d4293c49386393434e16af67b6b922c921a",
+      "stratum": "above_92"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 86.51293333333334,
+          "pass_draws": 2,
+          "psh_values": [
+            90.8582,
+            86.9384,
+            81.7422
+          ],
+          "reasons": [
+            "psh_threshold",
+            "",
+            ""
+          ],
+          "sd": 4.572868947754061
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 84.77246666666666,
+          "pass_draws": 2,
+          "psh_values": [
+            91.062,
+            81.823,
+            81.4324
+          ],
+          "reasons": [
+            "psh_threshold",
+            "",
+            ""
+          ],
+          "sd": 5.450395788686665
+        },
+        "gpu_minus_cpu_draws2_3_mean": 0.43216666666666015,
+        "gpu_minus_cpu_mean": -1.740466666666677,
+        "kind": "actual_parent",
+        "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+        "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+        "stratum": "parent_control"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8449576190999628",
+            "a3d_maximum": "0.9200128010854012",
+            "a3d_minimum": "-2.893780444367504",
+            "a3d_positive_auc": "1.2393915924400514",
+            "a3d_total": "-106.46466000659531",
+            "input_structure_sha256": "db9e0b0023a66c03d4625e0c28132bc63252804cc0124ca3871b09d06988a9ab",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "d83fb420a0eaa1326bd9f5b1de564dfa21f24854fa31329aa086fee13497f859",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4465768011247877,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1586,
+            "positive_charge_patches": 0.6872,
+            "surface_hydrophobic_patches": 90.8582,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8279493756928943",
+            "a3d_maximum": "0.9238205312133335",
+            "a3d_minimum": "-2.8629818238993368",
+            "a3d_positive_auc": "1.160767031605006",
+            "a3d_total": "-104.32162133730468",
+            "input_structure_sha256": "4cd55e19ae1a24fa75c98f34f13e74b45c20de2666d450382892d07c8b4bde48",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e4f87c53d780646d923fa789f56888e233e47b188ebb52362d8d4784ecf60812",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4461168052919413,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1915,
+            "positive_charge_patches": 0.7205,
+            "surface_hydrophobic_patches": 86.9384,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8387950621118275",
+            "a3d_maximum": "0.9222276666259771",
+            "a3d_minimum": "-2.8680253687196133",
+            "a3d_positive_auc": "1.2144159920262492",
+            "a3d_total": "-105.68817782609027",
+            "input_structure_sha256": "bab4f6d6c7311553817ae934c1787358c014c69d51b3e09550543a544bf61431",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "938f78b476196b5a5ecda4ad48ac86b546bee9f751b1ec09f1fecccb9a0e0d59",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4479021610895961,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1953,
+            "positive_charge_patches": 0.6125,
+            "surface_hydrophobic_patches": 81.7422,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8707145679367734",
+            "a3d_maximum": "0.9295439774819158",
+            "a3d_minimum": "-2.903567043034716",
+            "a3d_positive_auc": "1.2227895470479258",
+            "a3d_total": "-109.71003556003345",
+            "input_structure_sha256": "80726852bd9143fcb3fe2ce277c72666cbbaf5eefeac0d0bac23697c169f382d",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "e3205fe98ff0919feb3d0a07b664a4544a378cb355b3bce32bed5c185a457f9d",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4432064109815126,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1259,
+            "positive_charge_patches": 0.6862,
+            "surface_hydrophobic_patches": 91.062,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8486371230322962",
+            "a3d_maximum": "0.9436993952406159",
+            "a3d_minimum": "-2.9659104735037083",
+            "a3d_positive_auc": "1.2549392084221782",
+            "a3d_total": "-106.92827750206932",
+            "input_structure_sha256": "aae96570fc94eb65fbe213e373803f27c846bc5ed8c418bdf94ab67fea1c4722",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "89dc48f2eea1ac38afa611ccda51ee4498cf8fa8e3a242d94aa8b091411f36c1",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.443062164334622,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1955,
+            "positive_charge_patches": 0.6307,
+            "surface_hydrophobic_patches": 81.823,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8433384295399315",
+            "a3d_maximum": "0.9284794218946055",
+            "a3d_minimum": "-2.8341467179259627",
+            "a3d_positive_auc": "1.3446125038901409",
+            "a3d_total": "-106.26064212203137",
+            "input_structure_sha256": "44ca3e89fb8ed5f53a4c6f6d7ce21fd002300f6fad4e168b26257c40f9bc8631",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "48ada16fdb7a6ec92358e1fa3a0ede0ee61bebc2f46e7c5fee0ae6b3a61251ad",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4466661684132158,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.1948,
+            "positive_charge_patches": 0.6703,
+            "surface_hydrophobic_patches": 81.4324,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "kind": "actual_parent",
+      "parent_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "selection_cpu_psh": null,
+      "sequence": "EQQLLESGGGLQQPGGSLTLSCAASGFTFSSYAMSWFRQAPGKEREFVSDISSQGDQTDYAESVKGRFTISRDNTQNTLYLQMNSLRAEDTAVYYCAKYPHRFKPRQGSDSGFDYWGQGTTVTVSS",
+      "sequence_hash": "534a7265c1755457fd3edbb20d074a1f43ba52492cae7070773b04f5d960efd2",
+      "stratum": "parent_control"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 83.6552,
+          "pass_draws": 3,
+          "psh_values": [
+            83.9537,
+            79.4587,
+            87.5532
+          ],
+          "reasons": [
+            "",
+            "",
+            ""
+          ],
+          "sd": 4.055497410922616
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 84.0858,
+          "pass_draws": 3,
+          "psh_values": [
+            84.058,
+            80.4876,
+            87.7118
+          ],
+          "reasons": [
+            "",
+            "",
+            ""
+          ],
+          "sd": 3.612180233598538
+        },
+        "gpu_minus_cpu_draws2_3_mean": 0.5798500000000075,
+        "gpu_minus_cpu_mean": 0.43060000000001253,
+        "kind": "actual_parent",
+        "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+        "stratum": "parent_control"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8957786862640369",
+            "a3d_maximum": "1.291263648951177",
+            "a3d_minimum": "-3.2252482860276688",
+            "a3d_positive_auc": "3.0722243852114897",
+            "a3d_total": "-112.86811446926865",
+            "input_structure_sha256": "2c2ce8d891cadc76e13bce04c8d99a826d82deb31c27bf008b0a115ea695a4cb",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "8f76b5aec25034d30632e2e4f2906bc839075a5e2eb3dc46147124b8ebf4b7db",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.396569102827501,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.6596,
+            "positive_charge_patches": 0.2085,
+            "surface_hydrophobic_patches": 83.9537,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8459887942041906",
+            "a3d_maximum": "1.4354415525546955",
+            "a3d_minimum": "-3.189246240609248",
+            "a3d_positive_auc": "3.554096413992579",
+            "a3d_total": "-106.59458806972802",
+            "input_structure_sha256": "6db3f10a3d8f8ee76f37e24f6664741d658cf09163039441a7d5dceaedd79df5",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "84774af17b1ffb38aef5a2ae7452ff6da2a724b195e7f8972ecd6f0e0ca16d88",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4060804771960438,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.7266,
+            "positive_charge_patches": 0.2069,
+            "surface_hydrophobic_patches": 79.4587,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8699997940630587",
+            "a3d_maximum": "1.37217911388027",
+            "a3d_minimum": "-3.1260740394947764",
+            "a3d_positive_auc": "3.346508639470245",
+            "a3d_total": "-109.6199740519454",
+            "input_structure_sha256": "92deaf34d1a96e6df58a1d73546a821933e049ae024a661627f3acd19b7d4329",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "4d377a0de006b789eb7262997fc9708cb9f4582305d5e91293602f83272cbaf3",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4066924951472013,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.7059,
+            "positive_charge_patches": 0.223,
+            "surface_hydrophobic_patches": 87.5532,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8600077084827303",
+            "a3d_maximum": "1.3290798941246809",
+            "a3d_minimum": "-3.206180855235478",
+            "a3d_positive_auc": "3.671604793547174",
+            "a3d_total": "-108.36097126882402",
+            "input_structure_sha256": "7e8c20de51f911d3c6f63340a5c4766d56233ff0c668313d87336d74e69d4b94",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "6c0c5321088ce5e6cfae57455eb0655c296044e8a0f76e19e840518408f16465",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3945145918755684,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.7298,
+            "positive_charge_patches": 0.1426,
+            "surface_hydrophobic_patches": 84.058,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8417779215025224",
+            "a3d_maximum": "1.3484699131939122",
+            "a3d_minimum": "-3.1604880376233853",
+            "a3d_positive_auc": "3.5824401772097136",
+            "a3d_total": "-106.06401810931783",
+            "input_structure_sha256": "7bae12fe7a6358919378ee38e2ae6c8fa8ebeedcd8e6744359cc5ef0bdcc13b9",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "4f5a3c1266f6e99d754e161cf6cb2402d920440954f17676ecaaea3cbe4d423f",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.3997088576974275,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.7364,
+            "positive_charge_patches": 0.1702,
+            "surface_hydrophobic_patches": 80.4876,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-0.8912616476830578",
+            "a3d_maximum": "1.2887752916824549",
+            "a3d_minimum": "-3.2170296172750144",
+            "a3d_positive_auc": "3.115422715249267",
+            "a3d_total": "-112.29896760806528",
+            "input_structure_sha256": "8e415f88ca8ea54d1747e2e0f3df5fd53e14d8ff9d22a610cae66426c3856146",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "9efa8b96dbe7849dd0f6d270aefe850a7cbc3e9a2f3b3fa7ea0890413f0df229",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.395769055089174,
+            "cdr3_length": 19,
+            "negative_charge_patches": 1.673,
+            "positive_charge_patches": 0.2272,
+            "surface_hydrophobic_patches": 87.7118,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "kind": "actual_parent",
+      "parent_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "selection_cpu_psh": null,
+      "sequence": "DQQLVESGGGLKQPGDSLTLSCAASGFTFSSYAMSWVRQAPGKEREWVSDITSQGDQTDYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCSRYPYRYDKTRGSDEGFDYWGQGTTVTVSS",
+      "sequence_hash": "e45e91405b3227ae5fc61ccb8a1af64f718b62a8d89bbf5c110a8612d5ad06b7",
+      "stratum": "parent_control"
+    },
+    {
+      "comparison": {
+        "cpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 89.99513333333333,
+          "pass_draws": 2,
+          "psh_values": [
+            88.1092,
+            94.2277,
+            87.6485
+          ],
+          "reasons": [
+            "",
+            "psh_threshold",
+            ""
+          ],
+          "sd": 3.672741015009543
+        },
+        "gpu": {
+          "draws": 3,
+          "inconclusive_draws": 0,
+          "mean": 89.61226666666667,
+          "pass_draws": 2,
+          "psh_values": [
+            88.0363,
+            87.7697,
+            93.0308
+          ],
+          "reasons": [
+            "",
+            "",
+            "psh_threshold"
+          ],
+          "sd": 2.963536148477581
+        },
+        "gpu_minus_cpu_draws2_3_mean": -1.3258333333333212,
+        "gpu_minus_cpu_mean": -0.3828666666666578,
+        "kind": "actual_parent",
+        "parent_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+        "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+        "stratum": "parent_control"
+      },
+      "cpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.0495691046254472",
+            "a3d_maximum": "0.9802040974130398",
+            "a3d_minimum": "-3.2366725801107803",
+            "a3d_positive_auc": "0.8650577763580817",
+            "a3d_total": "-132.24570718280634",
+            "input_structure_sha256": "e67cf867d625fd5a463cc56298d9a850b7555da111c5cc01fe1a361432a6731a",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "fe4187efda5b9ba15cdc7fdc6e2c4fff7d103856bb1edaa13c51a49005a6fd28",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4249832687467445,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3459,
+            "positive_charge_patches": 0.6022,
+            "surface_hydrophobic_patches": 88.1092,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.0947305539148733",
+            "a3d_maximum": "0.9816699017900669",
+            "a3d_minimum": "-3.295186683136356",
+            "a3d_positive_auc": "0.8587125585310111",
+            "a3d_total": "-137.93604979327404",
+            "input_structure_sha256": "bc0032a2b66be8171f1a01f8f61ea7c96f99ce4af668770f5732603763eabd47",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "d6977b0e327021457b242f92862e51c5025bb386cc2b8d77b08e3d8def97465a",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.424844257511647,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3333,
+            "positive_charge_patches": 0.5926,
+            "surface_hydrophobic_patches": 94.2277,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.0411432450738385",
+            "a3d_maximum": "0.977891141528534",
+            "a3d_minimum": "-3.270561798337971",
+            "a3d_positive_auc": "0.8673163059572245",
+            "a3d_total": "-131.18404887930365",
+            "input_structure_sha256": "1ba685db73bfc01dbabf67b4e6515af325e40174a5aa5c19928416bd14b4c486",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "c773fe4115664e9a48c3a4fd7b4fdb64fba93e62d62024fa3ed6947b4347ba03",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4243504150836135,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3288,
+            "positive_charge_patches": 0.5966,
+            "surface_hydrophobic_patches": 87.6485,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        }
+      ],
+      "gpu_observations": [
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.0605856112830887",
+            "a3d_maximum": "0.9804360191247381",
+            "a3d_minimum": "-3.2614261382989147",
+            "a3d_positive_auc": "0.8514434156557659",
+            "a3d_total": "-133.63378702166918",
+            "input_structure_sha256": "ee9eea0f846ffda4e989b18d4a2c8edb16b41fa61f1d3acc81ac7a6eb5b5a05b",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "7f7a54db60bb75b762039142d416203ad3eb1489e98a667f2cb0478fe380a363",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4256624792091168,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3333,
+            "positive_charge_patches": 0.6033,
+            "surface_hydrophobic_patches": 88.0363,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.0982830190140407",
+            "a3d_maximum": "0.9783779018112058",
+            "a3d_minimum": "-3.350471873692288",
+            "a3d_positive_auc": "0.8658213839225866",
+            "a3d_total": "-138.3836603957691",
+            "input_structure_sha256": "5a1c2ba794c7f874c6c125648fd0fa633fa393ef68db632861c3dc29c68ecfde",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "99f1f82f4d7875d3d859768e9c57bab80caf69c2631bf8dc2e849e442a7a42fa",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4246739153871082,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3383,
+            "positive_charge_patches": 0.5999,
+            "surface_hydrophobic_patches": 87.7697,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "passed"
+        },
+        {
+          "aggrescan3d": {
+            "a3d_average": "-1.039878000515548",
+            "a3d_maximum": "0.9781044653120142",
+            "a3d_minimum": "-3.2649157473037125",
+            "a3d_positive_auc": "0.8959342841566889",
+            "a3d_total": "-131.02462806495905",
+            "input_structure_sha256": "1caa4fc79b1f58b278453b158c934a9673fac1cf9c4254d42394a200ba60695c",
+            "mode": "static-no-minimization",
+            "normalized_structure_sha256": "74f98ead4968a24e13408483254d7309bbc3f62ada2e148b88d82cf264749e87",
+            "passed": true,
+            "ph_scale": "default-scale",
+            "radius_angstrom": "10.0",
+            "residue_count": 126,
+            "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+            "status": "ok",
+            "surface_method": "FreeSASA-2.0.1-NACCESS-LR100"
+          },
+          "backend_passed": true,
+          "error": false,
+          "error_kind": "none",
+          "execution_censored": false,
+          "gate_reason": "psh_threshold",
+          "has_red_flags": false,
+          "metrics": {
+            "cdr3_compactness": 1.4237905315570734,
+            "cdr3_length": 19,
+            "negative_charge_patches": 0.3395,
+            "positive_charge_patches": 0.5984,
+            "surface_hydrophobic_patches": 93.0308,
+            "total_cdr_length": 35
+          },
+          "missing_metrics": [],
+          "outcome": "rejected"
+        }
+      ],
+      "kind": "actual_parent",
+      "parent_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+      "selection_cpu_psh": null,
+      "sequence": "EQQLLESGGGLKKPGRSLQLSCAASGFTFSSYAMSWFRQAPGKERESVSDISSQGDQTDYAESVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPHRHKPQQGTDQGFDYWGQGTTVTVSS",
+      "sequence_hash": "6e71d2ce8d7270e11e2c6af0825c9d167e3a346fb509c7356c6c6ff54342bfd7",
+      "stratum": "parent_control"
+    }
+  ],
+  "runtime": {
+    "cpu_threads": 1,
+    "cpu_workers": 8,
+    "gpu_prediction_device": "cpu",
+    "gpu_refinement_properties": {
+      "DeterministicForces": "false",
+      "DeviceIndex": "0",
+      "Precision": "single",
+      "platform": "CUDA"
+    },
+    "gpu_workers_per_gpu": 4,
+    "gpus": [
+      0,
+      6,
+      7
+    ],
+    "hydrogen_context_platform_observed": false,
+    "model_weights": {
+      "1": "2f8f398a95e2fd3fe38527415471a60346cb131864a1a4ef081e11816d74e995",
+      "2": "41c163511ad20d1aa67fbd50f64ced9a25381d0618847b16a19d5e14df73297e",
+      "3": "8de57b3f0b6b89acb0e87fc7b647522666dd90e86ed3138417cbcd785c982c4d",
+      "4": "96f3cfba8de00e4c833bc73efa821f6022ed65e951a4289c7e3b5409527964e0"
+    },
+    "scientific_sources": {
+      "ImmuneBuilder.NanoBodyBuilder2": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+      "ImmuneBuilder.refine": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+      "theraprofnano.CDR_Profiler.CDR3_Conf_Assigner": "3b77f628bab30927b8934362c2759c06949d5393b4f5401e956334ab21033c44",
+      "theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner": "71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46"
+    },
+    "selected_model_id_observed": false,
+    "versions": {
+      "numpy": "1.26.4",
+      "openmm": "8.5.1",
+      "pdbfixer": "1.12.0",
+      "torch": "2.7.1"
+    }
+  },
+  "schema": "pr100-backend-reference-canary-v1",
+  "selection": "three lowest sequence hashes per first-CPU PSH stratum: below86,86to92inclusive,above92; plus3actualparents; selected before any matched GPU observation; not fleet-unbiased",
+  "source_sha": "08ed26540da12ce08eccc631fad35056a702f02c",
+  "upstream_runtime_parity_proven": false
+}

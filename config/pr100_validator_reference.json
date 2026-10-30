@@ -1,0 +1,169 @@
+{
+  "upstream": {
+    "repository": "https://github.com/metanova-labs/nova",
+    "main_sha": "db9bf190a6907338a05871b9658f42a089229675",
+    "pr100_head_sha": "ce19ea8cbe656671c3440ba58b4093ff80798d4f",
+    "filter_repository": "https://github.com/frankji-groundcontrol/NOVA-nanobody-filter",
+    "filter_sha": "fe2d5868126406a0de8953d26ecd8bdccbdbd029",
+    "files_sha256": {
+      "neurons/validator/nanobody_validity.py": "e70664a6f0962524394d623a991ae9679fee0e553d35aef6a1da5324663e23d4",
+      "utils/nanobodies.py": "4315ba7cb631f68717dc00fa7690ca3cf44621fa15d256c11913fbcff58e03ab",
+      "utils/aggrescan3d.py": "ecd3f23a1238b2262777cc1cd28bbcce260c9d52a83c215711641b329d36430e",
+      "requirements/requirements.txt": "a40937d47e0edeaf6e5e6e5e5aba525807603ebbe55f05426929ee0fd2d96465",
+      "config/config.yaml": "b649659d00e75cd5c853c0480e2598e1dd9d4274b0639edf6ec4e1b02738f653",
+      "tools/download_model_weights.py": "78412084eec8b2450ca141a2959ee82d803397a07c2aa808673a4384348d195c"
+    }
+  },
+  "published_dependencies": {
+    "ImmuneBuilder": {
+      "package_version": "1.2",
+      "repository": "https://github.com/cosmic-amanita/ImmuneBuilder",
+      "revision": "ba353b3c24b02bff48d1508f0ccff9d3a68fad15"
+    },
+    "TNP": {
+      "package": "theraprofnano",
+      "repository": "https://github.com/oxpig/TNP",
+      "revision": "29dcac72f1380e8538e8870f45a699d3c6156162"
+    },
+    "pdbfixer": {
+      "package_version": "1.12.0",
+      "repository": "https://github.com/openmm/pdbfixer",
+      "revision_tag": "v1.12"
+    },
+    "openmm": "8.5.0",
+    "torch": "2.7.1",
+    "torch_install_default_cuda": "cu126",
+    "numpy": {
+      "source_pin": null
+    },
+    "python": {
+      "source_allowed_minor_versions": [
+        "3.10",
+        "3.11",
+        "3.12"
+      ],
+      "exact_version_pin": null
+    },
+    "ANARCI": "2026.2.13.2",
+    "abnumber": "0.4.4",
+    "biopython": "1.85"
+  },
+  "source_files_sha256": {
+    "ImmuneBuilder.refine": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+    "ImmuneBuilder.NanoBodyBuilder2": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+    "pdbfixer.pdbfixer": "a52e39125e3e0e2d1b58b83841fb05b8669e0bcdd73461e1b0ed1d5a8e8261b9",
+    "openmm.app.modeller": "376d8c8c06d1cfed4e40da20d77a2094099e872bda783b9c9bfc03a67305e813",
+    "theraprofnano.CDR_Profiler.CDR3_Conf_Assigner": "3b77f628bab30927b8934362c2759c06949d5393b4f5401e956334ab21033c44",
+    "theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner": "71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46",
+    "metanano.config": "00e8cba1b69ffdac9294b114a173b37353ee547687bdd00c042cc1cc9bab55ce",
+    "metanano.filters.developability": "8cd965a87676270c893e27b22f6114964591984ad058453f52182a12964ebbb0",
+    "metanano.filters.aggrescan3d": "bbf27a6b23f2708de802b920ee68ab713e18fd72f73bcdddd9b3061414ca082f",
+    "metanano.utils.tnp_wrapper": "b97ad69ba1d1ca56f37031dec73627b3547ef36c2326bfd61635fa1501f9ecdd",
+    "metanano.utils.aggrescan3d_wrapper": "efe77f70a171bd095872ff301d0ce6206a299c4e0df9c3c45ef9b1588f5c2993",
+    "metanano.services.developability_service": "77acb749de967f7d25292bec5b35de8b8853af28bcc8b86ef40d18269a13aaf7",
+    "metanano.services.async_manager": "e4ab496b6e9b619074170dd75928230074429e0ae33504fb350466c785b0adcd"
+  },
+  "execution_contract": {
+    "validator_tnp_concurrency": {
+      "default": 16,
+      "minimum": 1,
+      "maximum": 16,
+      "override_variable": "NOVA_MAX_CONCURRENT_TNP"
+    },
+    "tnp_argv": [
+      "TNP",
+      "--name",
+      "{unique_name}",
+      "--output",
+      "{temporary_directory}",
+      "--seq",
+      "{sequence}"
+    ],
+    "nbb2_argv": [
+      "NanoBodyBuilder2",
+      "--heavy_sequence",
+      "{sequence}",
+      "--output",
+      "{pdb_path}",
+      "--n_threads",
+      "1"
+    ],
+    "pytorch_threads": 1,
+    "prediction_device": "cuda if torch.cuda.is_available() else cpu",
+    "prediction_model_ids": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "refinement_minimizer": {
+      "platform": "CPU",
+      "properties": {
+        "Threads": "1"
+      }
+    },
+    "missing_atom_context": {
+      "platform": "unspecified by ImmuneBuilder; PDBFixer platform default None",
+      "seed": null
+    },
+    "hydrogen_context": {
+      "platform": "unspecified by ImmuneBuilder; Modeller platform default None",
+      "placement_rng": "unseeded Python random.random"
+    },
+    "seed_policy": "No explicit seed supplied by examined validator/TNP/NBB2 call chain; must observe dependency RNG separately",
+    "cuda_visibility_policy": "inherited process environment; no forced GPU hiding in examined upstream developability path",
+    "omp_openblas_mkl_openmm_thread_env": "not set by examined upstream developability path; worker environment unknown",
+    "profile_retry_policy": "up to3 attempts on profile compute failure within shared timeout; returns first computed profile; not3 biological pass confirmations",
+    "weights": {
+      "names": [
+        "nanobody_model_1",
+        "nanobody_model_2",
+        "nanobody_model_3",
+        "nanobody_model_4"
+      ],
+      "public_record": "https://zenodo.org/records/7258553",
+      "upstream_sha256_pins": null,
+      "qualification_requirement": "capture actual four model hashes; upstream downloader checks size and loadability only"
+    }
+  },
+  "thresholds": {
+    "psh_inclusive_min": 73.4,
+    "psh_inclusive_max": 89,
+    "cdr_total_length_inclusive": [
+      20,
+      39
+    ],
+    "cdr3_length_inclusive": [
+      5,
+      23
+    ],
+    "cdr3_compactness_inclusive": [
+      0.56,
+      1.61
+    ],
+    "ppc_max_inclusive": 1.18,
+    "pnc_max_inclusive": 1.88,
+    "a3d_average_max_inclusive": "-0.68002724866200",
+    "a3d_maximum_max_inclusive": "1.58023066762925",
+    "a3d_mode": "static-no-minimization",
+    "a3d_ph_scale": "default-scale",
+    "a3d_surface_method": "FreeSASA-2.0.1-NACCESS-LR100",
+    "a3d_radius_angstrom": 10,
+    "a3d_maximum_nonnegative_required": true,
+    "a3d_average_lte_maximum_required": true
+  },
+  "schema": "pr100-published-reference-v1",
+  "actual_validator_worker_attested": false,
+  "tnp_cli_body_sha256": "e1f91ab9cafe1d22fab8e7f45922e1219792c7f0a4ba65bb4fde315db302dae5",
+  "tnp_cli_normalization": "remove exactly first shebang line; require installed interpreter binding separately",
+  "observer_required_scopes": [
+    "openmm.Context.__init__",
+    "pdbfixer.PDBFixer.addMissingAtoms",
+    "openmm.app.Modeller.addHydrogens",
+    "ImmuneBuilder.refine.minimize_energy",
+    "ImmuneBuilder.refine.strained_sidechain_bonds_fixer",
+    "ImmuneBuilder.NanoBodyBuilder2.predict",
+    "ImmuneBuilder.Nanobody.save_single_unrefined",
+    "ImmuneBuilder.Nanobody.save"
+  ]
+}

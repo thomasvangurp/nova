@@ -1,0 +1,66 @@
+The published validator and a locally consistent runtime are different claims.
+
+This contract is based on main db9bf190a6907338a05871b9658f42a089229675
+(PR100 head ce19ea8cbe656671c3440ba58b4093ff80798d4f), independently fetched
+on 2026-10-30. config/pr100_validator_reference.json records the source hashes,
+dependency requirements, execution policy and numerical bounds. The original
+published requirements file is retained as an independent test fixture.
+
+The existing production release 08ed265 and its completed experiments were
+qualified against a local runtime. This change does not retroactively certify
+them as matching an external validator. It does not change any live runtime,
+configuration, publication gate or scientific execution policy.
+
+The mandatory published pins include OpenMM 8.5.0, Torch 2.7.1, PDBFixer 1.12.0
+and BioPython 1.85. ImmuneBuilder is the cosmic-amanita ba353b3 fork. Compare
+actual file bytes: our previous screen already used the fork's corrected
+refine.py despite a stale oxpig origin declaration. Its OpenMM 8.5.1 remains
+different from the published version. NumPy has no exact upstream pin. Every
+experiment records and binds an exact NumPy version; 2.0.2 is an uploader
+inventory hypothesis, not evidence of the external worker's installed NumPy.
+
+Upstream TNP runs NanoBodyBuilder2 --heavy_sequence SEQUENCE --output PDB
+--n_threads 1. Prediction selects CUDA automatically when available. The main
+and sidechain minimizers use CPU with Threads=1. PDBFixer missing-atom and
+Modeller hydrogen Contexts have unspecified platforms and must be observed,
+not inferred from the final Simulation. Hydrogen placement is unseeded.
+The isolated observer does not change seeds, precision, devices or scientific
+return values. It records all Context construction through Context.__init__,
+including aliases imported before instrumentation; model rankings, coordinate
+hashes, prepared PDBs and refinement fallback outcomes are also recorded.
+
+Runtime receipts bind the release, sequence, request, independent reference
+contract, actual source bytes, interpreter, all four weight hashes, native
+tools, exact dependency versions and complete observer trace. Installed TNP
+rewrites its shebang; only that first line is excluded from the upstream body
+hash, and the installed file hash and interpreter binding are recorded separately.
+Reference receipts require the complete developability gate, including PSH <=89;
+the backend's broader red-region pass flag is insufficient.
+
+validate_receipt returns an in-process checked reference result. A saved JSON
+copy must be revalidated before candidate_canary can consume it. Each draw
+must have a distinct request and match its candidate and observation digest.
+The old 12-candidate, three-draw CPU/CUDA fixture is intentionally diagnostic:
+23e071c8 passed all old CPU draws and failed all accelerated draws, despite
+similar aggregate variation. It must be measured under the corrected reference.
+CI does not force the accelerated backend to accept it based on old labels.
+Candidate-level decisions and all raw metrics remain necessary; aggregate
+variance alone cannot establish parity. Even a matching small canary only
+supports an extended trial and never authorizes production promotion.
+
+Every result explicitly states actual_validator_worker_attested=false. Public
+W&B metadata identifies the log uploader, not the actual scientific worker.
+Published-source compatibility must not be presented as external worker
+attestation or proof of statistical equivalence. Promotion requires separately
+reviewed hardware evidence and deployment of the exact tested bytes.
+
+The unit trace fixtures test contract rejection and observer mechanics; they
+are not hardware qualification. Run the full release shipping check before
+using a committed probe, then retain real measured receipts and cleanup proof.
+
+Primary sources:
+https://github.com/metanova-labs/nova/pull/100
+https://github.com/metanova-labs/nova/blob/db9bf190a6907338a05871b9658f42a089229675/requirements/requirements.txt
+https://github.com/oxpig/TNP/blob/29dcac72f1380e8538e8870f45a699d3c6156162/bin/TNP
+https://github.com/cosmic-amanita/ImmuneBuilder/blob/ba353b3c24b02bff48d1508f0ccff9d3a68fad15/ImmuneBuilder/NanoBodyBuilder2.py
+https://github.com/cosmic-amanita/ImmuneBuilder/blob/ba353b3c24b02bff48d1508f0ccff9d3a68fad15/ImmuneBuilder/refine.py

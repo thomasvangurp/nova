@@ -25,6 +25,7 @@ SOURCE_PATHS = (
     'NOVA-nanobody-filter', 'data/structures/8AOK.cif',
     'docs/PR100_DEVELOPABILITY_EXPERIMENT.md', 'docs/PR100_NATIVE_CLOSURE_CHECK.md',
     'docs/PR100_NATIVE_REVIEW_RESPONSE.md',
+    'docs/PR100_VALIDATOR_REFERENCE.txt',
     'docs/PR100_MOLECULE_GATE.md',
     'docs/experiments/pr100-native-reuse-v1.population.json',
     'docs/pr100-safe-activation.md', 'docs/evidence/pr100_activation_20261027',

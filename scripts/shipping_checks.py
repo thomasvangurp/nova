@@ -22,6 +22,8 @@ TEST_FILES = (
     'tests/test_pr100_replay.py',
     'tests/test_pr100_live_consumer.py',
     'tests/test_pr100_validator_oracle.py',
+    'tests/test_pr100_validator_reference.py',
+    'tests/test_pr100_context_observer.py',
     'tests/test_pr100_probe.py',
     'tests/test_pr100_native_benchmark.py',
     'tests/test_pr100_resources.py',
