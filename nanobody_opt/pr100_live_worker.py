@@ -149,6 +149,89 @@ def worker_count(job, *, cores=None, memory=None):
     return max(1, limit)
 
 
+def annotation_worker_count(job, *, segment_enabled, cores=None):
+    """Small annotation pool; retain the baseline's serial execution path.
+
+    The unchanged AbNumber ANARCI call leaves HMMER's thread count implicit.
+    Reserve three CPU slots per call (two HMMER workers plus its master), or
+    more if HMMER_NCPU is already configured. Never modify that environment
+    or the scientific call's parameters to obtain concurrency.
+    """
+    if not segment_enabled:
+        return 1
+    bounds = [job.get('workers', DEFAULT_WORKERS), job.get('max_workers', DEFAULT_MAX_WORKERS),
+              job.get('cpu_slots', 1)]
+    if any(type(n) is not int or n < 1 for n in bounds):
+        raise ValueError('annotation resources must be positive integers')
+    try:
+        hmmer_workers = int(os.environ.get('HMMER_NCPU', '2'))
+    except ValueError:
+        raise ValueError('invalid HMMER worker count') from None
+    if hmmer_workers < 0:
+        raise ValueError('invalid HMMER worker count')
+    slots_per_call = max(3, hmmer_workers + 1)
+    cores = available_cores() if cores is None else cores
+    return max(1, min(8, bounds[0], bounds[1], bounds[2] // slots_per_call,
+                      max(1, cores) // slots_per_call))
+
+
+def _warm_sequence_annotation():
+    """Initialize imported modules and read-only reference caches before threads."""
+    import importlib
+    importlib.import_module('abnumber')
+    importlib.import_module('anarci.anarci')
+    pr100_filter.validate_annotation_runtime()
+    germline = pr100_filter.helper('germline_identity')
+    germline._anarci_panel('human')
+    germline._hmm_digest()
+    return pr100_filter.annotation_identity()
+
+
+def _sequence_annotation(sequence, requirements, expected, identity=None):
+    from nanobody_opt import gates, hydrophobicity
+    # The exact existing sequence, annotation and hydrophobicity gates retain
+    # their order. Execution errors propagate; they are never biological rejects.
+    if gates.check_sequence(sequence, requirements):
+        return None, 'basic_sequence'
+    annotation = {**pr100_filter._annotate_uncached(sequence),
+                  'annotation_identity': (pr100_filter.annotation_identity()
+                                          if identity is None else identity)}
+    reason = rules.annotation_reason(annotation, requirements,
+                                     sequence=sequence, epoch_challenge=expected)
+    if not reason and not hydrophobicity.check(sequence)[1]:
+        reason = hydrophobicity.REJECT_REASON
+    return annotation, reason
+
+
+def sequence_annotations(sequences, requirements, expected, *, workers=1):
+    """Yield exact gate results in input order with at most workers tasks held.
+
+    No process pool, disk annotation cache, HMM batching or extraction changes.
+    A failed input raises in input order, as on the serial path; cancel work
+    that has not started and join running tasks before propagating the failure.
+    """
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError('annotation workers must be within one to eight')
+    if workers == 1:
+        for sequence in sequences:
+            yield _sequence_annotation(sequence, requirements, expected)
+        return
+    from collections import deque
+    identity = _warm_sequence_annotation()
+    pending = deque()
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='pr100-annotation') as pool:
+        try:
+            for sequence in sequences:
+                pending.append(pool.submit(_sequence_annotation, sequence, requirements, expected, identity))
+                if len(pending) == workers:
+                    yield pending.popleft().result()
+            while pending:
+                yield pending.popleft().result()
+        finally:
+            for future in pending:
+                future.cancel()
+
+
 def candidate_budget(job):
     budget = job.get('candidate_budget_seconds', DEFAULT_CANDIDATE_BUDGET)
     if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
@@ -402,23 +485,10 @@ def sequence_phase(job, directory):
         # is observable, without making the database pipeline a mining gate.
         history['history_capture_status'] = 'sidecar_unavailable'
     eligible, reasons = [], {}
-    for sequence, row in unique.items():
-        # Reject on the cheap sequence gates BEFORE annotation: a residue outside
-        # the standard alphabet (e.g. 'X') crashes the annotator.
-        if gates.check_sequence(sequence, config['nanobody_requirements']):
-            reasons['basic_sequence'] = reasons.get('basic_sequence', 0) + 1
-            continue
-        annotation = {**pr100_filter._annotate_uncached(sequence),
-                      'annotation_identity': pr100_filter.annotation_identity()}
-        reason = rules.annotation_reason(annotation, config['nanobody_requirements'],
-                                         sequence=sequence, epoch_challenge=expected)
-        # Cheap sequence-level hydrophobicity safety net: drop the obvious
-        # hydrophobic tail before the expensive 3D fold, mirroring the
-        # Boltz-2 skip-pass-1 screen. Only clearly-over-hydrophobic CDR3s
-        # are rejected; a candidate this screen cannot parse passes through
-        # to the annotation/native gates unchanged.
-        if not reason and not hydrophobicity.check(sequence)[1]:
-            reason = hydrophobicity.REJECT_REASON
+    annotation_workers = annotation_worker_count(job, segment_enabled=segment_settings['enabled'])
+    annotations = sequence_annotations(unique, config['nanobody_requirements'], expected,
+                                       workers=annotation_workers)
+    for (annotation, reason), (sequence, row) in zip(annotations, unique.items()):
         reasons[reason or 'passed'] = reasons.get(reason or 'passed', 0) + 1
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
@@ -468,6 +538,7 @@ def sequence_phase(job, directory):
               'fresh_unique_proposals': fresh_count,
               'proposal_exhausted': fresh_count < proposals_wanted,
               'proposals': proposals_wanted, 'annotation_reasons': reasons,
+              'annotation_workers': annotation_workers,
               'proposal_offset': proposal_offset, 'next_proposal_offset': proposal_offset + proposal_attempts,
               'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique) + sum(duplicate_counts.values()),
               'candidates': eligible, 'novelty_checked': False,
