@@ -319,6 +319,18 @@ def sequence_phase(job, directory):
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
     unique = {r['sequence']: r for r in rows
               if rules.sequence_hash(r['sequence']) not in blocked}
+    # Preserve the source relationship before cheap eligibility filters discard
+    # candidates. A background importer owns SQLite writes; mining never waits
+    # on a database or reconstructs parentage from sequence similarity.
+    from nanobody_opt.pr100_history import generation_records
+    history = generation_records(list(unique.values()), [row for row, _ in proposal_donors])
+    try:
+        pr100_filter.atomic(directory / 'generation-history.json', {'challenge': expected, **history})
+        history['history_capture_status'] = 'sidecar_saved'
+    except OSError:
+        # The final result still carries the records. Optional sidecar failure
+        # is observable, without making the database pipeline a mining gate.
+        history['history_capture_status'] = 'sidecar_unavailable'
     eligible, reasons = [], {}
     for sequence, row in unique.items():
         # Reject on the cheap sequence gates BEFORE annotation: a residue outside
@@ -355,7 +367,7 @@ def sequence_phase(job, directory):
         eligible.sort(key=lambda row: not chemistry_row(row))
     # Novelty is deliberately NOT run here: the archive search now runs after
     # native developability, so it is spent only on native passers.
-    result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'],
+    result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'], **history,
               'archive_sha256': job['archive_sha256'], 'archive_checked_at_unix': job['archive_fetched_at'],
               'archive_rows': len(frame), 'existing_references': len(refs),
               'reference_coverage': reference_coverage,

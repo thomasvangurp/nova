@@ -406,3 +406,21 @@ def test_sequence_phase_verifies_optional_bank_identity_before_work(sequence_run
     for identity in ('f' * 64, 'malformed', True):
         with pytest.raises(ValueError, match='bank identity'):
             sequence_runner(reference_bank_sha256=identity)
+
+
+def test_actual_generation_journal_keeps_rejected_candidates_and_template_links(sequence_runner, monkeypatch, tmp_path):
+    from nanobody_opt import pr100_history as history
+    monkeypatch.setattr(worker.rules, 'annotation_reason', lambda *a, **kw: 'fixture_rejected')
+    result = sequence_runner(missing_cell_donor_fallback=True)
+    assert result['candidates'] == []
+    assert result['generation_rows'] and result['lineage_references']
+    assert result['history_capture_status'] == 'sidecar_saved'
+    db = history.open_store(tmp_path / 'history.sqlite')
+    try:
+        report = history.import_generation(db, json.dumps(result).encode(), locator='recorded-test/result.json')
+        assert report['rows'] == len(result['generation_rows'])
+        assert report['recorded_relationships'] > 0 and report['unresolved_references'] == 0
+        assert {r[0] for r in db.execute('SELECT proposal_type FROM lineage_edges')} == {'recorded_cdr3_template'}
+        assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == 0
+    finally:
+        db.close()

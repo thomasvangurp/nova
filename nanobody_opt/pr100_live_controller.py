@@ -112,7 +112,7 @@ out={'running':not(d/'supervisor-receipt.json').exists()}
 if cache_result and cache_result.get('verified'):out['archive_cache_verified_sha256']=cache_result['verified']
 if not out['running']:
  out['receipt']=json.loads((d/'supervisor-receipt.json').read_text());out['files']={}
- for name in ('result.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
+ for name in ('result.json','generation-history.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
   p=d/name
   if p.is_file():out['files'][name]=base64.b64encode(p.read_bytes()).decode()
  report=d/'score/report.json'
