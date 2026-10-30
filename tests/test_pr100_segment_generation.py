@@ -326,13 +326,15 @@ def test_recorded32_multi_round_capacity_global_cap_provenance_and_cached_core(p
         monkeypatch.setattr(s, name, counted)
     stats = {}
     rows = s.generate(prepared32, CHALLENGE, limit=2400, stats=stats)
-    assert 2 * 128 < len(rows) <= 2400
+    # This fixed recorded library has enough supported capacity. A regression
+    # back to a few hundred proposals must fail release certification.
+    assert len(rows) == 2400
     assert len(rows) == len({r['sequence_hash'] for r in rows}) == stats['emitted']
     counts = Counter(_loop_sequence(row) for row in rows)
     assert max(counts.values()) <= 8
     assert len(counts) == stats['emitted_distinct_cdr3s']
     assert 1 < stats['rounds_run'] <= s.MAX_ROUNDS
-    assert stats['filled'] == (len(rows) == 2400)
+    assert stats['filled'] is True and stats['stop_reason'] == 'limit_filled'
     assert stats['bounded_stop'] == (stats['stop_reason'] == 'search_round_limit')
     # IMGT validation, splice library and the seven region-group pools are
     # built once, independent of the number of rounds.
