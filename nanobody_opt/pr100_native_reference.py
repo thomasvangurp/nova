@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -22,6 +23,7 @@ import time
 import types
 import uuid
 import weakref
+import zlib
 
 from nanobody_opt import pr100_validator_reference as reference
 
@@ -93,6 +95,28 @@ def _heavy_pdb_rows(text):
     return rows
 
 
+def pack_artifact(text):
+    raw = text.encode()
+    reference.require(len(raw) <= 2_000_000, 'oversized_scientific_artifact')
+    return {'encoding': 'zlib-base64-v1', 'raw_bytes': len(raw),
+            'data': base64.b64encode(zlib.compress(raw, level=6)).decode()}
+
+
+def unpack_artifact(value):
+    try:
+        reference.require(isinstance(value, dict) and value.get('encoding') == 'zlib-base64-v1'
+            and type(value.get('raw_bytes')) is int and 0 < value['raw_bytes'] <= 2_000_000
+            and isinstance(value.get('data'), str) and len(value['data']) <= 2_000_000,
+            'invalid_scientific_artifact_envelope')
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(base64.b64decode(value['data'], validate=True), 2_000_001)
+        reference.require(decoder.eof and not decoder.unconsumed_tail and not decoder.unused_data
+            and len(raw) == value['raw_bytes'], 'invalid_scientific_artifact_size')
+        return raw.decode()
+    except (ValueError, zlib.error, UnicodeError) as error:
+        raise ValueError('invalid_scientific_artifact') from error
+
+
 def validate_structure_binding(receipt):
     """Bind observed model -> exact TNP H-removal -> final PDB -> TNP/A3D."""
     models = [e for e in receipt['trace'] if e.get('event') == 'model_saved']
@@ -105,7 +129,7 @@ def validate_structure_binding(receipt):
     binding = receipt['structure_binding']
     reference.require(binding['transformation'] == 'published_tnp_hydrogen_removal_pdbio'
         and binding['raw_model_sha256'] == model['pdb_sha256'], 'unbound_original_model')
-    original, final = binding['observed_geometry_pdb'], binding['final_pdb']
+    original, final = (unpack_artifact(binding[key]) for key in ('observed_geometry_pdb', 'final_pdb'))
     reference.require(hashlib.sha256(original.encode()).hexdigest() == geometry['pdb_sha256']
         and hashlib.sha256(final.encode()).hexdigest() == receipt['structure_sha256'],
         'structure_artifact_changed')
@@ -464,7 +488,12 @@ def draw(request, index):
     metrics = {target: raw[source] for source, target in METRICS.items()}
     structure = profiles / 'Final_Models' / (name + '_NanoBodyBuilder2_Model.pdb')
     structure_sha = sha(structure)
-    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    raw_trace = trace_path.read_bytes()
+    # The original full trace remains an immutable host artifact. Ordered atom
+    # identity/coordinate evidence is carried by hashed PDBs below, so repeatedly
+    # embedding atom_ids on every intermediate geometry event is unnecessary.
+    trace = [{key: value for key, value in json.loads(line).items() if key != 'atom_ids'}
+             for line in raw_trace.splitlines()]
     reference.validate_trace(trace, sequence_hash=key, expected_observer_sha256=row['observer_sha256'],
                              expected_cuda_available=True)
     models = [e for e in trace if e.get('event') == 'model_saved']
@@ -474,8 +503,8 @@ def draw(request, index):
     reference.require(Path(geometry_name).name == geometry_name, 'invalid_geometry_artifact_path')
     structure_binding = {'transformation': 'published_tnp_hydrogen_removal_pdbio',
         'raw_model_sha256': models[0]['pdb_sha256'],
-        'observed_geometry_pdb': (directory / 'coordinates' / geometry_name).read_text(),
-        'final_pdb': structure.read_text(), 'tnp_result_json': result_text,
+        'observed_geometry_pdb': pack_artifact((directory / 'coordinates' / geometry_name).read_text()),
+        'final_pdb': pack_artifact(structure.read_text()), 'tnp_result_json': result_text,
         'tnp_result_sha256': hashlib.sha256(result_text.encode()).hexdigest()}
     _namespace_wrappers(bundle)
     from metanano.utils.tnp_wrapper import ProfileExecution
@@ -492,6 +521,7 @@ def draw(request, index):
         'registration_sha256': settings['registration_sha256'], 'policy': row['policy'],
         'implementation_sha256': row['implementation_sha256'], 'draw_id': str(directory),
         'aggregation_loader': 'exact_source_wrappers_without_application_bootstrap',
+        'raw_trace_sha256': hashlib.sha256(raw_trace).hexdigest(),
         'structure_binding_sha256': reference.digest(structure_binding)}
     receipt = {'schema': reference.SCHEMA, 'source_sha': request['source_sha'], 'sequence_hash': key,
         'request': binding, 'request_sha256': reference.digest(binding),

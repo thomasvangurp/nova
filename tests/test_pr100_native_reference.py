@@ -59,7 +59,8 @@ def registered(tmp_path, monkeypatch):
         source: receipt['observation']['metrics'][target] for source, target in native.METRICS.items()}})
     receipt['structure_binding'] = {'transformation': 'published_tnp_hydrogen_removal_pdbio',
         'raw_model_sha256': receipt['trace'][model_index]['pdb_sha256'],
-        'observed_geometry_pdb': original_pdb, 'final_pdb': final_pdb,
+        'observed_geometry_pdb': native.pack_artifact(original_pdb),
+        'final_pdb': native.pack_artifact(final_pdb),
         'tnp_result_json': result_text, 'tnp_result_sha256': hashlib.sha256(result_text.encode()).hexdigest()}
     request['structure_binding_sha256'] = reference.digest(receipt['structure_binding'])
     receipt.update(request=request, request_sha256=reference.digest(request), structure_sha256=structure_sha)
@@ -130,8 +131,9 @@ def test_renumbered_heavy_structure_is_valid_but_changed_coordinate_is_not(regis
     receipt = value['native_reference']['receipt']
     assert native.authoritative_measurement(value)
     binding = receipt['structure_binding']
-    binding['final_pdb'] = atom(1, 'N', 1., 'N') + atom(2, 'CA', 1.501, 'C')
-    receipt['structure_sha256'] = hashlib.sha256(binding['final_pdb'].encode()).hexdigest()
+    changed = atom(1, 'N', 1., 'N') + atom(2, 'CA', 1.501, 'C')
+    binding['final_pdb'] = native.pack_artifact(changed)
+    receipt['structure_sha256'] = hashlib.sha256(changed.encode()).hexdigest()
     receipt['aggregation']['input_structure_sha256'] = receipt['structure_sha256']
     value['aggrescan3d'] = copy.deepcopy(receipt['aggregation'])
     receipt['request']['structure_binding_sha256'] = reference.digest(binding)
@@ -146,6 +148,26 @@ def test_real_upstream_hydrogen_removal_preserves_983_heavy_atoms():
     left, right = (native._heavy_pdb_rows(value[key]) for key in ('observed_geometry_pdb', 'final_pdb'))
     assert len(left) == value['expected_heavy_atoms'] == 983
     assert left == right
+    for key in ('observed_geometry_pdb', 'final_pdb'):
+        envelope = native.pack_artifact(value[key])
+        assert native.unpack_artifact(envelope) == value[key]
+        assert len(envelope['data']) < len(value[key]) / 2
+
+
+@pytest.mark.parametrize('change', ['trailing', 'wrong_size', 'bomb', 'bad_base64'])
+def test_scientific_artifact_decode_is_bounded(change):
+    envelope = native.pack_artifact('ATOM\n')
+    if change == 'trailing':
+        envelope['data'] += 'AAAA'
+    elif change == 'wrong_size':
+        envelope['raw_bytes'] = 1
+    elif change == 'bomb':
+        envelope = {'encoding': 'zlib-base64-v1', 'raw_bytes': 10,
+            'data': native.base64.b64encode(native.zlib.compress(b'A' * 2_000_001)).decode()}
+    else:
+        envelope['data'] = 'invalid!'
+    with pytest.raises(ValueError):
+        native.unpack_artifact(envelope)
 
 
 def test_explicit_allowlist_intersection_and_empty_refusal(registered):
