@@ -34,6 +34,8 @@ NATIVE_EXECUTION_ENV_KEYS = (
 def interleave_segment_controls(eligible, *, segment_source, edit_source='edit_generation'):
     """Order eligible rows for native admission: four segment rows per one control.
 
+    The 80% share is an opportunity target while both sources have eligible
+    work; differing eligibility or source exhaustion can change the final share.
     Edit and baseline controls alternate while both arms still hold rows, and
     each arm keeps its internal order. An exhausted arm releases its slots to
     the remaining arms (work-conserving), so native capacity is never left idle

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from collections import Counter
 import itertools
-import math
 
 from nanobody_opt import rules
 from nanobody_opt.pr100_reference_donors import merit
@@ -241,24 +240,8 @@ def reconstruct(row, references):
     return ''.join(assembled)
 
 
-def _coverage_rounds(pools):
-    """Rounds until every rotating window has cycled; one when nothing rotates.
-
-    Each pool advances by its own width-tied stride, so its rotation period is
-    ``len(rest) // gcd(stride, len(rest))``. The maximum across pools bounds the
-    rounds needed before a zero-yield round proves the library is exhausted.
-    """
-    periods = []
-    for pool, width, stride in pools:
-        if len(pool) <= width:
-            continue
-        rest = len(pool) - width // 2
-        periods.append(rest // math.gcd(stride, rest))
-    return max(periods, default=1)
-
-
 def _search_round(framework_pools, loop_window, donors, known_joins, challenge, stats,
-                  beam_width, round_offset):
+                  beam_width, round_offset, blocked, loop_counts, max_per_cdr3):
     """One deterministic beam pass over windowed pools; no gate or native calls."""
     pools = list(framework_pools) + [loop_window]
     beam = [{'parts': [], 'rank': 0, 'unsupported_joins': 0}]
@@ -269,6 +252,18 @@ def _search_round(framework_pools, loop_window, donors, known_joins, challenge, 
             for option in pool:
                 stats['beam_expansions'] += 1
                 parts = previous['parts'] + option['parts']
+                if is_loops:
+                    loop = ''.join(p['sequence'] for p in option['parts']
+                                   if p['region'].startswith('cdr3'))
+                    if loop_counts[loop] >= max_per_cdr3:
+                        stats['cdr3_cap_drops'] += 1
+                        continue
+                    # Prior admissions and resume exclusions must not consume
+                    # the final beam's fresh exploration slots. The ranking
+                    # and diversity ordering of remaining proposals is intact.
+                    if rules.sequence_hash(''.join(p['sequence'] for p in parts)) in blocked:
+                        stats['exact_or_resume_collisions'] += 1
+                        continue
                 if is_loops and source_cdr_conflict(parts, donors):
                     stats['source_conserved_cdr_conflicts'] += 1
                     continue
@@ -332,13 +327,18 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
     loop_width = min(beam_width, 64)
     loop_stride = max(1, loop_width - loop_width // 2)
     option_stride = max(1, OPTION_WIDTH - OPTION_WIDTH // 2)
-    coverage_rounds = _coverage_rounds([(loop_pool, loop_width, loop_stride)]
-                                       + [(pool, OPTION_WIDTH, option_stride)
-                                          for pools in framework.values() for pool in pools])
+    loop_sequences = {''.join(p['sequence'] for p in option['parts']
+                              if p['region'].startswith('cdr3')) for option in loop_pool}
 
     result, seen, loop_counts = [], set(), Counter()
-    rounds, empty_streak, filled, exhausted = 0, 0, False, False
+    rounds, stop_reason = 0, 'search_round_limit'
     for r in range(MAX_ROUNDS):
+        if not loop_sequences:
+            stop_reason = 'no_splice_options'
+            break
+        if all(loop_counts[loop] >= max_per_cdr3 for loop in loop_sequences):
+            stop_reason = 'loop_caps_saturated'
+            break
         rounds = r + 1
         loop_offset = offset + r * loop_stride
         option_offset = offset + r * option_stride
@@ -347,7 +347,8 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
             windows = [_window(pool, OPTION_WIDTH, option_offset) for pool in framework[layout]]
             candidates = _search_round(windows, _window(loop_pool, loop_width, loop_offset),
                                        donors, known_joins, challenge, counters,
-                                       beam_width, loop_offset)
+                                       beam_width, loop_offset, excluded | seen,
+                                       loop_counts, max_per_cdr3)
             records = []
             for candidate in candidates:
                 seq = ''.join(p['sequence'] for p in candidate['parts'])
@@ -373,7 +374,6 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
                 reconstruct(row, references)
                 records.append(row)
             streams.append(records)
-        produced = 0
         for pair in itertools.zip_longest(*streams):
             for row in pair:
                 if row is None or row['sequence_hash'] in seen:
@@ -384,31 +384,27 @@ def generate(donors, challenge, *, limit=128, beam_width=128, max_per_cdr3=8,
                     counters['cdr3_cap_drops'] += 1
                     continue
                 result.append(row); seen.add(row['sequence_hash'])
-                loop_counts[loop] += 1; produced += 1
+                loop_counts[loop] += 1
                 if len(result) == bounds['limit']:
                     break
             if len(result) == bounds['limit']:
                 break
         if len(result) == bounds['limit']:
-            filled = True
+            stop_reason = 'limit_filled'
             break
-        if produced == 0:
-            empty_streak += 1
-            if empty_streak >= coverage_rounds:
-                exhausted = True
-                break
-        else:
-            empty_streak = 0
-    else:
-        # The rotated window has cycled through every bounded round without
-        # filling the requested quota: report exhaustion instead of a filled
-        # claim. Emitted counters below still reflect exactly what was produced.
-        exhausted = True
+    if stop_reason == 'search_round_limit' and loop_sequences and all(
+            loop_counts[loop] >= max_per_cdr3 for loop in loop_sequences):
+        stop_reason = 'loop_caps_saturated'
+    # A bounded beam search cannot prove that all assemblies were exhausted.
+    # Only no splice options or globally saturated loop caps prove that this
+    # call cannot emit further rows under its configured cap.
     counters['emitted'] = len(result)
     counters['emitted_distinct_cdr3s'] = len(loop_counts)
     counters['rounds_run'] = rounds
-    counters['filled'] = filled
-    counters['exhausted'] = exhausted
+    counters['filled'] = stop_reason == 'limit_filled'
+    counters['stop_reason'] = stop_reason
+    counters['bounded_stop'] = stop_reason == 'search_round_limit'
+    counters['library_exhausted'] = stop_reason in ('no_splice_options', 'loop_caps_saturated')
     if stats is not None:
         stats.update(counters)
     return result

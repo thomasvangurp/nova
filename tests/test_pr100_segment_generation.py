@@ -1,5 +1,7 @@
 """Real numbered historical donors; proposal provenance and live gate contracts."""
 import copy
+from collections import Counter
+import gzip
 import json
 from pathlib import Path
 import sys
@@ -94,22 +96,19 @@ def test_loop_cap_bounds_redundancy_without_inflating_the_proposal_quota(prepare
     # The cap is global across rotated rounds: only two distinct loops exist,
     # so the search reports exhaustion instead of a filled quota.
     assert stats['emitted'] == 4 and stats['emitted_distinct_cdr3s'] == 2
-    assert stats['filled'] is False and stats['exhausted'] is True
+    assert stats['filled'] is False and stats['library_exhausted'] is True
     assert stats['cdr3_cap_drops'] > 0
 
 
-def test_beam_width_eight_real_fixture_reports_actual_capacity_not_two_beam(prepared):
-    # The audited single-pass search capped real output at 2*beam_width. The
-    # real three-donor fixture has only two length-compatible loops and fewer
-    # region options than the window width, so its pools cannot rotate: with
-    # beam_width=8 the honest ceiling stays <= 2*beam_width. The refactor must
-    # report that as exhaustion, never as a filled quota.
+def test_round_bound_does_not_claim_library_exhaustion(prepared, monkeypatch):
+    monkeypatch.setattr(s, 'MAX_ROUNDS', 1)
     stats = {}
-    rows = s.generate(prepared, CHALLENGE, limit=108, beam_width=8, max_per_cdr3=64, stats=stats)
-    assert len(rows) == stats['emitted'] <= 2 * 8
-    assert stats['filled'] is False and stats['exhausted'] is True
-    assert stats['rounds_run'] < s.MAX_ROUNDS
-    assert stats['emitted_distinct_cdr3s'] == 2
+    rows = s.generate(prepared, CHALLENGE, limit=4800, max_per_cdr3=64, stats=stats)
+    assert len(rows) == stats['emitted'] < 4800
+    assert stats['rounds_run'] == 1
+    assert stats['stop_reason'] == 'search_round_limit'
+    assert stats['bounded_stop'] is True
+    assert stats['library_exhausted'] is False and stats['filled'] is False
 
 
 def test_donor_order_does_not_change_search_or_provenance(prepared):
@@ -296,4 +295,103 @@ def test_live_worker_default_2400_limit_reports_exhaustion_not_filled(run_worker
     # Two length-compatible loops * default per-CDR3 cap 8 => 16 actual children.
     assert result['segment_generation_stats']['emitted'] == 16
     assert result['segment_generation_stats']['filled'] is False
-    assert result['segment_generation_stats']['exhausted'] is True
+    assert result['segment_generation_stats']['stop_reason'] == 'loop_caps_saturated'
+    assert result['segment_generation_stats']['library_exhausted'] is True
+
+
+@pytest.fixture(scope='module')
+def prepared32():
+    path = Path(__file__).parent / 'fixtures/pr100/segment_donors_32_26030.json.gz'
+    data = json.loads(gzip.decompress(path.read_bytes()))
+    assert data['before_epoch'] == CHALLENGE['epoch']
+    assert data['source_report_sha256'] == 'd82c6d3a190966b6539994f5b5f6596b763013ade33fedfd1a496243cb58b7df'
+    assert data['annotation_identity_sha256']
+    assert len(data['rows']) == 32
+    assert all(e['epoch'] < CHALLENGE['epoch'] for r in data['rows'] for e in r['quality_evidence'])
+    return [s.prepare(row, row['numbered']) for row in data['rows']]
+
+
+def _loop_sequence(row):
+    return ''.join(row['sequence'][p['child_start']:p['child_end']]
+                   for p in row['segment_provenance'] if p['region'].startswith('cdr3'))
+
+
+def test_recorded32_multi_round_capacity_global_cap_provenance_and_cached_core(prepared32, monkeypatch):
+    calls = Counter()
+    for name in ('prepare', '_loop_pool', '_option_pool'):
+        original = getattr(s, name)
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(s, name, counted)
+    stats = {}
+    rows = s.generate(prepared32, CHALLENGE, limit=2400, stats=stats)
+    assert 2 * 128 < len(rows) <= 2400
+    assert len(rows) == len({r['sequence_hash'] for r in rows}) == stats['emitted']
+    counts = Counter(_loop_sequence(row) for row in rows)
+    assert max(counts.values()) <= 8
+    assert len(counts) == stats['emitted_distinct_cdr3s']
+    assert 1 < stats['rounds_run'] <= s.MAX_ROUNDS
+    assert stats['filled'] == (len(rows) == 2400)
+    assert stats['bounded_stop'] == (stats['stop_reason'] == 'search_round_limit')
+    # IMGT validation, splice library and the seven region-group pools are
+    # built once, independent of the number of rounds.
+    assert calls == {'prepare': 32, '_loop_pool': 1, '_option_pool': 7}
+    references = {d['sequence_hash']: d['sequence'] for d in prepared32}
+    for row in rows:
+        assert s.reconstruct(row, references) == row['sequence']
+        assert not row['acceptance_qualified'] and not row['target_scored']
+
+
+def test_recorded32_resume_exclusions_rotate_without_reemitting(prepared32):
+    first = s.generate(prepared32, CHALLENGE, limit=300)
+    hashes = {r['sequence_hash'] for r in first}
+    stats = {}
+    resumed = s.generate(prepared32, CHALLENGE, limit=300, offset=17, excluded=hashes, stats=stats)
+    assert len(first) == len(resumed) == 300
+    assert hashes.isdisjoint(r['sequence_hash'] for r in resumed)
+    assert max(Counter(_loop_sequence(r) for r in resumed).values()) <= 8
+    assert stats['emitted'] == 300 and stats['filled'] is True
+
+
+def test_weighted_4800_reservation_stays_shared_across_attempts_and_confirmations():
+    segments = [{'sequence': f'segment-{i}', 'source': s.SOURCE} for i in range(5000)]
+    controls = [{'sequence': f'control-{i}', 'source': 'baseline'} for i in range(1500)]
+    ordered = worker.interleave_segment_controls(segments + controls, segment_source=s.SOURCE)
+    ledger = budget.ensure({}, {})
+    admitted = budget.reserve(ledger, 1, ordered)
+    assert len(admitted) == 4800
+    assert Counter(r['source'] for r in admitted) == {s.SOURCE: 3840, 'baseline': 960}
+    assert all([r['source'] for r in admitted[i:i+5]] == [s.SOURCE] * 4 + ['baseline']
+               for i in range(0, 4800, 5))
+    assert budget.summary(ledger)['capacity_used'] == 4800
+    carry = {'sequence': admitted[0]['sequence'], 'native_resume': {'measurements': [{}]}}
+    assert budget.reserve(ledger, 2, [carry, {'sequence': 'new-after-limit'}]) == [carry]
+    budget.reconcile(ledger, 1, {'fresh_admitted_sequence_hashes':
+                     [rules.sequence_hash(r['sequence']) for r in admitted]}, cleanup_verified=False)
+    assert budget.summary(ledger)['admitted_unique'] == 4800
+    assert budget.summary(ledger)['remaining'] == 0
+    assert budget.reserve(ledger, 3, [carry] + ordered[1:]) == [carry]
+    assert budget.summary(ledger)['capacity_used'] == 4800
+
+
+def test_weighted_controls_exhaustion_and_empty_sources_preserve_all_work():
+    segments = [_src(s.SOURCE, i) for i in range(9)]
+    assert worker.interleave_segment_controls(segments, segment_source=s.SOURCE) == segments
+    controls = [_src('edit_generation', 0)] + [_src('baseline', i) for i in range(3)]
+    assert worker.interleave_segment_controls(controls, segment_source=s.SOURCE) == controls
+    assert worker.interleave_segment_controls([], segment_source=s.SOURCE) == []
+
+
+def test_default_off_queue_unchanged_and_rejected_segments_leave_control_order(run_worker, monkeypatch):
+    off = run_worker()
+    explicit_off = run_worker(segment_generation={'enabled': False})
+    assert explicit_off['candidates'] == off['candidates']
+    on = run_worker(segment_generation={'enabled': True, 'limit': 8})
+    segment_sequences = {r['sequence'] for r in on['candidates'] if r['source'] == s.SOURCE}
+    monkeypatch.setattr(worker.rules, 'annotation_reason',
+                        lambda annotation, requirements, *, sequence, epoch_challenge:
+                        'wrong_epoch_v_gene' if sequence in segment_sequences else '')
+    rejected = run_worker(segment_generation={'enabled': True, 'limit': 8})
+    assert rejected['eligible_segment_generation'] == 0
+    assert rejected['candidates'] == off['candidates']
