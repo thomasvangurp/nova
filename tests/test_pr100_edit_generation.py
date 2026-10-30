@@ -19,6 +19,13 @@ from nanobody_opt.regions import find_regions
 from pr100_germline import real_panel
 
 
+def _wiring_budget(parent):
+    """Only a wiring stub; real HMM accounting is exercised by recorded tests below."""
+    return types.SimpleNamespace(parent=parent, protected_j=frozenset(),
+        delta=lambda position, aa: 0, restoration=lambda position: None,
+        accepts=lambda child: True)
+
+
 def _safe_framework_position(parent):
     """A non-anchor FR3 position whose residue is neither S nor T, so both
     substitutions introduce fresh residues for the per-position allowed table."""
@@ -242,7 +249,10 @@ def _edit_runner(monkeypatch, tmp_path, bank_rows, archive_sequences=('AAA',)):
         Chain=lambda sequence, **kw: types.SimpleNamespace(**{
             key + '_seq': sequence[slice(*getattr(find_regions(sequence), key))]
             for key in ('cdr1', 'cdr2', 'cdr3')})))
-    monkeypatch.setattr(worker.rules, 'pinned_config', lambda epoch: {'nanobody_requirements': {}})
+    monkeypatch.setattr(worker.rules, 'pinned_config', lambda epoch:
+                        {'nanobody_requirements': {'min_human_v_identity': 82}})
+    from nanobody_opt import pr100_v_identity_budget
+    monkeypatch.setattr(pr100_v_identity_budget, 'build', lambda parent, **kw: _wiring_budget(parent))
     monkeypatch.setattr(worker.pr100_filter, 'validate_annotation_runtime', lambda: None)
     monkeypatch.setattr(worker.pr100_filter, 'helper', lambda name:
                         types.SimpleNamespace(_anarci_panel=lambda species: (panel, None)))
@@ -419,7 +429,9 @@ def test_multi_edit_arm_strict_parent_identity_and_immutable_framework():
         parent = propose(panel, 'IGHV3-23', length, seed=9, ordinal=0)['sequence']
         regions = find_regions(parent)
         cdrs = {key: parent[slice(*getattr(regions, key))] for key in ('cdr1', 'cdr2', 'cdr3')}
-        rows = edit.generate([parent], limit=32, novelty_aware=True, parent_cdrs={parent: cdrs})
+        options = {'novelty_aware': True, 'parent_cdrs': {parent: cdrs},
+                   'parent_identity_budgets': {parent: _wiring_budget(parent)}}
+        rows = edit.generate([parent], limit=32, **options)
         assert len(rows) == 32
         mutable = set(regions.cdr_positions())
         c3 = list(range(*regions.cdr3))
@@ -431,7 +443,7 @@ def test_multi_edit_arm_strict_parent_identity_and_immutable_framework():
             assert all(child[i] == parent[i] for i in range(len(parent))
                        if i not in mutable or parent[i] == 'C' or i in c3[-3:])
             assert child.count('C') == parent.count('C')
-        assert rows == edit.generate([parent], limit=32, novelty_aware=True, parent_cdrs={parent: cdrs})
+        assert rows == edit.generate([parent], limit=32, **options)
 
 
 def test_multi_edit_requires_annotation_and_retains_mixed_length_parents():
@@ -440,5 +452,152 @@ def test_multi_edit_requires_annotation_and_retains_mixed_length_parents():
     cdrs = {p: {key: p[slice(*getattr(find_regions(p), key))]
                 for key in ('cdr1', 'cdr2', 'cdr3')} for p in parents}
     assert edit.generate(parents, limit=2, novelty_aware=True) == []
-    rows = edit.generate(parents, limit=2, novelty_aware=True, parent_cdrs=cdrs)
+    assert edit.generate(parents, limit=2, novelty_aware=True, parent_cdrs=cdrs) == []
+    rows = edit.generate(parents, limit=2, novelty_aware=True, parent_cdrs=cdrs,
+                        parent_identity_budgets={p: _wiring_budget(p) for p in parents})
     assert [r['parent_sequence'] for r in rows] == parents
+
+
+def _recorded_hmm_budgets():
+    from pathlib import Path
+    from nanobody_opt import pr100_v_identity_budget as budget
+    fixture = json.loads((Path(__file__).parent / 'fixtures/pr100/parent_hmm_identity_26019.json').read_text())
+    panels = {region: {name: dict(enumerate(reference, 1)) for name, reference in references.items()}
+              for region, references in fixture['reference_alignments'].items()}
+    contexts = {row['sequence']: budget.from_alignment(row['sequence'], allowed_gene='IGHV3-23',
+        minimum_identity_pct=82, state_vectors=row['state_vectors'], details=row['details'], panels=panels)
+        for row in fixture['parents']}
+    return fixture, panels, contexts
+
+
+def test_recorded_parent_mapping_matches_exact_pinned_validator_identity():
+    import hashlib
+    from pathlib import Path
+    from nanobody_opt import pr100_filter
+    fixture, panels, contexts = _recorded_hmm_budgets()
+    assert fixture['runtime'] == pr100_filter.ANNOTATION_RUNTIME
+    assert fixture['helper_sha256'] == hashlib.sha256(
+        (Path(__file__).parents[1] / 'utils/germline_identity.py').read_bytes()).hexdigest()
+    assert hashlib.sha256(json.dumps(fixture['reference_alignments'], sort_keys=True,
+        separators=(',', ':')).encode()).hexdigest() == fixture['panel_sha256']
+    assert len(panels['V']) == 249 and len(panels['J']) == 14
+    for row in fixture['parents']:
+        context = contexts[row['sequence']]
+        assert context.accepts(row['sequence'])
+        best = max(score for _, score in context.scores(row['sequence']))
+        assert str(best) == row['annotation']['germline']['V']['identity_fraction'] == '41/49'
+        assert float(100 * best) == row['annotation']['germline']['V']['identity_pct']
+        # 82 matches out of 98; the >=82% gate needs 81, leaving one match.
+        assert len(context.anchor) == 98
+        assert sum(row['sequence'][i] == aa for i, aa in context.anchor) == 82
+
+
+def test_recorded_parent_budget_edits_preserve_matches_j_framework_and_cysteines():
+    from fractions import Fraction
+    fixture, _, contexts = _recorded_hmm_budgets()
+    cdrs = {row['sequence']: row['cdrs'] for row in fixture['parents']}
+    children = edit.generate(list(contexts), limit=60, novelty_aware=True,
+        parent_cdrs=cdrs, parent_identity_budgets=contexts)
+    assert len(children) == 60
+    assert [r['parent_sequence'] for r in children[:3]] == list(contexts)
+    for row in children:
+        parent, child = row['parent_sequence'], row['sequence']
+        context = contexts[parent]
+        spans = edit._annotated_spans(parent, cdrs[parent])
+        mutable = set().union(*spans.values()) - context.protected_j
+        changes = [i for i, (a, b) in enumerate(zip(parent, child)) if a != b]
+        assert len(changes) == 7
+        assert sum(i in spans['cdr3'] for i in changes) >= 3
+        assert set(changes) <= mutable
+        assert all(parent[i] != 'C' and child[i] != 'C' for i in changes)
+        assert all(context.delta(i, child[i]) >= 0 for i in changes)
+        assert context.accepts(child)
+        assert context.scores(child) == [(name, Fraction(sum(i is not None and child[i] == aa
+            for i, aa in positions), len(positions))) for name, positions in context.alleles]
+        assert sum(parent[i] == child[i] for i in spans['cdr3']) / 19 < .85
+        assert sum(a == b for a, b in zip(parent, child)) / 126 < .95
+    excluded = {rules.sequence_hash(row['sequence']) for row in children}
+    next_children = edit.generate(list(contexts), limit=60, novelty_aware=True,
+        parent_cdrs=cdrs, parent_identity_budgets=contexts, excluded_hashes=excluded)
+    assert len(next_children) == 60
+    assert all(rules.sequence_hash(row['sequence']) not in excluded for row in next_children)
+
+
+def test_hmm_insertion_and_germline_mismatch_do_not_spend_identity():
+    from nanobody_opt.pr100_v_identity_budget import from_alignment
+    # Sequence indices deliberately differ from match-state and IMGT numbers.
+    # Insertion index1 contributes to neither V denominator nor match count.
+    panels = {'V': {'IGHV3-23*01': {1: 'A', 2: 'S', 3: '-'}},
+              'J': {'IGHJ4*01': {3: 'Y'}}}
+    model = from_alignment('ATGY', allowed_gene='IGHV3-23', minimum_identity_pct=50,
+        state_vectors=[[((1, 'm'), 0), ((1, 'i'), 1), ((2, 'm'), 2), ((3, 'm'), 3)]],
+        details=[{'chain_type': 'H'}], panels=panels)
+    assert model.delta(0, 'G') == -1
+    assert model.delta(1, 'G') == 0
+    assert model.delta(2, 'S') == 1
+    assert model.delta(2, 'N') == 0
+    assert model.restoration(2) == 'S'
+    assert model.protected_j == {3}
+    assert model.accepts('AGNY')
+    assert not model.accepts('AGNN')  # J cannot be changed to fill a novelty quota.
+
+
+def test_budget_checks_top_gene_ties_and_missing_reference_positions():
+    from nanobody_opt.pr100_v_identity_budget import from_alignment
+    panels = {'V': {'IGHV3-23*01': {1: 'A', 2: 'S'},
+                    'IGHV3-7*01': {1: 'A', 2: 'T'}}, 'J': {'IGHJ4*01': {3: 'Y'}}}
+    options = {'allowed_gene': 'IGHV3-23', 'minimum_identity_pct': 50,
+               'state_vectors': [[((1, 'm'), 0), ((2, 'm'), 1), ((3, 'm'), 2)]],
+               'details': [{'chain_type': 'H'}], 'panels': panels}
+    model = from_alignment('AGY', **options)
+    assert model.accepts('AGY')  # tied allowed genes remain valid.
+    assert not model.accepts('ATY')  # V% alone does not preserve the epoch gene.
+    options['state_vectors'] = [[((1, 'm'), 0), ((3, 'm'), 2)]]
+    missing = from_alignment('AGY', **options)
+    assert max(score for _, score in missing.scores('AGY')) == .5
+    with pytest.raises(ValueError, match='current V identity challenge'):
+        from_alignment('AGY', **{**options, 'minimum_identity_pct': 82})
+    with pytest.raises(ValueError, match='current V identity challenge'):
+        from_alignment('AGY', **{**options, 'allowed_gene': 'IGHV3-66'})
+
+
+def test_budget_runtime_uses_exact_hmmer_and_j_pass(monkeypatch):
+    from nanobody_opt import pr100_filter, pr100_v_identity_budget as budget
+    fixture, panels, contexts = _recorded_hmm_budgets()
+    row = fixture['parents'][0]
+    calls = []
+    alignments = [(None, row['state_vectors'], row['details'])]
+    def run_hmmer(records, **options):
+        calls.append(('hmmer', records, options))
+        return alignments
+    def check_for_j(records, observed, scheme):
+        calls.append(('j', records, observed is alignments, scheme))
+    monkeypatch.setitem(sys.modules, 'anarci', types.ModuleType('anarci'))
+    monkeypatch.setitem(sys.modules, 'anarci.anarci', types.SimpleNamespace(
+        run_hmmer=run_hmmer, check_for_j=check_for_j))
+    monkeypatch.setattr(pr100_filter, 'validate_annotation_runtime', lambda: calls.append('runtime'))
+    monkeypatch.setattr(pr100_filter, 'helper', lambda name:
+        types.SimpleNamespace(_anarci_panel=lambda species: (panels, fixture['panel_sha256'])))
+    assert budget.build(row['sequence'], allowed_gene='IGHV3-23', minimum_identity_pct=82) == contexts[row['sequence']]
+    assert calls[0] == 'runtime'
+    assert calls[1] == ('hmmer', [('query', row['sequence'])], {'ncpu': 1, 'hmmer_species': None})
+    assert calls[2] == ('j', [('query', row['sequence'])], True, 'imgt')
+
+
+def test_worker_builds_budgets_for_exact_current_challenge(monkeypatch, tmp_path):
+    from nanobody_opt import pr100_v_identity_budget
+    parent = propose(real_panel(), 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    bank = [{'sequence': parent, 'sequence_hash': rules.sequence_hash(parent),
+             'cells': ['IGHV3-23:5'], 'source': 'wiring_fixture'}]
+    run = _edit_runner(monkeypatch, tmp_path, bank)
+    calls = []
+    def build(sequence, **options):
+        calls.append((sequence, options))
+        return _wiring_budget(sequence)
+    monkeypatch.setattr(pr100_v_identity_budget, 'build', build)
+    challenge = {'epoch': 25969, 'target': rules.TARGET,
+                 'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
+    result = run(challenge, edit_generation={'enabled': True, 'limit': 4})
+    assert calls == [(parent, {'allowed_gene': 'IGHV3-23', 'minimum_identity_pct': 82})]
+    assert result['challenge'] == challenge
+    assert result['edit_generation_candidates'] == 4

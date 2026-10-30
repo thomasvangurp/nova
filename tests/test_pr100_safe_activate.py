@@ -633,7 +633,7 @@ def test_same_novelty_identity_code_upgrade_cannot_claim_pending_migration_excep
 
 
 @pytest.mark.parametrize('predecessor', [a.QUALIFIED_NOVELTY_RELEASE, a.ARCHIVE_CACHE_RELEASE,
-                                        a.TERMINAL_INVALIDATION_RELEASE])
+                                        a.TERMINAL_INVALIDATION_RELEASE, a.RECOVERY_RELEASE])
 def test_qualified_novelty_release_is_approved_predecessor(deployment, novelty_receipt, predecessor):
     *_, old = deployment
     old['source_sha'] = predecessor

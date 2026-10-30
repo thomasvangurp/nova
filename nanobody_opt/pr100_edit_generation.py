@@ -256,7 +256,7 @@ def _annotated_spans(parent, cdrs):
     return spans
 
 
-def novelty_aware_candidates(parent, *, cdrs, allowed, limit):
+def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
     """Bounded parent-guided multi-edits; parent-relative proxies are not novelty.
 
     CDR spans come from qualified annotation, not the heuristic region finder.
@@ -265,15 +265,18 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit):
     full current archive using the validator implementation.
     """
     spans = _annotated_spans(parent, cdrs)
-    if spans is None or len(allowed) != len(parent):
+    if (spans is None or len(allowed) != len(parent) or identity_budget is None
+            or identity_budget.parent != parent):
         return []
     # Strict inequalities: 95% whole identity and 85% CDR3 identity are both
     # duplicate boundaries, so equality does not qualify this proposal arm.
     whole_edits = math.floor(len(parent) * 0.05) + 1
     cdr3_edits = math.floor(len(spans['cdr3']) * 0.15) + 1
-    cdr3_mutable = [i for i in spans['cdr3'][:-3] if parent[i] != 'C']
-    other_mutable = [i for key in ('cdr1', 'cdr2') for i in spans[key] if parent[i] != 'C']
-    if cdr3_edits > len(cdr3_mutable) or whole_edits - cdr3_edits > len(other_mutable):
+    protected = identity_budget.protected_j | set(spans['cdr3'][-3:])
+    cdr3_mutable = [i for i in spans['cdr3'] if parent[i] != 'C' and i not in protected]
+    other_mutable = [i for key in ('cdr1', 'cdr2') for i in spans[key]
+                     if parent[i] != 'C' and i not in protected]
+    if cdr3_edits > len(cdr3_mutable) or whole_edits > len(cdr3_mutable) + len(other_mutable):
         return []
     from nanobody_opt.pr100_proposal_pilot import AMINO_ACID_WEIGHTS
     broad = [aa for aa, weight in AMINO_ACID_WEIGHTS.items() if weight > 0 and aa != 'C']
@@ -281,23 +284,56 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit):
     seen = set()
     for ordinal in range(limit):
         seed = int.from_bytes(hashlib.sha256(
-            ('pr100-parent-multi-edit-v1:' + parent + ':' + str(ordinal)).encode()).digest(), 'big')
+            ('pr100-parent-v-budget-v2:' + parent + ':' + str(ordinal)).encode()).digest(), 'big')
         rng = random.Random(seed)
-        positions = (rng.sample(cdr3_mutable, cdr3_edits)
-                     + rng.sample(other_mutable, whole_edits - cdr3_edits))
         candidate = list(parent)
-        for position in positions:
-            observed = [aa for aa in allowed[position] if aa != parent[position] and aa != 'C']
-            population = observed if observed and ordinal % 2 == 0 else [
-                aa for aa in broad if aa != parent[position]]
-            if not population:
-                break
-            candidate[position] = rng.choice(population)
+        used = set()
+
+        def choose(positions, *, extra=False):
+            options = []
+            for position in positions:
+                if position in used:
+                    continue
+                observed = [aa for aa in allowed[position]
+                            if aa in gates.ALLOWED_AAS and aa not in (parent[position], 'C')]
+                population = observed if observed and ordinal % 2 == 0 else broad
+                restore = identity_budget.restoration(position)
+                population = sorted(set(population) | ({restore} if restore else set()))
+                for aa in population:
+                    if aa in (parent[position], 'C'):
+                        continue
+                    delta = identity_budget.delta(position, aa)
+                    # Never spend a matching V residue merely to fill a quota.
+                    # Parent mismatches, insertions and restoration edits supply
+                    # novelty without consuming its narrow identity allowance.
+                    if delta < 0:
+                        continue
+                    is_cdr3 = position in cdr3_mutable
+                    # Alternate CDR3-heavy edits with a balanced arm that uses
+                    # germline restoration/old CDR1/2 mismatches. Both keep the
+                    # minimum total changes needed for parent-relative novelty.
+                    if extra and ordinal % 2:
+                        priority = (0 if is_cdr3 else 1 if delta > 0 else 2)
+                    else:
+                        priority = (0 if delta > 0 else 1 if not is_cdr3 and extra else 2)
+                    options.append((priority, rng.random(), position, aa))
+            if not options:
+                return False
+            _, _, position, aa = min(options)
+            candidate[position] = aa
+            used.add(position)
+            return True
+
+        if not all(choose(cdr3_mutable) for _ in range(cdr3_edits)):
+            continue
+        if not all(choose(cdr3_mutable + other_mutable, extra=True)
+                   for _ in range(whole_edits - cdr3_edits)):
+            continue
         candidate = ''.join(candidate)
         differences = sum(a != b for a, b in zip(candidate, parent))
         changed_cdr3 = sum(candidate[i] != parent[i] for i in spans['cdr3'])
         if (differences < whole_edits or changed_cdr3 < cdr3_edits
-                or candidate in seen):
+                or candidate in seen or not identity_budget.accepts(candidate)):
             continue
         seen.add(candidate)
         candidates.append((candidate, 'novelty_aware_multi_edit'))
@@ -318,12 +354,14 @@ def generate(
     stats: dict[str, int] | None = None,
     novelty_aware: bool = False,
     parent_cdrs: dict[str, dict[str, str]] | None = None,
+    parent_identity_budgets: dict | None = None,
 ) -> list[dict[str, str]]:
     """Emit edit children round-robin, with separate contexts for each parent length.
 
     With ``novelty_aware=True``, only bounded multi-edits that pass strict
     parent-relative identity proxies are emitted, using supplied annotation
-    CDRs. These proxies are never current-archive novelty evidence.
+    CDRs and HMM identity budgets. These projections are never current-archive
+    novelty or child annotation evidence.
 
     Parents are proposal CENTRES, never submissions. Each parent seeds the
     framework lane (CDR3-preserving singles/haplotypes) and the lineage lane
@@ -394,6 +432,7 @@ def generate(
         if novelty_aware:
             framework = novelty_aware_candidates(parent,
                 cdrs=(parent_cdrs or {}).get(parent), allowed=allowed,
+                identity_budget=(parent_identity_budgets or {}).get(parent),
                 limit=max(16, min(2048, (limit or 300) * 4)))
             lineage = []
         else:

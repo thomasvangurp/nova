@@ -164,6 +164,7 @@ def sequence_phase(job, directory):
     from nanobody_opt import check_validator_novelty as novelty
     from nanobody_opt import pr100_reference_donors as donors
     from nanobody_opt import pr100_edit_generation
+    from nanobody_opt import pr100_v_identity_budget
     from collections import Counter
     expected = job['challenge']
     config = rules.pinned_config(expected['epoch'])
@@ -270,11 +271,15 @@ def sequence_phase(job, directory):
         edit_background = [str(s).strip().upper() for s in frame['sequence']
                            if isinstance(s, str) and s.strip()]
         parent_cdrs = {}
+        parent_identity_budgets = {}
         for parent in edit_parents:
             try:
                 if set(parent) - gates.ALLOWED_AAS:
                     raise ValueError('invalid parent alphabet')
                 chain = Chain(parent, scheme='imgt', cdr_definition='imgt', use_anarcii=False)
+                parent_identity_budgets[parent] = pr100_v_identity_budget.build(
+                    parent, allowed_gene=expected['allowed_v'],
+                    minimum_identity_pct=config['nanobody_requirements']['min_human_v_identity'])
                 parent_cdrs[parent] = {key: str(getattr(chain, key + '_seq'))
                                        for key in ('cdr1', 'cdr2', 'cdr3')}
             except Exception:
@@ -283,7 +288,8 @@ def sequence_phase(job, directory):
         edit_candidates = pr100_edit_generation.generate(
             edit_parents, background_sequences=edit_background,
             limit=edit_settings['limit'], excluded_hashes=excluded | archive_hashes | seen,
-            stats=edit_stats, novelty_aware=True, parent_cdrs=parent_cdrs)
+            stats=edit_stats, novelty_aware=True, parent_cdrs=parent_cdrs,
+            parent_identity_budgets=parent_identity_budgets)
         for edit in edit_candidates:
             rows.append({**edit, 'source': 'edit_generation',
                          'requested_v': expected['allowed_v'],
