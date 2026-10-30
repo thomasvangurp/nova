@@ -51,6 +51,7 @@ TEST_FILES = (
     'tests/test_pr100_terminal_invalidation.py',
     'tests/test_pr100_reference_donors.py',
     'tests/test_pr100_parent_feed.py',
+    'tests/test_pr100_lineage_outcomes.py',
     'tests/test_pr100_rival_merit.py',
     'tests/test_pr100_edit_generation.py',
     'tests/test_pr100_hydrophobicity.py',

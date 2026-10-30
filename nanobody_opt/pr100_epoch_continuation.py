@@ -1088,6 +1088,12 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                    wall_seconds=time.time() - receipt['started_at_unix'],
                    continuation_pending=True, cumulative_scored_candidates=len(state['score_rows']))
     receipt['fresh_native_budget'] = fresh_budget.summary(budget)
+    try:
+        from nanobody_opt import pr100_lineage_outcomes as lineage
+        receipt['lineage_outcomes'] = lineage.record(config['state_root'], challenge, config)
+    except Exception:
+        # Read-only analysis: a lineage write failure can never fail an epoch.
+        receipt['lineage_outcomes'] = {'status': 'unavailable'}
     c.atomic(attempt_dir / 'receipt.json', receipt)
     c.atomic(local / 'receipt.json', receipt)
     if 'native' in diagnostics:
