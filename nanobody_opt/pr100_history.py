@@ -335,7 +335,34 @@ def inventory(conn):
             'source_snapshots': conn.execute('SELECT COUNT(*) FROM history_sources').fetchone()[0],
             'orphan_observations': conn.execute('SELECT COUNT(*) FROM observations o LEFT JOIN nodes n '
                                                'ON o.node_id=n.id WHERE n.id IS NULL').fetchone()[0],
+            'canonical_csv_coverage': archive_coverage(conn),
             'public_era_completeness_proven': False}
+
+
+def archive_coverage(conn):
+    """Sequence completeness is established by the CSV, independently of API gaps.
+
+    This verifies a specific downloaded snapshot. Missing miner/epoch/replay
+    metadata never makes an imported CSV sequence disappear from the store.
+    """
+    row = conn.execute("SELECT source_id,sha256,expected_rows,report_json FROM history_sources "
+                       "WHERE kind='target_archive_csv' ORDER BY recorded_at DESC,source_id DESC LIMIT 1").fetchone()
+    if row is None:
+        return {'status': 'not_imported', 'all_snapshot_sequences_stored': False}
+    ident, sha, expected_rows, report_json = row
+    report = json.loads(report_json)
+    stored = conn.execute('SELECT COUNT(*) FROM history_membership m JOIN nodes n '
+                          'ON n.id=m.node_id WHERE m.source_id=? AND n.target=?',
+                          (ident, TARGET)).fetchone()[0]
+    rejected = len(report['rejected_rows'])
+    unique = report['unique_sequences']
+    complete = not rejected and stored == unique
+    return {'status': 'matched' if complete else 'incomplete', 'source_id': ident,
+            'sha256': sha, 'input_rows': expected_rows, 'unique_sequences': unique,
+            'stored_sequences': stored, 'rejected_rows': rejected,
+            'missing_sequences': unique - stored, 'all_snapshot_sequences_stored': complete,
+            'epoch_metadata_required_for_sequence_coverage': False,
+            'raw_replay_metadata_required_for_sequence_coverage': False}
 
 
 def main(argv=None):

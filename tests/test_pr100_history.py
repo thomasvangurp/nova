@@ -52,6 +52,25 @@ def test_archive_rejects_hash_corruption_and_accounts_invalid_rows(store):
     assert [x['reason'] for x in report['rejected_rows']] == [
         'archive_sequence_hash_mismatch', 'invalid_sequence']
     assert len(report['rejected_rows']) == report['input_rows']
+    assert not h.archive_coverage(store)['all_snapshot_sequences_stored']
+
+
+def test_csv_completeness_does_not_require_leaderboards_epochs_or_raw_passes(store):
+    h.import_archive(store, b'sequence,design_iiptm\nACDE,0.5\nACDF,0.6\n', locator='snapshot.csv')
+    coverage = h.inventory(store)['canonical_csv_coverage']
+    assert coverage['status'] == 'matched' and coverage['all_snapshot_sequences_stored']
+    assert coverage['stored_sequences'] == coverage['unique_sequences'] == 2
+    assert coverage['missing_sequences'] == 0
+    assert not coverage['epoch_metadata_required_for_sequence_coverage']
+    assert not coverage['raw_replay_metadata_required_for_sequence_coverage']
+    assert store.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == 0
+
+
+def test_archive_coverage_detects_a_missing_membership_node(store):
+    h.import_archive(store, b'sequence\nACDE\nACDF\n', locator='snapshot.csv')
+    store.execute("DELETE FROM nodes WHERE sequence='ACDF'")
+    coverage = h.archive_coverage(store)
+    assert coverage['status'] == 'incomplete' and coverage['missing_sequences'] == 1
 
 
 def test_corrected_archive_versions_are_not_merged_into_fake_raw_draws(store):
