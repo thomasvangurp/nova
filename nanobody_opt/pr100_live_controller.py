@@ -387,6 +387,7 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
         job['source_sha'] = config['source_sha']
         job['native_reference'] = {**job['native_reference'], 'gpu_allowlist': list(allowed_gpus),
             'lock_directory': config['remote_root'] + '/gpu-locks', 'scorer': runtime['scorer']}
+    collection = native_collection_reserve(config) if phase == 'native' else 0.0
     cap = phase_cap(phase, stop_at) if cap is None else cap
     if config.get('_continuation') and phase in ('sequence', 'native'):
         usable = stop_at - time.time() - PUBLISH_RESERVE_SECONDS
@@ -396,11 +397,13 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
                           + float(config.get('novelty_reserve_seconds', NOVELTY_RESERVE_SECONDS))
                           + NATIVE_SETUP_RESERVE_SECONDS)
         downstream = PHASE_FLOORS['score'] + (native_minimum if phase == 'sequence' else 0)
-        cap = min(max(cap, native_minimum if phase == 'native' else PHASE_FLOORS['sequence']),
+        # The minimum native window excludes collection; reserve transfer before
+        # applying that floor, so subtracting it below cannot undo the floor.
+        minimum_cap = native_minimum + collection if phase == 'native' else PHASE_FLOORS['sequence']
+        cap = min(max(cap, minimum_cap),
                   usable - downstream)
-        if cap < (native_minimum if phase == 'native' else PHASE_FLOORS['sequence']):
+        if cap < minimum_cap:
             raise TimeoutError('insufficient remaining phase window')
-    collection = native_collection_reserve(config) if phase == 'native' else 0.0
     if collection:
         # Pay for evidence transfer before admitting scientific work, inside
         # the existing phase/epoch window, never by extending its deadline.

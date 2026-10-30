@@ -166,6 +166,30 @@ def test_native_collection_reserve_refuses_too_short_window(tmp_path):
         controller.phase_request(value, challenge(), 'native', {}, time.time()+1000, clock(), cap=100)
 
 
+def test_late_native_floor_includes_collection_without_erasing_call_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(controller.time, 'time', lambda: 1000.)
+    value = config(tmp_path, _continuation=True, native_collection_reserve_seconds=90)
+    value['worker'].update(native_minimum_call_window_seconds=130, native_cleanup_reserve_seconds=10)
+    # 455 native +90 collection +90 scoring +150 publication +30 spare.
+    stop_at = 1815.
+    _, request = controller.phase_request(value, challenge(), 'native', {}, stop_at, clock())
+    job = json.loads(__import__('base64').b64decode(request['files']['job.json']))
+    assert request['spec']['wall_seconds'] == 455
+    assert job['phase_budget_seconds'] == 155
+    from nanobody_opt.pr100_epoch_continuation import required_seconds
+    assert required_seconds('native', value) == 785
+    assert (request['spec']['wall_seconds'] + request['collection_reserve_seconds']
+            + controller.PHASE_FLOORS['score'] + controller.PUBLISH_RESERVE_SECONDS <= stop_at - 1000)
+
+
+def test_late_native_still_refuses_when_complete_window_does_not_fit(tmp_path, monkeypatch):
+    monkeypatch.setattr(controller.time, 'time', lambda: 1000.)
+    value = config(tmp_path, _continuation=True, native_collection_reserve_seconds=90)
+    value['worker'].update(native_minimum_call_window_seconds=130, native_cleanup_reserve_seconds=10)
+    with pytest.raises(TimeoutError, match='remaining phase window'):
+        controller.phase_request(value, challenge(), 'native', {}, 1784., clock())
+
+
 def test_native_phase_carries_the_archive_so_the_worker_can_check_novelty(tmp_path):
     import base64
     files = {'input.json': b'{}', 'archive.csv': b'sequence\nAAA\n'}

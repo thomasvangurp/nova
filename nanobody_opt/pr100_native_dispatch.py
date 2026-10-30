@@ -130,6 +130,7 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
         selected = {**config, 'worker': worker, '_native_host': host, '_bounded_phase_collection': True}
         host_payload = {**payload, 'input.json': json.dumps({**incoming, 'candidates': rows}).encode()}
         detail = {}
+        prelaunch_timeout = False
         try:
             files = run_phase(selected, challenge, 'native', host_payload, stop_at, chain, child, diagnostics=detail)
         except ValueError:
@@ -137,6 +138,13 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
             # falling back to the cached artifact that was just rejected.
             files = {}
             detail['phase_identity_error'] = 'native_phase_binding_refused'
+        except TimeoutError:
+            # run_phase durably records intent BEFORE its first remote start.
+            # A deadline refusal without that intent owns no remote process.
+            prelaunch_timeout = not (child / 'native-request.json').exists()
+            detail['prelaunch_timeout'] = prelaunch_timeout
+            files = {name: (child / 'native' / name).read_bytes() for name in
+                     ('result.json', 'native-confirmations.json') if (child / 'native' / name).is_file()}
         except Exception:
             # Any completed child data remains durable. An unverified owner
             # prevents another native attempt, but cannot erase valid peers.
@@ -148,6 +156,11 @@ def run(config, challenge, payload, stop_at, chain, local, *, diagnostics=None, 
             terminal = {}
         if not isinstance(terminal, dict):
             terminal = {}
+        if prelaunch_timeout:
+            terminal = {'reason': 'not_launched', 'cleanup': {
+                'remaining_descendants': 0, 'fixed_point_reached': True},
+                'evidence': 'prelaunch_timeout_without_durable_intent'}
+            c.atomic(child / 'native-supervisor.json', terminal)
         owned = not cleanup_verified(terminal)
         value, observed = host_artifacts(files, incoming, rows, terminal, owned, detail, expected_host=host)
         return host, value, observed, owned, detail

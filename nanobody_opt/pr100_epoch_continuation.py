@@ -698,6 +698,7 @@ def required_seconds(mode, config):
                             10 if 'native_minimum_call_window_seconds' in config['worker'] else 0))
         required += float(config.get('novelty_reserve_seconds', c.NOVELTY_RESERVE_SECONDS))
         required += c.NATIVE_SETUP_RESERVE_SECONDS
+        required += c.native_collection_reserve(config)
     if mode == 'sequence':
         required += c.PHASE_FLOORS['sequence']
     return required

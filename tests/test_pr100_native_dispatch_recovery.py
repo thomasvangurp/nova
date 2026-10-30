@@ -12,6 +12,36 @@ from tests.test_pr100_epoch_continuation import legacy, score_files, write
 from tests.test_pr100_live_controller import config as route_config
 
 
+@pytest.mark.parametrize('intent_exists', [False, True])
+def test_deadline_before_intent_is_not_an_unresolved_owner_or_budget_charge(tmp_path, intent_exists):
+    from nanobody_opt import pr100_fresh_budget as fresh_budget
+    rows = [{'sequence': 'A' * 60}, {'sequence': 'C' * 60}]
+    challenge = {'epoch': 26034}
+    incoming = {'challenge': challenge, 'epoch': 26034, 'target': 'test',
+                'archive_sha256': 'a' * 64, 'candidates': rows}
+    def phase(config, current, name, payload, stop, chain, directory, **kwargs):
+        if intent_exists:
+            write(directory / 'native-request.json', {'saved': True})
+        raise TimeoutError('inert deadline refusal')
+    config = {'worker': {'workers': 1}, 'native_hosts': ['master', 'slave'], 'source_sha': 'c' * 40}
+    state = {}
+    budget = fresh_budget.ensure(state, config)
+    fresh_budget.reserve(budget, 1, rows)
+    files = dispatch.run(config, challenge, {'input.json': json.dumps(incoming).encode()},
+                         100, object(), tmp_path, run_phase=phase)
+    value = json.loads(files['result.json'])
+    clean = continuation.cleanup_verified(json.loads((tmp_path / 'native-supervisor.json').read_bytes()))
+    fresh_budget.reconcile(budget, 1, value, cleanup_verified=clean)
+    assert value['attempted_sequence_hashes'] == []
+    if intent_exists:
+        assert value['unresolved_native_hosts'] == ['master', 'slave'] and not clean
+        assert fresh_budget.summary(budget)['reserved_uncertain_unique'] == 2
+    else:
+        assert value['unresolved_native_hosts'] == [] and clean
+        assert {r['sequence'] for r in value['deferred_candidates']} == {r['sequence'] for r in rows}
+        assert fresh_budget.summary(budget)['capacity_used'] == 0
+
+
 def test_both_host_dispatch_preserves_assigned_complete_native_histories(tmp_path):
     rows = [{'sequence': 'A' * 60}, {'sequence': 'C' * 60}]
     challenge = {'epoch': 26020}
