@@ -99,20 +99,22 @@ def reconcile_native_histories(state, value, assigned_hashes):
     from nanobody_opt import pr100_fleet_probability as probability
     from nanobody_opt import pr100_live_selection as selection
     records = value.get('native_complete_histories')
+    previous = state.get('native_reference_histories', {})
     registered_rows = [r for r in value.get('candidates', [])
                        if r.get('pr100_evidence', {}).get('developability', {}).get('evidence_backend')
                        == 'native_reference']
     if records is None:
-        if registered_rows:
+        if registered_rows or set(value.get('terminal_native_outcomes', {})) & set(previous):
             raise ValueError('native complete history missing')
         return
     if (not isinstance(records, list) or value.get('challenge') != state['challenge']
             or value.get('epoch') != state['challenge']['epoch']):
         raise ValueError('native complete history binding mismatch')
-    previous = state.get('native_reference_histories', {})
     updates, seen, stale, superseded = {}, set(), set(), set()
     complete = {}
     terminal = dict(value.get('terminal_native_outcomes', {}))
+    pending = {rules.sequence_hash(r['sequence']): r.get('native_resume', {})
+               for r in value.get('deferred_confirmations', []) if isinstance(r, dict) and 'sequence' in r}
     for record in records:
         if not isinstance(record, dict):
             raise ValueError('native complete history invalid')
@@ -138,6 +140,13 @@ def reconcile_native_histories(state, value, assigned_hashes):
                     'admitted': summary['admit_to_binding_comparison'],
                     'complete_draws': summary['complete_draws'],
                     'passing_draws': summary['passing_draws'], 'reason': summary['reason']}
+        carried = pending.get(key, {})
+        rescue_pending = (summary['complete_draws'] == 1 and summary['passing_draws'] == 0
+            and carried.get('failed_first_rescue_reserved') is True
+            and carried.get('measurements') == measurements and carried.get('fleet_policy') == policy
+            and type(carried.get('required_cpu_observations')) is int
+            and 2 <= carried['required_cpu_observations'] <= 3)
+        incoming['bounded_rescue_pending'] = rescue_pending
         old = previous.get(key)
         if old is not None:
             if old.get('registration') != incoming['registration'] or old.get('policy') != policy:
@@ -148,14 +157,14 @@ def reconcile_native_histories(state, value, assigned_hashes):
                 raise ValueError('native complete history conflicts with prior evidence')
             if len(requests) < len(old_ids):
                 stale.add(key); terminal.pop(key, None)
-                if old.get('admitted') is False:
+                if old.get('admitted') is False and not old.get('bounded_rescue_pending'):
                     terminal[key] = old['reason']
                 continue
             if len(requests) > len(old_ids):
                 superseded.add(key)
         updates[key] = incoming
         complete[key] = (measurements, policy)
-        if incoming['admitted']:
+        if incoming['admitted'] or rescue_pending:
             # One failed draw cannot overturn a supported aggregate decision.
             terminal.pop(key, None)
         else:
@@ -169,12 +178,16 @@ def reconcile_native_histories(state, value, assigned_hashes):
                 or history.get('policy') != complete[key][1]
                 or updates[key]['admitted'] is not True):
             raise ValueError('candidate omits complete native history')
+    if (set(terminal) & set(previous)) - set(complete) - stale:
+        raise ValueError('registered rejection lacks complete native history')
     # Apply only after the entire incoming result is checked.
     state['native_reference_histories'] = {**previous, **updates}
     state['native_rows'] = [r for r in state.get('native_rows', [])
                             if rules.sequence_hash(r['sequence']) not in superseded]
     value['candidates'] = [r for r in value.get('candidates', [])
                            if rules.sequence_hash(r['sequence']) not in stale]
+    value['deferred_confirmations'] = [r for r in value.get('deferred_confirmations', [])
+        if rules.sequence_hash(r['sequence']) not in stale]
     value['terminal_native_outcomes'] = terminal
 
 def valid_rows(value, challenge):
@@ -893,12 +906,19 @@ def run_epoch(config, chain, clock, *, dry_run=False):
             if active['phase'] == 'native':
                 partial = read(attempt_dir / 'native/result.json', {})
                 fresh_budget.reconcile(budget, active['number'], partial, cleanup_verified=True)
-                attempted = partial.get('attempted_sequence_hashes')
-                if attempted is None:
-                    attempted = [rules.sequence_hash(r['sequence']) for r in state['pending_native']]
-                state['native_attempted_hashes'] = sorted(set(state['native_attempted_hashes']) | set(attempted))
-                state['pending_confirmation'] = [r for r in partial.get('deferred_confirmations', [])
-                    if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
+                assigned = read(attempt_dir / 'native-input.json', {}).get('candidates', [])
+                try:
+                    reconcile_native_histories(state, partial,
+                        {rules.sequence_hash(r['sequence']) for r in assigned})
+                except (ValueError, TypeError, KeyError):
+                    receipt['native_history_recovery_rejected'] = True
+                else:
+                    attempted = partial.get('attempted_sequence_hashes')
+                    if attempted is None:
+                        attempted = [rules.sequence_hash(r['sequence']) for r in state['pending_native']]
+                    state['native_attempted_hashes'] = sorted(set(state['native_attempted_hashes']) | set(attempted))
+                    state['pending_confirmation'] = [r for r in partial.get('deferred_confirmations', [])
+                        if r.get('native_resume', {}).get('identity', {}).get('resume_eligible') is True]
             elif active['phase'] == 'score':
                 partial = read(terminal_dir / 'score/result.json', {})
                 admitted = partial.get('attempted_sequence_hashes',

@@ -118,3 +118,34 @@ def test_legacy_result_does_not_create_new_history_state():
     saved = state(); incoming = {'candidates': [{'sequence': SEQUENCE}], 'terminal_native_outcomes': {}}
     apply(saved, incoming)
     assert 'native_reference_histories' not in saved
+
+
+def test_reserved_first_failure_rescue_stays_pending_instead_of_terminal():
+    saved = state(); values = observations([90]); incoming = result(values)
+    incoming['deferred_confirmations'] = [{'sequence': SEQUENCE, 'native_resume': {
+        'measurements': values, 'fleet_policy': POLICY, 'required_cpu_observations': 3,
+        'failed_first_rescue_reserved': True}}]
+    apply(saved, incoming)
+    assert incoming['terminal_native_outcomes'] == {}
+    assert saved['native_reference_histories'][KEY]['bounded_rescue_pending'] is True
+    assert len(incoming['deferred_confirmations']) == 1
+
+
+def test_stale_partial_confirmation_cannot_restart_old_history():
+    saved = state(); apply(saved, result(observations([81, 90, 91, 92])))
+    incoming = result(observations([81]))
+    incoming['deferred_confirmations'] = [{'sequence': SEQUENCE, 'native_resume': {
+        'measurements': observations([81]), 'fleet_policy': POLICY}}]
+    apply(saved, incoming)
+    assert incoming['deferred_confirmations'] == []
+
+
+@pytest.mark.parametrize('records', [None, []])
+def test_registered_terminal_claim_requires_complete_history(records):
+    saved = state(); apply(saved, result(observations([81])))
+    incoming = {'epoch': 26020, 'challenge': CHALLENGE, 'candidates': [],
+                'terminal_native_outcomes': {KEY: 'observed_support_too_low'}}
+    if records is not None:
+        incoming['native_complete_histories'] = records
+    with pytest.raises(ValueError, match='history'):
+        apply(saved, incoming)
