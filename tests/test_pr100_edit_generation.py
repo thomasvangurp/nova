@@ -507,7 +507,7 @@ def test_recorded_parent_budget_edits_preserve_matches_j_framework_and_cysteines
         mutable = set().union(*spans.values()) - context.protected_j
         changes = [i for i, (a, b) in enumerate(zip(parent, child)) if a != b]
         assert len(changes) == 7
-        assert sum(i in spans['cdr3'] for i in changes) >= 3
+        assert sum(i in spans['cdr3'] for i in changes) == 3
         assert set(changes) <= mutable
         assert all(parent[i] != 'C' and child[i] != 'C' for i in changes)
         assert all(context.delta(i, child[i]) >= 0 for i in changes)
@@ -601,3 +601,20 @@ def test_worker_builds_budgets_for_exact_current_challenge(monkeypatch, tmp_path
     assert calls == [(parent, {'allowed_gene': 'IGHV3-23', 'minimum_identity_pct': 82})]
     assert result['challenge'] == challenge
     assert result['edit_generation_candidates'] == 4
+
+
+def test_recorded_local_alignment_rejects_cdr3_only_hamming_novel_child():
+    import hashlib
+    from pathlib import Path
+    from nanobody_opt.check_validator_novelty import duplicate_reason
+    fixture = json.loads((Path(__file__).parent /
+        'fixtures/pr100/parent_edit_local_alignment_counterexample.json').read_text())
+    assert hashlib.sha256((Path(__file__).parents[1] /
+        'NOVA-nanobody-filter/metanano/utils/alignment.py').read_bytes()).hexdigest() == fixture['alignment_source_sha256']
+    query, parent = fixture['query'], fixture['parent']
+    assert len(query) == len(parent)
+    assert sum(a == b for a, b in zip(query, parent)) / len(parent) < .95
+    alignment = list(zip(fixture['aligned_query'], fixture['aligned_target'], strict=True))
+    identity = sum(a == b and a != '-' for a, b in alignment) / len(alignment)
+    assert identity == fixture['identity'] >= .95
+    assert duplicate_reason(identity, {'CDR3': .5}) == 'near-identical sequence'

@@ -276,7 +276,7 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
     cdr3_mutable = [i for i in spans['cdr3'] if parent[i] != 'C' and i not in protected]
     other_mutable = [i for key in ('cdr1', 'cdr2') for i in spans[key]
                      if parent[i] != 'C' and i not in protected]
-    if cdr3_edits > len(cdr3_mutable) or whole_edits > len(cdr3_mutable) + len(other_mutable):
+    if cdr3_edits > len(cdr3_mutable) or whole_edits - cdr3_edits > len(other_mutable):
         return []
     from nanobody_opt.pr100_proposal_pilot import AMINO_ACID_WEIGHTS
     broad = [aa for aa, weight in AMINO_ACID_WEIGHTS.items() if weight > 0 and aa != 'C']
@@ -289,7 +289,7 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
         candidate = list(parent)
         used = set()
 
-        def choose(positions, *, extra=False):
+        def choose(positions):
             options = []
             for position in positions:
                 if position in used:
@@ -308,14 +308,11 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
                     # novelty without consuming its narrow identity allowance.
                     if delta < 0:
                         continue
-                    is_cdr3 = position in cdr3_mutable
-                    # Alternate CDR3-heavy edits with a balanced arm that uses
-                    # germline restoration/old CDR1/2 mismatches. Both keep the
-                    # minimum total changes needed for parent-relative novelty.
-                    if extra and ordinal % 2:
-                        priority = (0 if is_cdr3 else 1 if delta > 0 else 2)
-                    else:
-                        priority = (0 if delta > 0 else 1 if not is_cdr3 and extra else 2)
+                    # Keep the minimum CDR3 edits, then use restoration/old
+                    # CDR1/2 mismatches. Concentrating all edits in CDR3 failed
+                    # real archive novelty despite whole-sequence Hamming<95%:
+                    # the validator uses local alignment against every length.
+                    priority = 0 if delta > 0 else 1
                     options.append((priority, rng.random(), position, aa))
             if not options:
                 return False
@@ -326,7 +323,7 @@ def novelty_aware_candidates(parent, *, cdrs, allowed, limit, identity_budget):
 
         if not all(choose(cdr3_mutable) for _ in range(cdr3_edits)):
             continue
-        if not all(choose(cdr3_mutable + other_mutable, extra=True)
+        if not all(choose(other_mutable)
                    for _ in range(whole_edits - cdr3_edits)):
             continue
         candidate = ''.join(candidate)
