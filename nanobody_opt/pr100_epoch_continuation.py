@@ -86,6 +86,97 @@ def union_rows(old, new):
             rows[row['sequence']] = row
     return list(rows.values())
 
+
+def reconcile_native_histories(state, value, assigned_hashes):
+    """Keep complete registered draw histories monotone within this epoch.
+
+    Store compact request+measurement digests, not another copy of every trace.
+    A shorter replay is ignored; a conflicting or mixed history is refused. Any
+    extended history supersedes the old candidate evidence, even if the new
+    result is rejected or has not completed novelty. Raw receipts remain in the
+    immutable collected attempt artifacts and the worker's checkpoints.
+    """
+    from nanobody_opt import pr100_fleet_probability as probability
+    from nanobody_opt import pr100_live_selection as selection
+    records = value.get('native_complete_histories')
+    registered_rows = [r for r in value.get('candidates', [])
+                       if r.get('pr100_evidence', {}).get('developability', {}).get('evidence_backend')
+                       == 'native_reference']
+    if records is None:
+        if registered_rows:
+            raise ValueError('native complete history missing')
+        return
+    if (not isinstance(records, list) or value.get('challenge') != state['challenge']
+            or value.get('epoch') != state['challenge']['epoch']):
+        raise ValueError('native complete history binding mismatch')
+    previous = state.get('native_reference_histories', {})
+    updates, seen, stale, superseded = {}, set(), set(), set()
+    complete = {}
+    terminal = dict(value.get('terminal_native_outcomes', {}))
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError('native complete history invalid')
+        key, measurements = record.get('sequence_hash'), record.get('measurements')
+        if key not in assigned_hashes or key in seen or not isinstance(measurements, list):
+            raise ValueError('native complete history outside assignment or duplicated')
+        seen.add(key)
+        if not measurements:
+            if record.get('request_sha256s') != []:
+                raise ValueError('empty native history has draw identifiers')
+            continue
+        policy = selection.fleet_policy_settings(record.get('fleet_policy'))
+        summary = probability.from_measurements(measurements,
+            minimum_smoothed_fraction=policy['minimum_smoothed_fraction'])
+        if summary['sequence_hash'] != key:
+            raise ValueError('native complete history sequence mismatch')
+        requests = [r['request_sha256'] for r in summary['observations']]
+        if record.get('request_sha256s') != requests:
+            raise ValueError('native complete history request mismatch')
+        digests = [rules.digest(row) for row in measurements]
+        incoming = {'registration': summary['registration'], 'policy': policy,
+                    'request_sha256s': requests, 'measurement_sha256s': digests,
+                    'admitted': summary['admit_to_binding_comparison'],
+                    'complete_draws': summary['complete_draws'],
+                    'passing_draws': summary['passing_draws'], 'reason': summary['reason']}
+        old = previous.get(key)
+        if old is not None:
+            if old.get('registration') != incoming['registration'] or old.get('policy') != policy:
+                raise ValueError('native complete history identity changed')
+            old_ids, old_digests = old.get('request_sha256s', []), old.get('measurement_sha256s', [])
+            shared = min(len(old_ids), len(requests))
+            if old_ids[:shared] != requests[:shared] or old_digests[:shared] != digests[:shared]:
+                raise ValueError('native complete history conflicts with prior evidence')
+            if len(requests) < len(old_ids):
+                stale.add(key); terminal.pop(key, None)
+                if old.get('admitted') is False:
+                    terminal[key] = old['reason']
+                continue
+            if len(requests) > len(old_ids):
+                superseded.add(key)
+        updates[key] = incoming
+        complete[key] = (measurements, policy)
+        if incoming['admitted']:
+            # One failed draw cannot overturn a supported aggregate decision.
+            terminal.pop(key, None)
+        else:
+            terminal[key] = incoming['reason']
+    for row in registered_rows:
+        key = rules.sequence_hash(row['sequence'])
+        if key in stale:
+            continue
+        history = row['pr100_evidence'].get('native_fleet_selection', {})
+        if (key not in complete or history.get('measurements') != complete[key][0]
+                or history.get('policy') != complete[key][1]
+                or updates[key]['admitted'] is not True):
+            raise ValueError('candidate omits complete native history')
+    # Apply only after the entire incoming result is checked.
+    state['native_reference_histories'] = {**previous, **updates}
+    state['native_rows'] = [r for r in state.get('native_rows', [])
+                            if rules.sequence_hash(r['sequence']) not in superseded]
+    value['candidates'] = [r for r in value.get('candidates', [])
+                           if rules.sequence_hash(r['sequence']) not in stale]
+    value['terminal_native_outcomes'] = terminal
+
 def valid_rows(value, challenge):
     if not isinstance(value, dict) or value.get('challenge') != challenge:
         return []
@@ -674,6 +765,8 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                     value['attempted_sequence_hashes'] = sorted(set(value.get('attempted_sequence_hashes', [])) |
                         {r.get('sequence_hash', rules.sequence_hash(r['sequence'])) if 'sequence' in r
                          else r['sequence_hash'] for r in records})
+                reconcile_native_histories(state, value,
+                    {rules.sequence_hash(r['sequence']) for r in json.loads(native_payload)['candidates']})
                 attempted = value.get('attempted_sequence_hashes', [rules.sequence_hash(r['sequence']) for r in rows])
                 state['native_attempted_hashes'] = sorted(seen | set(attempted))
                 state['pending_native'] = [r for r in state['pending_native']
