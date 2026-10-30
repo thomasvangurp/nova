@@ -111,7 +111,7 @@ def reconcile_native_histories(state, value, assigned_hashes):
             or value.get('epoch') != state['challenge']['epoch']):
         raise ValueError('native complete history binding mismatch')
     updates, seen, stale, superseded = {}, set(), set(), set()
-    complete = {}
+    complete, preserved_checkpoints = {}, {}
     terminal = dict(value.get('terminal_native_outcomes', {}))
     pending = {rules.sequence_hash(r['sequence']): r.get('native_resume', {})
                for r in value.get('deferred_confirmations', []) if isinstance(r, dict) and 'sequence' in r}
@@ -160,6 +160,17 @@ def reconcile_native_histories(state, value, assigned_hashes):
                 if old.get('admitted') is False and not old.get('bounded_rescue_pending'):
                     terminal[key] = old['reason']
                 continue
+            if (len(requests) == len(old_ids) and old.get('bounded_rescue_pending')
+                    and not rescue_pending):
+                checkpoint = next((r for r in state.get('pending_confirmation', [])
+                    if rules.sequence_hash(r['sequence']) == key
+                    and r.get('native_resume', {}).get('measurements') == measurements
+                    and r.get('native_resume', {}).get('fleet_policy') == policy
+                    and r.get('native_resume', {}).get('failed_first_rescue_reserved') is True), None)
+                if checkpoint is None:
+                    raise ValueError('reserved native rescue checkpoint missing')
+                preserved_checkpoints[key] = checkpoint
+                rescue_pending = incoming['bounded_rescue_pending'] = True
             if len(requests) > len(old_ids):
                 superseded.add(key)
         updates[key] = incoming
@@ -187,7 +198,8 @@ def reconcile_native_histories(state, value, assigned_hashes):
     value['candidates'] = [r for r in value.get('candidates', [])
                            if rules.sequence_hash(r['sequence']) not in stale]
     value['deferred_confirmations'] = [r for r in value.get('deferred_confirmations', [])
-        if rules.sequence_hash(r['sequence']) not in stale]
+        if rules.sequence_hash(r['sequence']) not in stale | set(preserved_checkpoints)]
+    value['deferred_confirmations'].extend(preserved_checkpoints.values())
     value['terminal_native_outcomes'] = terminal
 
 def valid_rows(value, challenge):
@@ -913,6 +925,15 @@ def run_epoch(config, chain, clock, *, dry_run=False):
                 except (ValueError, TypeError, KeyError):
                     receipt['native_history_recovery_rejected'] = True
                 else:
+                    rejected = set(partial.get('terminal_native_outcomes', {}))
+                    state['invalidated_native_hashes'] = sorted(
+                        set(state.get('invalidated_native_hashes', [])) | rejected)
+                    state['native_rows'] = [r for r in state['native_rows']
+                        if rules.sequence_hash(r['sequence']) not in rejected]
+                    if rejected & {rules.sequence_hash(sequence) for sequence in state['score_rows']}:
+                        # Reconcile any published evidence before another long
+                        # science batch can leave a disproven member in the pool.
+                        state['pending_publication'] = True
                     attempted = partial.get('attempted_sequence_hashes')
                     if attempted is None:
                         attempted = [rules.sequence_hash(r['sequence']) for r in state['pending_native']]

@@ -140,6 +140,25 @@ def test_stale_partial_confirmation_cannot_restart_old_history():
     assert incoming['deferred_confirmations'] == []
 
 
+def test_identical_history_cannot_drop_reserved_first_failure_rescue():
+    saved = state(); values = observations([90]); first = result(values)
+    checkpoint = {'sequence': SEQUENCE, 'native_resume': {
+        'measurements': values, 'fleet_policy': POLICY, 'required_cpu_observations': 3,
+        'failed_first_rescue_reserved': True}}
+    first['deferred_confirmations'] = [checkpoint]
+    apply(saved, first)
+    saved['pending_confirmation'] = copy.deepcopy(first['deferred_confirmations'])
+    replay = result(values)
+    apply(saved, replay)
+    assert replay['terminal_native_outcomes'] == {}
+    assert replay['deferred_confirmations'] == [checkpoint]
+    assert saved['native_reference_histories'][KEY]['bounded_rescue_pending'] is True
+    exhausted = result(observations([90, 91]))
+    apply(saved, exhausted)
+    assert exhausted['terminal_native_outcomes'] == {KEY: 'no_measured_pass'}
+    assert exhausted['deferred_confirmations'] == []
+
+
 @pytest.mark.parametrize('records', [None, []])
 def test_registered_terminal_claim_requires_complete_history(records):
     saved = state(); apply(saved, result(observations([81])))
