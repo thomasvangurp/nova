@@ -657,6 +657,7 @@ def test_worker_builds_budgets_for_exact_current_challenge(monkeypatch, tmp_path
 
 
 def test_worker_propagates_bounded_chemistry_policy_and_lineage(monkeypatch, tmp_path):
+    real_pinned_config = worker.rules.pinned_config
     fixture, _, contexts = _recorded_hmm_budgets()
     bank = [{'sequence': row['sequence'], 'sequence_hash': row['sequence_hash'],
              'cells': ['IGHV3-23:19'], 'source': 'recorded_parent_wiring_fixture'}
@@ -679,6 +680,41 @@ def test_worker_propagates_bounded_chemistry_policy_and_lineage(monkeypatch, tmp
     # Bank merit sorting decides parent order; each receives its bounded share.
     assert {parent: sum(row['parent_sequence'] == parent for row in rows)
             for parent in contexts} == {parent: 2 for parent in contexts}
+    assert result['candidates'][:6] == rows
+    assert result['edit_generation_priority_count'] == 6
+    assert result['eligible_edit_generation_source_counts'] == {
+        'novelty_aware_multi_edit_chemistry_conservative_v3': 6}
+    baseline = [row for row in result['candidates'] if row.get('source') != 'edit_generation']
+    assert baseline
+    # Drive the actual native admission loop with an inert failing profile and
+    # only two fresh slots. This is scheduling evidence, not biological proof.
+    from tests.test_pr100_fresh_native_budget import setup_worker, profile
+    native = tmp_path / 'native-admission'; native.mkdir()
+    job = setup_worker(native, monkeypatch, result['candidates'])
+    monkeypatch.setattr(worker.rules, 'pinned_config', real_pinned_config)
+    calls = []
+    def measure(sequences, *_args, **_kwargs):
+        calls.extend(sequences)
+        return [profile(sequence, 160) for sequence in sequences], 0, 1
+    observed = worker.native_phase(job, native, measure=measure)
+    assert calls == [row['sequence'] for row in rows[:2]]
+    assert observed['fresh_admitted_unique'] == 2
+    assert observed['not_run'] == len(result['candidates']) - 2
+
+
+def test_balanced_policy_preserves_default_baseline_first_order(monkeypatch, tmp_path):
+    parent = propose(real_panel(), 'IGHV3-23', 5, seed=9, ordinal=0)['sequence']
+    run = _edit_runner(monkeypatch, tmp_path, [{'sequence': parent,
+        'sequence_hash': rules.sequence_hash(parent), 'cells': ['IGHV3-23:5']}])
+    challenge = {'epoch': 25969, 'target': rules.TARGET,
+                 'allowed_v': 'IGHV3-23', 'allowed_cdr3_length': 5}
+    default = run(challenge, edit_generation={'enabled': True, 'limit': 4})
+    explicit = run(challenge, edit_generation={'enabled': True, 'limit': 4,
+                                             'policy': edit.BALANCED_POLICY})
+    assert default['candidates'] == explicit['candidates']
+    assert default['edit_generation_priority_count'] == explicit['edit_generation_priority_count'] == 0
+    sources = [row['source'] for row in default['candidates']]
+    assert sources == sorted(sources, key=lambda source: source == 'edit_generation')
 
 
 def test_recorded_local_alignment_rejects_cdr3_only_hamming_novel_child():

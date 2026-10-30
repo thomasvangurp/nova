@@ -330,6 +330,18 @@ def sequence_phase(job, directory):
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
                              'pr100_annotation': annotation})
+    chemistry_priority_count = 0
+    if (edit_settings['enabled'] and
+            edit_settings.get('policy') == pr100_edit_generation.CHEMISTRY_POLICY):
+        def chemistry_row(row):
+            return (row.get('source') == 'edit_generation' and
+                    row.get('edit_policy') == pr100_edit_generation.CHEMISTRY_POLICY)
+        chemistry_priority_count = sum(chemistry_row(row) for row in eligible)
+        # The lane is already bounded by its emission limit. Reach these
+        # qualified parent edits before the baseline can exhaust the native
+        # window. Stable sorting preserves both lanes' internal order; default
+        # and balanced policy retain their existing order exactly.
+        eligible.sort(key=lambda row: not chemistry_row(row))
     # Novelty is deliberately NOT run here: the archive search now runs after
     # native developability, so it is spent only on native passers.
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'],
@@ -339,6 +351,7 @@ def sequence_phase(job, directory):
               'proposal_source_counts': dict(source_counts),
               'edit_generation_enabled': edit_settings['enabled'],
               'edit_generation_policy': edit_settings.get('policy', pr100_edit_generation.BALANCED_POLICY),
+              'edit_generation_priority_count': chemistry_priority_count,
               'edit_generation_source_counts': dict(edit_source_counts),
               'edit_generation_candidates': sum(edit_source_counts.values()),
               'edit_generation_stats': dict(edit_stats),
