@@ -745,8 +745,12 @@ def main(argv=None) -> int:
 
     if arguments.rehearse or (not arguments.serial and not arguments.dry_run):
         committed, failures, dropped = commit_batch(rows, arguments, environment)
+        rehearsed = committed if arguments.rehearse else 0
+        if arguments.rehearse:
+            committed = 0
         print(json.dumps(dict(event="done", committed=committed, failed=failures,
-                              commit_evidence="helper_reported",
+                              rehearsed=rehearsed,
+                              commit_evidence="rehearsal" if arguments.rehearse else "helper_reported",
                               dropped_to_blackout=len(dropped),
                               dropped_uids=dropped)), flush=True)
         if not failures or arguments.rehearse or committed:

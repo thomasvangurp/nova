@@ -133,6 +133,20 @@ def test_serial_actual_success_and_dry_run_have_distinct_counts(
         assert (done['committed'], done['dry_run']) == (expected_committed, expected_dry)
 
 
+def test_rehearsal_reports_preview_count_without_claiming_commits(
+        submit, arguments, monkeypatch, isolated_preflight, capsys):
+    def rehearse(rows, args, environment):
+        assert args.rehearse
+        # commit_batch's rehearsal return value counts encrypted preview rows.
+        return len(rows), 0, []
+    monkeypatch.setattr(submit, 'commit_batch', rehearse)
+    assert submit.main(arguments + ['--rehearse']) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    done = next(row for row in events if row['event'] == 'done')
+    assert (done['committed'], done['rehearsed'], done['commit_evidence']) == (0, 1, 'rehearsal')
+    assert not any(row['event'] == 'zero_commits' for row in events)
+
+
 def test_partial_parallel_batch_preserves_success_without_resubmitting(
         submit, arguments, monkeypatch, isolated_preflight, capsys):
     """One actual batch success survives a failed row and its built-in repair."""
