@@ -13,6 +13,7 @@ import base64
 import gzip
 import hashlib
 import json
+import lzma
 import math
 from pathlib import Path
 import re
@@ -57,7 +58,7 @@ _SECRET = re.compile(r'(?i)(authorization|bearer|token|secret|password|api[_-]?k
 _LONG_OPAQUE = re.compile(r'\b[A-Za-z0-9+/_-]{48,}\b')
 
 TRANSPORT = pr100_archive_cache.RECEIVER + r'''
-import base64,gzip,hashlib,json,os,pathlib,re,stat,subprocess,sys,time
+import base64,gzip,hashlib,json,lzma,os,pathlib,re,stat,subprocess,sys,time
 raw=sys.stdin.buffer.read()
 r=json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw);d=pathlib.Path(r['directory']);cache_result=None
 if r['operation']=='journal':
@@ -129,7 +130,7 @@ else:
     out.setdefault('tails',{})[name]=h.read(2048).decode('utf-8','replace')
 encoded=json.dumps(out).encode()
 if r.get('compress_response') is True and len(encoded)>8192:
- sys.stdout.buffer.write(b'NOVA_PR100_GZIP_V1:'+base64.b64encode(gzip.compress(encoded,compresslevel=1,mtime=0))+b'\n')
+ sys.stdout.buffer.write(b'NOVA_PR100_XZ_V1:'+base64.b64encode(lzma.compress(encoded,preset=3))+b'\n')
 else:print(encoded.decode())
 '''
 
@@ -189,9 +190,11 @@ def phase_cap(phase, stop_at, *, now=None, publish_reserve=PUBLISH_RESERVE_SECON
 TRANSPORT_ATTEMPTS = 5
 TRANSPORT_BACKOFF_SECONDS = 3
 POLL_FAILURE_LIMIT = 8
-REPLY_PREFIX = b'NOVA_PR100_GZIP_V1:'
+REPLY_PREFIX = b'NOVA_PR100_XZ_V1:'
+GZIP_REPLY_PREFIX = b'NOVA_PR100_GZIP_V1:'
 MAX_REPLY_BYTES = 256 * 1024 * 1024
 MAX_COMPRESSED_REPLY_BYTES = 64 * 1024 * 1024
+MAX_REPLY_DECODER_MEMORY = 64 * 1024 * 1024
 
 
 def decode_transport_reply(raw):
@@ -200,17 +203,22 @@ def decode_transport_reply(raw):
     if not lines:
         raise ValueError('empty_transport_reply')
     body = lines[-1]
-    if body.startswith(REPLY_PREFIX):
-        encoded = body[len(REPLY_PREFIX):]
+    prefix = next((p for p in (REPLY_PREFIX, GZIP_REPLY_PREFIX) if body.startswith(p)), None)
+    if prefix:
+        encoded = body[len(prefix):]
         if len(encoded) > 4 * ((MAX_COMPRESSED_REPLY_BYTES + 2) // 3):
             raise ValueError('compressed_transport_reply_too_large')
         packed = base64.b64decode(encoded, validate=True)
         if len(packed) > MAX_COMPRESSED_REPLY_BYTES:
             raise ValueError('compressed_transport_reply_too_large')
-        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        body = decoder.decompress(packed, MAX_REPLY_BYTES + 1)
+        if prefix == REPLY_PREFIX:
+            decoder = lzma.LZMADecompressor(memlimit=MAX_REPLY_DECODER_MEMORY)
+            body = decoder.decompress(packed, max_length=MAX_REPLY_BYTES + 1)
+        else:
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            body = decoder.decompress(packed, MAX_REPLY_BYTES + 1)
         if (len(body) > MAX_REPLY_BYTES or not decoder.eof
-                or decoder.unused_data or decoder.unconsumed_tail):
+                or decoder.unused_data or getattr(decoder, 'unconsumed_tail', b'')):
             raise ValueError('invalid_bounded_transport_reply')
     if len(body) > MAX_REPLY_BYTES:
         raise ValueError('transport_reply_too_large')
@@ -280,7 +288,7 @@ def remote(config, host, request, *, sleep=time.sleep):
     try:
         # A login banner or rc-file echo may precede the reply; the reply is the last line.
         reply = decode_transport_reply(result.stdout)
-    except (ValueError, IndexError, zlib.error) as cause:
+    except (ValueError, IndexError, zlib.error, lzma.LZMAError) as cause:
         error = RuntimeError('remote transport returned no result')
         error.diagnostics = {'stdout_tail': sanitize(result.stdout),
                              'stderr_tail': sanitize(result.stderr)}

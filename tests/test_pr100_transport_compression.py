@@ -2,6 +2,7 @@
 import gzip
 import base64
 import json
+import lzma
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -61,7 +62,7 @@ def test_actual_receiver_compresses_complete_native_artifacts_losslessly(tmp_pat
 def test_compressed_reply_refuses_unbounded_or_incomplete_stream(monkeypatch, kind):
     monkeypatch.setattr(controller, 'MAX_REPLY_BYTES', 1024)
     data = json.dumps({'evidence': 'a' * (2000 if kind == 'too_large' else 20)}).encode()
-    packed = gzip.compress(data)
+    packed = lzma.compress(data, preset=3)
     if kind == 'truncated': packed = packed[:-4]
     if kind == 'trailing': packed += b'not part of the result'
     encoded = base64.b64encode(packed)
@@ -75,7 +76,16 @@ def test_compressed_reply_accepts_banner_but_keeps_json_compatibility():
     raw = json.dumps(value).encode()
     assert controller.decode_transport_reply(b'login banner\n' + raw) == value
     assert controller.decode_transport_reply(b'login banner\n' + controller.REPLY_PREFIX
+        + base64.b64encode(lzma.compress(raw, preset=3))) == value
+    assert controller.decode_transport_reply(controller.GZIP_REPLY_PREFIX
         + base64.b64encode(gzip.compress(raw))) == value
+
+
+def test_xz_reply_cannot_allocate_unbounded_decoder_dictionary(monkeypatch):
+    packed = lzma.compress(b'{"running":false}', preset=6)
+    monkeypatch.setattr(controller, 'MAX_REPLY_DECODER_MEMORY', 1024 * 1024)
+    with pytest.raises(lzma.LZMAError):
+        controller.decode_transport_reply(controller.REPLY_PREFIX + base64.b64encode(packed))
 
 
 def test_compressed_response_requires_explicit_config_opt_in(monkeypatch):
