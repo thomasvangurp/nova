@@ -78,6 +78,34 @@ remain outside the approved registry; a pending CUDA row is rejected even if its
 other hashes have been filled. Root fills final rows only after qualification and
 source freeze; this document does not register or enable them.
 
+### Actual CUDA loader identity at startup
+
+The four-key sidecar descriptor remains valid for historical/research receipt
+validation. A new CUDA resident Engine requires an additional `loader` object,
+bound inside that descriptor and therefore the registered runtime digest:
+
+```json
+{
+  "core_sha256": "2e6d893dab1ae7cc5fb259091828329ce772aa45bc2a379ff301693dd2f1c437",
+  "nvrtc_sha256": "e096758089294cd705e28588160818b2756b783f5599222f8fdf78377280d50c",
+  "torch_compiled_cuda": 12060,
+  "cpp_version": "8.5"
+}
+```
+
+These full hashes are the exact8.5.0 core and baseline NVRTC12.6.20 observed in
+`OPENMM850-ACTUAL-LOADED-MAPS.json` with `LD_LIBRARY_PATH` absent. They are a
+descriptor example for root's qualified row, not a registration added here.
+At CUDA worker startup, after Torch/OpenMM/plugin imports and before model or
+Context construction, the Engine reads `/proc/self/maps` in process and selects
+only `libOpenMM.so` and `libnvrtc.so` with optional numeric suffixes. It requires
+one unique mapped file for each, rejects deleted mappings, hashes only those two
+files and compares actual `Platform.getOpenMMVersion()` and Torch's compiled CUDA
+version. Repeated ELF segments from the same file are accepted; distinct mapped
+copies are refused. No mappings, process arguments, environment, or backend logs
+are emitted. No whole-Torch or per-draw loader hash is added. CPU Engines do not
+require or execute this loader check. `pr100_native_reference.py` is unchanged.
+
 ## Settings and sidecar
 
 `resident` defaults to false. CUDA requires it to be true. The optional

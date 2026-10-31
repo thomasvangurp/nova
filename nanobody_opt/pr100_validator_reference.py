@@ -51,11 +51,18 @@ def validate_refinement_policy(policy):
 
 
 def validate_cuda_plugin_identity(plugin):
-    require(isinstance(plugin, dict) and set(plugin) == {
-        'distribution', 'version', 'wheel_sha256', 'manifest_sha256'}
+    required = {'distribution', 'version', 'wheel_sha256', 'manifest_sha256'}
+    require(isinstance(plugin, dict) and set(plugin) in (required, required | {'loader'})
         and plugin['distribution'] == 'OpenMM-CUDA-12' and plugin['version'] == '8.5.0'
         and plugin['wheel_sha256'] == CUDA_PLUGIN_WHEEL_SHA256
         and sha256(plugin['manifest_sha256']), 'invalid_cuda_plugin_identity')
+    if 'loader' in plugin:
+        loader=plugin['loader']
+        require(isinstance(loader,dict) and set(loader)=={
+            'core_sha256','nvrtc_sha256','torch_compiled_cuda','cpp_version'}
+            and sha256(loader['core_sha256']) and sha256(loader['nvrtc_sha256'])
+            and type(loader['torch_compiled_cuda']) is int and loader['torch_compiled_cuda']==12060
+            and loader['cpp_version']=='8.5','invalid_cuda_loader_identity')
     return plugin
 
 

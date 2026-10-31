@@ -172,6 +172,31 @@ def load_refinement_plugin(mm, settings, row):
     mm.Platform.getPlatformByName('CUDA')  # Never silently fall back.
 
 
+def verify_cuda_loader(mm, torch, row, *, maps_path=Path('/proc/self/maps')):
+    """Hash only the unique actually mapped core/NVRTC at CUDA worker startup."""
+    if row['policy']['final_refinement']['platform'] != 'CUDA':
+        return
+    plugin=reference.validate_cuda_plugin_identity(row.get('cuda_plugin'))
+    require('loader' in plugin,'cuda_loader_identity_required')
+    mapped={'core':set(),'nvrtc':set()}
+    for line in maps_path.read_text().splitlines():
+        fields=line.split(None,5)
+        if len(fields)!=6:continue
+        raw=fields[5];path=Path(raw.removesuffix(' (deleted)'));name=path.name
+        kind=('core' if name=='libOpenMM.so' else
+              'nvrtc' if re.fullmatch(r'libnvrtc\.so(?:\.\d+)*',name) else None)
+        if kind is None:continue
+        require(raw==str(path),'cuda_loader_mapping_deleted')
+        mapped[kind].add(path.resolve())
+    require(all(len(paths)==1 for paths in mapped.values()),'cuda_loader_mapping_not_unique')
+    actual={'core_sha256':native.sha(next(iter(mapped['core']))),
+        'nvrtc_sha256':native.sha(next(iter(mapped['nvrtc']))),
+        'torch_compiled_cuda':torch._C._cuda_getCompiledVersion(),
+        'cpp_version':mm.Platform.getOpenMMVersion()}
+    require(actual==plugin['loader'],'cuda_loader_identity_mismatch')
+    return actual
+
+
 def model_fingerprint(model):
     """Full model state at startup / batch end, never inside a draw."""
     digest = hashlib.sha256()
@@ -215,6 +240,8 @@ class Engine:
         self.mm = importlib.import_module('openmm'); importlib.import_module('openmm.app')
         self.fixer = importlib.import_module('pdbfixer')
         load_refinement_plugin(self.mm, self.settings, self.row)
+        if self.row['policy']['final_refinement']['platform'] == 'CUDA':
+            verify_cuda_loader(self.mm,self.torch,self.row)
         disabled = logging.root.manager.disable
         try:
             self.builder = importlib.import_module('ImmuneBuilder.NanoBodyBuilder2')

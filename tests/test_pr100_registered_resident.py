@@ -140,6 +140,31 @@ def test_refinement_plugin_is_loaded_only_for_cuda_policy(monkeypatch,cpu):
     assert calls==([] if cpu else ['sidecar_verified',('load','/sealed/plugin'),('platform','CUDA')])
 
 
+@pytest.mark.parametrize('change',[None,'hash','duplicate','compiled','cpp','missing_descriptor'])
+def test_cuda_startup_binds_unique_actual_maps_before_any_context(tmp_path,change):
+    core=tmp_path/'libOpenMM.so';core.write_bytes(b'core')
+    nvrtc=tmp_path/'libnvrtc.so.12.6.20';nvrtc.write_bytes(b'nvrtc')
+    loader={'core_sha256':resident.native.sha(core),'nvrtc_sha256':resident.native.sha(nvrtc),
+            'torch_compiled_cuda':12060,'cpp_version':'8.5'}
+    plugin={'distribution':'OpenMM-CUDA-12','version':'8.5.0',
+        'wheel_sha256':resident.reference.CUDA_PLUGIN_WHEEL_SHA256,
+        'manifest_sha256':'e'*64,'loader':loader}
+    row={'policy':POLICY,'cuda_plugin':plugin}
+    paths=[core,core,nvrtc]  # Multiple ELF segments are one actual mapped file.
+    if change=='hash':nvrtc.write_bytes(b'changed')
+    if change=='duplicate':
+        other=tmp_path/'other/libnvrtc.so.12.6.20';other.parent.mkdir();other.write_bytes(b'nvrtc');paths.append(other)
+    if change=='missing_descriptor':plugin.pop('loader')
+    maps=tmp_path/'maps';maps.write_text('\n'.join(f'000-111 r-xp 000 00:00 1 {p}' for p in paths))
+    mm=NS(Platform=NS(getOpenMMVersion=lambda:'8.6' if change=='cpp' else '8.5'),
+          Context=lambda *_:pytest.fail('must refuse before Context construction'))
+    torch=NS(_C=NS(_cuda_getCompiledVersion=lambda:12090 if change=='compiled' else 12060))
+    if change:
+        with pytest.raises(resident.AdapterError):resident.verify_cuda_loader(mm,torch,row,maps_path=maps)
+    else:assert resident.verify_cuda_loader(mm,torch,row,maps_path=maps)==loader
+    assert resident.verify_cuda_loader(None,None,{'policy':CPU_POLICY},maps_path=tmp_path/'absent') is None
+
+
 def test_model_drift_prevents_any_authoritative_delivery(monkeypatch):
     engine=resident.Engine.__new__(resident.Engine);engine.model=object();engine.initial_state='a'*64
     monkeypatch.setattr(resident,'model_fingerprint',lambda _model:'b'*64)

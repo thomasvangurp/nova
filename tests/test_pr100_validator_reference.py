@@ -225,6 +225,23 @@ def test_cuda_receipt_requires_exact_plugin_binding_as_well_as_platform_trace():
         reference.validate_receipt(value, **options, expected_cuda_plugin=changed)
 
 
+def test_cuda_loader_descriptor_optional_for_research_but_exact_when_present():
+    plugin={'distribution':'OpenMM-CUDA-12','version':'8.5.0',
+        'wheel_sha256':reference.CUDA_PLUGIN_WHEEL_SHA256,'manifest_sha256':'e'*64}
+    assert reference.validate_cuda_plugin_identity(plugin) is plugin
+    loader={'core_sha256':'a'*64,'nvrtc_sha256':'b'*64,'torch_compiled_cuda':12060,'cpp_version':'8.5'}
+    plugin['loader']=loader
+    assert reference.validate_cuda_plugin_identity(plugin) is plugin
+    for key,bad in [('core_sha256','short'),('nvrtc_sha256','short'),
+                    ('torch_compiled_cuda',12090),('cpp_version','8.5.1')]:
+        plugin['loader']={**loader,key:bad}
+        with pytest.raises(ValueError,match='invalid_cuda_loader_identity'):
+            reference.validate_cuda_plugin_identity(plugin)
+    plugin['loader']={**loader,'extra':True}
+    with pytest.raises(ValueError,match='invalid_cuda_loader_identity'):
+        reference.validate_cuda_plugin_identity(plugin)
+
+
 @pytest.mark.parametrize('key', ['source_sha', 'sequence_hash', 'request_sha256', 'reference_contract_sha256',
                                 'runtime_identity_sha256', 'trace_sha256', 'actual_validator_worker_attested'])
 def test_receipt_reuse_and_false_attestation_rejected(key):
