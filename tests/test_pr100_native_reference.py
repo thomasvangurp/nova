@@ -91,6 +91,30 @@ def test_historical_registrations_remain_bound_without_relabeling_old_evidence()
         assert native.registration(reference.digest(row)) == row
 
 
+def test_qualified_loader126_row_binds_actual_report_runtime_and_frozen_source():
+    from nanobody_opt import pr100_registered_resident as resident
+    rows=json.loads(native.REGISTRY.read_text())['registrations']
+    assert [reference.digest(row) for row in rows[:3]]==[
+        '376a25c5a0162d874e179f18170177f5fe1ce30f75c3b2b083e2941a06ac6ccf',
+        'a22d5e4f19e3a1fa4a97f20c60eec050c8534a3ce7c9b2f000a56bbdc8795c97',
+        '1c42ca3af222e23fd9aa51c1f9845457cb5371054009334aa4b9c1934d060324']
+    row=next(r for r in rows if r['name'].endswith('cuda-refinement-prep1-loader126'))
+    assert row['qualification_status']=='qualified' and row['actual_validator_worker_attested'] is False
+    assert row['resident_module_sha256']==native.sha(resident.__file__)
+    assert row['implementation_sha256']==native.sha(native.__file__)
+    proof=native.ROOT/row['qualification_report_file']
+    assert native.sha(proof)==row['qualification_report_sha256']
+    result=json.loads(proof.read_text())
+    assert result['completed']==result['draw_count']==result['fresh_predictions']==28
+    assert result['authoritative'] is False and result['sealed_closure_unchanged'] is True
+    assert result['cleanup']['remaining_descendants']==0 and result['cleanup']['fixed_point_reached'] is True
+    assert result['child_exit_code']==0 and result['released'] is True
+    runtime=real_gate_observations()[0]['measurement']['native_reference']['receipt']['runtime']
+    assert row['runtime_sha256']==reference.digest({**runtime,'cuda_plugin':row['cuda_plugin']})
+    assert row['cuda_plugin']['loader']['nvrtc_sha256']==next(
+        r['sha256'] for r in result['actual_maps']['libraries'] if 'libnvrtc.so.' in r['path'])
+
+
 def test_old_runner_registration_cannot_launch_changed_runner_bytes():
     row = json.loads(native.REGISTRY.read_text())['registrations'][0]
     if row['implementation_sha256'] != native.sha(native.__file__):

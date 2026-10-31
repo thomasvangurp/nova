@@ -1,0 +1,121 @@
+{
+  "schema": "pr100-exact850-absentld-fullprofile-handoff-v1",
+  "status": "complete",
+  "authoritative": false,
+  "production_deployment": false,
+  "remote_directory": "/root/artifacts/native-speed-exact850-absentld-1793410489604795327",
+  "draw_count": 28,
+  "completed": 28,
+  "fresh_predictions": 28,
+  "counts": {
+    "complete": 28
+  },
+  "elapsed_probe_seconds": 171.9926349017769,
+  "elapsed_owner_seconds": 175.79232083074749,
+  "model_load_seconds": 1.4982761619612575,
+  "timings_resident_model_both_arms": {
+    "CPU": {
+      "n": 14,
+      "mean_seconds": 7.429188832973263,
+      "median_seconds": 6.678412530105561,
+      "min_seconds": 5.107632027007639,
+      "max_seconds": 13.536811052821577,
+      "numeric_gate_pass_count": 8
+    },
+    "CUDA": {
+      "n": 14,
+      "mean_seconds": 2.913091443346015,
+      "median_seconds": 2.8445253241807222,
+      "min_seconds": 2.3137289490550756,
+      "max_seconds": 4.008998967707157,
+      "numeric_gate_pass_count": 10
+    }
+  },
+  "mean_profile_latency_ratio_CPU_over_CUDA": 2.5502765627020616,
+  "scope": "Original full TNP + A3D with fresh numbering/predict every profile; model constructor resident in BOTH arms. Not cold-vs-resident or aggregate throughput.",
+  "scientific_limits": "Independent unseeded preparation/refinement; no matched prepared states or population equivalence threshold. Boundary numeric gate changes retained; no sole-NVRTC causality inference or publication qualification claim.",
+  "seed_resets": false,
+  "sealed_closure_unchanged": true,
+  "source_verification": {
+    "mode": "research_snapshot",
+    "ci_verified": false,
+    "manifest_sha256": "3178bde23705280352c61976a42df64fd9362e0f3e677a9374e1627ab02abec6"
+  },
+  "minimum_GPU_free_MiB": 22169,
+  "peak_additional_sampled_GPU_MiB": 1911,
+  "cleanup": {
+    "remaining_descendants": 0,
+    "fixed_point_reached": true,
+    "freeze_scan_count": 3,
+    "killed_descendants": 0,
+    "worker_exitcodes": {
+      "2579590": 0
+    }
+  },
+  "released": true,
+  "child_exit_code": 0,
+  "known_pid_liveness": {
+    "2579420": false,
+    "2579590": false
+  },
+  "context_inventory": [
+    {
+      "role": "hydrogens",
+      "platform": "CPU",
+      "properties": {
+        "DeterministicForces": "false",
+        "Threads": "1"
+      },
+      "count": 29
+    },
+    {
+      "role": "minimize_energy",
+      "platform": "CPU",
+      "properties": {
+        "DeterministicForces": "false",
+        "Threads": "1"
+      },
+      "count": 15
+    },
+    {
+      "role": "minimize_energy",
+      "platform": "CUDA",
+      "properties": {
+        "DeterministicForces": "true",
+        "DeviceIndex": "0",
+        "Precision": "mixed"
+      },
+      "count": 14
+    },
+    {
+      "role": "missing_atoms",
+      "platform": "CPU",
+      "properties": {
+        "DeterministicForces": "false",
+        "Threads": "1"
+      },
+      "count": 28
+    }
+  ],
+  "actual_maps": {
+    "pid": 2579590,
+    "at_unix": 1793410507.8655455,
+    "libraries": [
+      {
+        "path": "/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/lib/python3.12/site-packages/OpenMM.libs/lib/libOpenMM.so",
+        "sha256": "2e6d893dab1ae7cc5fb259091828329ce772aa45bc2a379ff301693dd2f1c437",
+        "bytes": 5808824
+      },
+      {
+        "path": "/usr/local/cuda-12.6/targets/x86_64-linux/lib/libnvrtc.so.12.6.20",
+        "sha256": "e096758089294cd705e28588160818b2756b783f5599222f8fdf78377280d50c",
+        "bytes": 57992520
+      }
+    ],
+    "scope": "one-time externally observed actual child mapping; no imports or Context created by observer"
+  },
+  "source_sha256": {
+    "owner": "a2a5b8e6956f7db83123dab71ad4f9a20163b20e0f95e6dca428ccc8c9e1cf25",
+    "probe": "a4396e2d31226b575a1752c114f87e00e176da1484f06afdcf0003fc1e0dd9ed"
+  }
+}
