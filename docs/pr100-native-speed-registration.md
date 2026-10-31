@@ -12,9 +12,13 @@ The CPU resident row uses exactly `prediction: auto_cuda`,
 Prediction models remain warm on CUDA; preparation and final refinement run the
 original CPU scientific functions. The CPU branch leaves the original Context
 constructor and all its arguments untouched, including repair contexts. It does
-not verify or load a CUDA plugin sidecar. The worker's private library path is
-only the exact environment's `lib` directory. The sealed runtime and bundle stay
-unchanged.
+not verify or load a CUDA plugin sidecar. The worker omits `LD_LIBRARY_PATH`
+entirely, matching the original baseline loader environment. CUDA refinement
+sets it only to nonempty approved sidecar `library_directories`; an empty list
+also leaves it absent. Neither path prefixes the environment's `lib` directory:
+that override changed loaded NVRTC despite the same OpenMM core and Torch bytes.
+This preserves baseline library RPATH resolution. The sealed runtime and bundle
+stay unchanged.
 
 Root must append a separate CPU-resident row pinning the frozen
 `resident_module_sha256` and its bounded qualification report. Historical CPU

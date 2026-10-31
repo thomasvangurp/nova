@@ -615,15 +615,16 @@ class RegisteredResidentAdapter(native.Adapter):
             'minimum_free_mib':(4096 if cpu_refinement else 2048)*(self.settings['workers_per_gpu']+1),
             'lock_directory':self.settings['lock_directory'],'scorer':self.settings['scorer'],
             'receipt':str(root/'lease.json'),'cwd':str(root),
-            # The legacy shell wrapper overwrites LD_LIBRARY_PATH. Execute its
-            # same sealed interpreter directly so the registered sidecar's CUDA
-            # dependencies remain visible; all scientific CLI bytes stay exact.
+            # Use the same sealed interpreter directly with baseline RPATHs.
+            # Only nonempty approved sidecar library directories may override
+            # loader search; prefixing environment/lib can change Torch NVRTC.
             'command':[environment+'/bin/python3.12','-s','-B','-m',MODULE,'--serve',str(root/'session.json')],
             'env':{'PATH':environment+'/bin:'+bundle+'/tools:/usr/bin:/bin',
                 'PYTHONPATH':str(ROOT),'PYTHONDONTWRITEBYTECODE':'1','HOME':'/root','LANG':'C.UTF-8',
                 'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','MKL_NUM_THREADS':'1',
-                'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1',
-                'LD_LIBRARY_PATH':':'.join([environment+'/lib',*plugin_libraries])}}
+                'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}}
+        if plugin_libraries:
+            lease['env']['LD_LIBRARY_PATH']=':'.join(plugin_libraries)
         native.atomic(root/'lease-job.json',lease)
         process = subprocess.Popen([sys.executable,'-B','-m','nanobody_opt.pr100_live_gpu',
             '--job',str(root/'lease-job.json')],cwd=ROOT,

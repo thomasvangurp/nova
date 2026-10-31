@@ -328,8 +328,8 @@ def adapter(tmp_path):
     return value
 
 
-@pytest.mark.parametrize('cpu',[True,False])
-def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_path,cpu):
+@pytest.mark.parametrize('cpu,libraries',[(True,[]),(False,[]),(False,['/qualified/plugin/lib'])])
+def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_path,cpu,libraries):
     value=adapter(tmp_path);processes=[]
     if cpu:value.settings['registration']={'policy':CPU_POLICY}
     class Process:
@@ -338,13 +338,17 @@ def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_
     monkeypatch.setattr(resident.subprocess,'Popen',Process)
     def plugin(*_args):
         assert not cpu,'CPU resident must not read sidecar files'
-        return {'library_directories':['/qualified/plugin/lib']}
+        return {'library_directories':libraries}
     monkeypatch.setattr(resident.native,'cuda_plugin_paths',plugin)
     first=value._start(0);second=value._start(0)
     assert first is second and len(processes)==1
     lease=json.loads((first['root']/'lease-job.json').read_text())
     assert lease['command'][:3]==['/qualified/env/bin/python3.12','-s','-B']
-    assert lease['env']['LD_LIBRARY_PATH']==('/qualified/env/lib' if cpu else '/qualified/env/lib:/qualified/plugin/lib')
+    if cpu or not libraries:
+        assert 'LD_LIBRARY_PATH' not in lease['env']
+    else:
+        assert lease['env']['LD_LIBRARY_PATH']==':'.join(libraries)
+        assert '/qualified/env/lib' not in lease['env']['LD_LIBRARY_PATH']
     assert lease['minimum_free_mib']==(20480 if cpu else 10240)
     assert lease['ttl_seconds']<=300 and value.capacity==32
     assert value._batch_limit({'queue':list(range(50)),'waiting_lanes':1})==32
