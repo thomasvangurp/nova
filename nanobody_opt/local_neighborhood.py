@@ -40,7 +40,7 @@ from nanobody_opt.mutation_network import (
     mutation_contexts,
 )
 from nanobody_opt.regions import find_regions
-from nanobody_opt.simulate_round import dense_rank_sums
+from nanobody_opt.simulate_round import validator_final_scores
 from nanobody_opt.terminal_policy import (
     TerminalPriors,
     basin_parent_recency_ranks,
@@ -92,7 +92,7 @@ def _rank_sum(frame: pd.DataFrame) -> np.ndarray:
     missing = set(METRICS) - set(frame.columns)
     if missing:
         raise ValueError(f"archive lacks exact metrics: {sorted(missing)}")
-    return dense_rank_sums(frame, METRICS)
+    return validator_final_scores(frame)
 
 
 def _motif(sequence: str, bounds: tuple[int, int]) -> str:

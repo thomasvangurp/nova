@@ -88,8 +88,8 @@ def main():
         df = df.tail(min(a.recent_only, len(df))).reset_index(drop=True)
     L = int(df.sequence.str.len().mode()[0])
     df = df[df.sequence.str.len() == L].reset_index(drop=True)
-    from nanobody_opt.simulate_round import dense_rank_sums
-    rank_sum = dense_rank_sums(df, SCORED)
+    from nanobody_opt.simulate_round import validator_final_scores
+    rank_sum = validator_final_scores(df)
     order = np.argsort(rank_sum)
     print(f"pool {len(df):,} sequences (recent era), length {L}")
 
