@@ -129,6 +129,12 @@ def route_contexts(observer, mm, policy, *, temporary_directory):
     minimizer and sidechain repair. Chirality work reuses that same Simulation.
     No force field, integrator, hydrogen selection, or minimization call changes.
     """
+    if policy['final_refinement'] == {'platform':'CPU','threads':1}:
+        require(policy['preparation_threads'] == 1, 'resident_cpu_requires_preparation_one')
+        # Preserve the original CPU Context constructor and arguments entirely.
+        # Observer still records the genuine original preparation/main devices.
+        yield
+        return
     require(policy['final_refinement'] == {
         'platform': 'CUDA', 'precision': 'mixed', 'deterministic_forces': True},
         'resident_requires_registered_cuda_policy')
@@ -154,6 +160,16 @@ def route_contexts(observer, mm, policy, *, temporary_directory):
         intact = mm.Context.__init__ is routed
         mm.Context.__init__ = original
         require(intact, 'resident_context_router_replaced')
+
+
+def load_refinement_plugin(mm, settings, row):
+    """CPU refinement needs no OpenMM CUDA sidecar; Torch prediction stays CUDA."""
+    if row['policy']['final_refinement'] == {'platform':'CPU','threads':1}:
+        require(row['policy']['preparation_threads'] == 1, 'resident_cpu_requires_preparation_one')
+        return
+    plugin = native.cuda_plugin_paths(settings, row)
+    mm.Platform.loadPluginsFromDirectory(plugin['plugin_directory'])
+    mm.Platform.getPlatformByName('CUDA')  # Never silently fall back.
 
 
 def model_fingerprint(model):
@@ -198,9 +214,7 @@ class Engine:
         require(self.torch.cuda.is_available(), 'registered_cuda_required')
         self.mm = importlib.import_module('openmm'); importlib.import_module('openmm.app')
         self.fixer = importlib.import_module('pdbfixer')
-        plugin = native.cuda_plugin_paths(self.settings, self.row)
-        self.mm.Platform.loadPluginsFromDirectory(plugin['plugin_directory'])
-        self.mm.Platform.getPlatformByName('CUDA')  # Never silently fall back.
+        load_refinement_plugin(self.mm, self.settings, self.row)
         disabled = logging.root.manager.disable
         try:
             self.builder = importlib.import_module('ImmuneBuilder.NanoBodyBuilder2')
@@ -589,12 +603,16 @@ class RegisteredResidentAdapter(native.Adapter):
         request = {'settings':self.settings,'source_sha':self.source_sha,'gpu':gpu,
                    'directory':str(root),'deadline':time.monotonic()+timeout-5}
         native.atomic(root/'session.json',request)
-        plugin = native.cuda_plugin_paths(self.settings,self.settings['registration'])
+        cpu_refinement = self.settings['registration']['policy']['final_refinement']['platform'] == 'CPU'
+        plugin_libraries = [] if cpu_refinement else native.cuda_plugin_paths(
+            self.settings,self.settings['registration'])['library_directories']
         bundle,environment = self.settings['bundle'],self.settings['environment']
         # Four measured resident workers added ~6.9 GiB. Reserve two GiB per
         # model process plus two GiB for contexts/overlap, never the cold 2 GiB.
         lease = {'gpu':gpu,'ttl_seconds':timeout,
-            'minimum_free_mib':2048*(self.settings['workers_per_gpu']+1),
+            # CPU refinement still keeps CUDA prediction models resident. Four
+            # workers reserve20GiB including conservative model/cache headroom.
+            'minimum_free_mib':(4096 if cpu_refinement else 2048)*(self.settings['workers_per_gpu']+1),
             'lock_directory':self.settings['lock_directory'],'scorer':self.settings['scorer'],
             'receipt':str(root/'lease.json'),'cwd':str(root),
             # The legacy shell wrapper overwrites LD_LIBRARY_PATH. Execute its
@@ -605,7 +623,7 @@ class RegisteredResidentAdapter(native.Adapter):
                 'PYTHONPATH':str(ROOT),'PYTHONDONTWRITEBYTECODE':'1','HOME':'/root','LANG':'C.UTF-8',
                 'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','MKL_NUM_THREADS':'1',
                 'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1',
-                'LD_LIBRARY_PATH':':'.join([environment+'/lib',*plugin['library_directories']])}}
+                'LD_LIBRARY_PATH':':'.join([environment+'/lib',*plugin_libraries])}}
         native.atomic(root/'lease-job.json',lease)
         process = subprocess.Popen([sys.executable,'-B','-m','nanobody_opt.pr100_live_gpu',
             '--job',str(root/'lease-job.json')],cwd=ROOT,

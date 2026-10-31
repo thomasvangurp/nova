@@ -21,6 +21,8 @@ from nanobody_opt import pr100_registered_resident as resident
 FIXTURE = Path(__file__).parent/'fixtures/pr100/resident_entrypoints'
 POLICY = {'prediction':'auto_cuda','preparation_threads':1,
           'final_refinement':{'platform':'CUDA','precision':'mixed','deterministic_forces':True}}
+CPU_POLICY = {'prediction':'auto_cuda','preparation_threads':1,
+              'final_refinement':{'platform':'CPU','threads':1}}
 
 
 def original_cli(monkeypatch):
@@ -109,6 +111,33 @@ def test_router_rejects_unqualified_policy_and_restores_on_failure(tmp_path):
     with pytest.raises(ArithmeticError):
         with resident.route_contexts(observer,mm,POLICY,temporary_directory=tmp_path):Context('outside')
     assert Context.__init__ is original
+
+
+def test_cpu_router_preserves_original_context_identity_and_all_arguments(tmp_path):
+    calls=[]
+    class Context:
+        def __init__(self,*args,**kwargs):calls.append((args,kwargs))
+    original=Context.__init__
+    # Any platform lookup/sidecar route is a failure in the CPU path.
+    mm=NS(Context=Context,Platform=NS(getPlatformByName=lambda *_:pytest.fail('CPU platform untouched')))
+    with resident.route_contexts(NS(),mm,CPU_POLICY,temporary_directory=tmp_path):
+        assert Context.__init__ is original
+        Context('system','integrator','CPU',{'Threads':'1'})
+        Context('preparation',platform='CPU')
+    assert Context.__init__ is original
+    assert calls==[(('system','integrator','CPU',{'Threads':'1'}),{}),
+                   (('preparation',),{'platform':'CPU'})]
+
+
+@pytest.mark.parametrize('cpu',[True,False])
+def test_refinement_plugin_is_loaded_only_for_cuda_policy(monkeypatch,cpu):
+    calls=[]
+    monkeypatch.setattr(resident.native,'cuda_plugin_paths',lambda *args:
+        calls.append('sidecar_verified') or {'plugin_directory':'/sealed/plugin'})
+    mm=NS(Platform=NS(loadPluginsFromDirectory=lambda path:calls.append(('load',path)),
+        getPlatformByName=lambda name:calls.append(('platform',name))))
+    resident.load_refinement_plugin(mm,{}, {'policy':CPU_POLICY if cpu else POLICY})
+    assert calls==([] if cpu else ['sidecar_verified',('load','/sealed/plugin'),('platform','CUDA')])
 
 
 def test_model_drift_prevents_any_authoritative_delivery(monkeypatch):
@@ -293,25 +322,30 @@ def test_actual_native_phase_selects_resident_only_when_enabled(monkeypatch,tmp_
 def adapter(tmp_path):
     value=resident.RegisteredResidentAdapter.__new__(resident.RegisteredResidentAdapter)
     value.settings={'gpus':[0],'workers_per_gpu':4,'resident_batch_draws':32,'resident':True,
-        'registration':{},'bundle':'/qualified/bundle','environment':'/qualified/env',
+        'registration':{'policy':POLICY},'bundle':'/qualified/bundle','environment':'/qualified/env',
         'lock_directory':'/owned/locks','scorer':'/qualified/scorer.py'}
     value.source_sha='a'*40;value.directory=tmp_path;value.phase_deadline=time.monotonic()+300;value.sessions={}
     return value
 
 
-def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_path):
+@pytest.mark.parametrize('cpu',[True,False])
+def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_path,cpu):
     value=adapter(tmp_path);processes=[]
+    if cpu:value.settings['registration']={'policy':CPU_POLICY}
     class Process:
         def __init__(self,*args,**kwargs):self.args=args;self.kwargs=kwargs;processes.append(self)
         def poll(self):return None
     monkeypatch.setattr(resident.subprocess,'Popen',Process)
-    monkeypatch.setattr(resident.native,'cuda_plugin_paths',lambda *_args:{'library_directories':['/qualified/plugin/lib']})
+    def plugin(*_args):
+        assert not cpu,'CPU resident must not read sidecar files'
+        return {'library_directories':['/qualified/plugin/lib']}
+    monkeypatch.setattr(resident.native,'cuda_plugin_paths',plugin)
     first=value._start(0);second=value._start(0)
     assert first is second and len(processes)==1
     lease=json.loads((first['root']/'lease-job.json').read_text())
     assert lease['command'][:3]==['/qualified/env/bin/python3.12','-s','-B']
-    assert lease['env']['LD_LIBRARY_PATH']=='/qualified/env/lib:/qualified/plugin/lib'
-    assert lease['minimum_free_mib']==10240
+    assert lease['env']['LD_LIBRARY_PATH']==('/qualified/env/lib' if cpu else '/qualified/env/lib:/qualified/plugin/lib')
+    assert lease['minimum_free_mib']==(20480 if cpu else 10240)
     assert lease['ttl_seconds']<=300 and value.capacity==32
     assert value._batch_limit({'queue':list(range(50)),'waiting_lanes':1})==32
 

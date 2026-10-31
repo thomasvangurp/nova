@@ -1,9 +1,40 @@
-# Registered resident main-CUDA execution
+# Registered resident CPU and main-CUDA execution
 
 The resident route is opt-in through `native_reference.resident: true`. Its
-registration selects CUDA main refinement with unchanged original scientific
+registration selects CPU1 or CUDA main refinement with unchanged original scientific
 functions and CPU preparation. Existing CPU policy and historical receipts keep
 their meaning. The published-validator trace check defaults to CPU refinement.
+
+## CPU-refinement resident first stage
+
+The CPU resident row uses exactly `prediction: auto_cuda`,
+`preparation_threads: 1`, and `final_refinement: {platform: CPU, threads: 1}`.
+Prediction models remain warm on CUDA; preparation and final refinement run the
+original CPU scientific functions. The CPU branch leaves the original Context
+constructor and all its arguments untouched, including repair contexts. It does
+not verify or load a CUDA plugin sidecar. The worker's private library path is
+only the exact environment's `lib` directory. The sealed runtime and bundle stay
+unchanged.
+
+Root must append a separate CPU-resident row pinning the frozen
+`resident_module_sha256` and its bounded qualification report. Historical CPU
+and CPU-compatible rows stay unchanged. Resident receipts keep `resident-v1`,
+original fresh draw identities, complete failures, and start/end model checks.
+`resident: false` remains the legacy CPU fallback. Existing warm worker counts,
+batch limits, lease ownership, deadlines and cleanup are unchanged.
+
+CPU-resident admission reserves `4096 * (workers_per_gpu + 1)` MiB: four workers
+require 20480 MiB free on the selected prediction GPU. This is conservative
+capacity admission, not a throughput or numerical-equivalence claim. The CUDA
+policy's existing `2048 * (workers_per_gpu + 1)` admission remains unchanged for
+future qualification. A single OpenMM8.5.0 CUDA-main worker exhausted the24GB
+master's memory; the CPU-resident stage does not enable that policy.
+
+The actual Adapter canary explicitly selects CPU1 or CUDA mixed deterministic
+refinement, matches the registered policy and verifies genuine recorded context
+properties. It still requires two groups of eight distinct fresh sequences under
+the same four workers and normal clean lease lifecycle. A CPU canary needs no
+CUDA plugin setting or CUDA registration. Biological failures remain observations.
 
 ## Qualified policy and row
 
