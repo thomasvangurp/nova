@@ -64,6 +64,7 @@ TEST_FILES = (
     'tests/test_pr100_parent_gates.py',
     'tests/test_pr100_stale_handoff.py',
     'tests/test_pr100_novelty_runtime_adversarial.py',
+    'tests/test_pr100_early_novelty.py',
     'tests/test_pr100_native_journal.py',
     'tests/test_pr100_native_screen.py',
     'tests/test_pr100_native_screen_integration.py',

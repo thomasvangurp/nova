@@ -313,6 +313,31 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
     return values, acquired, clock() - acquired
 
 
+def sequence_novelty_prefilter(job, directory, rows, *, check=None, clock=time.monotonic):
+    """Optional exact archive search before any native admission; no native claim."""
+    enabled = job.get('sequence_full_archive_novelty', False)
+    if type(enabled) is not bool:
+        raise ValueError('sequence_full_archive_novelty must be a boolean')
+    if not enabled:
+        return rows, None
+    from nanobody_opt.pr100_novelty_runtime import validate_config
+    runtime = validate_config(job.get('novelty_runtime'))
+    archive = directory / 'archive.csv'
+    if file_digest(archive) != job['archive_sha256']:
+        raise ValueError('early novelty archive snapshot changed')
+    started = clock()
+    kept, archive_rows = ((check or check_novelty)(rows, archive, runtime=runtime)
+                          if rows else ([], None))
+    kept_hashes = {rules.sequence_hash(row['sequence']) for row in kept}
+    removed = [rules.sequence_hash(row['sequence']) for row in rows
+               if rules.sequence_hash(row['sequence']) not in kept_hashes]
+    return kept, {'runtime_sha256': runtime['identity_sha256'],
+                  'archive_sha256': job['archive_sha256'], 'archive_rows': archive_rows,
+                  'input_sha256': rules.digest(rows), 'input_count': len(rows),
+                  'kept_count': len(kept), 'removed_count': len(removed),
+                  'removed_sequence_hashes': removed, 'elapsed_seconds': clock() - started}
+
+
 def sequence_phase(job, directory):
     from abnumber import Chain
     import pandas as pd
@@ -516,6 +541,7 @@ def sequence_phase(job, directory):
         if not reason:
             eligible.append({**row, 'sequence_hash': rules.sequence_hash(sequence),
                              'pr100_annotation': annotation})
+    eligible, early_novelty = sequence_novelty_prefilter(job, directory, eligible)
     chemistry_priority_count = 0
     if (edit_settings['enabled'] and
             edit_settings.get('policy') == pr100_edit_generation.CHEMISTRY_POLICY):
@@ -533,8 +559,8 @@ def sequence_phase(job, directory):
         # segment rows per one combined control, alternating edit/baseline and
         # work-conserving when an arm is exhausted (see interleave_segment_controls).
         eligible = interleave_segment_controls(eligible, segment_source=segments.SOURCE)
-    # Novelty is deliberately NOT run here: the archive search now runs after
-    # native developability, so it is spent only on native passers.
+    # The opt-in prefilter saves native work. Publication still requires the
+    # final archive check; this early result never claims native qualification.
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'], **history,
               'archive_sha256': job['archive_sha256'], 'archive_checked_at_unix': job['archive_fetched_at'],
               'archive_rows': len(frame), 'existing_references': len(refs),
@@ -566,12 +592,14 @@ def sequence_phase(job, directory):
               'generated_sequence_hashes': generated, 'excluded_generated': len(generated) - len(unique) + sum(duplicate_counts.values()),
               'candidates': eligible, 'novelty_checked': False,
               'annotated_total': len(eligible), 'status': 'complete'}
+    if early_novelty is not None:
+        result['early_archive_novelty'] = early_novelty
     pr100_filter.atomic(directory / 'result.json', result)
     return result
 
 
 def check_novelty(rows, archive, *, novelty=None, runtime=None):
-    """Archive novelty, run only on candidates that already passed native."""
+    """Exact archive novelty, independent of the native structural measurement."""
     if novelty is None:
         from nanobody_opt.pr100_novelty_runtime import check
         return check(rows, archive, runtime=runtime)

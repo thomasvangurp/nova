@@ -341,9 +341,13 @@ def phase_request(config, challenge, phase, files, stop_at, clock, *, cap=None):
     # New worker knobs (proposals, workers, repeats, margin, allow_marginal, ...) pass
     # through unchanged; the controller never second-guesses them.
     job.update(config['worker'])
-    if phase in ('native', 'novelty') and runtime.get('novelty_runtime') is not None:
+    needs_novelty = (phase in ('native', 'novelty') or
+                     phase == 'sequence' and job.get('sequence_full_archive_novelty') is True)
+    if needs_novelty and runtime.get('novelty_runtime') is not None:
         from nanobody_opt.pr100_novelty_runtime import validate_config
         job['novelty_runtime'] = dict(validate_config(runtime['novelty_runtime']))
+    elif phase == 'sequence' and job.get('sequence_full_archive_novelty') is True:
+        raise ValueError('dedicated novelty runtime configuration is required')
     if phase == 'native':
         job.update(config.get('native_worker_overrides', {}).get(host, {}))
         job['native_host'] = host
