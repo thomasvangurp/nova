@@ -1,0 +1,74 @@
+{
+  "source_manifests": {
+    "environment": "4e9316d4dd7db9dccb5d55e5cefeabf942cf1579ce100db28d132df2c4bf1875",
+    "bundle": "5987cd030870eefba1d88133840e7944fee9170f172e8c150608a5cfc761baf6"
+  },
+  "files": [
+    {
+      "original_path": "/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/bin/TNP",
+      "export_path": "TNP",
+      "sha256": "807963d232d24bbedd0f2d927703c04c0e2ab03ca8d4a94a8c8653fa4fac946a",
+      "bytes": 30478
+    },
+    {
+      "original_path": "/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/bin/NanoBodyBuilder2",
+      "export_path": "NanoBodyBuilder2",
+      "sha256": "2548a8f24187d72fa09dfde3a4504dff027cf38602dc111207a49bd832c02912",
+      "bytes": 348
+    },
+    {
+      "original_path": "/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/lib/python3.12/site-packages/ImmuneBuilder/NanoBodyBuilder2.py",
+      "export_path": "NanoBodyBuilder2.py",
+      "sha256": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+      "bytes": 9267
+    },
+    {
+      "original_path": "/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/lib/python3.12/site-packages/ImmuneBuilder/refine.py",
+      "export_path": "refine.py",
+      "sha256": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+      "bytes": 13536
+    }
+  ],
+  "missing_primary": [],
+  "original_files_modified": false,
+  "scientific_contract": {
+    "sources": {
+      "ImmuneBuilder.NanoBodyBuilder2": "927ac1cb381de0266fc4bd27828b48ca0443703b6b00c13490062e48e7c727dc",
+      "ImmuneBuilder.refine": "e33d4bdc3e8354296ede6bde0e2fb438368e5e2fbe87ec0d7b387be0d60ebaf0",
+      "metanano.config": "00e8cba1b69ffdac9294b114a173b37353ee547687bdd00c042cc1cc9bab55ce",
+      "metanano.filters.aggrescan3d": "bbf27a6b23f2708de802b920ee68ab713e18fd72f73bcdddd9b3061414ca082f",
+      "metanano.filters.developability": "8cd965a87676270c893e27b22f6114964591984ad058453f52182a12964ebbb0",
+      "metanano.services.async_manager": "e4ab496b6e9b619074170dd75928230074429e0ae33504fb350466c785b0adcd",
+      "metanano.services.developability_service": "77acb749de967f7d25292bec5b35de8b8853af28bcc8b86ef40d18269a13aaf7",
+      "metanano.utils.aggrescan3d_wrapper": "efe77f70a171bd095872ff301d0ce6206a299c4e0df9c3c45ef9b1588f5c2993",
+      "metanano.utils.tnp_wrapper": "b97ad69ba1d1ca56f37031dec73627b3547ef36c2326bfd61635fa1501f9ecdd",
+      "openmm.app.modeller": "376d8c8c06d1cfed4e40da20d77a2094099e872bda783b9c9bfc03a67305e813",
+      "pdbfixer.pdbfixer": "a52e39125e3e0e2d1b58b83841fb05b8669e0bcdd73461e1b0ed1d5a8e8261b9",
+      "theraprofnano.CDR_Profiler.CDR3_Conf_Assigner": "3b77f628bab30927b8934362c2759c06949d5393b4f5401e956334ab21033c44",
+      "theraprofnano.Hydrophobicity_and_Charge_Profiler.Hydrophobicity_and_Charge_Assigner": "71c4fcd4fbe3aa2892598a54dfb1d208265a31f30f455efc8a9c85ea10af7c46"
+    },
+    "versions": {
+      "abnumber": "0.4.4",
+      "anarci": "2026.2.13.2",
+      "biopython": "1.85",
+      "immunebuilder": "1.2",
+      "numpy": "2.0.2",
+      "openmm": "8.5.0",
+      "pdbfixer": "1.12.0",
+      "scipy": "1.15.3",
+      "theraprofnano": "0.0.1",
+      "torch": "2.7.1"
+    },
+    "native_tools": {
+      "aggrescan3d-rs": "9f9e8e393e8016db3749d622232606632ad96d0569fc62f8dbf5409aaff03038",
+      "freesasa": "cc53d9070c82823303fdb680ca72fa11c1a1b313c480c9da7bf537e8e870f903",
+      "psa": "9f38d64c4e533ab5da8c7d608312065e8dc0fb7b41c7dd27216ce40f6fc220e3"
+    },
+    "tnp_cli": {
+      "body_sha256": "e1f91ab9cafe1d22fab8e7f45922e1219792c7f0a4ba65bb4fde315db302dae5",
+      "file_sha256": "807963d232d24bbedd0f2d927703c04c0e2ab03ca8d4a94a8c8653fa4fac946a",
+      "shebang_matches_interpreter": true
+    },
+    "interpreter_sha256": "8d520ffeb3f6028a6ed827273e6b03b00bae1962f20b20ca69dec0489f3fc28b"
+  }
+}

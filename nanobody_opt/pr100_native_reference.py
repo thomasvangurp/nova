@@ -32,6 +32,7 @@ BACKEND = 'native_reference'
 MODULE = 'nanobody_opt.pr100_native_reference'
 SCHEMA = 'pr100-registered-native-profile-v1'
 REGISTRY = ROOT / 'config/pr100_native_reference.json'
+RESIDENT_MODULE = 'nanobody_opt.pr100_registered_resident'
 
 
 def sha(path):
@@ -57,9 +58,17 @@ def registration(identity):
     row = matches[0]
     policy = row.get('policy', {})
     reference.require(policy.get('prediction') == 'auto_cuda'
-        and policy.get('final_refinement') == {'platform': 'CPU', 'threads': 1}
         and type(policy.get('preparation_threads')) is int
         and 1 <= policy['preparation_threads'] <= 32, 'invalid_reference_policy')
+    refinement = reference.validate_refinement_policy(policy.get('final_refinement'))
+    if refinement['platform'] == 'CUDA':
+        reference.require(policy['preparation_threads'] == 1, 'invalid_cuda_preparation_policy')
+        reference.validate_cuda_plugin_identity(row.get('cuda_plugin'))
+        reference.require(row.get('qualification_status') == 'qualified'
+            and reference.sha256(row.get('qualification_report_sha256'))
+            and reference.sha256(row.get('resident_module_sha256')), 'unqualified_cuda_registration')
+    if 'resident_module_sha256' in row:
+        reference.require(reference.sha256(row['resident_module_sha256']), 'unregistered_resident_module')
     for key in ('runtime_sha256', 'observer_sha256', 'implementation_sha256',
                 'environment_manifest_sha256', 'bundle_manifest_sha256'):
         reference.require(reference.sha256(row.get(key)), 'missing_registration_identity')
@@ -169,12 +178,27 @@ def authoritative_measurement(value):
             and request['policy'] == row['policy']
             and request['implementation_sha256'] == row['implementation_sha256'],
             'reference_policy_changed')
+        if (row['policy']['final_refinement']['platform'] == 'CUDA'
+                or request.get('execution') == 'resident-v1'):
+            reference.require(request.get('execution') == 'resident-v1'
+                and reference.sha256(row.get('resident_module_sha256'))
+                and request.get('resident_module_sha256') == row['resident_module_sha256']
+                and reference.sha256(request.get('model_state_start_sha256'))
+                and request['model_state_start_sha256'] == request.get('model_state_end_sha256')
+                and isinstance(request.get('resident_batch_id'), str)
+                and re.fullmatch('[0-9a-f]{32}', request['resident_batch_id']) is not None
+                and type(request.get('resident_batch_draws')) is int
+                and 1 <= request['resident_batch_draws'] <= 32,
+                'resident_execution_changed')
         reference.require(receipt['request_sha256'] == reference.digest(request), 'request_changed')
         reference.validate_receipt(receipt, expected_source_sha=request['source_sha'],
             expected_sequence_hash=value['sequence_hash'], expected_request_sha256=reference.digest(request),
             expected_weights=row['weights'], expected_numpy=row['numpy'],
             expected_observer_sha256=row['observer_sha256'], expected_cuda_available=True,
-            expected_runtime_identity_sha256=row['runtime_sha256'])
+            expected_runtime_identity_sha256=row['runtime_sha256'],
+            expected_final_refinement=row['policy']['final_refinement'],
+            expected_preparation_threads=row['policy']['preparation_threads'],
+            expected_cuda_plugin=row.get('cuda_plugin'))
         _policy_trace(receipt, row['policy'])
         validate_structure_binding(receipt)
         metrics = receipt['observation']['metrics']
@@ -197,15 +221,33 @@ METRICS = {'Total CDR Length': 'total_cdr_length', 'CDR3 Length': 'cdr3_length',
            'PPC': 'positive_charge_patches', 'PNC': 'negative_charge_patches'}
 
 
+def _registered_runtime(raw_runtime, row):
+    """Bind an added sidecar without changing the original sealed contract."""
+    if row['policy']['final_refinement']['platform'] == 'CUDA':
+        reference.validate_cuda_plugin_identity(row.get('cuda_plugin'))
+        reference.require('cuda_plugin' not in raw_runtime, 'base_runtime_already_extended')
+        return {**raw_runtime, 'cuda_plugin': dict(row['cuda_plugin'])}
+    return raw_runtime
+
+
 def verify_files(settings, row, *, full=False):
     """Verify the sealed closure once per phase, scientific assets per lease."""
     bundle, environment = Path(settings['bundle']), Path(settings['environment'])
     reference.require(sha(__file__) == row['implementation_sha256'], 'runner_bytes_changed')
     observer = ROOT / 'nanobody_opt/pr100_context_observer.py'
     reference.require(sha(observer) == row['observer_sha256'], 'observer_bytes_changed')
-    runtime = json.loads((bundle / 'runtime-contract.json').read_text())
+    raw_runtime = json.loads((bundle / 'runtime-contract.json').read_text())
+    if row['policy']['final_refinement']['platform'] == 'CUDA':
+        reference.require(settings.get('resident') is True, 'cuda_requires_registered_resident')
+        cuda_plugin_paths(settings, row)
+    runtime = _registered_runtime(raw_runtime, row)
     reference.require(reference.digest(runtime) == row['runtime_sha256'], 'runtime_changed')
-    reference.validate_runtime(runtime, expected_weights=row['weights'], expected_numpy=row['numpy'])
+    reference.validate_runtime(runtime, expected_weights=row['weights'], expected_numpy=row['numpy'],
+                               expected_cuda_plugin=row.get('cuda_plugin'))
+    if settings.get('resident', False):
+        reference.require(reference.sha256(row.get('resident_module_sha256'))
+            and sha(ROOT / (RESIDENT_MODULE.replace('.', '/') + '.py')) == row['resident_module_sha256'],
+            'resident_module_changed')
     roots = [bundle / 'filter-source', environment / 'lib/python3.12/site-packages']
     for name, expected in runtime['sources'].items():
         candidates = [root / (name.replace('.', '/') + '.py') for root in roots]
@@ -231,6 +273,47 @@ def verify_files(settings, row, *, full=False):
     return runtime
 
 
+def cuda_plugin_paths(settings, row):
+    """Only the registered, sealed sidecar; no automatic plugin discovery."""
+    identity = reference.validate_cuda_plugin_identity(row.get('cuda_plugin'))
+    value = settings.get('cuda_plugin_root')
+    reference.require(isinstance(value, str) and Path(value).is_absolute(), 'missing_cuda_plugin_root')
+    root = Path(value).resolve()
+    path = root / 'plugin-manifest.json'
+    reference.require(not path.is_symlink() and sha(path) == identity['manifest_sha256'],
+                      'cuda_plugin_manifest_changed')
+    manifest = json.loads(path.read_text())
+    reference.require(manifest.get('schema') == 'pr100-openmm-cuda-plugin-v1'
+        and all(manifest.get(key) == identity[key] for key in ('distribution', 'version', 'wheel_sha256')),
+        'cuda_plugin_manifest_identity_changed')
+    def inside(relative):
+        reference.require(isinstance(relative, str) and not Path(relative).is_absolute()
+            and '..' not in Path(relative).parts, 'invalid_cuda_plugin_path')
+        result = root / relative
+        reference.require(result.resolve().is_relative_to(root), 'cuda_plugin_path_escape')
+        return result
+    files = manifest.get('files')
+    reference.require(isinstance(files, dict) and files, 'missing_cuda_plugin_files')
+    for relative, expected in files.items():
+        target = inside(relative)
+        reference.require(re.fullmatch(r'.+\.so(?:\.\d+)*', target.name) is not None
+            and reference.sha256(expected) and target.is_file() and not target.is_symlink()
+            and sha(target) == expected, 'cuda_plugin_file_changed')
+    directory = inside(manifest.get('plugin_directory'))
+    reference.require(directory.is_dir() and (directory / 'libOpenMMCUDA.so').is_file(),
+                      'missing_cuda_plugin_directory')
+    libraries = manifest.get('library_directories')
+    reference.require(isinstance(libraries, list), 'missing_cuda_library_directories')
+    library_paths = [inside(relative) for relative in libraries]
+    reference.require(all(path.is_dir() for path in library_paths), 'missing_cuda_library_directory')
+    for folder in [directory, *library_paths]:
+        for candidate in folder.iterdir():
+            if re.fullmatch(r'.+\.so(?:\.\d+)*', candidate.name):
+                reference.require(candidate.relative_to(root).as_posix() in files,
+                                  'unsealed_cuda_library')
+    return {'plugin_directory': str(directory), 'library_directories': [str(path) for path in library_paths]}
+
+
 def settings_for(job):
     settings = job.get('native_reference', {})
     reference.require(isinstance(settings, dict) and type(settings.get('enabled', False)) is bool,
@@ -238,6 +321,18 @@ def settings_for(job):
     if not settings.get('enabled', False):
         return None
     row = registration(settings.get('registration_sha256'))
+    resident = settings.get('resident', False)
+    reference.require(type(resident) is bool, 'invalid_resident_setting')
+    if resident:
+        reference.require(reference.sha256(row.get('resident_module_sha256')), 'unregistered_resident_module')
+        batch_draws = settings.get('resident_batch_draws', 32)
+        reference.require(type(batch_draws) is int and 1 <= batch_draws <= 32,
+                          'invalid_resident_batch_draws')
+        settings = {**settings, 'resident_batch_draws': batch_draws}
+    if row['policy']['final_refinement']['platform'] == 'CUDA':
+        reference.require(resident, 'cuda_requires_registered_resident')
+        value = settings.get('cuda_plugin_root')
+        reference.require(isinstance(value, str) and Path(value).is_absolute(), 'missing_cuda_plugin_root')
     gpus, allowlist = settings.get('gpus'), settings.get('gpu_allowlist')
     reference.require(isinstance(gpus, list) and isinstance(allowlist, list)
         and all(type(g) is int and 0 <= g < 64 for g in gpus + allowlist), 'invalid_reference_gpus')
@@ -248,7 +343,7 @@ def settings_for(job):
     for key in ('bundle', 'environment', 'lock_directory', 'scorer'):
         reference.require(isinstance(settings.get(key), str) and Path(settings[key]).is_absolute(),
                           'missing_reference_path:' + key)
-    return {**settings, 'gpus': chosen, 'workers_per_gpu': workers, 'registration': row}
+    return {**settings, 'resident': resident, 'gpus': chosen, 'workers_per_gpu': workers, 'registration': row}
 
 
 class Inconclusive(dict):
@@ -326,12 +421,15 @@ class Adapter:
             task = asyncio.create_task(self._lane(state, gpu))
             state['tasks'].add(task); task.add_done_callback(state['tasks'].discard)
 
+    def _batch_limit(self, state):
+        return min(self.settings['workers_per_gpu'],
+                   max(1, math.ceil(len(state['queue']) / max(1, state['waiting_lanes']))))
+
     async def _lane(self, state, gpu):
         batch = []
         try:
             await asyncio.sleep(0)  # Coalesce simultaneously admitted refill slots.
-            limit = min(self.settings['workers_per_gpu'],
-                        max(1, math.ceil(len(state['queue']) / max(1, state['waiting_lanes']))))
+            limit = self._batch_limit(state)
             state['waiting_lanes'] -= 1
             while state['queue'] and len(batch) < limit:
                 item = state['queue'].popleft()

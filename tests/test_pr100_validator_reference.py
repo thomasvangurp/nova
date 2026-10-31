@@ -164,6 +164,67 @@ def test_reference_receipt_never_claims_external_worker_or_promotion():
     assert result['promotion_authorized'] is False
 
 
+def cuda_trace():
+    rows = trace()
+    for event in rows:
+        if event.get('event') != 'context_created':
+            continue
+        if event['role'] == 'hydrogens':
+            event.update(platform='CPU', properties={'Threads': '1'})
+        elif event['role'] == 'minimize_energy':
+            event.update(platform='CUDA', properties={
+                'Precision': 'mixed', 'DeterministicForces': 'true', 'DeviceIndex': '0'})
+    return rows
+
+
+def test_cuda_policy_is_explicit_and_does_not_change_published_cpu_default():
+    rows = cuda_trace()
+    with pytest.raises(ValueError, match='upstream_refinement_device_mismatch'):
+        validate_trace(rows)
+    result = reference.validate_trace(rows, sequence_hash='a'*64,
+        expected_observer_sha256='b'*64, expected_cuda_available=True,
+        expected_final_refinement=reference.CUDA_REFINEMENT, expected_preparation_threads=1)
+    assert result['all_contexts_observed']
+
+
+@pytest.mark.parametrize('change', ['precision', 'determinism', 'device', 'main_cpu', 'hydrogen_cuda', 'prep_threads'])
+def test_cuda_policy_requires_exact_main_and_cpu_preparation_properties(change):
+    rows = cuda_trace()
+    main = next(r for r in rows if r.get('event') == 'context_created' and r['role'] == 'minimize_energy')
+    hydrogen = next(r for r in rows if r.get('event') == 'context_created' and r['role'] == 'hydrogens')
+    if change == 'precision': main['properties']['Precision'] = 'single'
+    elif change == 'determinism': main['properties']['DeterministicForces'] = 'false'
+    elif change == 'device': main['properties']['DeviceIndex'] = '1'
+    elif change == 'main_cpu': main.update(platform='CPU', properties={'Threads': '1'})
+    elif change == 'hydrogen_cuda': hydrogen['platform'] = 'CUDA'
+    else: hydrogen['properties']['Threads'] = '4'
+    with pytest.raises(ValueError):
+        reference.validate_trace(rows, sequence_hash='a'*64, expected_observer_sha256='b'*64,
+            expected_cuda_available=True, expected_final_refinement=reference.CUDA_REFINEMENT,
+            expected_preparation_threads=1)
+
+
+def test_cuda_receipt_requires_exact_plugin_binding_as_well_as_platform_trace():
+    value = receipt()
+    value['trace'] = cuda_trace()
+    value['trace_sha256'] = reference.digest(value['trace'])
+    plugin = {'distribution': 'OpenMM-CUDA-12', 'version': '8.5.0',
+              'wheel_sha256': reference.CUDA_PLUGIN_WHEEL_SHA256, 'manifest_sha256': 'e'*64}
+    value['runtime']['cuda_plugin'] = plugin
+    value['runtime_identity_sha256'] = reference.digest(value['runtime'])
+    options = dict(expected_source_sha='1'*40, expected_sequence_hash='a'*64,
+        expected_request_sha256='2'*64, expected_weights=runtime()['model_weights'], expected_numpy='2.0.2',
+        expected_observer_sha256='b'*64, expected_cuda_available=True,
+        expected_runtime_identity_sha256=value['runtime_identity_sha256'],
+        expected_final_refinement=reference.CUDA_REFINEMENT, expected_preparation_threads=1)
+    with pytest.raises(ValueError, match='invalid_cuda_plugin_identity'):
+        reference.validate_receipt(value, **options)
+    assert reference.validate_receipt(value, **options, expected_cuda_plugin=plugin)['published_source_match']
+    changed = {**plugin, 'manifest_sha256': 'f'*64}
+    with pytest.raises(ValueError, match='cuda_plugin_identity_mismatch'):
+        reference.validate_receipt(value, **options, expected_cuda_plugin=changed)
+
+
 @pytest.mark.parametrize('key', ['source_sha', 'sequence_hash', 'request_sha256', 'reference_contract_sha256',
                                 'runtime_identity_sha256', 'trace_sha256', 'actual_validator_worker_attested'])
 def test_receipt_reuse_and_false_attestation_rejected(key):

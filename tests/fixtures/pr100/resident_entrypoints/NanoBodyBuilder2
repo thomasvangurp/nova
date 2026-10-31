@@ -1,0 +1,8 @@
+#!/root/pr100-validator-reference-20261030/ba353b3-openmm850-biopython185-numpy202/env/bin/python3.12
+# -*- coding: utf-8 -*-
+import re
+import sys
+from ImmuneBuilder.NanoBodyBuilder2 import command_line_interface
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(command_line_interface())

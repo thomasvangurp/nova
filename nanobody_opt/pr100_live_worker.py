@@ -149,6 +149,20 @@ def worker_count(job, *, cores=None, memory=None):
     return max(1, limit)
 
 
+def native_slot_resources(allocated, settings, adapter, *, cores):
+    """Resident queue slots never expand the actual CPU/model allocation."""
+    threads = settings['registration']['policy']['preparation_threads']
+    physical_limit = min(allocated, max(1, cores // threads))
+    if settings.get('resident') is True:
+        scientific = len(settings['gpus']) * settings['workers_per_gpu']
+        if scientific > physical_limit:
+            raise ValueError('resident model processes exceed native CPU allocation')
+        return {'queue_slots':adapter.capacity, 'scientific_processes':scientific,
+                'executor_workers':scientific}
+    count = min(physical_limit, adapter.capacity)
+    return {'queue_slots':count,'scientific_processes':count,'executor_workers':count}
+
+
 def annotation_worker_count(job, *, segment_enabled, cores=None):
     """Small annotation pool; retain the baseline's serial execution path.
 
@@ -271,7 +285,7 @@ def edit_generation_settings(job):
 
 
 def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
-                  on_result=None, on_result_error=None, timeout_seconds=None):
+                  on_result=None, on_result_error=None, timeout_seconds=None, executor_workers=None):
     """Profile a batch and report wall measured from slot acquisition.
 
     The upstream ProfileExecution timeout starts before the semaphore is
@@ -280,6 +294,9 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
     candidate begins here, when its slot is already held.
     """
     develop = develop or pr100_filter.develop
+    executor_workers = workers if executor_workers is None else executor_workers
+    if type(executor_workers) is not int or not 1 <= executor_workers <= workers:
+        raise ValueError('invalid native executor allocation')
     acquired = clock()
     callbacks = ({'on_result': on_result, 'on_result_error': on_result_error}
                  if on_result is not None else {})
@@ -287,7 +304,7 @@ def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
         callbacks['task_timeout_seconds'] = timeout_seconds
     def private_loop():
         loop = asyncio.new_event_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=workers,
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=executor_workers,
                                                     thread_name_prefix='pr100-native'))
         return loop
     # Only this batch owns this loop. Avoid the implicit32-thread ceiling.
@@ -678,12 +695,18 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
     from nanobody_opt import pr100_native_reference
     reference_settings = pr100_native_reference.settings_for(job)
     native_adapter = None
+    scientific_workers = workers
     if reference_settings is not None:
         if measure is not None or screen_settings(job)['enabled']:
             raise ValueError('registered reference cannot mix measurement overrides or screens')
-        native_adapter = pr100_native_reference.Adapter(job, directory)
+        if reference_settings.get('resident') is True:
+            from nanobody_opt.pr100_registered_resident import RegisteredResidentAdapter
+            native_adapter = RegisteredResidentAdapter(job, directory)
+        else:
+            native_adapter = pr100_native_reference.Adapter(job, directory)
         preparation_threads = reference_settings['registration']['policy']['preparation_threads']
-        workers = min(workers, native_adapter.capacity, max(1, available_cores() // preparation_threads))
+        resources = native_slot_resources(workers,reference_settings,native_adapter,cores=available_cores())
+        workers, scientific_workers = resources['queue_slots'],resources['scientific_processes']
     fresh_limit = fresh_budget.validate_limit(job.get('fresh_admission_limit', fresh_budget.DEFAULT_LIMIT), allow_zero=True)
     budget = candidate_budget(job)
     timed_admission = 'native_minimum_call_window_seconds' in job
@@ -771,6 +794,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
             'policy': reference_settings['registration']['policy'], 'gpus': reference_settings['gpus'],
             'workers_per_gpu': reference_settings['workers_per_gpu'],
             'actual_validator_worker_attested': False}
+        if reference_settings.get('resident') is True:
+            result['native_reference']['resources'] = resources
     result['native_admission'] = {'deadline_clamped': timed_admission,
         'minimum_call_window_seconds': minimum_window, 'cleanup_reserve_seconds': cleanup_reserve,
         'candidate_timeout_cap_seconds': budget, 'allocations': []}
@@ -1032,6 +1057,8 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 [r['sequence'] for r in batch], workers, clock=clock,
                 on_result=completed, on_result_error=observation_error,
                 **({'develop': native_adapter.develop} if native_adapter is not None else {}),
+                **({'executor_workers':scientific_workers} if reference_settings is not None
+                   and reference_settings.get('resident') is True else {}),
                 **deadline_options)
         else:
             values, acquired, elapsed = measure([r['sequence'] for r in batch], workers, clock=clock)
@@ -1297,15 +1324,25 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
 
         result['native_refill'] = (refill or pr100_native_refill.run)(
             next_calls, completed, workers, clock=clock,
-            **({'develop': native_adapter.develop} if native_adapter is not None else {}))
+            **({'develop': native_adapter.develop} if native_adapter is not None else {}),
+            **({'executor_workers':scientific_workers} if reference_settings is not None
+               and reference_settings.get('resident') is True else {}))
         return [r for r in rows if r['sequence'] in measured]
 
     try:
         survivors = (collect_refill_measurements() if work_conserving else
                      collect_interleaved_measurements() if interleave else collect_measurements())
     finally:
-        journal.close(timeout=1.0)
-        result['observation_journal'] = journal.progress()
+        try:
+            # A resident pool owns its existing cooperative leases until the
+            # native measurement boundary. Verify owned cleanup before any
+            # completed phase can hand candidates to novelty/publication.
+            shutdown = getattr(native_adapter, 'shutdown', None)
+            if shutdown is not None:
+                shutdown()
+        finally:
+            journal.close(timeout=1.0)
+            result['observation_journal'] = journal.progress()
     verdicts = {}
 
     passers = []

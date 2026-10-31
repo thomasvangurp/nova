@@ -1,8 +1,10 @@
 """Bounded slot refill around the unchanged original native profiling adapter.
 
-No scientific work is queued beyond the number of available slots. A slot is
-reused only after the original adapter has returned, including worker cleanup.
-The enclosing phase supervisor retains ownership of every process descendant.
+No calls are queued beyond the explicit admission slots. A registered resident
+adapter may distinguish those slots from its smaller scientific process pool;
+the executor limit stays with that actual CPU allocation. A slot is reused only
+after its bounded batch checks complete. The enclosing native phase closes its
+resident leases and the supervisor owns every process descendant.
 """
 from __future__ import annotations
 
@@ -18,11 +20,14 @@ class NotStarted:
     reason: str = 'minimum_native_window_closed'
 
 
-def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
+def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic, executor_workers=None):
     from nanobody_opt import pr100_filter
     develop = develop or pr100_filter.develop
     if type(workers) is not int or workers < 1:
         raise ValueError('refill workers must be a positive integer')
+    executor_workers = workers if executor_workers is None else executor_workers
+    if type(executor_workers) is not int or not 1 <= executor_workers <= workers:
+        raise ValueError('invalid native refill executor allocation')
 
     async def execute(call):
         timeout = call['timeout_seconds']
@@ -94,7 +99,7 @@ def run(next_calls, on_result, workers, *, develop=None, clock=time.monotonic):
 
     def private_loop():
         loop = asyncio.new_event_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=workers,
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=executor_workers,
             thread_name_prefix='pr100-native-refill'))
         return loop
 

@@ -78,15 +78,24 @@ def atom(serial, name, x, element):
     return f'ATOM  {serial:5d} {name:>4s} ALA H   1    {x:8.3f}{2.:8.3f}{3.:8.3f}{1.:6.2f}{0.:6.2f}          {element:>2s}  \n'
 
 
-def test_shipped_trial_registration_pins_actual_runner_and_observer_bytes():
+def test_historical_registrations_remain_bound_without_relabeling_old_evidence():
     rows = json.loads(native.REGISTRY.read_text())['registrations']
     assert rows
     for row in rows:
-        assert row['implementation_sha256'] == native.sha(native.__file__)
-        assert row['observer_sha256'] == native.sha(native.ROOT / 'nanobody_opt/pr100_context_observer.py')
+        assert reference.sha256(row['implementation_sha256'])
+        assert reference.sha256(row['observer_sha256'])
         assert row['actual_validator_worker_attested'] is False
-        assert 'trial' in row['qualification_scope']
+        assert isinstance(row['qualification_scope'], str) and row['qualification_scope']
+        if row['name'] == 'published-source-cuda-prediction-cpu-refinement-prep1':
+            assert 'trial' in row['qualification_scope']
         assert native.registration(reference.digest(row)) == row
+
+
+def test_old_runner_registration_cannot_launch_changed_runner_bytes():
+    row = json.loads(native.REGISTRY.read_text())['registrations'][0]
+    if row['implementation_sha256'] != native.sha(native.__file__):
+        with pytest.raises(ValueError, match='runner_bytes_changed'):
+            native.verify_files({'bundle': '/unused', 'environment': '/unused'}, row)
 
 
 @pytest.fixture
@@ -147,6 +156,122 @@ def test_registered_complete_gate_accepts_and_has_stable_identity(registered):
     assert native.measurement_identity(value)['backend'] == 'native_reference'
     assert native.measurement_identity(value)['policy_sha256'] == reference.digest(
         value['native_reference']['policy'])
+
+
+@pytest.fixture
+def cuda_registered(registered):
+    value, job = copy.deepcopy(registered)
+    registry = json.loads(native.REGISTRY.read_text())
+    row = copy.deepcopy(registry['registrations'][0])
+    row['policy']['final_refinement'] = dict(reference.CUDA_REFINEMENT)
+    row.update(qualification_status='qualified', qualification_report_sha256='4'*64,
+               resident_module_sha256='5'*64,
+               cuda_plugin={'distribution': 'OpenMM-CUDA-12', 'version': '8.5.0',
+                   'wheel_sha256': reference.CUDA_PLUGIN_WHEEL_SHA256, 'manifest_sha256': '6'*64})
+    binding = value['native_reference']; receipt = binding['receipt']
+    for event in receipt['trace']:
+        if event.get('event') == 'context_created' and event['role'] == 'minimize_energy':
+            event.update(platform='CUDA', properties={
+                'Precision': 'mixed', 'DeterministicForces': 'true', 'DeviceIndex': '0'})
+    receipt['trace_sha256'] = reference.digest(receipt['trace'])
+    receipt['runtime']['cuda_plugin'] = row['cuda_plugin']
+    receipt['runtime_identity_sha256'] = row['runtime_sha256'] = reference.digest(receipt['runtime'])
+    identity = reference.digest(row)
+    registry['registrations'].append(row); native.REGISTRY.write_text(json.dumps(registry))
+    binding.update(registration_sha256=identity, policy=row['policy'])
+    receipt['request'].update(registration_sha256=identity, policy=row['policy'], execution='resident-v1',
+        resident_module_sha256=row['resident_module_sha256'], model_state_start_sha256='7'*64,
+        model_state_end_sha256='7'*64, resident_batch_id='8'*32, resident_batch_draws=16)
+    receipt['request_sha256'] = reference.digest(receipt['request'])
+    job['native_reference'].update(registration_sha256=identity, resident=True,
+                                    cuda_plugin_root='/sidecar')
+    return value, job
+
+
+def test_registered_cuda_receipt_is_distinct_and_requires_qualified_row(cuda_registered):
+    value, job = cuda_registered
+    assert native.authoritative_measurement(value)
+    settings = native.settings_for(job)
+    assert settings['resident'] is True and settings['resident_batch_draws'] == 32
+    registry = json.loads(native.REGISTRY.read_text())
+    row = registry['registrations'][-1]
+    row['qualification_status'] = 'pending'
+    native.REGISTRY.write_text(json.dumps(registry))
+    with pytest.raises(ValueError, match='unqualified_cuda_registration'):
+        native.registration(reference.digest(row))
+
+
+@pytest.mark.parametrize('change', ['missing_execution', 'module', 'state', 'batch_id', 'batch_size', 'main', 'prep'])
+def test_cuda_resident_receipt_forgery_or_mixed_policy_rejected(cuda_registered, change):
+    value, _ = cuda_registered
+    receipt = value['native_reference']['receipt']; request = receipt['request']
+    if change == 'missing_execution': request.pop('execution')
+    elif change == 'module': request['resident_module_sha256'] = 'f'*64
+    elif change == 'state': request['model_state_end_sha256'] = 'f'*64
+    elif change == 'batch_id': request['resident_batch_id'] = 'not-a-uuid'
+    elif change == 'batch_size': request['resident_batch_draws'] = 33
+    else:
+        role = 'minimize_energy' if change == 'main' else 'hydrogens'
+        event = next(r for r in receipt['trace'] if r.get('event') == 'context_created' and r['role'] == role)
+        event['platform'] = 'CPU' if change == 'main' else 'CUDA'
+        receipt['trace_sha256'] = reference.digest(receipt['trace'])
+    receipt['request_sha256'] = reference.digest(request)
+    assert not native.authoritative_measurement(value)
+
+
+def test_cuda_setting_requires_resident_opt_in_and_bounded_batch(cuda_registered):
+    _, job = cuda_registered
+    job['native_reference']['resident'] = False
+    with pytest.raises(ValueError, match='cuda_requires_registered_resident'):
+        native.settings_for(job)
+    job['native_reference'].update(resident=True, resident_batch_draws=33)
+    with pytest.raises(ValueError, match='invalid_resident_batch_draws'):
+        native.settings_for(job)
+
+
+def test_plugin_manifest_is_exact_confined_and_rejects_unsealed_library(tmp_path):
+    root = tmp_path / 'sidecar'; directory = root / 'lib/plugins'; directory.mkdir(parents=True)
+    plugin = directory / 'libOpenMMCUDA.so'; plugin.write_bytes(b'inert-test-library')
+    manifest = {'schema': 'pr100-openmm-cuda-plugin-v1', 'distribution': 'OpenMM-CUDA-12',
+        'version': '8.5.0', 'wheel_sha256': reference.CUDA_PLUGIN_WHEEL_SHA256,
+        'plugin_directory': 'lib/plugins', 'library_directories': [],
+        'files': {'lib/plugins/libOpenMMCUDA.so': native.sha(plugin)}}
+    path = root / 'plugin-manifest.json'; path.write_text(json.dumps(manifest))
+    row = {'cuda_plugin': {key: manifest[key] for key in ('distribution', 'version', 'wheel_sha256')}}
+    row['cuda_plugin']['manifest_sha256'] = native.sha(path)
+    settings = {'cuda_plugin_root': str(root)}
+    assert native.cuda_plugin_paths(settings, row)['plugin_directory'] == str(directory)
+    extra = directory / 'libUnsealed.so'; extra.write_bytes(b'other')
+    with pytest.raises(ValueError, match='unsealed_cuda_library'):
+        native.cuda_plugin_paths(settings, row)
+    extra.unlink(); plugin.write_bytes(b'changed')
+    with pytest.raises(ValueError, match='cuda_plugin_file_changed'):
+        native.cuda_plugin_paths(settings, row)
+
+
+def test_cuda_runtime_extends_original_contract_only_in_memory_and_keeps_core_identity(tmp_path):
+    original = reference_receipt()['runtime']
+    before = copy.deepcopy(original)
+    path = tmp_path / 'runtime-contract.json'
+    path.write_text(json.dumps(original))
+    sealed_sha = native.sha(path)
+    row = {'policy': {'final_refinement': dict(reference.CUDA_REFINEMENT)},
+        'environment_manifest_sha256': '1'*64, 'bundle_manifest_sha256': '2'*64,
+        'cuda_plugin': {'distribution': 'OpenMM-CUDA-12', 'version': '8.5.0',
+            'wheel_sha256': reference.CUDA_PLUGIN_WHEEL_SHA256, 'manifest_sha256': '3'*64}}
+    row_before = copy.deepcopy(row)
+    extended = native._registered_runtime(original, row)
+    assert extended == {**before, 'cuda_plugin': row['cuda_plugin']}
+    assert original == before and row == row_before and native.sha(path) == sealed_sha
+    assert reference.digest(extended) != reference.digest(original)
+    for key in ('sources', 'interpreter_sha256', 'python_version', 'model_weights', 'versions', 'tnp_cli', 'native_tools'):
+        assert extended[key] == original[key]
+    reference.validate_runtime(extended, expected_weights=original['model_weights'],
+                               expected_numpy='2.0.2', expected_cuda_plugin=row['cuda_plugin'])
+    with pytest.raises(ValueError, match='base_runtime_already_extended'):
+        native._registered_runtime(extended, row)
+    cpu = {'policy': {'final_refinement': dict(reference.CPU_REFINEMENT)}}
+    assert native._registered_runtime(original, cpu) is original
 
 
 @pytest.mark.parametrize('change', ['unknown_registration', 'legacy_screen', 'old_version', 'device',

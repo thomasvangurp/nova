@@ -73,6 +73,7 @@ TEST_FILES = (
     'tests/test_pr100_fleet_probability_integration.py',
     'tests/test_pr100_native_reference.py',
     'tests/test_pr100_native_reference_worker.py',
+    'tests/test_pr100_registered_resident.py',
     'tests/test_pr100_native_history.py',
     'tests/test_pr100_handoff_diagnostics.py',
     'tests/test_pr100_live_handoff_contract.py',

@@ -15,6 +15,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 'pr100-reference-receipt-v1'
 CRITICAL_CANARY = '23e071c8d23f0f727fb387dbfc1aefd1e0b8d3782e3a6ff2897834191cf4701b'
+CPU_REFINEMENT = {'platform': 'CPU', 'threads': 1}
+CUDA_REFINEMENT = {'platform': 'CUDA', 'precision': 'mixed', 'deterministic_forces': True}
+CUDA_PLUGIN_WHEEL_SHA256 = '5e9b1054820b177366113d954fa2885837b31333ea2f6daa489da23148469173'
 
 
 class _CheckedReference(dict):
@@ -39,7 +42,24 @@ def sha256(value):
     return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
 
 
-def validate_runtime(runtime, *, expected_weights, expected_numpy):
+def validate_refinement_policy(policy):
+    require(isinstance(policy, dict) and (
+        (policy == CPU_REFINEMENT and type(policy.get('threads')) is int)
+        or (policy == CUDA_REFINEMENT and policy.get('deterministic_forces') is True)),
+        'invalid_refinement_policy')
+    return policy
+
+
+def validate_cuda_plugin_identity(plugin):
+    require(isinstance(plugin, dict) and set(plugin) == {
+        'distribution', 'version', 'wheel_sha256', 'manifest_sha256'}
+        and plugin['distribution'] == 'OpenMM-CUDA-12' and plugin['version'] == '8.5.0'
+        and plugin['wheel_sha256'] == CUDA_PLUGIN_WHEEL_SHA256
+        and sha256(plugin['manifest_sha256']), 'invalid_cuda_plugin_identity')
+    return plugin
+
+
+def validate_runtime(runtime, *, expected_weights, expected_numpy, expected_cuda_plugin=None):
     """Validate measured bytes against an independent upstream fixture.
 
     Expected weights/NumPy bind the experiment's selected runtime. They are not
@@ -47,6 +67,9 @@ def validate_runtime(runtime, *, expected_weights, expected_numpy):
     """
     ref = contract()
     require(isinstance(runtime, dict), 'missing_runtime')
+    if expected_cuda_plugin is not None:
+        validate_cuda_plugin_identity(expected_cuda_plugin)
+        require(runtime.get('cuda_plugin') == expected_cuda_plugin, 'cuda_plugin_identity_mismatch')
     require(runtime.get('sources') == ref['source_files_sha256'], 'source_bytes_mismatch')
     require(runtime.get('filter_revision') == ref['upstream']['filter_sha'], 'filter_revision_mismatch')
     versions = runtime.get('versions', {})
@@ -77,7 +100,13 @@ def validate_runtime(runtime, *, expected_weights, expected_numpy):
             'runtime_identity_sha256': digest(runtime)}
 
 
-def validate_trace(events, *, sequence_hash, expected_observer_sha256, expected_cuda_available):
+def validate_trace(events, *, sequence_hash, expected_observer_sha256, expected_cuda_available,
+                   expected_final_refinement=None, expected_preparation_threads=None):
+    refinement = validate_refinement_policy(
+        CPU_REFINEMENT if expected_final_refinement is None else expected_final_refinement)
+    if expected_preparation_threads is not None:
+        require(type(expected_preparation_threads) is int and 1 <= expected_preparation_threads <= 32,
+                'invalid_preparation_policy')
     required_scopes = contract()['observer_required_scopes']
     require(sha256(sequence_hash) and sha256(expected_observer_sha256), 'invalid_trace_binding')
     require(type(expected_cuda_available) is bool, 'missing_device_policy')
@@ -128,8 +157,19 @@ def validate_trace(events, *, sequence_hash, expected_observer_sha256, expected_
                 require(context.get('platform') in ('CPU', 'CUDA', 'OpenCL', 'Reference')
                         and isinstance(context.get('properties'), dict), 'unobserved_context_platform')
                 if context['role'] in ('minimize_energy', 'sidechain_repair'):
-                    require(context['platform'] == 'CPU' and context['properties'].get('Threads') == '1',
-                            'upstream_refinement_device_mismatch')
+                    if refinement['platform'] == 'CPU':
+                        require(context['platform'] == 'CPU' and context['properties'].get('Threads') == '1',
+                                'upstream_refinement_device_mismatch')
+                    else:
+                        properties = context['properties']
+                        require(context['platform'] == 'CUDA'
+                            and properties.get('Precision') == 'mixed'
+                            and properties.get('DeterministicForces') == 'true'
+                            and properties.get('DeviceIndex') == '0', 'registered_cuda_refinement_mismatch')
+                if expected_preparation_threads is not None and context['role'] in ('missing_atoms', 'hydrogens'):
+                    require(context['platform'] == 'CPU'
+                        and context['properties'].get('Threads') == str(expected_preparation_threads),
+                        'preparation_policy_not_observed')
         local_predictions = [r for r in rows if r.get('event') == 'prediction']
         predictions.extend(local_predictions)
         local_models = [r for r in rows if r.get('event') == 'model_saved']
@@ -187,7 +227,13 @@ def validate_trace(events, *, sequence_hash, expected_observer_sha256, expected_
 
 def validate_receipt(receipt, *, expected_source_sha, expected_sequence_hash, expected_request_sha256,
                      expected_weights, expected_numpy, expected_observer_sha256,
-                     expected_cuda_available, expected_runtime_identity_sha256):
+                     expected_cuda_available, expected_runtime_identity_sha256,
+                     expected_final_refinement=None, expected_preparation_threads=None,
+                     expected_cuda_plugin=None):
+    refinement = validate_refinement_policy(
+        CPU_REFINEMENT if expected_final_refinement is None else expected_final_refinement)
+    if refinement['platform'] == 'CUDA':
+        validate_cuda_plugin_identity(expected_cuda_plugin)
     require(isinstance(expected_source_sha, str) and re.fullmatch('[0-9a-f]{40}', expected_source_sha)
             and sha256(expected_sequence_hash) and sha256(expected_request_sha256)
             and sha256(expected_runtime_identity_sha256), 'invalid_expected_binding')
@@ -197,14 +243,16 @@ def validate_receipt(receipt, *, expected_source_sha, expected_sequence_hash, ex
         require(receipt.get(key) == expected, 'reference_binding_mismatch:' + key)
     require(receipt.get('reference_contract_sha256') == digest(contract()), 'reference_contract_changed')
     runtime = validate_runtime(receipt.get('runtime'), expected_weights=expected_weights,
-                               expected_numpy=expected_numpy)
+                               expected_numpy=expected_numpy, expected_cuda_plugin=expected_cuda_plugin)
     require(receipt.get('runtime_identity_sha256') == runtime['runtime_identity_sha256'],
             'runtime_identity_changed')
     require(runtime['runtime_identity_sha256'] == expected_runtime_identity_sha256,
             'approved_runtime_identity_mismatch')
     trace = validate_trace(receipt.get('trace'), sequence_hash=expected_sequence_hash,
                            expected_observer_sha256=expected_observer_sha256,
-                           expected_cuda_available=expected_cuda_available)
+                           expected_cuda_available=expected_cuda_available,
+                           expected_final_refinement=refinement,
+                           expected_preparation_threads=expected_preparation_threads)
     require(receipt.get('trace_sha256') == trace['trace_sha256'], 'trace_digest_changed')
     require(receipt.get('actual_validator_worker_attested') is False, 'unsupported_worker_attestation')
     observation = receipt.get('observation')
