@@ -136,6 +136,16 @@ def qualify_rows(job, original, public, annotate):
         row['cells'] = cells; row['pr100_annotation'] = annotation; kept.append(row)
     validate(kept)
     bank.require(kept and set(old) <= {r['sequence_hash'] for r in kept}, 'old_parent_lost')
+    # Join the durable native developability profile (raw PSH) for any parent
+    # already measured on the master box, so the selector reads the real
+    # profile instead of the leaderboard developability_rank proxy. Opt-in:
+    # absent means disabled. When present the store must work -- a missing or
+    # empty store raises, so a broken join can never publish as success.
+    # Read-only; never touches quality_evidence.
+    developability_db = job.get('developability_db')
+    if developability_db:
+        from nanobody_opt import pr100_developability_store
+        pr100_developability_store.attach(kept, developability_db, target=job['target'])
     identity = {k: job[k] for k in ('source_sha', 'target', 'before_epoch', 'runtime_sha256', 'annotation_identity')}
     value = {'schema': bank.SCHEMA, **identity, 'original_bank_sha256': job['original_bank_sha256'],
              'public_records_sha256': job['public_records_sha256'],
