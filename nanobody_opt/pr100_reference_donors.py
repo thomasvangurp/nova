@@ -62,13 +62,28 @@ def developability_status(row):
     if not isinstance(profile, dict):
         evidence = row.get('pr100_evidence')
         profile = evidence.get('developability') if isinstance(evidence, dict) else None
-    try:
-        values = [profile[key] for key in parent_gates.CDR_DEVELOPABILITY_RED_REGION]
-        if any(type(value) not in (float, int) or not math.isfinite(value) for value in values):
-            return 'unknown'
-    except (KeyError, TypeError):
-        return 'unknown'
-    return 'in_range' if parent_gates.cdr_developability_in_range(profile) else 'out_of_range'
+    if isinstance(profile, dict):
+        try:
+            values = [profile[key] for key in parent_gates.CDR_DEVELOPABILITY_RED_REGION]
+            if all(type(value) in (float, int) and math.isfinite(value) for value in values):
+                return ('in_range' if parent_gates.cdr_developability_in_range(profile)
+                        else 'out_of_range')
+        except (KeyError, TypeError):
+            pass
+    # No usable TNP developability profile (the parent-feed is annotation-only):
+    # fall back to the leaderboard developability_rank, a PSH proxy. Lower rank
+    # = better developability (lower PSH). Treat the top half of the epoch
+    # field as in-range.
+    for value in row.get('quality_evidence', []):
+        if not isinstance(value, dict):
+            continue
+        metrics = value.get('metrics')
+        rank = metrics.get('developability_rank') if isinstance(metrics, dict) else None
+        field_size = value.get('field_size')
+        if (type(rank) in (int, float) and math.isfinite(rank)
+                and type(field_size) is int and field_size > 1):
+            return 'in_range' if rank <= field_size / 2 else 'out_of_range'
+    return 'unknown'
 
 
 def merit(row, challenge):

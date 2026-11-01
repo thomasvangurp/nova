@@ -368,6 +368,48 @@ def test_missing_and_failed_developability_are_distinct(bank):
     assert evidence['developability_out_of_range_selected'] == 1
 
 
+def test_annotation_only_rows_fall_back_to_developability_rank(bank):
+    # Parent-feed rows carry no TNP developability profile (annotation-only),
+    # but their quality_evidence metrics include the leaderboard
+    # developability_rank (lower = better = lower PSH). The fallback treats the
+    # better half of the field as in-range instead of reporting 'unknown'.
+    rows = copy.deepcopy([r for r in bank if r['cells'] == ['IGHV3-23:18']][:4])
+    field_size = 4
+    for i, row in enumerate(rows):
+        row.pop('developability', None)
+        row['quality_evidence'] = [{
+            'kind': 'public_validator_percentile', 'target': rules.TARGET,
+            'epoch': 25968, 'value': i / (field_size - 1), 'passes': 1,
+            'field_size': field_size,
+            'metrics': {'developability_rank': float(i + 1)}}]
+    _, chosen, evidence = donors.select(rows, challenge(length=18), 4)
+    assert [d['cdr_developability_status'] for _, d in chosen] == [
+        'in_range', 'in_range', 'out_of_range', 'out_of_range']
+    assert evidence['developability_unknown_selected'] == 0
+    assert evidence['developability_in_range_selected'] == 2
+    assert evidence['developability_out_of_range_selected'] == 2
+
+
+def test_developability_rank_fallback_needs_both_rank_and_field(bank):
+    row = copy.deepcopy(next(r for r in bank if r['cells'] == ['IGHV3-23:18']))
+    row.pop('developability', None)
+    c = challenge(length=18)
+    base = {'kind': 'public_validator_percentile', 'target': rules.TARGET,
+            'epoch': 25968, 'value': 0.5, 'passes': 1, 'field_size': 10}
+    # rank without field_size -> still unknown
+    row['quality_evidence'] = [{**base, 'metrics': {'developability_rank': 1.0}}]
+    del row['quality_evidence'][0]['field_size']
+    assert donors.developability_status(row) == 'unknown'
+    # field_size without metrics -> still unknown
+    row['quality_evidence'] = [{**base, 'metrics': {}}]
+    assert donors.developability_status(row) == 'unknown'
+    # rank <= field_size/2 -> in_range, else out_of_range
+    row['quality_evidence'] = [{**base, 'metrics': {'developability_rank': 5.0}}]
+    assert donors.developability_status(row) == 'in_range'
+    row['quality_evidence'][0]['metrics']['developability_rank'] = 6.0
+    assert donors.developability_status(row) == 'out_of_range'
+
+
 def test_exact_parent_identity_is_validated_too(bank):
     rows = copy.deepcopy(bank)
     rows[0]['sequence_hash'] = 'f' * 64
