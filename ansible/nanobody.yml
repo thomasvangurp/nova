@@ -566,6 +566,29 @@
       register: metanano_build
       changed_when: "'Nothing to do' not in (metanano_build.stdout ~ metanano_build.stderr)"
 
+    # A MetaNano environment whose Python stdlib is absent (lib/python3.12
+    # missing) is an interrupted install or a partial seed, not a healthy env.
+    # The isolated native-reference runtime copies its stdlib and scientific
+    # closure from this environment, so an incomplete MetaNano silently cascades
+    # into a broken native-reference seed (missing OpenMM.libs/lib/libOpenMM.so
+    # and thousands of sealed files). Fail the deploy here instead of at CUDA
+    # worker startup.
+    - name: Require a complete MetaNano stdlib before the native-reference seed
+      ansible.builtin.stat:
+        path: /root/.pixi/envs/metanano/lib/python3.12/__future__.py
+      register: metanano_stdlib
+
+    - name: Assert the MetaNano environment carried its Python standard library
+      ansible.builtin.assert:
+        that:
+          - metanano_stdlib.stat.exists
+          - metanano_stdlib.stat.size > 1000
+        fail_msg: >-
+          /root/.pixi/envs/metanano/lib/python3.12 is missing or empty. The
+          MetaNano environment was not installed completely; re-run
+          `pixi install --manifest-path /root/pixi.toml --locked --environment metanano`
+          before seeding the native-reference runtime.
+
     - name: Verify Pixi activation owns the Layer-2 runtime
       ansible.builtin.command:
         argv:
