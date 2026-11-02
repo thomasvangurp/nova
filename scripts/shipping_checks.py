@@ -119,6 +119,8 @@ TEST_FILES = (
     'tests/test_nanobody_rank_exact.py',
     'tests/test_topup_slave.py',
     'tests/test_build_rival_bank.py',
+    'tests/test_challenge_ledger.py',
+    'tests/test_plan_from_accepted.py',
     'tests/test_chain_state.py',
     'tests/test_de_novo_bank.py',
     'tests/test_hf_field_refresh.py',
