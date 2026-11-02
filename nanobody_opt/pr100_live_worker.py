@@ -418,13 +418,14 @@ def sequence_phase(job, directory):
         # archive supplies the same-length background residue variation (and the
         # haplotype donors), exactly as local_neighborhood uses the recent field.
         edit_cell = f"{expected['allowed_v']}:{expected['allowed_cdr3_length']}"
-        # Never clone a known high-PSH (out_of_range) parent: the edit policy
-        # conserves chemistry, so it would only clone high-PSH children that
-        # fail the developability gate. Unknown and in-range parents still seed
-        # the edit lane; the charged cold-start lane carries the rest.
+        # Graft every exact-cell parent. Leaderboard parents already passed the
+        # validator's developability gate, and developability_rank is a relative
+        # rank within the accepted field, not a PSH pass/fail — so a hard
+        # out_of_range drop discarded the winning parents. developability_rank
+        # stays a sort tiebreak in select(); children are re-checked at the
+        # native PSH gate.
         edit_parents = [r['sequence'] for r in refs
-                        if edit_cell in r.get('cells', [])
-                        and donors.developability_status(r) != 'out_of_range']
+                        if edit_cell in r.get('cells', [])]
         edit_background = [str(s).strip().upper() for s in frame['sequence']
                            if isinstance(s, str) and s.strip()]
         parent_cdrs = {}
