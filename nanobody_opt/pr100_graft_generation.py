@@ -46,9 +46,19 @@ _PROVENANCE_KEYS = ('source_hash', 'source_start', 'source_end', 'region',
 _NEUTRAL_SUBSTITUTIONS = 3  # floor; see ``required_substitutions``
 _REGION_ORDER = ('fr1', 'cdr1', 'fr2', 'cdr2', 'fr3', 'cdr3', 'fr4')
 #: Validator thresholds the child must stay under against every donor.
-_WHOLE_IDENTITY_MAX = 0.95
-_CDR3_CLONOTYPE_MAX = 0.85
+_VALIDATOR_WHOLE_IDENTITY = 0.95
+_VALIDATOR_CDR3_CLONOTYPE = 0.85
+#: Safety margin below the validator thresholds. The fleet/validator side applies
+#: alignment slack (it gates at 0.93 whole identity), so borderline children that
+#: only just clear 0.95 / 0.85 are not emitted. Gates use the margined values.
+_WHOLE_IDENTITY_MARGIN = 0.02
+_CDR3_CLONOTYPE_MARGIN = 0.02
+_WHOLE_IDENTITY_MAX = round(_VALIDATOR_WHOLE_IDENTITY - _WHOLE_IDENTITY_MARGIN, 2)  # 0.93
+_CDR3_CLONOTYPE_MAX = round(_VALIDATOR_CDR3_CLONOTYPE - _CDR3_CLONOTYPE_MARGIN, 2)  # 0.83
+#: Conserved-CDR rule (unchanged): a child is a derivative when CDR3 >= 0.80 AND
+#: CDR1 >= 0.90 AND CDR2 >= 0.90 against a donor.
 _CONSERVED_CDR3, _CONSERVED_CDR1, _CONSERVED_CDR2 = 0.80, 0.90, 0.90
+_AMINO_ACIDS = frozenset('ACDEFGHIKLMNPQRSTVWY')
 #: N-x-S/T glycosylation (x any residue, deliberately stricter than x != P),
 #: asparagine deamidation (NG) and aspartate isomerisation/cleavage (DG, DP).
 _LIABILITY = re.compile(r'(?=(N[A-Z][ST]|NG|DG|DP))')
@@ -60,7 +70,9 @@ _MODES = ('verbatim', 'de_novo')
 #: recipe is germline-independent: the exact-cell framework donor already
 #: supplies the germline, so only CDR3 length conditions the template.
 _ANCHORS = ('AR', 'AK', 'SK', 'SR')
-_TAILS = ('FDY', 'FDV', 'FDP', 'MDV')
+#: FDP is deliberately absent: its DP is a liability motif, so every FDP-tailed
+#: candidate would be generated only to be rejected.
+_TAILS = ('FDY', 'FDV', 'MDV')
 _SHORT_AA = ('T', 'S', 'A', 'G', 'Q', 'N')
 _MEDIUM_CORES = ('YPYHF', 'HPYHFK', 'YPYR', 'PYHF')
 _LONG_CORES = ('FQPR', 'FQPRY', 'YPYR', 'FPYR', 'PYRF')
@@ -114,13 +126,16 @@ def whole_identity(left, right):
 
 
 def required_substitutions(length):
-    """Smallest k with k > 0.15 * length (and at least 3).
+    """Smallest k with k > 0.20 * length (and at least 3).
 
-    Identity (L-k)/L must fall below the 0.85 CDR3 clonotype threshold; three
-    substitutions are not enough from L=20 upward. Integer arithmetic avoids
-    float edge cases at exact multiples.
+    The verbatim CDR3 must clear the conserved-CDR rule as well as the clonotype
+    bound: CDR3 identity (L-k)/L has to fall below 0.80 (the conserved-CDR3
+    threshold), which also keeps it below the margined clonotype bound. At
+    L=15-23 a 0.15-based floor leaves CDR3 identity at 0.80-0.84, so every
+    verbatim pair would be dropped. Integer arithmetic avoids float edge cases
+    at exact multiples.
     """
-    return max(_NEUTRAL_SUBSTITUTIONS, (15 * length) // 100 + 1)
+    return max(_NEUTRAL_SUBSTITUTIONS, (20 * length) // 100 + 1)
 
 
 def liability_count(sequence):
@@ -167,7 +182,7 @@ def _charge(sequence):
 def de_novo_cdr3(length, seed):
     """Deterministic, length-conditioned de-novo CDR3 from the winner recipe.
 
-    The invariant anchor (AR/AK/SK/SR) and J-tail (FDY/FDV/FDP/MDV) frame the
+    The invariant anchor (AR/AK/SK/SR) and J-tail (FDY/FDV/MDV) frame the
     CDR3; the middle is filled from a length-bucket template: minimal neutral
     filler (5-10), a PYR/PYHF core (11-14), an FQPR/PYR core plus an
     alternating K/R-D/E charge network (15-18), or an FQPR/PYR core plus a
@@ -270,10 +285,13 @@ def reconstruct_with_edits(row, references):
 
     Validates legitimacy, not only internal consistency: exactly the seven IMGT
     regions in order; the six framework/CDR1/CDR2 parts verbatim from a single
-    donor interval; only the cdr3 part may be de-novo (byte-identical recorded
-    sequence) or carry edits; edits are bounded by the substitution count for
-    that CDR3 length, unique by offset, and exactly the neutral swap of the
-    donor residue. Any violation, including malformed parts, raises ValueError.
+    donor interval; only the cdr3 part may be de-novo (non-empty, valid amino
+    acids, byte-identical recorded sequence) or carry edits. A verbatim CDR3
+    carries 1..``required_substitutions`` edits that are exactly the
+    deterministic ``neutral_substitutions`` output (offsets only inside the
+    scanned window, never arbitrary). ``graft_mode`` and the recorded CDR3 /
+    framework source hashes must agree with the parts. Any violation, including
+    malformed parts, raises ValueError.
     """
     if not isinstance(row, dict) or not isinstance(row.get('sequence'), str):
         raise ValueError('invalid graft row')
@@ -293,6 +311,7 @@ def reconstruct_with_edits(row, references):
         if part.get('source') == DE_NOVO_PART_SOURCE:
             piece = part.get('sequence')
             if (region != 'cdr3' or edits or not isinstance(piece, str)
+                    or not piece or not set(piece) <= _AMINO_ACIDS
                     or type(c) is not int or type(d) is not int
                     or c != cursor or d - c != len(piece)
                     or 'source_hash' in part):
@@ -319,8 +338,23 @@ def reconstruct_with_edits(row, references):
     result = ''.join(assembled)
     cdr3_part, cdr3_piece = parts[5], assembled[5]
     edits = cdr3_part.get('edits', [])
-    if len(edits) > required_substitutions(len(cdr3_piece)):
-        raise ValueError('graft edit count exceeds substitution cap')
+    de_novo = cdr3_part.get('source') == DE_NOVO_PART_SOURCE
+    # graft_mode is journaled with every row; the two source-hash fields are not part
+    # of the history journal's GENERATION_FIELDS, so they are cross-checked whenever
+    # the row carries them (always true for freshly emitted rows).
+    if row.get('graft_mode') != ('de_novo' if de_novo else 'verbatim'):
+        raise ValueError('graft provenance metadata mismatch')
+    for field, expected in (('graft_cdr3_source_hash', cdr3_source),
+                            ('graft_framework_source_hash', next(iter(framework_sources)))):
+        if field in row and row[field] != expected:
+            raise ValueError('graft provenance metadata mismatch')
+    if de_novo:
+        if edits:
+            raise ValueError('graft de-novo cdr3 mismatch')
+    elif not 1 <= len(edits) <= required_substitutions(len(cdr3_piece)):
+        raise ValueError('graft edit count outside substitution bounds')
+    if 'graft_neutral_subs' in row and row['graft_neutral_subs'] != len(edits):
+        raise ValueError('graft edit count metadata mismatch')
     seen = set()
     for edit in edits:
         if not isinstance(edit, dict):
@@ -328,7 +362,8 @@ def reconstruct_with_edits(row, references):
         offset = edit.get('child_offset')
         source_residue = edit.get('from')
         if (edit.get('kind') != 'neutral_cdr3_substitution'
-                or type(offset) is not int or not 0 <= offset < len(cdr3_piece)
+                or type(offset) is not int
+                or not 2 <= offset < len(cdr3_piece) - 3  # the neutral-substitution scan window
                 or offset in seen
                 or not isinstance(source_residue, str)
                 or source_residue != cdr3_piece[offset]
@@ -337,6 +372,11 @@ def reconstruct_with_edits(row, references):
         seen.add(offset)
         position = cdr3_part['child_start'] + offset
         result = result[:position] + edit['to'] + result[position + 1:]
+    if edits:  # edits must be the deterministic pass output, not arbitrary swaps
+        expected = neutral_substitutions(cdr3_piece, len(edits))[1]
+        if [(e['child_offset'], e['from'], e['to'], e['kind']) for e in edits] != \
+                [(e['child_offset'], e['from'], e['to'], e['kind']) for e in expected]:
+            raise ValueError('graft edit mismatch')
     if result != row['sequence']:
         raise ValueError('graft provenance reconstruction mismatch')
     return result
@@ -426,8 +466,8 @@ def generate(cdr3_donors, framework_donors, challenge, *, limit=300,
     the attempt number so continuation yields fresh candidates.
 
     Every emitted CHILD must clear the validator-style gates against the donors
-    it was built from (whole identity < 0.95, CDR3 similarity < 0.85, conserved
-    CDR rule), carry no liability motif in the generated region, and be unique
+    it was built from (whole identity < 0.93, CDR3 similarity < 0.83, conserved
+    CDR rule; the margins sit below the 0.95 / 0.85 validator thresholds), carry no liability motif in the generated region, and be unique
     by sequence and by CDR3 clonotype. A graft needs at least two distinct
     exact-cell donors, so fewer than two emit nothing.
     """

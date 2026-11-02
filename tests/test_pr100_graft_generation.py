@@ -61,7 +61,7 @@ def prepared(donor):
     return segments.prepare(donor, donor['numbered'])
 
 
-SWAPPABLE = 'RRSAG' + 'R' * 11  # 3 swappable residues at offsets 2..4, length 16
+SWAPPABLE = 'RRSAGT' + 'R' * 10  # 4 swappable residues at offsets 2..5, length 16
 
 
 def pair(abnumber, cd_cdr3=SWAPPABLE, fd_cdr3='Y' * 16, cd_cdr1='R' * 12, fd_cdr1='K' * 12):
@@ -114,20 +114,20 @@ def test_verbatim_graft_provenance_reconstructs(abnumber):
     assert row['graft_mode'] == 'verbatim'
     assert len(row['segment_provenance']) == 7
     assert len({p['source_hash'] for p in row['segment_provenance']}) == 2
-    assert row['graft_neutral_subs'] == 3
+    assert row['graft_neutral_subs'] == 4
     assert row['graft_neutral_subs_shortfall'] == 0
     refs = {cd['sequence_hash']: cd['sequence'], fd['sequence_hash']: fd['sequence']}
     assert graft.reconstruct_with_edits(row, refs) == row['sequence']
 
 
-def test_three_substitutions_identity_offsets_and_residues():
+def test_four_substitutions_identity_offsets_and_residues():
     cdr3 = SWAPPABLE
     edited, edits = graft.neutral_substitutions(cdr3)
-    assert edited == 'RRTSA' + 'R' * 11
+    assert edited == 'RRTSAS' + 'R' * 10
     identity = sum(a == b for a, b in zip(edited, cdr3)) / len(cdr3)
-    assert identity == 13 / 16 == pytest.approx(0.8125)
-    assert 0.80 <= identity < 0.85
-    assert len(edits) == 3
+    assert identity == 12 / 16 == pytest.approx(0.75)
+    assert identity < 0.80  # below the conserved-CDR3 threshold
+    assert len(edits) == 4
     for edit in edits:
         assert edit['kind'] == 'neutral_cdr3_substitution'
         assert edit['from'] in graft.NEUTRAL_SWAPS
@@ -135,12 +135,30 @@ def test_three_substitutions_identity_offsets_and_residues():
         assert 2 <= edit['child_offset'] < len(cdr3) - 3
 
 
-def test_required_substitutions_clears_clonotype_threshold_for_all_lengths():
-    assert [graft.required_substitutions(n) for n in (5, 16, 19, 20, 23, 24, 27, 40)] \
-        == [3, 3, 3, 4, 4, 4, 5, 7]
+def test_required_substitutions_clears_conserved_cdr3_for_all_lengths():
+    assert [graft.required_substitutions(n) for n in (5, 14, 15, 16, 19, 20, 23, 24, 27, 40)] \
+        == [3, 3, 4, 4, 4, 5, 5, 5, 6, 9]
     for length in range(5, 41):
         k = graft.required_substitutions(length)
-        assert (length - k) / length < 0.85
+        assert (length - k) / length < 0.80
+        assert (length - k) / length < graft._CDR3_CLONOTYPE_MAX
+
+
+def test_gate_margins_sit_below_validator_thresholds():
+    assert graft._WHOLE_IDENTITY_MAX == 0.93
+    assert graft._CDR3_CLONOTYPE_MAX == 0.83
+    assert (graft._CONSERVED_CDR3, graft._CONSERVED_CDR1, graft._CONSERVED_CDR2) \
+        == (0.80, 0.90, 0.90)
+
+
+@pytest.mark.parametrize('length', range(15, 24))
+def test_verbatim_lane_emits_for_every_length_15_to_23(abnumber, length):
+    cdr3 = 'RR' + 'SAGSAG' + 'R' * (length - 8 - 3) + 'RRR'
+    cd, fd = pair(abnumber, cd_cdr3=cdr3, fd_cdr3='Y' * length)
+    challenge = {**CHALLENGE, 'allowed_cdr3_length': length}
+    rows = graft.generate([cd], [prepared(fd)], challenge, modes=('verbatim',))
+    assert len(rows) == 1
+    assert rows[0]['graft_neutral_subs'] == graft.required_substitutions(length)
 
 
 def test_neutral_substitutions_protect_anchor_and_skip_liability_motifs():
@@ -171,8 +189,8 @@ def test_divergence_gate_drops_conserved_and_keeps_divergent(abnumber):
 
 def test_gate_is_child_vs_both_donors_not_donor_vs_donor(abnumber):
     # CDR1 differs in 2/12 positions (similarity 0.833 < 0.90) so the donors
-    # themselves look divergent, but the CHILD is 5 residues from the CDR3
-    # donor (2 CDR1 + 3 substitutions): whole identity 126/131 >= 0.95.
+    # themselves look divergent, but the CHILD is 6 residues from the CDR3
+    # donor (2 CDR1 + 4 substitutions): whole identity 125/131 >= 0.93.
     cd, fd = pair(abnumber, fd_cdr1='RRRRRRRRRRKK')
     cd_prepared = prepared(cd)
     assert graft.whole_identity(fd['sequence'], cd['sequence']) < 0.95
@@ -189,21 +207,21 @@ def test_gate_is_child_vs_both_donors_not_donor_vs_donor(abnumber):
 
 
 def test_clonotype_threshold_for_long_cdr3_uses_more_substitutions(abnumber):
-    cdr3 = 'RR' + 'SAGSAG' + 'R' * 12  # length 20 -> k = 4
+    cdr3 = 'RR' + 'SAGSAG' + 'R' * 12  # length 20 -> k = 5
     cd, fd = pair(abnumber, cd_cdr3=cdr3, fd_cdr3='Y' * 20)
     challenge = {**CHALLENGE, 'allowed_cdr3_length': 20}
     rows = graft.generate([cd], [prepared(fd)], challenge, modes=('verbatim',))
     assert len(rows) == 1
-    assert rows[0]['graft_neutral_subs'] == 4
+    assert rows[0]['graft_neutral_subs'] == 5
     child_cdr3 = next(p for p in rows[0]['segment_provenance'] if p['region'] == 'cdr3')
     edited = list(cdr3)
     for edit in child_cdr3['edits']:
         edited[edit['child_offset']] = edit['to']
-    assert segments.cdr_similarity(''.join(edited), cdr3) < 0.85
+    assert segments.cdr_similarity(''.join(edited), cdr3) < 0.80
 
 
 def test_donor_with_too_few_swappable_residues_is_skipped(abnumber):
-    for cdr3 in ('R' * 16, 'RRSA' + 'R' * 12):
+    for cdr3 in ('R' * 16, 'RRSAG' + 'R' * 11):
         cd, fd = pair(abnumber, cd_cdr3=cdr3)
         stats = {}
         assert graft.generate([cd], [prepared(fd)], CHALLENGE, modes=('verbatim',),
@@ -262,6 +280,13 @@ def test_de_novo_cdr3_recipe_length_charge_and_determinism():
         assert abs(pos - neg) <= 1
         assert graft.de_novo_cdr3(length, seed=42) == value
     assert graft.de_novo_cdr3(16, 42) != graft.de_novo_cdr3(16, 43)
+
+
+def test_de_novo_tails_exclude_liability_prone_fdp():
+    assert 'FDP' not in graft._TAILS
+    assert all(graft.liability_count(tail) == 0 for tail in graft._TAILS)
+    tails = {graft.de_novo_cdr3(16, seed)[-3:] for seed in range(200)}
+    assert tails == set(graft._TAILS)
 
 
 def test_de_novo_cdr3_is_length_conditioned():
@@ -420,6 +445,22 @@ def test_reconstruct_with_edits_rejects_illegitimate_provenance(abnumber):
         (verbatim, lambda r: cdr3(r)['edits'][0].pop('from')),
         (verbatim, lambda r: r.__setitem__('sequence', None)),
         (de_novo, lambda r: cdr3(r).__setitem__('sequence', None)),
+        # zero-edit verbatim, arbitrary-offset / out-of-window edits
+        (verbatim, lambda r: cdr3(r).__setitem__('edits', [])),
+        (verbatim, lambda r: cdr3(r).__setitem__('edits', [
+            {'child_offset': 5, 'from': 'T', 'to': 'S', 'kind': 'neutral_cdr3_substitution'}])),
+        (verbatim, lambda r: cdr3(r)['edits'][0].__setitem__('child_offset', 0)),
+        # provenance metadata must agree with the parts
+        (verbatim, lambda r: r.__setitem__('graft_mode', 'de_novo')),
+        (de_novo, lambda r: r.__setitem__('graft_mode', 'verbatim')),
+        (verbatim, lambda r: r.__setitem__('graft_cdr3_source_hash', r['graft_framework_source_hash'])),
+        (verbatim, lambda r: r.__setitem__('graft_framework_source_hash', r['graft_cdr3_source_hash'])),
+        (de_novo, lambda r: r.__setitem__('graft_cdr3_source_hash', r['graft_framework_source_hash'])),
+        (verbatim, lambda r: r.__setitem__('graft_neutral_subs', 1)),
+        # de-novo CDR3 must be non-empty and alphabet-valid (lengths kept consistent)
+        (de_novo, lambda r: cdr3(r).update(sequence='')),
+        (de_novo, lambda r: cdr3(r).update(sequence='B' * len(cdr3(r)['sequence']))),
+        (de_novo, lambda r: cdr3(r).update(sequence='a' * len(cdr3(r)['sequence']))),
     ]
     for row, fn in cases:
         with pytest.raises(ValueError):
@@ -496,5 +537,5 @@ def test_history_and_lineage_resolve_graft_donors(abnumber, tmp_path):
     assert len(edges) == 3
     verbatim_edits = [json.loads(m)['graft_edits'] for _, _, m in edges
                       if json.loads(m)['graft_mode'] == 'verbatim']
-    assert any(len(edits) == 3 for edits in verbatim_edits)
+    assert any(len(edits) == 4 for edits in verbatim_edits)
     store.close()

@@ -455,3 +455,15 @@ def test_cancelled_registered_call_awaits_normal_owner_cleanup(monkeypatch,tmp_p
     asyncio.run(run())
     assert calls==[('wait',2),'terminate_owned_lease',('wait',12)]
     assert (root/'STOP').exists()
+
+
+def test_original_program_context_cwd_failure_does_not_leak_process_lock(monkeypatch, tmp_path):
+    def broken_cwd():
+        raise FileNotFoundError('cwd removed')
+    monkeypatch.setattr(resident.Path, 'cwd', staticmethod(broken_cwd))
+    with pytest.raises(FileNotFoundError):
+        with resident.original_program_context(['TNP'], tmp_path, None, preparation_threads=1,
+                                               trace_path=tmp_path/'trace.jsonl'):
+            pass
+    assert resident._process_lock.acquire(blocking=False)  # not left held
+    resident._process_lock.release()

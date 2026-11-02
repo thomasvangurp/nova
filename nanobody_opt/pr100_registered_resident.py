@@ -116,8 +116,9 @@ class OriginalNBB2CLI:
 @contextmanager
 def original_program_context(argv, cwd, bridge, *, preparation_threads, trace_path, path=None):
     """Restore every process-global override, including exceptional CLI exits."""
+    old_cwd = Path.cwd()  # may raise; evaluate before taking the lock so it cannot leak
     require(_process_lock.acquire(blocking=False), 'resident_process_busy')
-    previous = (sys.argv, Path.cwd(), subprocess.run, logging.root.manager.disable)
+    previous = (sys.argv, old_cwd, subprocess.run, logging.root.manager.disable)
     keys = ('OPENMM_CPU_THREADS', 'NOVA_PR100_CONTEXT_TRACE', 'PATH', 'PYTHONDONTWRITEBYTECODE')
     environment = {key: os.environ.get(key) for key in keys}
     original_run = subprocess.run

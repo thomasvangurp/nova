@@ -11,9 +11,12 @@ observations.  This tool, for every epoch older than ``--keep`` newest directori
   3. only then removes regenerable producer output and writes ``epoch<N>/PRUNED.json``.
      Raw payloads and structures stay at their original per-pass paths.
 
-When ``archive.csv`` is already missing (the epoch was archived elsewhere), there are no importer
-ids left to recompute or backfill, so the producer tree is pruned without an id check. If
-``archive.csv`` IS present, pruning still requires every recomputed id to be present in SQLite.
+When ``archive.csv`` is missing, the retained ``exact_all.json`` payloads can never be imported
+(the importer needs ``archive.csv``), so deleting the producer tree could lose measurements that
+are not in SQLite. Such an epoch is therefore SKIPPED by default (``--execute`` writes a
+``PRUNED.json`` carrying ``"skipped": "archive_missing_unimportable"`` and deletes nothing); pass
+``--force-archive-missing`` to prune it anyway. If ``archive.csv`` IS present, pruning requires
+every recomputed id to be present in SQLite.
 
 It is a dry run unless ``--execute`` is given.  Rankings, tickets (``checkpoints``) and the other
 small top-level files are kept.  Run it with the interpreter that can import ``nanobody_opt``.
@@ -149,17 +152,26 @@ def prune_epoch(args: argparse.Namespace, epoch_dir: Path) -> dict:
             result["status"] = "kept_missing_measurements"
             return result
     else:
-        # archive.csv is already gone (the epoch was archived elsewhere), so there are no
-        # importer ids left to recompute and nothing to backfill: the producer tree is safe
-        # to prune as-is. Retained evidence files are still kept by remove_producer_tree.
+        # archive.csv is gone, so the importer ids cannot be recomputed and exact_all.json can
+        # never be imported: pruning could silently lose measurements. Refuse unless forced.
         ids: list[str] = []
         result.update(observation_ids=0, archive_missing=True)
+        if not args.force_archive_missing:
+            result["status"] = "skipped_archive_missing_unimportable"
+            print(f"WARNING: {epoch_dir.name}: archive.csv missing, measurements cannot be verified "
+                  f"or imported; NOT pruning (use --force-archive-missing to override)",
+                  file=sys.stderr, flush=True)
+            if args.execute:
+                (epoch_dir / "PRUNED.json").write_text(json.dumps(
+                    {"skipped": "archive_missing_unimportable", "checked_at": time.time(),
+                     "freed_bytes": 0}, indent=1))
+            return result
     if not args.execute:
         result["status"] = "would_prune"
         return result
     freed = remove_producer_tree(args.live_root, epoch_dir)
     marker = {"pruned_at": time.time(), "verified_observation_ids": len(ids), "freed_bytes": freed,
-              "archive_csv": "verified" if archive.is_file() else "missing",
+              "archive_csv": "verified" if archive.is_file() else "missing_forced",
               "kept": "rankings, checkpoints, config, raw exact payloads and per-pass structures at their original paths"}
     (epoch_dir / "PRUNED.json").write_text(json.dumps(marker, indent=1))
     result.update(status="pruned", freed_bytes=freed)
@@ -176,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-idle-minutes", type=float, default=30.0,
                         help="skip an epoch whose producer tree changed more recently than this")
     parser.add_argument("--quiet", action="store_true", help="do not print epochs that are already pruned")
+    parser.add_argument("--force-archive-missing", action="store_true",
+                        help="prune epochs whose archive.csv is missing even though their exact_all.json "
+                             "can no longer be imported (default: skip them)")
     parser.add_argument("--execute", action="store_true", help="import missing rows and delete (default: dry run)")
     args = parser.parse_args(argv)
 
