@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import hashlib
 import json
 import os
@@ -29,9 +30,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,32 +39,28 @@ from nanobody_opt import rules  # its source bytes are pinned into tool_sha (ver
 
 import plan_from_accepted  # sibling script: the script dir is sys.path[0] when this runs as a script
 
-# =============================== LIVE-STATE PLACEHOLDERS — FILL BEFORE USE ===============================
-_UNFILLED = "__FILL_ME__"
+# =============================== LIVE-STATE (filled) ===============================
+# Accepted-submissions DB (read-only) and the query that lists candidate epochs. The
+# epochs query takes (to_epoch, target) and returns DISTINCT integer epochs. The block hash
+# comes from the Bittensor subtensor (config.subtensor.chain_endpoint), not a separate HTTP
+# archive endpoint.
+ACCEPTED_DB_PATH = "/root/artifacts/nanobody_mutations.sqlite"
+ACCEPTED_TARGET = "Q9NZQ7"
+ACCEPTED_EPOCHS_SQL = (
+    "SELECT DISTINCT o.epoch FROM observations o JOIN nodes n ON n.id = o.node_id "
+    "WHERE o.source = 'public_validator_api' AND o.score_kind = 'validator_final_rank_sum' "
+    "AND o.epoch <= ? AND n.target = ? ORDER BY o.epoch"
+)
 
-# [PLACEHOLDER 1] The NAME of the env var that holds the archive node's HTTP(S) JSON-RPC URL.
-# Only the name goes here. The URL may embed an API key, so it is read at call time and never
-# printed, logged, or written to the report.
-ARCHIVE_RPC_URL_ENV = _UNFILLED + "ARCHIVE_RPC_URL_ENV_NAME"
-
-# [PLACEHOLDER 2] The accepted-submissions observation DB (SQLite, opened read-only) and the SQL that
-# lists candidate epochs. The SQL must take exactly ONE `?` (to_epoch) and return ONE integer column
-# of DISTINCT epochs <= to_epoch.
-ACCEPTED_DB_PATH = _UNFILLED + "/path/to/accepted_submissions.sqlite"
-ACCEPTED_EPOCHS_SQL = _UNFILLED + "SELECT DISTINCT epoch FROM <accepted_table> WHERE epoch <= ? ORDER BY epoch"
-
-# [PLACEHOLDER 3] H4-style era gate. Set True only after a human has confirmed that the config file
-# (ruleset) and epoch_length were the validator's rules for EVERY epoch in the backfill range.
-# Apply refuses while this is False.
+# H4-style era gate. Set True only after a human has confirmed the config (ruleset) and
+# epoch_length were the validator's rules for EVERY epoch in the backfill range.
 ERAS_CONFIRMED = False
-# =========================================================================================================
+# ================================================================================
 
 EXPECTED_DERIVATION_VERSION = "accepted-submissions-v1"
 PLAN_SOURCE = "validator_accepted_submissions"   # goes into provenance.derived_from, never into the source column
 LEDGER_SOURCE = "backfill"                       # the epoch_challenges.source column is always this
 VERIFIED_BY = "rules.challenge(block_hash)"
-RPC_ATTEMPTS = 4
-RPC_TIMEOUT_S = 30
 
 EPOCH_COLS = (
     "seq", "epoch", "epoch_length", "epoch_start_block", "epoch_start_block_hash", "target",
@@ -168,73 +162,40 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# ------------------------------------------------------------------ placeholders / environment
-def _require_placeholders_filled() -> None:
-    unfilled = [
-        name for name, val in (
-            ("ARCHIVE_RPC_URL_ENV", ARCHIVE_RPC_URL_ENV),
-            ("ACCEPTED_DB_PATH", ACCEPTED_DB_PATH),
-            ("ACCEPTED_EPOCHS_SQL", ACCEPTED_EPOCHS_SQL),
-        ) if val.startswith(_UNFILLED)
-    ]
-    if unfilled:
-        raise Refusal(f"fill the live-state placeholders first: {', '.join(unfilled)}")
-
-
-def _rpc_url() -> str:
-    """Return the archive RPC URL. The value must never reach stdout, stderr, or the report."""
-    url = os.environ.get(ARCHIVE_RPC_URL_ENV, "")
-    if not url:
-        raise Refusal(f"environment variable {ARCHIVE_RPC_URL_ENV} is not set")
-    scheme = urllib.parse.urlsplit(url).scheme.lower()
-    if scheme not in ("http", "https"):
-        raise Refusal(f"{ARCHIVE_RPC_URL_ENV} must be an http(s) JSON-RPC URL (scheme {scheme!r} unsupported)")
-    return url
-
-
+# ------------------------------------------------------------------ block hash (Bittensor subtensor)
 _BLOCK_HASH_CACHE: dict[int, str] = {}
 
 
-def fetch_block_hash(block_number: int) -> str:
-    """chain_getBlockHash against the archive node. Errors are sanitised and never contain the URL."""
-    if isinstance(block_number, bool) or not isinstance(block_number, int) or block_number < 0:
-        raise ValueError(f"block number must be a non-negative int, got {block_number!r}")
-    if block_number in _BLOCK_HASH_CACHE:
-        return _BLOCK_HASH_CACHE[block_number]
-    url = _rpc_url()
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash",
-                       "params": [block_number]}).encode("utf-8")
-    payload, last = None, "no attempt"
-    for attempt in range(RPC_ATTEMPTS):
-        if attempt:
-            time.sleep(2 ** attempt)
-        req = urllib.request.Request(url, data=body, method="POST",
-                                     headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=RPC_TIMEOUT_S) as resp:
-                payload = json.loads(resp.read())
-            break
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-            e.close()
-            if e.code != 429 and e.code < 500:
-                break  # client error: retrying will not help
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            last = type(e).__name__
-    if payload is None:
-        raise RuntimeError(f"archive RPC chain_getBlockHash({block_number}) failed: {last}")
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"archive RPC returned a non-object for block {block_number}")
-    if payload.get("error") is not None:
-        err = payload["error"]
-        code = err.get("code") if isinstance(err, dict) else None
-        raise RuntimeError(f"archive RPC error for block {block_number}: code={code}")
-    h = payload.get("result")
-    if not isinstance(h, str) or not _BLOCK_HASH_RE.match(h):
-        raise RuntimeError(f"archive RPC returned no valid hash for block {block_number} "
-                           f"(non-archive node, pruned, or future block?)")
-    _BLOCK_HASH_CACHE[block_number] = h
-    return h
+def fetch_block_hash(subtensor, block: int) -> str:
+    """Return the 0x-prefixed hash of a block via subtensor.determine_block_hash.
+
+    Errors are sanitised (type name only; never the endpoint or raw text). A
+    None/malformed result means the node lacks this header (pruned / warp gap).
+    """
+    if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+        raise RuntimeError(f"invalid block number: {block!r}")
+    cached = _BLOCK_HASH_CACHE.get(block)
+    if cached is not None:
+        return cached
+    try:
+        value = subtensor.determine_block_hash(block)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"block hash lookup failed for block {block} ({type(exc).__name__})") from None
+    if not isinstance(value, str) or not _BLOCK_HASH_RE.match(value):
+        raise RuntimeError(f"block hash unavailable for block {block}: endpoint lacks this header "
+                           f"(pruned/warp-gap node); use an archive --subtensor.chain_endpoint")
+    value = value.lower()
+    _BLOCK_HASH_CACHE[block] = value
+    return value
+
+
+def _build_subtensor(args):
+    """Build the Bittensor subtensor from the CLI flags (lazy import)."""
+    import bittensor as bt  # lazy: only needed on the chain-connected host
+    kwargs = {"network": args.subtensor_network}
+    if args.subtensor_chain_endpoint:
+        kwargs["chain_endpoint"] = args.subtensor_chain_endpoint
+    return bt.Subtensor(**kwargs)  # capital S: the live code uses bt.Subtensor(network=...)
 
 
 # ------------------------------------------------------------------ ledger access
@@ -664,9 +625,9 @@ def _config_git(config_path: Path, config_bytes: bytes):
 
 
 def _candidate_epochs(obs_conn, to_epoch: int) -> list[int]:
-    if ACCEPTED_EPOCHS_SQL.count("?") != 1:
-        raise Refusal("ACCEPTED_EPOCHS_SQL must contain exactly one '?' (to_epoch)")
-    vals = [tuple(r)[0] for r in obs_conn.execute(ACCEPTED_EPOCHS_SQL, (to_epoch,)).fetchall()]
+    if ACCEPTED_EPOCHS_SQL.count("?") != 2:
+        raise Refusal("ACCEPTED_EPOCHS_SQL must contain exactly two '?' (to_epoch, target)")
+    vals = [tuple(r)[0] for r in obs_conn.execute(ACCEPTED_EPOCHS_SQL, (to_epoch, ACCEPTED_TARGET)).fetchall()]
     if any(isinstance(v, bool) or not isinstance(v, int) for v in vals):
         raise Refusal("ACCEPTED_EPOCHS_SQL returned non-integer epochs")
     if len(set(vals)) != len(vals):
@@ -676,8 +637,8 @@ def _candidate_epochs(obs_conn, to_epoch: int) -> list[int]:
     return sorted(vals)
 
 
-def _open_accepted_db():
-    p = Path(ACCEPTED_DB_PATH)
+def _open_accepted_db(db_path):
+    p = Path(db_path)
     if not p.is_file():
         raise Refusal(f"accepted-submissions DB not found: {p}")
     return sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True)
@@ -705,7 +666,6 @@ def _apply_blockers(integrity, calib, git_problem) -> list[str]:
 
 # ------------------------------------------------------------------ driver
 def _run(args, report: dict) -> int:
-    _require_placeholders_filled()
     if args.mode == "apply":
         if not ERAS_CONFIRMED:
             raise Refusal("apply refused: ERAS_CONFIRMED is False (confirm eras for the whole range first)")
@@ -715,7 +675,6 @@ def _run(args, report: dict) -> int:
             raise Refusal("apply refused: --report is required (audit trail)")
     if args.limit is not None and args.limit < 1:
         raise Refusal("--limit must be >= 1")
-    _rpc_url()  # fail fast; the value is not kept
 
     config_path = args.config.resolve()
     config_bytes = config_path.read_bytes()  # read exactly once; build_plan's config_sha256 is checked against it
@@ -725,7 +684,7 @@ def _run(args, report: dict) -> int:
     report.update({
         "config": {"path": str(config_path), "config_sha256": _sha256(config_bytes), "ruleset_sha256": config_fp},
         "tool_sha": tool_sha, "tool_files": tool_files,
-        "live_state": {"ARCHIVE_RPC_URL_ENV": ARCHIVE_RPC_URL_ENV, "ACCEPTED_DB_PATH": ACCEPTED_DB_PATH,
+        "live_state": {"ACCEPTED_DB_PATH": ACCEPTED_DB_PATH, "ACCEPTED_TARGET": ACCEPTED_TARGET,
                        "ACCEPTED_EPOCHS_SQL": ACCEPTED_EPOCHS_SQL, "ERAS_CONFIRMED": ERAS_CONFIRMED},
     })
 
@@ -742,11 +701,13 @@ def _run(args, report: dict) -> int:
         epoch_length = _resolve_epoch_length(rows, args.epoch_length)
         ledger_by_epoch = {r["epoch"]: r for r in rows}
 
-        obs = _open_accepted_db()
+        subtensor = _build_subtensor(args)
+        obs = _open_accepted_db(args.accepted_db)
         try:
             epochs = _candidate_epochs(obs, to_epoch)
             plan = plan_from_accepted.build_plan(
-                obs, epochs, epoch_length=epoch_length, fetch_block_hash=fetch_block_hash,
+                obs, epochs, epoch_length=epoch_length,
+                fetch_block_hash=functools.partial(fetch_block_hash, subtensor),
                 annotate=plan_from_accepted.pinned_annotator, config_path=config_path)
         finally:
             obs.close()
@@ -857,6 +818,11 @@ def main(argv=None) -> int:
     ap.add_argument("--epoch-length", type=int, default=None, help="required only if ledger rows disagree")
     ap.add_argument("--report", type=Path, default=None, help="JSON report path (required for apply)")
     ap.add_argument("--yes", action="store_true", help="confirm apply writes")
+    ap.add_argument("--accepted-db", default=ACCEPTED_DB_PATH,
+                    help="accepted-submissions SQLite path (default: master path)")
+    ap.add_argument("--subtensor-network", default="finney", help="Bittensor network (default finney)")
+    ap.add_argument("--subtensor-chain-endpoint", default=None,
+                    help="optional wss archive endpoint if the default node is pruned")
     args = ap.parse_args(argv)
 
     report = {"tool": "backfill_challenges", "mode": args.mode, "run_id": uuid.uuid4().hex,
