@@ -534,3 +534,28 @@ def test_deadline_keeps_valid_partial_fallback_honest(native_env, monkeypatch):
     assert result['rejection_counts']['insufficient_repeats'] == 1
     assert 'margin_missed' not in result['rejection_counts']
     assert result['repeat_evaluations'] == 0
+
+
+def _src(source, n):
+    return {'source': source, 'n': n}
+
+
+def test_interleave_accepts_frozenset_segment_source():
+    rows = ([_src('segment_recombination', i) for i in range(2)]
+            + [_src('leaderboard_graft', i) for i in range(2)]
+            + [_src('edit_generation', i) for i in range(2)]
+            + [_src('fresh_baseline_proposal', i) for i in range(4)])
+    ordered = worker.interleave_segment_controls(
+        rows, segment_source=frozenset(('segment_recombination', 'leaderboard_graft')))
+    # The two experimental sources share the four-per-control arm, preserving
+    # their combined pool order and each source's internal order.
+    assert [r['source'] for r in ordered[:4]] == (
+        ['segment_recombination'] * 2 + ['leaderboard_graft'] * 2)
+    assert [r['n'] for r in ordered if r['source'] == 'segment_recombination'] == [0, 1]
+    assert [r['n'] for r in ordered if r['source'] == 'leaderboard_graft'] == [0, 1]
+    assert ordered[4]['source'] == 'edit_generation'
+    # Single-string callers still behave exactly as before: the graft source
+    # falls into the baseline/control pool when it is not in the segment set.
+    single = worker.interleave_segment_controls(rows, segment_source='segment_recombination')
+    assert [r['source'] for r in single[:4]] == (
+        ['segment_recombination'] * 2 + ['edit_generation', 'leaderboard_graft'])

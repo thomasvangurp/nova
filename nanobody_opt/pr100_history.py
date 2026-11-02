@@ -26,7 +26,7 @@ GENERATION_FIELDS = ('sequence', 'sequence_hash', 'source', 'parent_sequence',
                      'reference_hash', 'reference_stratum', 'proposal_lane',
                      'edit_policy', 'mutations', 'requested_v', 'requested_cdr3_length')
 GENERATION_FIELDS += ('segment_layout', 'segment_provenance', 'segment_splice',
-                      'segment_search_prior', 'proposal_type')
+                      'segment_search_prior', 'proposal_type', 'graft_mode')
 
 
 def canonical(value):
@@ -125,7 +125,8 @@ def generation_records(rows, donors):
     projected = [{k: row[k] for k in GENERATION_FIELDS if k in row} for row in rows]
     used = {row.get('reference_hash') for row in projected if row.get('reference_hash')}
     used.update(part['source_hash'] for row in projected
-                for part in row.get('segment_provenance', []))
+                for part in row.get('segment_provenance', [])
+                if isinstance(part, dict) and part.get('source_hash'))
     references = [{'sequence': row['sequence'], 'sequence_hash': row['sequence_hash']}
                   for row in donors if row.get('sequence_hash') in used]
     return {'generation_rows': projected, 'lineage_references': references,
@@ -256,6 +257,21 @@ def import_generation(conn, raw, *, locator, references=None, before_epoch=None)
             if not missing_items:
                 reconstruct(row, refs)
                 links = [(refs[sha], 'recorded_segment_donor') for sha in sorted(hashes)]
+        if row.get('source') == 'leaderboard_graft':
+            from nanobody_opt.pr100_graft_generation import reconstruct_with_edits
+            parts = row.get('segment_provenance')
+            if not isinstance(parts, list) or not parts:
+                raise ValueError('segment_provenance_missing')
+            hashes = {part['source_hash'] for part in parts
+                      if isinstance(part, dict) and part.get('source_hash')}
+            if any(not isinstance(sha, str) or HEX.fullmatch(sha) is None for sha in hashes):
+                raise ValueError('invalid_segment_reference_hash')
+            missing_items = [{'reason': 'segment_donor_unresolved:' + sha, 'reference_hash': sha}
+                             for sha in sorted(hashes - refs.keys())]
+            links = []
+            if not missing_items:
+                reconstruct_with_edits(row, refs)
+                links = [(refs[sha], 'recorded_graft_donor') for sha in sorted(hashes)]
         prepared.append((row, child, links, missing_items))
     relationships = unresolved = 0
     with conn:
@@ -285,6 +301,15 @@ def import_generation(conn, raw, *, locator, references=None, before_epoch=None)
                     metadata['copied_segments'] = [part for part in row['segment_provenance']
                         if part['source_hash'] == digest(parent.encode())]
                     metadata['segment_layout'] = row['segment_layout']
+                if kind == 'recorded_graft_donor':
+                    mutations = []  # A graft contribution is not a whole-parent mutation path.
+                    parent_parts = [part for part in row['segment_provenance']
+                                    if part.get('source_hash') == digest(parent.encode())]
+                    metadata['copied_segments'] = parent_parts
+                    metadata['segment_layout'] = row['segment_layout']
+                    metadata['graft_mode'] = row.get('graft_mode')
+                    cdr3_part = next((p for p in parent_parts if p.get('region') == 'cdr3'), None)
+                    metadata['graft_edits'] = cdr3_part.get('edits', []) if cdr3_part else []
                 conn.execute('INSERT OR IGNORE INTO lineage_edges('
                              'parent_node_id,child_node_id,epoch,source,proposal_type,mutations_json,metadata_json) '
                              'VALUES(?,?,?,?,?,?,?)',
