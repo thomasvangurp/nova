@@ -1,12 +1,106 @@
 """Durable same-epoch attempts. Journals remain audit-only, never reusable evidence."""
 from __future__ import annotations
+import contextlib
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
+import socket
+import subprocess
 import time
 from nanobody_opt import rules, pr100_fresh_budget as fresh_budget
 
+_log = logging.getLogger(__name__)
+
 SCHEMA = 'pr100-epoch-continuation-v1'
+
+
+# ---------------------------------------------------------------------------
+# Challenge ledger: best-effort per-epoch recording. A broken ledger must never
+# take down the miner, so every failure is logged and swallowed; each retry or
+# continuation re-attempts the idempotent write.
+# ---------------------------------------------------------------------------
+LEDGER_FILENAME = "challenge-ledger.sqlite"
+_DERIVATION_SCHEME = "challenge-v1"
+_LEDGER_SOURCE = "pr100-coordinator"
+
+try:
+    from nanobody_opt import challenge_ledger
+except Exception:
+    challenge_ledger = None
+    _log.exception("CHALLENGE_LEDGER_IMPORT_FAILED")
+
+
+def challenge_ledger_path(config):
+    return Path(config["state_root"]) / LEDGER_FILENAME
+
+
+def _git(cwd, *args):
+    try:
+        return subprocess.run(
+            ("git", *args), cwd=str(cwd), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True,
+        ).stdout.decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+
+
+def _git_clean_commit(path):
+    path = Path(path).resolve()
+    cwd = path.parent
+    if _git(cwd, "rev-parse", "--is-shallow-repository") != "false":
+        return None
+    sha = _git(cwd, "log", "-1", "--format=%H", "--", path.name)
+    if not sha:
+        return None
+    if _git(cwd, "status", "--porcelain", "--", path.name) != "":
+        return None  # dirty checkout: refuse to claim a commit
+    return sha
+
+
+def _derivation_version():
+    if challenge_ledger is None:
+        return f"{_DERIVATION_SCHEME}@unknown"
+    try:
+        src = Path(challenge_ledger.__file__).resolve()
+        sha = _git_clean_commit(src)
+        if sha:
+            return f"{_DERIVATION_SCHEME}@{sha}"
+        return f"{_DERIVATION_SCHEME}@sha256:{hashlib.sha256(src.read_bytes()).hexdigest()}"
+    except Exception:
+        return f"{_DERIVATION_SCHEME}@unknown"
+
+
+LEDGER_DERIVATION_VERSION = _derivation_version()
+
+
+def _record_challenge_best_effort(config, epoch, clock, challenge, *, dry_run):
+    """Append this epoch's challenge to the ledger once. Never raises."""
+    if dry_run:
+        _log.info("challenge ledger: dry_run, not recording epoch=%s", epoch)
+        return
+    if challenge_ledger is None:
+        _log.error("CHALLENGE_LEDGER_WRITE_FAILED epoch=%s reason=import-failed", epoch)
+        return
+    try:
+        config_bytes = challenge_ledger.canonical_json(rules.pinned_config(epoch))
+        block = clock.get("block")
+        provenance = {
+            "writer": "pr100_epoch_continuation.run_epoch",
+            "epoch": int(epoch),
+            "clock_block": int(block) if block is not None else None,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+        }
+        with contextlib.closing(challenge_ledger.connect(challenge_ledger_path(config))) as conn:
+            result = challenge_ledger.record_challenge(
+                config_bytes, challenge, LEDGER_DERIVATION_VERSION, _LEDGER_SOURCE,
+                provenance, conn=conn)
+        _log.info("challenge ledger epoch=%s inserted=%s derivation=%s",
+                  epoch, result.get("inserted"), LEDGER_DERIVATION_VERSION)
+    except Exception:
+        _log.exception("CHALLENGE_LEDGER_WRITE_FAILED epoch=%s", epoch)
 
 
 def failure_details(error):
@@ -738,6 +832,7 @@ def run_epoch(config, chain, clock, *, dry_run=False):
     local.mkdir(parents=True, exist_ok=True)
     challenge = rules.challenge(rules.pinned_config(epoch), epoch,
                                 chain.determine_block_hash(epoch * length), length)
+    _record_challenge_best_effort(config, epoch, clock, challenge, dry_run=dry_run)
     stop_at = c.publication_cutoff(clock, epoch, reserve=config.get('reserve_blocks', c.RESERVE_BLOCKS))
     path = local / 'continuation.json'
     state = read(path)
