@@ -42,7 +42,7 @@ from nanobody_opt.analyze_epoch_winners import (
 from nanobody_opt.rank_exact import LEADERBOARD_API_ROOT
 from nanobody_opt.regions import find_regions
 from nanobody_opt.select_elite_parents import _epoch_candidates, _fetch
-from nanobody_opt.simulate_round import METRICS, validator_final_scores
+from nanobody_opt.simulate_round import METRICS, dense_rank_sums
 
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
@@ -173,7 +173,7 @@ def percentile_targets(frame: pd.DataFrame) -> np.ndarray:
 
 def rank_field(frame: pd.DataFrame) -> pd.DataFrame:
     ranked = frame.copy()
-    ranked["reconstructed_rank_sum"] = validator_final_scores(ranked)
+    ranked["reconstructed_rank_sum"] = dense_rank_sums(ranked, METRICS)
     ranked["actual_field_rank"] = ranked["final_score"].rank(
         method="min", ascending=True
     ).astype(int)

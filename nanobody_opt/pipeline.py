@@ -20,7 +20,7 @@ from sklearn.linear_model import Ridge
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nanobody_opt import gates, diversity
-from nanobody_opt.simulate_round import validator_final_scores
+from nanobody_opt.simulate_round import dense_rank_sums
 
 SCORED = {  # boltzgen rank_sum: all 10 metrics, this is what WINS the epoch
     "design_iiptm": "max", "design_ptm": "max", "design_to_target_iptm": "max",
@@ -81,7 +81,7 @@ def main():
     print(f"archive: {len(df):,} sequences at the modal length {L}")
 
     # what is SCORED
-    rank_sum = validator_final_scores(df)
+    rank_sum = dense_rank_sums(df, SCORED)
     # what defines the TOP 50 for the diversity gate -- a DIFFERENT algorithm
     top50 = diversity.minmax_weighted_rank(df, k=cfg.get("num_top_sequences", 50))
     top50_seqs = top50.sequence.tolist()
