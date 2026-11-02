@@ -6,7 +6,7 @@ scientific imports occur in the controller process. New qualified registration
 is required; enabling a flag never promotes an old CPU receipt.
 """
 from __future__ import annotations
-import argparse,asyncio,functools,hashlib,importlib,json,logging,math,os,re,selectors,subprocess,sys,threading,time,uuid
+import argparse,asyncio,functools,hashlib,importlib,json,locale,logging,math,os,re,selectors,subprocess,sys,threading,time,uuid
 from contextlib import contextmanager,redirect_stdout,redirect_stderr
 from pathlib import Path
 from types import ModuleType
@@ -25,6 +25,37 @@ def require(value, reason):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+def restore_utf8_locale():
+    """Re-assert a UTF-8 process locale before every resident draw.
+
+    TNP's post-prediction stages reset the C locale to POSIX/ASCII, which
+    changes the default text encoding of any file opened without an explicit
+    ``encoding`` (and of the redirected stdout). Re-assert UTF-8 so a draw's
+    own stdout and TNP's log files stay UTF-8 across repeated draws.
+    """
+    for name in ('C.UTF-8', 'C.utf8', 'en_US.UTF-8'):
+        try:
+            locale.setlocale(locale.LC_ALL, name)
+            return
+        except locale.Error:
+            continue
+
+def ensure_biopython_three_to_one():
+    """Compat for the sealed TNP scripts against Biopython 1.85.
+
+    The sealed environment's ``scripts/process_pdb.py`` still imports
+    ``three_to_one`` from ``Bio.PDB.Polypeptide`` inside ``run_dssp``. That
+    name no longer exists in Biopython 1.85 (the canonical mapping is
+    ``protein_letters_3to1``), so ``get_modelling_details`` raises ImportError
+    and never writes ``modelling_details.jsonp`` / ``sequence_liabilities.csv``.
+    Expose the old name as a function before TNP executes so the sealed source
+    runs unchanged.
+    """
+    import Bio.PDB.Polypeptide as polypeptide
+    if not hasattr(polypeptide, 'three_to_one'):
+        polypeptide.three_to_one = (lambda resname:
+            polypeptide.protein_letters_3to1.get(resname, 'X'))
 
 def execute_program(code):
     """Give an unchanged entrypoint its own __main__ globals and script path."""
@@ -275,6 +306,10 @@ class Engine:
         sequence = request['sequences'][index]
         require(re.fullmatch('[ACDEFGHIKLMNPQRSTVWY]{50,300}', sequence) is not None,
                 'invalid_sequence')
+        # Re-assert UTF-8 before this draw's stdout/log files are opened; TNP's
+        # post-prediction stages can leave the process locale at POSIX/ASCII.
+        restore_utf8_locale()
+        ensure_biopython_three_to_one()
         native.atomic(Path(request['directory'])/(str(index)+'.started.json'), {'started':True})
         directory = Path(request['directory']) / str(index); directory.mkdir()
         started = time.monotonic(); key = hashlib.sha256(sequence.encode()).hexdigest()
@@ -293,8 +328,8 @@ class Engine:
         with route_contexts(observer, self.mm, self.row['policy'], temporary_directory=self.root/'openmm-tmp'):
             try:
                 observer.install(self.mm, self.fixer, self.builder, self.refine, self.torch)
-                with (directory/'private-stdout.log').open('x') as stdout, \
-                     (directory/'private-stderr.log').open('x') as stderr, \
+                with (directory/'private-stdout.log').open('x', encoding='utf-8') as stdout, \
+                     (directory/'private-stderr.log').open('x', encoding='utf-8') as stderr, \
                      original_program_context(argv, directory, bridge,
                          preparation_threads=self.row['policy']['preparation_threads'],
                          trace_path=directory/'trace.jsonl', path=self.settings['environment']+'/bin:'+

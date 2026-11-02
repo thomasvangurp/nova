@@ -105,7 +105,7 @@
       "qualification_status": "qualified",
       "qualification_report_sha256": "999d5219a4ff187c59730350fefc2ed598b51c8ff93e212659e0d24ad16a57a8",
       "qualification_report_file": "config/pr100_cuda850_qualification.json",
-      "resident_module_sha256": "243eb321d5128662f4ccd0b4c27c91fb3d4668ced52919e590c4cbc1d7cdeb25",
+      "resident_module_sha256": "7ced4313aa67108425de801289b44f0faf399349c693d3d3a3ab87aed993f3f7",
       "cuda_plugin": {
         "distribution": "OpenMM-CUDA-12",
         "version": "8.5.0",
