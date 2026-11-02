@@ -559,7 +559,7 @@ def sequence_phase(job, directory):
             graft_donors[:graft_settings['cdr3_donors']],
             framework_prepared[:graft_settings['framework_donors']],
             expected,
-            limit=graft_settings['limit'],
+            limit=graft_settings['limit'], proposal_offset=proposal_offset,
             excluded=excluded | archive_hashes | {rules.sequence_hash(r['sequence']) for r in rows},
             stats=graft_stats))
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})

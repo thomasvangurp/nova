@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections import Counter
 import random
+import re
 
 from nanobody_opt import rules
 from nanobody_opt import pr100_reference_donors as reference_donors
@@ -42,7 +43,17 @@ _BOUNDS = (('limit', 1, 4800), ('cdr3_donors', 1, 64),
            ('framework_donors', 1, 64), ('donor_slots', 2, 128))
 _PROVENANCE_KEYS = ('source_hash', 'source_start', 'source_end', 'region',
                     'sequence', 'imgt_start', 'imgt_end')
-_NEUTRAL_SUBSTITUTIONS = 3
+_NEUTRAL_SUBSTITUTIONS = 3  # floor; see ``required_substitutions``
+_REGION_ORDER = ('fr1', 'cdr1', 'fr2', 'cdr2', 'fr3', 'cdr3', 'fr4')
+#: Validator thresholds the child must stay under against every donor.
+_WHOLE_IDENTITY_MAX = 0.95
+_CDR3_CLONOTYPE_MAX = 0.85
+_CONSERVED_CDR3, _CONSERVED_CDR1, _CONSERVED_CDR2 = 0.80, 0.90, 0.90
+#: N-x-S/T glycosylation (x any residue, deliberately stricter than x != P),
+#: asparagine deamidation (NG) and aspartate isomerisation/cleavage (DG, DP).
+_LIABILITY = re.compile(r'(?=(N[A-Z][ST]|NG|DG|DP))')
+_DE_NOVO_MIN_LENGTH = 5
+_DE_NOVO_MAX_ATTEMPTS = 4000
 _MODES = ('verbatim', 'de_novo')
 
 #: Measured de-novo winner recipe components (121-epoch winner analysis). The
@@ -102,19 +113,48 @@ def whole_identity(left, right):
     return (sum(a == b for a, b in zip(left, right)) / size) if size else 1.0
 
 
-def neutral_substitutions(cdr3, n=_NEUTRAL_SUBSTITUTIONS):
-    """Deterministic, seedless neutral substitutions; never the last 3 residues.
+def required_substitutions(length):
+    """Smallest k with k > 0.15 * length (and at least 3).
+
+    Identity (L-k)/L must fall below the 0.85 CDR3 clonotype threshold; three
+    substitutions are not enough from L=20 upward. Integer arithmetic avoids
+    float edge cases at exact multiples.
+    """
+    return max(_NEUTRAL_SUBSTITUTIONS, (15 * length) // 100 + 1)
+
+
+def liability_count(sequence):
+    """Number of (overlapping) N-x-S/T, NG, DG and DP motifs in ``sequence``."""
+    return len(_LIABILITY.findall(sequence))
+
+
+def neutral_substitutions(cdr3, n=None):
+    """Deterministic, seedless neutral substitutions.
+
+    The scan starts at index 2 (the AR/AK/SK/SR-style anchor A is never
+    mutated) and never touches the last 3 residues. A swap that would add a
+    liability motif is skipped. ``n`` defaults to ``required_substitutions``.
+    Fewer than ``n`` edits are returned when the CDR3 has too few swappable
+    residues; callers must treat that as a shortfall and skip the donor.
 
     Returns the edited CDR3 and one edit record per applied substitution. Each
     edit's ``child_offset`` is relative to the CDR3 start and ``from`` is the
     verbatim donor residue.
     """
-    indices = [i for i in range(0, len(cdr3) - 3) if cdr3[i] in NEUTRAL_SWAPS]
-    edits = [{'child_offset': i, 'from': cdr3[i], 'to': NEUTRAL_SWAPS[cdr3[i]],
-              'kind': 'neutral_cdr3_substitution'} for i in indices[:n]]
-    edited = list(cdr3)
-    for edit in edits:
-        edited[edit['child_offset']] = edit['to']
+    n = required_substitutions(len(cdr3)) if n is None else n
+    edited, edits = list(cdr3), []
+    for i in range(2, len(cdr3) - 3):
+        if len(edits) == n:
+            break
+        if cdr3[i] not in NEUTRAL_SWAPS:
+            continue
+        trial = edited[:]
+        trial[i] = NEUTRAL_SWAPS[cdr3[i]]
+        if liability_count(''.join(trial)) > liability_count(''.join(edited)):
+            continue
+        edited = trial
+        edits.append({'child_offset': i, 'from': cdr3[i], 'to': NEUTRAL_SWAPS[cdr3[i]],
+                      'kind': 'neutral_cdr3_substitution'})
     return ''.join(edited), edits
 
 
@@ -153,6 +193,12 @@ def de_novo_cdr3(length, seed):
     return anchor + middle + tail
 
 
+def _pick(pool, built, rng):
+    """Choose from ``pool`` without extending a run of one residue past two."""
+    allowed = [r for r in pool if built[-2:] != [r, r]]
+    return rng.choice(allowed or list(pool))
+
+
 def _fill_middle(prefix, middle_len, rng):
     """Fill to ``middle_len`` with a winner-proportioned residue mix.
 
@@ -160,41 +206,49 @@ def _fill_middle(prefix, middle_len, rng):
     alternating to keep K+R within one of D+E), 30% polar/small, 20% aromatic
     and 10% hydrophobic, matching the 121-epoch winner middle composition.
     Consecutive charged runs are capped at two so the native developability
-    charge-patch gates are not provoked.
+    charge-patch gates are not provoked, and no residue of any class (charged,
+    polar, aromatic, hydrophobic) repeats more than twice in a row, counting
+    the prefix.
     """
     prefix_pos, prefix_neg = _charge(prefix)
     net_len = middle_len - len(prefix)
     next_positive = (prefix_pos - prefix_neg) < 0
-    network = []
+    built = list(prefix)
     charge_run = 0
     for _ in range(net_len):
         if charge_run >= 2 or rng.random() >= 0.40:
             roll = rng.random()
             if roll < 0.50:
-                network.append(rng.choice(_SHORT_AA))
+                built.append(_pick(_SHORT_AA, built, rng))
             elif roll < 0.83:
-                network.append(rng.choice(_AROMATIC_AA))
+                built.append(_pick(_AROMATIC_AA, built, rng))
             else:
-                network.append(rng.choice(_HYDRO_AA))
+                built.append(_pick(_HYDRO_AA, built, rng))
             charge_run = 0
         else:
-            network.append(rng.choice(_POSITIVE if next_positive else _NEGATIVE))
+            built.append(_pick(_POSITIVE if next_positive else _NEGATIVE, built, rng))
             next_positive = not next_positive
             charge_run += 1
-    return prefix + ''.join(network)
+    return ''.join(built)
+
+
+def _filler(prefix, count, rng):
+    """``count`` neutral residues continuing ``prefix`` under the max-run-2 cap."""
+    built = list(prefix)
+    for _ in range(count):
+        built.append(_pick(_SHORT_AA, built, rng))
+    return ''.join(built[len(prefix):])
 
 
 def _short_middle(n, rng):
     """Minimal neutral filler; no aromatic/His core."""
-    return ''.join(rng.choice(_SHORT_AA) for _ in range(n))
+    return _filler([], n, rng)
 
 
 def _medium_middle(n, rng):
     """One PYR/PYHF core motif, extended with neutral filler to the exact length."""
     core = rng.choice(_MEDIUM_CORES)[:n]
-    if len(core) < n:
-        core += ''.join(rng.choice(_SHORT_AA) for _ in range(n - len(core)))
-    return core
+    return core + _filler(list(core), n - len(core), rng)
 
 
 def _long_middle(n, rng):
@@ -214,51 +268,75 @@ def _xlong_middle(n, rng):
 def reconstruct_with_edits(row, references):
     """Exact residue-level provenance check for graft rows, edits included.
 
-    Mirrors ``segments.reconstruct`` interval/contiguity checks for donor
-    intervals, validates a de-novo CDR3 byte-identical when the cdr3 part
-    carries ``source == 'de_novo_recipe'``, then applies each verbatim part's
-    neutral substitutions and returns the edited join. Any interval,
-    contiguity, source-identity or edit mismatch raises.
+    Validates legitimacy, not only internal consistency: exactly the seven IMGT
+    regions in order; the six framework/CDR1/CDR2 parts verbatim from a single
+    donor interval; only the cdr3 part may be de-novo (byte-identical recorded
+    sequence) or carry edits; edits are bounded by the substitution count for
+    that CDR3 length, unique by offset, and exactly the neutral swap of the
+    donor residue. Any violation, including malformed parts, raises ValueError.
     """
+    if not isinstance(row, dict) or not isinstance(row.get('sequence'), str):
+        raise ValueError('invalid graft row')
     parts = row.get('segment_provenance')
-    if not isinstance(parts, list) or len(parts) != 7:
+    if not isinstance(parts, list) or len(parts) != len(_REGION_ORDER):
         raise ValueError('invalid graft provenance')
-    assembled, cursor, sources, slices = [], 0, set(), []
-    for part in parts:
-        c = part.get('child_start'); d = part.get('child_end')
+    if not isinstance(references, dict):
+        raise ValueError('invalid graft references')
+    assembled, cursor, framework_sources, cdr3_source = [], 0, set(), None
+    for index, (part, region) in enumerate(zip(parts, _REGION_ORDER)):
+        if not isinstance(part, dict) or part.get('region') != region:
+            raise ValueError('graft provenance region order mismatch')
+        c, d = part.get('child_start'), part.get('child_end')
+        edits = part.get('edits', [])
+        if not isinstance(edits, list) or (edits and region != 'cdr3'):
+            raise ValueError('invalid graft edits')
         if part.get('source') == DE_NOVO_PART_SOURCE:
             piece = part.get('sequence')
-            if (not isinstance(piece, str) or type(c) is not int or type(d) is not int
-                    or c != cursor or d - c != len(piece)):
+            if (region != 'cdr3' or edits or not isinstance(piece, str)
+                    or type(c) is not int or type(d) is not int
+                    or c != cursor or d - c != len(piece)
+                    or 'source_hash' in part):
                 raise ValueError('graft de-novo cdr3 mismatch')
-            assembled.append(piece); cursor = d; slices.append((part, piece))
-            continue
-        sha = part['source_hash']; source = references.get(sha)
-        a, b = part['source_start'], part['source_end']
-        if (source is None or rules.sequence_hash(source) != sha or type(a) is not int
-                or type(b) is not int or not 0 <= a < b <= len(source)
-                or type(c) is not int or type(d) is not int or c != cursor
-                or d - c != b - a):
-            raise ValueError('graft provenance interval mismatch')
-        piece = source[a:b]
-        assembled.append(piece); sources.add(sha); cursor = d
-        slices.append((part, piece))
-    if not 1 <= len(sources) <= 2:
+        else:
+            if 'source' in part:
+                raise ValueError('graft provenance source mismatch')
+            sha, a, b = part.get('source_hash'), part.get('source_start'), part.get('source_end')
+            source = references.get(sha) if isinstance(sha, str) else None
+            if (not isinstance(source, str) or rules.sequence_hash(source) != sha
+                    or type(a) is not int or type(b) is not int or not 0 <= a < b <= len(source)
+                    or type(c) is not int or type(d) is not int or c != cursor
+                    or d - c != b - a):
+                raise ValueError('graft provenance interval mismatch')
+            piece = source[a:b]
+            if region == 'cdr3':
+                cdr3_source = sha
+            else:
+                framework_sources.add(sha)
+        assembled.append(piece)
+        cursor = d
+    if len(framework_sources) != 1 or cdr3_source in framework_sources:
         raise ValueError('graft provenance source mismatch')
     result = ''.join(assembled)
-    for part, piece in slices:
-        edits = part.get('edits', [])
-        if not isinstance(edits, list):
-            raise ValueError('invalid graft edits')
-        for edit in edits:
-            offset = edit.get('child_offset')
-            if (edit.get('kind') != 'neutral_cdr3_substitution'
-                    or type(offset) is not int or not 0 <= offset < len(piece)
-                    or edit.get('from') != piece[offset]
-                    or edit.get('to') != NEUTRAL_SWAPS.get(edit['from'])):
-                raise ValueError('graft edit mismatch')
-            position = part['child_start'] + offset
-            result = result[:position] + edit['to'] + result[position + 1:]
+    cdr3_part, cdr3_piece = parts[5], assembled[5]
+    edits = cdr3_part.get('edits', [])
+    if len(edits) > required_substitutions(len(cdr3_piece)):
+        raise ValueError('graft edit count exceeds substitution cap')
+    seen = set()
+    for edit in edits:
+        if not isinstance(edit, dict):
+            raise ValueError('graft edit mismatch')
+        offset = edit.get('child_offset')
+        source_residue = edit.get('from')
+        if (edit.get('kind') != 'neutral_cdr3_substitution'
+                or type(offset) is not int or not 0 <= offset < len(cdr3_piece)
+                or offset in seen
+                or not isinstance(source_residue, str)
+                or source_residue != cdr3_piece[offset]
+                or edit.get('to') != NEUTRAL_SWAPS.get(source_residue)):
+            raise ValueError('graft edit mismatch')
+        seen.add(offset)
+        position = cdr3_part['child_start'] + offset
+        result = result[:position] + edit['to'] + result[position + 1:]
     if result != row['sequence']:
         raise ValueError('graft provenance reconstruction mismatch')
     return result
@@ -292,29 +370,71 @@ def _emit_row(child, sha, framework, cdr3_part, cdr3_source_hash, neutral_subs,
             'acceptance_qualified': False, 'target_scored': False}
 
 
-def _diverges(framework, cdr3_donor):
-    """Hard, cheap divergence gate shared by both graft modes."""
-    return (whole_identity(framework['sequence'], cdr3_donor['sequence']) < 0.95
-            and (segments.cdr_similarity(framework['segments']['cdr1']['sequence'],
-                                         cdr3_donor['segments']['cdr1']['sequence']) < 0.90
-                 or segments.cdr_similarity(framework['segments']['cdr2']['sequence'],
-                                            cdr3_donor['segments']['cdr2']['sequence']) < 0.90))
+def _child_cdrs(framework, cdr3):
+    return (framework['segments']['cdr1']['sequence'],
+            framework['segments']['cdr2']['sequence'], cdr3)
+
+
+def _clears_donor(child, child_cdrs, donor):
+    """True when the CHILD (not the donor pair) is far enough from ``donor``."""
+    cdr1, cdr2, cdr3 = child_cdrs
+    donor_cdr3 = donor['segments']['cdr3']['sequence']
+    cdr3_similarity = segments.cdr_similarity(cdr3, donor_cdr3)
+    if (whole_identity(child, donor['sequence']) >= _WHOLE_IDENTITY_MAX
+            or cdr3_similarity >= _CDR3_CLONOTYPE_MAX):
+        return False
+    return not (cdr3_similarity >= _CONSERVED_CDR3
+                and segments.cdr_similarity(cdr1, donor['segments']['cdr1']['sequence'])
+                >= _CONSERVED_CDR1
+                and segments.cdr_similarity(cdr2, donor['segments']['cdr2']['sequence'])
+                >= _CONSERVED_CDR2)
+
+
+def _assemble(framework, cdr3):
+    s = framework['segments']
+    return (s['fr1']['sequence'] + s['cdr1']['sequence'] + s['fr2']['sequence']
+            + s['cdr2']['sequence'] + s['fr3']['sequence'] + cdr3 + s['fr4']['sequence'])
+
+
+class _Clonotypes:
+    """Emitted CDR3s; a new CDR3 at or above the clonotype threshold is a dup."""
+
+    def __init__(self):
+        self.exact, self.items = set(), []
+
+    def duplicate(self, cdr3):
+        return cdr3 in self.exact or any(
+            segments.cdr_similarity(cdr3, other) >= _CDR3_CLONOTYPE_MAX
+            for other in self.items)
+
+    def add(self, cdr3):
+        self.exact.add(cdr3)
+        self.items.append(cdr3)
 
 
 def generate(cdr3_donors, framework_donors, challenge, *, limit=300,
-             excluded=(), stats=None, modes=_MODES):
+             excluded=(), stats=None, modes=_MODES, proposal_offset=0):
     """Emit exact-cell CDR3 grafts, in deterministic merit order, up to ``limit``.
 
     ``cdr3_donors`` are raw exact-cell bank rows (prepared here). ``framework_donors``
-    are already-prepared exact-cell rows from ``prepare_framework``. Each passing
-    donor pair emits a verbatim graft (donor CDR3 + neutral substitutions) and,
-    when ``de_novo`` is enabled, a de-novo graft (recipe-sampled CDR3). A graft
-    needs at least two distinct exact-cell donors, so a shared framework/CDR3
-    donor pool with fewer than two donors emits nothing.
+    are already-prepared exact-cell rows from ``prepare_framework``.
+
+    ``verbatim``: each (CDR3 donor, framework donor) pair emits the donor CDR3
+    with ``required_substitutions`` neutral swaps. A donor whose CDR3 has fewer
+    swappable residues is skipped. ``de_novo``: recipe-sampled CDR3s on each
+    framework donor in round-robin, seeded from epoch, ``proposal_offset`` and
+    the attempt number so continuation yields fresh candidates.
+
+    Every emitted CHILD must clear the validator-style gates against the donors
+    it was built from (whole identity < 0.95, CDR3 similarity < 0.85, conserved
+    CDR rule), carry no liability motif in the generated region, and be unique
+    by sequence and by CDR3 clonotype. A graft needs at least two distinct
+    exact-cell donors, so fewer than two emit nothing.
     """
     from abnumber import Chain
     if (type(limit) is not int or not 1 <= limit <= 4800
-            or not isinstance(cdr3_donors, list) or not isinstance(framework_donors, list)):
+            or not isinstance(cdr3_donors, list) or not isinstance(framework_donors, list)
+            or type(proposal_offset) is not int or proposal_offset < 0):
         raise ValueError('invalid graft generation input bound')
     modes = tuple(modes)
     if not modes or any(mode not in _MODES for mode in modes):
@@ -336,6 +456,7 @@ def generate(cdr3_donors, framework_donors, challenge, *, limit=300,
     cdr3_donors = sorted(cdr3_donors, key=key)
     framework_donors = sorted(framework_donors, key=key)
     references = {fd['sequence_hash']: fd['sequence'] for fd in framework_donors}
+    length = challenge['allowed_cdr3_length']
     prepared_cds = []
     for cd in cdr3_donors:
         try:
@@ -348,71 +469,89 @@ def generate(cdr3_donors, framework_donors, challenge, *, limit=300,
             counters['donor_numbering_failed'] += 1
             continue
         cdr3 = prepared['segments']['cdr3']['sequence']
-        if len(cdr3) != challenge['allowed_cdr3_length']:
+        if len(cdr3) != length:
             counters['cdr3_length_mismatch'] += 1
             continue
         references[cd['sequence_hash']] = cd['sequence']
         prepared_cds.append((prepared, cdr3))
 
     excluded = set(excluded)
-    result = []
+    result, seen_sequences, clonotypes = [], set(), _Clonotypes()
     stop_reason = 'donor_pairs_exhausted'
-    de_novo_counter = 0
-    for prepared, cdr3_verbatim in prepared_cds:
-        edited_cdr3, edits = neutral_substitutions(cdr3_verbatim)
-        for fd in framework_donors:
-            if fd['sequence_hash'] == prepared['sequence_hash']:
+
+    def finish(child, sha, fd, cdr3_part, cdr3_hash, subs, shortfall, mode, cdr3):
+        row = _emit_row(child, sha, fd, cdr3_part, cdr3_hash, subs, shortfall,
+                        mode, challenge)
+        if reconstruct_with_edits(row, references) != child:
+            raise ValueError('graft reconstruction mismatch')
+        result.append(row)
+        seen_sequences.add(child)
+        clonotypes.add(cdr3)
+        return len(result) >= limit
+
+    if 'verbatim' in modes:
+        needed = required_substitutions(length)
+        for prepared, cdr3_verbatim in prepared_cds:
+            edited_cdr3, edits = neutral_substitutions(cdr3_verbatim, needed)
+            if len(edits) < needed:
+                counters['cdr3_insufficient_swappable_residues'] += 1
                 continue
-            if _diverges(fd, prepared):
-                counters['divergence_drops'] += 1
+            if liability_count(edited_cdr3) > liability_count(cdr3_verbatim):
+                counters['liability_drops'] += 1
                 continue
-            if 'verbatim' in modes:
-                child = (fd['segments']['fr1']['sequence'] + fd['segments']['cdr1']['sequence']
-                         + fd['segments']['fr2']['sequence'] + fd['segments']['cdr2']['sequence']
-                         + fd['segments']['fr3']['sequence'] + edited_cdr3
-                         + fd['segments']['fr4']['sequence'])
+            for fd in framework_donors:
+                if fd['sequence_hash'] == prepared['sequence_hash']:
+                    continue
+                child = _assemble(fd, edited_cdr3)
+                cdrs = _child_cdrs(fd, edited_cdr3)
+                if not (_clears_donor(child, cdrs, prepared)
+                        and _clears_donor(child, cdrs, fd)):
+                    counters['divergence_drops'] += 1
+                    continue
                 sha = rules.sequence_hash(child)
                 if sha in excluded:
                     counters['exact_or_resume_collisions'] += 1
-                else:
-                    cdr3_part = {k: prepared['segments']['cdr3'][k] for k in _PROVENANCE_KEYS}
-                    cdr3_part['edits'] = edits
-                    row = _emit_row(child, sha, fd, cdr3_part,
-                                    prepared['sequence_hash'], len(edits),
-                                    max(0, _NEUTRAL_SUBSTITUTIONS - len(edits)),
-                                    'verbatim', challenge)
-                    if reconstruct_with_edits(row, references) != child:
-                        raise ValueError('graft reconstruction mismatch')
-                    result.append(row)
-                    if len(result) == limit:
-                        stop_reason = 'limit_filled'
-                        break
-            if 'de_novo' in modes and len(result) < limit:
-                seed = challenge['epoch'] * 1_000_000 + de_novo_counter
-                de_novo_counter += 1
-                generated = de_novo_cdr3(challenge['allowed_cdr3_length'], seed)
-                child = (fd['segments']['fr1']['sequence'] + fd['segments']['cdr1']['sequence']
-                         + fd['segments']['fr2']['sequence'] + fd['segments']['cdr2']['sequence']
-                         + fd['segments']['fr3']['sequence'] + generated
-                         + fd['segments']['fr4']['sequence'])
-                sha = rules.sequence_hash(child)
-                if sha in excluded:
-                    counters['exact_or_resume_collisions'] += 1
-                else:
-                    cdr3_part = {'source': DE_NOVO_PART_SOURCE, 'region': 'cdr3',
-                                 'sequence': generated}
-                    row = _emit_row(child, sha, fd, cdr3_part, None, 0, 0,
-                                    'de_novo', challenge)
-                    if reconstruct_with_edits(row, references) != child:
-                        raise ValueError('graft reconstruction mismatch')
-                    result.append(row)
-                    if len(result) == limit:
-                        stop_reason = 'limit_filled'
-                        break
-            if len(result) == limit:
+                    continue
+                if child in seen_sequences or clonotypes.duplicate(edited_cdr3):
+                    counters['duplicate_drops'] += 1
+                    continue
+                cdr3_part = {k: prepared['segments']['cdr3'][k] for k in _PROVENANCE_KEYS}
+                cdr3_part['edits'] = edits
+                if finish(child, sha, fd, cdr3_part, prepared['sequence_hash'],
+                          len(edits), 0, 'verbatim', edited_cdr3):
+                    stop_reason = 'limit_filled'
+                    break
+            if stop_reason == 'limit_filled':
                 break
-        if len(result) == limit:
-            break
+
+    if 'de_novo' in modes and stop_reason != 'limit_filled':
+        if length < _DE_NOVO_MIN_LENGTH:
+            counters['de_novo_length_unsupported'] += 1
+        elif framework_donors:
+            attempts = min(limit * 8, _DE_NOVO_MAX_ATTEMPTS)
+            base = challenge['epoch'] * 1_000_000_000 + proposal_offset * 1_000_000
+            for attempt in range(attempts):
+                fd = framework_donors[attempt % len(framework_donors)]
+                generated = de_novo_cdr3(length, base + attempt)
+                if liability_count(generated):
+                    counters['liability_drops'] += 1
+                    continue
+                child = _assemble(fd, generated)
+                if not _clears_donor(child, _child_cdrs(fd, generated), fd):
+                    counters['divergence_drops'] += 1
+                    continue
+                sha = rules.sequence_hash(child)
+                if sha in excluded:
+                    counters['exact_or_resume_collisions'] += 1
+                    continue
+                if child in seen_sequences or clonotypes.duplicate(generated):
+                    counters['duplicate_drops'] += 1
+                    continue
+                cdr3_part = {'source': DE_NOVO_PART_SOURCE, 'region': 'cdr3',
+                             'sequence': generated}
+                if finish(child, sha, fd, cdr3_part, None, 0, 0, 'de_novo', generated):
+                    stop_reason = 'limit_filled'
+                    break
     counters['emitted'] = len(result)
     counters['filled'] = stop_reason == 'limit_filled'
     counters['stop_reason'] = stop_reason

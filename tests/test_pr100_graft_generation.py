@@ -61,6 +61,18 @@ def prepared(donor):
     return segments.prepare(donor, donor['numbered'])
 
 
+SWAPPABLE = 'RRSAG' + 'R' * 11  # 3 swappable residues at offsets 2..4, length 16
+
+
+def pair(abnumber, cd_cdr3=SWAPPABLE, fd_cdr3='Y' * 16, cd_cdr1='R' * 12, fd_cdr1='K' * 12):
+    """A CDR3 donor and a framework donor whose CDR1 diverges (clears conserved rule)."""
+    cd = build_donor(cdr3=cd_cdr3, cdr1=cd_cdr1)
+    fd = build_donor(cdr3=fd_cdr3, cdr1=fd_cdr1)
+    abnumber[cd['sequence']] = cd
+    abnumber[fd['sequence']] = fd
+    return cd, fd
+
+
 @pytest.fixture
 def abnumber(monkeypatch):
     """A deterministic fake abnumber.Chain backed by the synthetic donor rows."""
@@ -95,25 +107,23 @@ def test_settings_default_off_and_strict_bounds():
 
 
 def test_verbatim_graft_provenance_reconstructs(abnumber):
-    cd = build_donor(cdr3='R' * 16)  # no neutral-swappable residues
-    fd = build_donor(cdr3='Y' * 16)
-    abnumber[cd['sequence']] = cd
-    abnumber[fd['sequence']] = fd
+    cd, fd = pair(abnumber)
     rows = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=10, modes=('verbatim',))
     assert len(rows) == 1
     row = rows[0]
     assert row['graft_mode'] == 'verbatim'
     assert len(row['segment_provenance']) == 7
     assert len({p['source_hash'] for p in row['segment_provenance']}) == 2
-    assert row['graft_neutral_subs'] == 0
+    assert row['graft_neutral_subs'] == 3
+    assert row['graft_neutral_subs_shortfall'] == 0
     refs = {cd['sequence_hash']: cd['sequence'], fd['sequence_hash']: fd['sequence']}
     assert graft.reconstruct_with_edits(row, refs) == row['sequence']
 
 
 def test_three_substitutions_identity_offsets_and_residues():
-    cdr3 = 'SAG' + 'R' * 13
+    cdr3 = SWAPPABLE
     edited, edits = graft.neutral_substitutions(cdr3)
-    assert edited == 'TSA' + 'R' * 13
+    assert edited == 'RRTSA' + 'R' * 11
     identity = sum(a == b for a, b in zip(edited, cdr3)) / len(cdr3)
     assert identity == 13 / 16 == pytest.approx(0.8125)
     assert 0.80 <= identity < 0.85
@@ -122,34 +132,89 @@ def test_three_substitutions_identity_offsets_and_residues():
         assert edit['kind'] == 'neutral_cdr3_substitution'
         assert edit['from'] in graft.NEUTRAL_SWAPS
         assert edit['to'] == graft.NEUTRAL_SWAPS[edit['from']]
-        assert 0 <= edit['child_offset'] < len(cdr3) - 3
+        assert 2 <= edit['child_offset'] < len(cdr3) - 3
 
 
-def test_divergence_gate_drops_divergent_and_keeps_conserved(abnumber):
-    divergent_cd = build_donor(cdr3='R' * 16, cdr1='R' * 12)
-    divergent_fd = build_donor(cdr3='Y' * 16, cdr1='K' * 12)
-    abnumber[divergent_cd['sequence']] = divergent_cd
-    abnumber[divergent_fd['sequence']] = divergent_fd
+def test_required_substitutions_clears_clonotype_threshold_for_all_lengths():
+    assert [graft.required_substitutions(n) for n in (5, 16, 19, 20, 23, 24, 27, 40)] \
+        == [3, 3, 3, 4, 4, 4, 5, 7]
+    for length in range(5, 41):
+        k = graft.required_substitutions(length)
+        assert (length - k) / length < 0.85
+
+
+def test_neutral_substitutions_protect_anchor_and_skip_liability_motifs():
+    # Index 0/1 are swappable but never touched.
+    edited, edits = graft.neutral_substitutions('SAGSAGSAG' + 'R' * 7)
+    assert edited[:2] == 'SA'
+    assert min(e['child_offset'] for e in edits) == 2
+    # Q@2 -> N would create the deamidation motif 'NG' with the G after it.
+    cdr3 = 'RRQG' + 'R' * 12
+    assert graft.NEUTRAL_SWAPS['Q'] == 'N'
+    edited, edits = graft.neutral_substitutions(cdr3, 1)
+    assert all(e['child_offset'] != 2 for e in edits)
+    assert graft.liability_count(edited) == 0
+    assert edits and edits[0]['child_offset'] == 3
+
+
+def test_divergence_gate_drops_conserved_and_keeps_divergent(abnumber):
+    conserved_cd, conserved_fd = pair(abnumber, fd_cdr1='R' * 12)
     stats = {}
-    assert graft.generate([divergent_cd], [prepared(divergent_fd)], CHALLENGE,
+    assert graft.generate([conserved_cd], [prepared(conserved_fd)], CHALLENGE,
                           modes=('verbatim',), stats=stats) == []
     assert stats['divergence_drops'] == 1
-
-    conserved_cd = build_donor(cdr3='R' * 16)
-    conserved_fd = build_donor(cdr3='Y' * 16)
-    abnumber[conserved_cd['sequence']] = conserved_cd
-    abnumber[conserved_fd['sequence']] = conserved_fd
-    rows = graft.generate([conserved_cd], [prepared(conserved_fd)], CHALLENGE,
+    divergent_cd, divergent_fd = pair(abnumber, cd_cdr3=SWAPPABLE[:-1] + 'K')
+    rows = graft.generate([divergent_cd], [prepared(divergent_fd)], CHALLENGE,
                           modes=('verbatim',))
     assert len(rows) == 1
 
 
+def test_gate_is_child_vs_both_donors_not_donor_vs_donor(abnumber):
+    # CDR1 differs in 2/12 positions (similarity 0.833 < 0.90) so the donors
+    # themselves look divergent, but the CHILD is 5 residues from the CDR3
+    # donor (2 CDR1 + 3 substitutions): whole identity 126/131 >= 0.95.
+    cd, fd = pair(abnumber, fd_cdr1='RRRRRRRRRRKK')
+    cd_prepared = prepared(cd)
+    assert graft.whole_identity(fd['sequence'], cd['sequence']) < 0.95
+    stats = {}
+    assert graft.generate([cd], [prepared(fd)], CHALLENGE, modes=('verbatim',),
+                          stats=stats) == []
+    assert stats['divergence_drops'] == 1
+    # Child clears both donors on the accepted path.
+    cd2, fd2 = pair(abnumber)
+    row = graft.generate([cd2], [prepared(fd2)], CHALLENGE, modes=('verbatim',))[0]
+    assert graft.whole_identity(row['sequence'], cd2['sequence']) < 0.95
+    assert graft.whole_identity(row['sequence'], fd2['sequence']) < 0.95
+    assert cd_prepared['segments']['cdr3']['sequence'] == SWAPPABLE
+
+
+def test_clonotype_threshold_for_long_cdr3_uses_more_substitutions(abnumber):
+    cdr3 = 'RR' + 'SAGSAG' + 'R' * 12  # length 20 -> k = 4
+    cd, fd = pair(abnumber, cd_cdr3=cdr3, fd_cdr3='Y' * 20)
+    challenge = {**CHALLENGE, 'allowed_cdr3_length': 20}
+    rows = graft.generate([cd], [prepared(fd)], challenge, modes=('verbatim',))
+    assert len(rows) == 1
+    assert rows[0]['graft_neutral_subs'] == 4
+    child_cdr3 = next(p for p in rows[0]['segment_provenance'] if p['region'] == 'cdr3')
+    edited = list(cdr3)
+    for edit in child_cdr3['edits']:
+        edited[edit['child_offset']] = edit['to']
+    assert segments.cdr_similarity(''.join(edited), cdr3) < 0.85
+
+
+def test_donor_with_too_few_swappable_residues_is_skipped(abnumber):
+    for cdr3 in ('R' * 16, 'RRSA' + 'R' * 12):
+        cd, fd = pair(abnumber, cd_cdr3=cdr3)
+        stats = {}
+        assert graft.generate([cd], [prepared(fd)], CHALLENGE, modes=('verbatim',),
+                              stats=stats) == []
+        assert stats['cdr3_insufficient_swappable_residues'] == 1
+
+
 def test_exact_length_enforcement_skips_wrong_length_cdr3(abnumber):
     cd_bad = build_donor(cdr3='R' * 13, cell_length=13)
-    cd_good = build_donor(cdr3='SAG' + 'R' * 13)
-    fd = build_donor(cdr3='Y' * 16)
-    for donor in (cd_bad, cd_good, fd):
-        abnumber[donor['sequence']] = donor
+    cd_good, fd = pair(abnumber)
+    abnumber[cd_bad['sequence']] = cd_bad
     stats = {}
     rows = graft.generate([cd_bad, cd_good], [prepared(fd)], CHALLENGE,
                           modes=('verbatim',), stats=stats)
@@ -162,17 +227,17 @@ def test_exact_length_enforcement_skips_wrong_length_cdr3(abnumber):
 
 
 def test_generate_is_deterministic_and_order_invariant(abnumber):
-    cd = build_donor(cdr3='SAG' + 'R' * 13)
+    cd, fd = pair(abnumber)
     cd2 = build_donor(cdr3='T' * 13 + 'AAA')
-    fd = build_donor(cdr3='Y' * 16)
-    fd2 = build_donor(cdr3='N' * 16)
-    for donor in (cd, cd2, fd, fd2):
+    fd2 = build_donor(cdr3='W' * 16, cdr1='D' * 12)
+    for donor in (cd2, fd2):
         abnumber[donor['sequence']] = donor
     first = graft.generate([cd, cd2], [prepared(fd), prepared(fd2)], CHALLENGE,
                            limit=20, modes=('verbatim', 'de_novo'))
     second = graft.generate([cd, cd2], [prepared(fd), prepared(fd2)], CHALLENGE,
                             limit=20, modes=('verbatim', 'de_novo'))
     assert first == second
+    assert {r['graft_mode'] for r in first} == {'verbatim', 'de_novo'}
     reversed_order = graft.generate([cd2, cd], [prepared(fd2), prepared(fd)], CHALLENGE,
                                     limit=20, modes=('verbatim', 'de_novo'))
     assert first == reversed_order
@@ -227,31 +292,138 @@ def test_de_novo_cdr3_is_length_conditioned():
 
 
 def test_de_novo_graft_mode_length_charge_and_provenance(abnumber):
-    cd = build_donor(cdr3='R' * 16)
-    fd = build_donor(cdr3='Y' * 16)
-    abnumber[cd['sequence']] = cd
-    abnumber[fd['sequence']] = fd
+    cd, fd = pair(abnumber)
     rows = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=4, modes=('de_novo',))
-    assert len(rows) == 1  # one framework/CDR3 pair -> one de-novo child
+    assert len(rows) == 4  # independent of the CDR3 donor pair space
+    assert len({r['sequence'] for r in rows}) == 4
     row = rows[0]
     assert row['graft_mode'] == 'de_novo'
-    cdr3_part = next(p for p in row['segment_provenance'] if p.get('region') == 'cdr3')
-    assert cdr3_part['source'] == graft.DE_NOVO_PART_SOURCE
-    assert 'source_hash' not in cdr3_part
-    generated = cdr3_part['sequence']
-    assert len(generated) == CHALLENGE['allowed_cdr3_length']
-    pos = sum(1 for c in generated if c in 'KR')
-    neg = sum(1 for c in generated if c in 'DE')
-    assert abs(pos - neg) <= 1
     refs = {fd['sequence_hash']: fd['sequence']}
-    assert graft.reconstruct_with_edits(row, refs) == row['sequence']
-    # Deterministic and seed-distinct across pairs.
-    assert graft.generate([cd], [prepared(fd)], CHALLENGE, modes=('de_novo',)) == rows
-    cd2 = build_donor(cdr3='SAG' + 'R' * 13)
-    abnumber[cd2['sequence']] = cd2
-    many = graft.generate([cd, cd2], [prepared(fd)], CHALLENGE, limit=8, modes=('de_novo',))
-    assert len(many) == 2
-    assert len({r['sequence'] for r in many}) == 2
+    cdr3s = []
+    for row in rows:
+        cdr3_part = next(p for p in row['segment_provenance'] if p.get('region') == 'cdr3')
+        assert cdr3_part['source'] == graft.DE_NOVO_PART_SOURCE
+        assert 'source_hash' not in cdr3_part
+        generated = cdr3_part['sequence']
+        cdr3s.append(generated)
+        assert len(generated) == CHALLENGE['allowed_cdr3_length']
+        assert abs(sum(c in 'KR' for c in generated) - sum(c in 'DE' for c in generated)) <= 1
+        assert graft.liability_count(generated) == 0
+        assert graft.whole_identity(row['sequence'], fd['sequence']) < 0.95
+        assert segments.cdr_similarity(generated, 'Y' * 16) < 0.85  # framework donor CDR3
+        assert graft.reconstruct_with_edits(row, refs) == row['sequence']
+    for i, left in enumerate(cdr3s):
+        for right in cdr3s[i + 1:]:
+            assert segments.cdr_similarity(left, right) < 0.85
+    # Deterministic; a different proposal_offset yields fresh candidates.
+    assert graft.generate([cd], [prepared(fd)], CHALLENGE, limit=4, modes=('de_novo',)) == rows
+    later = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=4, modes=('de_novo',),
+                           proposal_offset=4)
+    assert len(later) == 4
+    assert not {r['sequence'] for r in later} & {r['sequence'] for r in rows}
+
+
+def test_de_novo_limit_beyond_donor_pair_space_is_reachable(abnumber):
+    cd, fd = pair(abnumber)
+    rows = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=120, modes=('de_novo',))
+    assert len(rows) == 120
+
+
+def test_de_novo_skips_small_lengths_without_raising(abnumber):
+    # Length 4 is below the recipe minimum: skip, do not abort.
+    cd, fd = pair(abnumber, cd_cdr3='RSAG', fd_cdr3='YYYY')
+    challenge = {**CHALLENGE, 'allowed_cdr3_length': 4}
+    stats = {}
+    assert graft.generate([cd], [prepared(fd)], challenge, modes=('de_novo',),
+                          stats=stats) == []
+    assert stats['de_novo_length_unsupported'] == 1
+    # Length 5: the child is >= 0.952 identical to the framework donor -> gated out.
+    cd, fd = pair(abnumber, cd_cdr3='RSAGR', fd_cdr3='YYYYY')
+    challenge = {**CHALLENGE, 'allowed_cdr3_length': 5}
+    stats = {}
+    assert graft.generate([cd], [prepared(fd)], challenge, modes=('de_novo',),
+                          stats=stats) == []
+    assert stats['divergence_drops'] > 0
+
+
+def test_liability_motifs_detected():
+    assert graft.liability_count('RRNASRR') == 1  # N-x-S
+    assert graft.liability_count('RRNGRR') == 1
+    assert graft.liability_count('RRDGRR') == 1
+    assert graft.liability_count('RRDPRR') == 1
+    assert graft.liability_count('RRNAARR') == 0
+
+
+def test_fill_middle_caps_runs_for_every_residue_class():
+    import random
+    for seed in range(300):
+        for prefix in ('', 'AA', 'FQPR'):
+            middle = graft._fill_middle(prefix, 30, random.Random(seed))
+            assert len(middle) == 30
+            assert 'AAA' not in middle and not any(c * 3 in middle for c in set(middle))
+        short = graft.de_novo_cdr3(10, seed)
+        assert not any(c * 3 in short for c in set(short))
+
+
+def test_reconstruct_with_edits_rejects_illegitimate_provenance(abnumber):
+    import copy
+    cd, fd = pair(abnumber)
+    refs = {cd['sequence_hash']: cd['sequence'], fd['sequence_hash']: fd['sequence']}
+    good = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=2,
+                          modes=('verbatim', 'de_novo'))
+    verbatim = next(r for r in good if r['graft_mode'] == 'verbatim')
+    de_novo = next(r for r in good if r['graft_mode'] == 'de_novo')
+    assert graft.reconstruct_with_edits(verbatim, refs) == verbatim['sequence']
+    assert graft.reconstruct_with_edits(de_novo, refs) == de_novo['sequence']
+
+    def mutated(row, fn):
+        clone = copy.deepcopy(row)
+        fn(clone)
+        return clone
+
+    def cdr3(row):
+        return row['segment_provenance'][5]
+
+    def swap_regions(row):
+        parts = row['segment_provenance']
+        parts[0], parts[2] = parts[2], parts[0]
+
+    def de_novo_framework(row):
+        row['segment_provenance'][0]['source'] = graft.DE_NOVO_PART_SOURCE
+
+    def edits_on_framework(row):
+        row['segment_provenance'][0]['edits'] = [dict(cdr3(row)['edits'][0])]
+
+    def duplicate_offsets(row):
+        cdr3(row)['edits'] = [cdr3(row)['edits'][0]] * 2
+
+    def too_many(row):
+        base = cdr3(row)['edits']
+        cdr3(row)['edits'] = base + [{'child_offset': 10, 'from': 'S', 'to': 'T',
+                                      'kind': 'neutral_cdr3_substitution'}]
+
+    cases = [
+        (verbatim, swap_regions), (verbatim, de_novo_framework),
+        (verbatim, edits_on_framework), (verbatim, duplicate_offsets),
+        (verbatim, too_many),
+        (de_novo, lambda r: cdr3(r).__setitem__('edits', [
+            {'child_offset': 0, 'from': 'A', 'to': 'S', 'kind': 'neutral_cdr3_substitution'}])),
+        (verbatim, lambda r: r['segment_provenance'].pop()),
+        (verbatim, lambda r: r['segment_provenance'].__setitem__(0, None)),
+        (verbatim, lambda r: r['segment_provenance'].__setitem__(0, 'x')),
+        (verbatim, lambda r: r['segment_provenance'][0].pop('source_hash')),
+        (verbatim, lambda r: r['segment_provenance'][0].__setitem__('source_hash', ['x'])),
+        (verbatim, lambda r: r['segment_provenance'][0].pop('region')),
+        (verbatim, lambda r: cdr3(r).__setitem__('edits', 'bad')),
+        (verbatim, lambda r: cdr3(r).__setitem__('edits', [None])),
+        (verbatim, lambda r: cdr3(r).__setitem__('edits', [{'child_offset': 'x'}])),
+        (verbatim, lambda r: cdr3(r)['edits'][0].pop('from')),
+        (verbatim, lambda r: r.__setitem__('sequence', None)),
+        (de_novo, lambda r: cdr3(r).__setitem__('sequence', None)),
+    ]
+    for row, fn in cases:
+        with pytest.raises(ValueError):
+            graft.reconstruct_with_edits(mutated(row, fn), refs)
 
 
 @pytest.fixture
@@ -259,8 +431,8 @@ def run_worker(abnumber, monkeypatch, tmp_path):
     from nanobody_opt import gates
     from nanobody_opt import pr100_live_worker as worker
     from pr100_germline import real_panel
-    cd = build_donor(cdr3='SAG' + 'R' * 13)
-    fd = build_donor(cdr3='AAA' + 'R' * 13)
+    cd = build_donor(cdr3=SWAPPABLE)
+    fd = build_donor(cdr3='YY' + 'SAG' + 'Y' * 11, cdr1='K' * 12)
     bank = [cd, fd]
     for row in bank:
         abnumber[row['sequence']] = row
@@ -286,7 +458,7 @@ def run_worker(abnumber, monkeypatch, tmp_path):
 
 def test_live_worker_graft_lane_and_per_lane_reporting(run_worker):
     off = run_worker()
-    on = run_worker(graft_generation={'enabled': True, 'limit': 8})
+    on = run_worker(graft_generation={'enabled': True, 'limit': 4})
     assert off['graft_generation_enabled'] is False
     assert on['graft_generation_enabled'] is True
     # Two exact-cell donors: two valid (cdr3, framework) pairs -> two verbatim
@@ -303,11 +475,9 @@ def test_live_worker_graft_lane_and_per_lane_reporting(run_worker):
 def test_history_and_lineage_resolve_graft_donors(abnumber, tmp_path):
     from nanobody_opt import pr100_history as history
     from nanobody_opt import pr100_lineage_outcomes as lineage
-    cd = build_donor(cdr3='SAG' + 'R' * 13)
-    fd = build_donor(cdr3='Y' * 16)
-    abnumber[cd['sequence']] = cd
-    abnumber[fd['sequence']] = fd
-    rows = graft.generate([cd], [prepared(fd)], CHALLENGE, modes=('verbatim', 'de_novo'))
+    cd, fd = pair(abnumber)
+    rows = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=2,
+                          modes=('verbatim', 'de_novo'))
     assert len(rows) == 2
     refs = {cd['sequence_hash']: cd['sequence'], fd['sequence_hash']: fd['sequence']}
     for row in rows:
