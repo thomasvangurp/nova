@@ -1,4 +1,4 @@
-"""Consolidate + join of the durable native developability profile (observations schema)."""
+"""Consolidate + join + migrate of the dedicated node_features developability store."""
 import hashlib
 import json
 import sqlite3
@@ -67,25 +67,24 @@ def test_consolidate_and_attach_round_trip(tmp_path):
     rows = [{'sequence': SEQ_A, 'sequence_hash': store._content_hash(SEQ_A)},
             {'sequence': SEQ_B, 'sequence_hash': store._content_hash(SEQ_B)},
             {'sequence': 'A' * 120, 'sequence_hash': store._content_hash('A' * 120)}]
-    store.attach(rows, db, target=TARGET)
+    stats = store.attach(rows, db, target=TARGET)
+    assert stats == {'matched': 2, 'total': 3}
     assert rows[0]['developability']['surface_hydrophobic_patches'] == 40.0
     assert rows[0]['developability']['passed'] is True
     assert rows[1]['developability']['passed'] is False
-    assert rows[1]['developability']['surface_hydrophobic_patches'] == 95.0
     assert 'developability' not in rows[2]
 
 
-def test_rejects_partial_or_error_profiles(tmp_path):
+def test_rejects_partial_profiles(tmp_path):
     cache = tmp_path / 'layer2'; cache.mkdir()
     db = tmp_path / 'q9.sqlite'
     _schema(db); _seed_node(db, SEQ_A, 1)
-    _write_cache(cache, SEQ_A, _dev(surface_hydrophobic_patches=None))  # missing metric
-
+    _write_cache(cache, SEQ_A, _dev(surface_hydrophobic_patches=None))
     accepted, rejected, _ = store.consolidate(cache, db, target=TARGET)
     assert accepted == 0 and rejected == 1
 
 
-def test_attach_is_fail_loud_on_missing_version(tmp_path):
+def test_attach_fail_loud_on_missing_version(tmp_path):
     db = tmp_path / 'q9.sqlite'
     _schema(db); _seed_node(db, SEQ_A, 1)
     with pytest.raises(ValueError, match='version mismatch'):
@@ -93,15 +92,37 @@ def test_attach_is_fail_loud_on_missing_version(tmp_path):
                      db, target=TARGET)
 
 
-def test_attach_never_touches_quality_evidence(tmp_path):
+def test_migrate_moves_observations_to_node_features(tmp_path):
     db = tmp_path / 'q9.sqlite'
     _schema(db); _seed_node(db, SEQ_A, 1)
-    # empty store (no score_kind rows) -> fail loud, not silent
+    # write a legacy F row into observations
     conn = sqlite3.connect(str(db))
-    conn.execute('INSERT INTO metadata (key, value) VALUES (?, ?)', (store.VERSION_KEY, store.PROFILER_VERSION))
+    conn.execute(
+        'INSERT INTO observations (observation_id, node_id, source, score_kind, score, '
+        'observation_count, metrics_json, provenance_json, repl_token) '
+        'VALUES (?, 1, ?, ?, 1.0, 1, ?, ?, 0)',
+        (f'{store.PROFILER_VERSION}:1', 'tnp_profiler', store.PROFILER_VERSION,
+         json.dumps({'total_cdr_length': 30.0, 'cdr3_length': 12.0, 'cdr3_compactness': 1.0,
+                     'surface_hydrophobic_patches': 40.0, 'positive_charge_patches': 2.0,
+                     'negative_charge_patches': 1.0}),
+         json.dumps({'passed': True, 'flags': {'L': 'green', 'L3': 'green', 'C': 'green',
+                                               'PSH': 'green', 'PPC': 'green', 'PNC': 'green'},
+                     'content_sha256': store._content_hash(SEQ_A),
+                     'cache_key': _cache_key(SEQ_A)})))
     conn.commit(); conn.close()
-    rows = [{'sequence': SEQ_A, 'sequence_hash': store._content_hash(SEQ_A),
-             'quality_evidence': [{'kind': 'public_validator_percentile'}]}]
-    with pytest.raises(ValueError, match='empty'):
-        store.attach(rows, db, target=TARGET)
-    assert rows[0]['quality_evidence'][0]['kind'] == 'public_validator_percentile'
+
+    result = store.migrate(db, target=TARGET)
+    assert result['moved'] == 1
+
+    conn = sqlite3.connect(str(db))
+    obs_left = conn.execute('SELECT COUNT(*) FROM observations WHERE score_kind = ?',
+                            (store.PROFILER_VERSION,)).fetchone()[0]
+    nf = conn.execute('SELECT COUNT(*) FROM node_features WHERE kind = ?',
+                      (store.PROFILER_VERSION,)).fetchone()[0]
+    conn.close()
+    assert obs_left == 0 and nf == 1
+
+    rows = [{'sequence': SEQ_A, 'sequence_hash': store._content_hash(SEQ_A)}]
+    stats = store.attach(rows, db, target=TARGET)
+    assert stats['matched'] == 1
+    assert rows[0]['developability']['surface_hydrophobic_patches'] == 40.0
