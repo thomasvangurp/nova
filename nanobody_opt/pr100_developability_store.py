@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -33,6 +34,9 @@ VERSION_KEY = 'tnp.version'
 METRIC_KEYS = ('total_cdr_length', 'cdr3_length', 'cdr3_compactness',
                'surface_hydrophobic_patches', 'positive_charge_patches',
                'negative_charge_patches')
+# The profiler's per-metric red/green verdicts use short flag names, not the
+# metric keys (see tnp_daemon.py: L, L3, C, PSH, PPC, PNC).
+FLAG_KEYS = ('L', 'L3', 'C', 'PSH', 'PPC', 'PNC')
 
 
 def _cache_key(sequence):
@@ -57,7 +61,7 @@ def _parse_profile(developability):
     flags = developability.get('flags')
     if type(passed) is not bool or not isinstance(flags, dict):
         return None
-    if set(flags) != set(METRIC_KEYS):
+    if set(flags) != set(FLAG_KEYS):
         return None
     metrics = {key: _number(developability.get(key)) for key in METRIC_KEYS}
     if any(metrics[key] is None for key in METRIC_KEYS):
@@ -93,15 +97,17 @@ def consolidate(cache_root, db_path, *, target):
             continue
         passed, flags, metrics = parsed
         rows.append((f'{PROFILER_VERSION}:{node_id}', node_id, SOURCE, SCORE_KIND,
+                     1.0 if passed else 0.0,
                      json.dumps(metrics, sort_keys=True),
                      json.dumps({'passed': passed, 'flags': flags,
                                  'content_sha256': _content_hash(sequence),
-                                 'cache_key': _cache_key(sequence)}, sort_keys=True)))
+                                 'cache_key': _cache_key(sequence)}, sort_keys=True),
+                     secrets.randbits(63)))
         accepted += 1
     connection.executemany(
         'INSERT INTO observations '
-        '(observation_id, node_id, source, score_kind, observation_count, metrics_json, provenance_json) '
-        'VALUES (?, ?, ?, ?, 1, ?, ?) '
+        '(observation_id, node_id, source, score_kind, score, observation_count, metrics_json, provenance_json, repl_token) '
+        'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?) '
         'ON CONFLICT(observation_id) DO NOTHING',
         rows)
     connection.execute(

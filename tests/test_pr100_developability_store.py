@@ -15,9 +15,8 @@ SEQ_B = 'QVQLQESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTIS
 def _dev(**overrides):
     value = {
         'passed': True,
-        'flags': {'total_cdr_length': 'green', 'cdr3_length': 'green',
-                  'cdr3_compactness': 'green', 'surface_hydrophobic_patches': 'green',
-                  'positive_charge_patches': 'green', 'negative_charge_patches': 'green'},
+        'flags': {'L': 'green', 'L3': 'green', 'C': 'green',
+                  'PSH': 'green', 'PPC': 'green', 'PNC': 'green'},
         'total_cdr_length': 30.0, 'cdr3_length': 12.0, 'cdr3_compactness': 1.0,
         'surface_hydrophobic_patches': 40.0, 'positive_charge_patches': 2.0,
         'negative_charge_patches': 1.0,
@@ -34,9 +33,10 @@ def _schema(db):
     conn = sqlite3.connect(str(db))
     conn.executescript(
         'CREATE TABLE nodes (id INTEGER PRIMARY KEY, target TEXT, sequence TEXT, length INTEGER, residue_vector BLOB);'
-        'CREATE TABLE observations (observation_id TEXT PRIMARY KEY, node_id INTEGER, epoch INTEGER, source TEXT,'
-        ' score_kind TEXT, score REAL, observation_count INTEGER, metrics_json TEXT, pose_json TEXT,'
-        ' provenance_json TEXT, replicated_at REAL, repl_token INTEGER);'
+        'CREATE TABLE observations (observation_id TEXT PRIMARY KEY, node_id INTEGER NOT NULL, epoch INTEGER,'
+        ' source TEXT NOT NULL, score_kind TEXT NOT NULL, score REAL NOT NULL,'
+        ' observation_count INTEGER NOT NULL, metrics_json TEXT NOT NULL, pose_json TEXT,'
+        ' provenance_json TEXT NOT NULL, replicated_at REAL, repl_token INTEGER NOT NULL);'
         'CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT, replicated_at REAL);')
     conn.commit()
     return conn
