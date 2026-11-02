@@ -84,9 +84,10 @@ def test_source_activation_preserves_state_publication_and_annotation(deployment
         now=lambda: 1000, service_factory=service_factory(unit, events))
     new = a.read(base / 'pr100-controller.json')
     assert result['status'] == 'activated' and events == ['validate', 'stop', 'install', 'start', 'verify']
-    assert new['native_hosts'] == ['master'] and new['native_worker_overrides']['master']['workers'] == 96
+    assert new['native_hosts'] == ['master']
     assert new['worker']['workers'] == 48
-    assert new['worker']['native_screen']['enabled'] is False
+    assert 'native_screen' not in new['worker']
+    assert 'native_worker_overrides' not in new
     assert new['hosts']['slave']['path'] == '/annotation/bin'
     assert (root / '25964/continuation.json').read_bytes() == state
     assert (base / 'publication.json').read_bytes() == publication
@@ -794,7 +795,7 @@ def test_native_screen_activation_sets_backend_without_refill_or_interleave(depl
     value = a.proposed_config(old, SHA, CLOCK['epoch'], 'master', native_screen=backend)
     assert value['worker']['native_screen'] == {'enabled': True, 'backend': backend}
     assert not value['worker'].get('native_interleave_confirmations')
-    for override in value['native_worker_overrides'].values():
+    for override in value.get('native_worker_overrides', {}).values():
         assert 'native_work_conserving' not in override
 
 
@@ -806,7 +807,7 @@ def test_native_screen_handoff_threads_backend_through_proposal(deployment):
     new = a.read(base / 'pr100-controller.json')
     assert new['worker']['native_screen'] == {'enabled': True, 'backend': 'cuda_refine'}
     assert not new['worker'].get('native_interleave_confirmations')
-    for override in new['native_worker_overrides'].values():
+    for override in new.get('native_worker_overrides', {}).values():
         assert 'native_work_conserving' not in override
 
 
@@ -850,10 +851,10 @@ def test_cli_rejects_native_screen_with_conflicting_modes(conflict):
     assert error.value.code == 2
 
 
-def test_non_screen_activation_resets_native_screen_to_disabled(deployment):
+def test_non_screen_activation_preserves_native_screen(deployment):
     *_, old = deployment
     value = a.proposed_config(old, SHA, CLOCK['epoch'], 'master')
-    assert value['worker']['native_screen']['enabled'] is False
+    assert 'native_screen' not in value['worker']
 
 
 @pytest.fixture

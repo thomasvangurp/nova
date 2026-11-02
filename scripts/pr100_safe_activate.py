@@ -37,7 +37,8 @@ APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEA
                                     QUALIFIED_NOVELTY_RELEASE, ARCHIVE_CACHE_RELEASE,
                                     TERMINAL_INVALIDATION_RELEASE, PRODUCTION_YIELD_RELEASE,
                                     FORCE_ACTIVATION_RELEASE, RECOVERY_RELEASE,
-                                    'ca091f95553ec4302c2221f703883bd35488795d'})
+                                    'ca091f95553ec4302c2221f703883bd35488795d',
+                                    'bcac5ba7895886aca5e2671c6d574e197ae58048'})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -548,13 +549,6 @@ def proposed_config(current, sha, epoch, mode, qualification=None, *, novelty_ru
         return rollout_options(value, native_refill_hosts=native_refill_hosts,
                                missing_cell_donors=missing_cell_donors)
     value.update(source_sha=sha, start_epoch=epoch, native_hosts=['master'] if mode == 'master' else ['master', 'slave'])
-    if sha != THROUGHPUT_RELEASE:
-        value['epoch_fresh_native_limit'] = current.get('epoch_fresh_native_limit', 4800)
-    value['native_worker_overrides'] = {
-        'master': {'workers': 96, 'max_workers': 96, 'cpu_slots': 104},
-        'slave': {'workers': 32, 'max_workers': 32, 'cpu_slots': 32}}
-    value['worker'].update(native_minimum_call_window_seconds=130, native_cleanup_reserve_seconds=10,
-                           native_screen={'enabled': False, 'backend': 'resident_cpu'})
     if native_screen is not None:
         enable_native_screen(value, native_screen)
     for host in ('master', 'slave'):
