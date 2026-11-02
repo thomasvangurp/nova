@@ -36,18 +36,24 @@ def interleave_segment_controls(eligible, *, segment_source, edit_source='edit_g
 
     The 80% share is an opportunity target while both sources have eligible
     work; differing eligibility or source exhaustion can change the final share.
-    Edit and baseline controls alternate while both arms still hold rows, and
-    each arm keeps its internal order. An exhausted arm releases its slots to
-    the remaining arms (work-conserving), so native capacity is never left idle
-    while another arm still has eligible work. This reorders only the admission
-    order of rows that already passed eligibility filters; it changes no gate,
-    budget or biological rule.
+    ``segment_source`` may be a single source string or a ``frozenset`` of source
+    strings (so the segment and leaderboard graft lanes share the experimental
+    arm). Edit and baseline controls alternate while both arms still hold rows,
+    and each arm keeps its internal order. An exhausted arm releases its slots
+    to the remaining arms (work-conserving), so native capacity is never left
+    idle while another arm still has eligible work. This reorders only the
+    admission order of rows that already passed eligibility filters; it changes
+    no gate, budget or biological rule.
     """
     from collections import deque
-    segment_pool = deque(row for row in eligible if row.get('source') == segment_source)
+    if isinstance(segment_source, frozenset):
+        is_segment = lambda row: row.get('source') in segment_source
+    else:
+        is_segment = lambda row: row.get('source') == segment_source
+    segment_pool = deque(row for row in eligible if is_segment(row))
     edit_pool = deque(row for row in eligible if row.get('source') == edit_source)
     baseline_pool = deque(row for row in eligible
-                          if row.get('source') not in (segment_source, edit_source))
+                          if not is_segment(row) and row.get('source') != edit_source)
     edit_next = True
 
     def next_control():
@@ -284,6 +290,19 @@ def edit_generation_settings(job):
     return settings
 
 
+def graft_generation_settings(job):
+    """Opt-in leaderboard graft lane; OFF unless the operator enables it.
+
+    ``job['graft_generation']`` is an optional object -- ``{"enabled": true}``
+    turns on the lane fed by exact-cell parents from the reference bank. The
+    same strict enabled-bool, unknown-key and bound validation lives in
+    ``pr100_graft_generation.settings``, so the worker and the module cannot
+    drift.
+    """
+    from nanobody_opt.pr100_graft_generation import settings as graft_settings
+    return graft_settings(job)
+
+
 def measure_batch(sequences, workers, *, clock=time.monotonic, develop=None,
                   on_result=None, on_result_error=None, timeout_seconds=None, executor_workers=None):
     """Profile a batch and report wall measured from slot acquisition.
@@ -347,6 +366,7 @@ def sequence_phase(job, directory):
     from nanobody_opt import pr100_edit_generation
     from nanobody_opt import pr100_v_identity_budget
     from nanobody_opt import pr100_segment_generation as segments
+    from nanobody_opt import pr100_graft_generation as graft
     from collections import Counter
     expected = job['challenge']
     config = rules.pinned_config(expected['epoch'])
@@ -377,6 +397,7 @@ def sequence_phase(job, directory):
     proposals_wanted = job.get('proposals', DEFAULT_PROPOSALS)
     proposal_offset = job.get('proposal_offset', 0)
     segment_settings = segments.settings(job)
+    graft_settings = graft_generation_settings(job)
     if type(proposal_offset) is not int or proposal_offset < 0:
         raise ValueError('proposal_offset must be a nonnegative integer')
     excluded = job.get('excluded_sequence_hashes', [])
@@ -517,6 +538,30 @@ def sequence_phase(job, directory):
             offset=proposal_offset // max(1, proposals_wanted),
             excluded=excluded | archive_hashes | {rules.sequence_hash(r['sequence']) for r in rows},
             stats=segment_stats))
+    graft_stats = {}
+    if graft_settings['enabled']:
+        # Exact-cell parents only: the graft lane re-uses a winning CDR3 (or a
+        # de-novo recipe sample) on a different same-V framework. The shared
+        # select() keeps developability_rank a sort tiebreak, never a hard drop,
+        # so winning parents are never discarded up front.
+        graft_donors, _graft_chosen, _graft_evidence = donors.select(
+            bank, expected, graft_settings['donor_slots'], fallback=False)
+        framework_prepared = []
+        for donor in graft_donors:
+            try:
+                chain = Chain(donor['sequence'], scheme='imgt', cdr_definition='imgt', use_anarcii=False)
+                numbered = [{'number': pos.number, 'letter': pos.letter, 'aa': aa}
+                            for pos, aa in chain]
+                framework_prepared.append(graft.prepare_framework(donor, numbered))
+            except Exception:
+                graft_stats['donor_numbering_failed'] = graft_stats.get('donor_numbering_failed', 0) + 1
+        rows.extend(graft.generate(
+            graft_donors[:graft_settings['cdr3_donors']],
+            framework_prepared[:graft_settings['framework_donors']],
+            expected,
+            limit=graft_settings['limit'],
+            excluded=excluded | archive_hashes | {rules.sequence_hash(r['sequence']) for r in rows},
+            stats=graft_stats))
     generated = sorted({rules.sequence_hash(r['sequence']) for r in rows})
     unique = {r['sequence']: r for r in rows
               if rules.sequence_hash(r['sequence']) not in blocked}
@@ -554,13 +599,21 @@ def sequence_phase(job, directory):
         # window. Stable sorting preserves both lanes' internal order; default
         # and balanced policy retain their existing order exactly.
         eligible.sort(key=lambda row: not chemistry_row(row))
-    if segment_settings['enabled']:
+    if segment_settings['enabled'] or graft_settings['enabled']:
         # Give the bounded experimental arm most native opportunity: four
-        # segment rows per one combined control, alternating edit/baseline and
-        # work-conserving when an arm is exhausted (see interleave_segment_controls).
-        eligible = interleave_segment_controls(eligible, segment_source=segments.SOURCE)
-    # The opt-in prefilter saves native work. Publication still requires the
-    # final archive check; this early result never claims native qualification.
+        # segment/graft rows per one combined control, alternating edit/baseline
+        # and work-conserving when an arm is exhausted (see
+        # interleave_segment_controls). The graft lane shares the experimental
+        # arm with the segment lane when both are enabled.
+        segment_source = (frozenset((segments.SOURCE, graft.SOURCE))
+                          if graft_settings['enabled'] else segments.SOURCE)
+        eligible = interleave_segment_controls(eligible, segment_source=segment_source)
+    # Per-lane yield reporting over the emitted rows and the annotated eligible
+    # candidates; publication itself happens in the controller after native +
+    # novelty, so the per-lane source split recorded here is what lets later
+    # phases attribute scored winners back to their generation lane.
+    per_lane_eligible = dict(Counter(r.get('source') for r in eligible))
+    per_lane_published = dict(Counter(r.get('source') for r in rows))
     result = {'challenge': expected, 'target': expected['target'], 'epoch': expected['epoch'], **history,
               'archive_sha256': job['archive_sha256'], 'archive_checked_at_unix': job['archive_fetched_at'],
               'archive_rows': len(frame), 'existing_references': len(refs),
@@ -576,6 +629,12 @@ def sequence_phase(job, directory):
               'segment_generation_settings': segment_settings,
               'segment_generation_stats': segment_stats,
               'eligible_segment_generation': sum(r.get('source') == segments.SOURCE for r in eligible),
+              'graft_generation_enabled': graft_settings['enabled'],
+              'graft_generation_settings': graft_settings,
+              'graft_generation_stats': graft_stats,
+              'eligible_graft_generation': sum(r.get('source') == graft.SOURCE for r in eligible),
+              'per_lane_eligible': per_lane_eligible,
+              'per_lane_published': per_lane_published,
               'eligible_proposal_source_counts': dict(Counter(
                   r['reference_stratum'] for r in eligible if 'reference_stratum' in r)),
               'eligible_edit_generation_source_counts': dict(Counter(
