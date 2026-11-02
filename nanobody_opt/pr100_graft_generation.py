@@ -56,6 +56,8 @@ _LONG_CORES = ('FQPR', 'FQPRY', 'YPYR', 'FPYR', 'PYRF')
 _LINKERS = ('QGSDSG', 'QGSGD')
 _POSITIVE = ('K', 'R')
 _NEGATIVE = ('D', 'E')
+_AROMATIC_AA = ('F', 'Y')
+_HYDRO_AA = ('M', 'V', 'I', 'L')
 
 
 def settings(job):
@@ -152,23 +154,33 @@ def de_novo_cdr3(length, seed):
 
 
 def _fill_middle(prefix, middle_len, rng):
-    """Append an alternating K/R-D/E network to hit ``middle_len``, balanced.
+    """Fill to ``middle_len`` with a winner-proportioned residue mix.
 
-    The alternating network keeps the whole middle's (K+R) and (D+E) counts
-    within one of each other when ``prefix`` itself is already within one.
+    The middle is not a monotone K/R-D/E run: roughly 40% charged (sign
+    alternating to keep K+R within one of D+E), 30% polar/small, 20% aromatic
+    and 10% hydrophobic, matching the 121-epoch winner middle composition.
+    Consecutive charged runs are capped at two so the native developability
+    charge-patch gates are not provoked.
     """
     prefix_pos, prefix_neg = _charge(prefix)
     net_len = middle_len - len(prefix)
-    imbalance = prefix_pos - prefix_neg
+    next_positive = (prefix_pos - prefix_neg) < 0
     network = []
-    if net_len > 0:
-        if net_len % 2 == 0:
-            start_positive = bool(rng.getrandbits(1))
+    charge_run = 0
+    for _ in range(net_len):
+        if charge_run >= 2 or rng.random() >= 0.40:
+            roll = rng.random()
+            if roll < 0.50:
+                network.append(rng.choice(_SHORT_AA))
+            elif roll < 0.83:
+                network.append(rng.choice(_AROMATIC_AA))
+            else:
+                network.append(rng.choice(_HYDRO_AA))
+            charge_run = 0
         else:
-            start_positive = imbalance < 0
-        for i in range(net_len):
-            positive = start_positive if i % 2 == 0 else not start_positive
-            network.append(rng.choice(_POSITIVE if positive else _NEGATIVE))
+            network.append(rng.choice(_POSITIVE if next_positive else _NEGATIVE))
+            next_positive = not next_positive
+            charge_run += 1
     return prefix + ''.join(network)
 
 
