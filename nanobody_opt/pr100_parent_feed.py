@@ -390,6 +390,8 @@ def tick(config, *, now=None, fetch=fetch_epoch, call=transport, config_provider
         'public_records_sha256': digest, 'annotation_runtime': runtime,
         'remote_directory': cfg['remote_directory'], 'cpu_affinity': cfg['cpu_affinity'],
         'workers': cfg['workers'], 'wall_seconds': cfg['wall_seconds']}
+    if cfg.get('developability_db'):
+        job['developability_db'] = cfg['developability_db']
     request_sha = bank.sha(bank.raw(job))
     request = {'operation': 'start', 'request_sha256': request_sha, 'job': job,
                'directory': cfg['remote_directory'] + '/jobs/' + request_sha,

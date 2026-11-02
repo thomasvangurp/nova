@@ -89,7 +89,8 @@ def settings(config):
     if not supplied.get('enabled', False):
         return None
     allowed = {'enabled', 'state_directory', 'remote_directory', 'cpu_affinity', 'workers',
-               'wall_seconds', 'max_epoch_requests', 'max_pointer_age_epochs', 'max_retained_age_epochs'}
+               'wall_seconds', 'max_epoch_requests', 'max_pointer_age_epochs', 'max_retained_age_epochs',
+               'developability_db'}
     require(not set(supplied) - allowed, 'unknown_parent_feed_setting')
     result = {'state_directory': str(Path(config['state_root']) / 'parent-feed'),
               'remote_directory': config['remote_root'] + '/parent-feed',
@@ -98,6 +99,11 @@ def settings(config):
     require(all(isinstance(result[k], str) and Path(result[k]).is_absolute()
                 and '..' not in Path(result[k]).parts for k in ('state_directory', 'remote_directory')),
             'parent_feed_paths_must_be_absolute')
+    if result.get('developability_db') is not None:
+        require(isinstance(result['developability_db'], str)
+                and Path(result['developability_db']).is_absolute()
+                and '..' not in Path(result['developability_db']).parts,
+                'developability_db_must_be_absolute')
     for key, low, high in (('workers', 1, 8), ('wall_seconds', 30, 240),
                            ('max_epoch_requests', 1, 12), ('max_pointer_age_epochs', 1, 24),
                            ('max_retained_age_epochs', 1, 72)):
