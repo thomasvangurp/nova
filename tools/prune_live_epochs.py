@@ -11,6 +11,10 @@ observations.  This tool, for every epoch older than ``--keep`` newest directori
   3. only then removes regenerable producer output and writes ``epoch<N>/PRUNED.json``.
      Raw payloads and structures stay at their original per-pass paths.
 
+When ``archive.csv`` is already missing (the epoch was archived elsewhere), there are no importer
+ids left to recompute or backfill, so the producer tree is pruned without an id check. If
+``archive.csv`` IS present, pruning still requires every recomputed id to be present in SQLite.
+
 It is a dry run unless ``--execute`` is given.  Rankings, tickets (``checkpoints``) and the other
 small top-level files are kept.  Run it with the interpreter that can import ``nanobody_opt``.
 """
@@ -129,24 +133,33 @@ def prune_epoch(args: argparse.Namespace, epoch_dir: Path) -> dict:
     if idle_seconds and time.time() - newest < idle_seconds:
         result["status"] = "recently_modified"  # an old epoch directory that is being worked on again
         return result
-    ids = expected_ids(epoch_dir, args.target)
-    absent = missing_ids(args.database, ids)
-    result.update(observation_ids=len(ids), missing_before=len(absent))
-    if absent:
-        if not args.execute:
-            result["status"] = "would_import_then_prune"
-            return result
-        result["importer_rc"] = run_importer(args.python, args.database, args.target, epoch_dir)
+    archive = epoch_dir / "archive.csv"
+    if archive.is_file():
+        ids = expected_ids(epoch_dir, args.target)
         absent = missing_ids(args.database, ids)
-        result["missing_after"] = len(absent)
-    if absent:
-        result["status"] = "kept_missing_measurements"
-        return result
+        result.update(observation_ids=len(ids), missing_before=len(absent))
+        if absent:
+            if not args.execute:
+                result["status"] = "would_import_then_prune"
+                return result
+            result["importer_rc"] = run_importer(args.python, args.database, args.target, epoch_dir)
+            absent = missing_ids(args.database, ids)
+            result["missing_after"] = len(absent)
+        if absent:
+            result["status"] = "kept_missing_measurements"
+            return result
+    else:
+        # archive.csv is already gone (the epoch was archived elsewhere), so there are no
+        # importer ids left to recompute and nothing to backfill: the producer tree is safe
+        # to prune as-is. Retained evidence files are still kept by remove_producer_tree.
+        ids: list[str] = []
+        result.update(observation_ids=0, archive_missing=True)
     if not args.execute:
         result["status"] = "would_prune"
         return result
     freed = remove_producer_tree(args.live_root, epoch_dir)
     marker = {"pruned_at": time.time(), "verified_observation_ids": len(ids), "freed_bytes": freed,
+              "archive_csv": "verified" if archive.is_file() else "missing",
               "kept": "rankings, checkpoints, config, raw exact payloads and per-pass structures at their original paths"}
     (epoch_dir / "PRUNED.json").write_text(json.dumps(marker, indent=1))
     result.update(status="pruned", freed_bytes=freed)
