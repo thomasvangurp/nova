@@ -23,7 +23,7 @@ SCHEMA = 'pr100-epoch-continuation-v1'
 # ---------------------------------------------------------------------------
 LEDGER_FILENAME = "challenge-ledger.sqlite"
 _DERIVATION_SCHEME = "challenge-v1"
-_LEDGER_SOURCE = "pr100-coordinator"
+_LEDGER_SOURCE = "live"
 
 try:
     from nanobody_opt import challenge_ledger
@@ -92,10 +92,11 @@ def _record_challenge_best_effort(config, epoch, clock, challenge, *, dry_run):
             "clock_block": int(block) if block is not None else None,
             "host": socket.gethostname(),
             "pid": os.getpid(),
+            "ledger_identity": LEDGER_DERIVATION_VERSION,
         }
         with contextlib.closing(challenge_ledger.connect(challenge_ledger_path(config))) as conn:
             result = challenge_ledger.record_challenge(
-                config_bytes, challenge, LEDGER_DERIVATION_VERSION, _LEDGER_SOURCE,
+                config_bytes, challenge, challenge_ledger.DERIVATION_VERSION, _LEDGER_SOURCE,
                 provenance, conn=conn)
         _log.info("challenge ledger epoch=%s inserted=%s derivation=%s",
                   epoch, result.get("inserted"), LEDGER_DERIVATION_VERSION)

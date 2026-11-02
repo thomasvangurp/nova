@@ -39,3 +39,18 @@ def test_record_and_verify_round_trip(tmp_path):
                             "live", {"node": "test"}, conn=conn)
     assert r2["inserted"] is False
     L.verify_challenge(epoch, challenge, conn=conn)
+
+
+def test_record_challenge_best_effort_writes_live_row(tmp_path):
+    from nanobody_opt import pr100_epoch_continuation as ec
+    config = dict(rules.pinned_config(rules.ACTIVATION_EPOCH))
+    config["state_root"] = str(tmp_path)
+    epoch, block_hash = 26000, "0x" + "cd" * 32
+    challenge = rules.challenge(config, epoch, block_hash, 361)
+    clock = {"block": epoch * 361, "epoch": epoch}
+    ec._record_challenge_best_effort(config, epoch, clock, challenge, dry_run=False)
+    conn = L.connect(str(tmp_path / "challenge-ledger.sqlite"))
+    row = conn.execute("SELECT epoch, source, derivation_version FROM epoch_challenges").fetchone()
+    conn.close()
+    assert row is not None, "no ledger row was written"
+    assert row[0] == epoch and row[1] == "live" and row[2] == L.DERIVATION_VERSION
