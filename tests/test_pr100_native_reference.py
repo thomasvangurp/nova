@@ -165,7 +165,9 @@ def test_qualified_loader126_row_binds_actual_report_runtime_and_frozen_source()
         '1c42ca3af222e23fd9aa51c1f9845457cb5371054009334aa4b9c1934d060324']
     row=next(r for r in rows if r['name'].endswith('cuda-refinement-prep1-loader126'))
     assert row['qualification_status']=='qualified' and row['actual_validator_worker_attested'] is False
-    assert row['resident_module_sha256']==native.sha(resident.__file__)
+    # Historical receipts retain their original implementation identity.
+    assert reference.digest(row)=='4824cd0daa6b9d322783679c8f143a6d604194f5939310843ea8d242c002c7dd'
+    assert row['resident_module_sha256']=='b03276270ee8c5b0ca91e6ed3d2301926b339086d3519da51f587d5c9c1c7697'
     assert row['implementation_sha256']==native.sha(native.__file__)
     proof=native.ROOT/row['qualification_report_file']
     assert native.sha(proof)==row['qualification_report_sha256']
@@ -178,6 +180,36 @@ def test_qualified_loader126_row_binds_actual_report_runtime_and_frozen_source()
     assert row['runtime_sha256']==reference.digest({**runtime,'cuda_plugin':row['cuda_plugin']})
     assert row['cuda_plugin']['loader']['nvrtc_sha256']==next(
         r['sha256'] for r in result['actual_maps']['libraries'] if 'libnvrtc.so.' in r['path'])
+
+
+def test_current_router_registration_binds_real_direct_repair_canary():
+    from nanobody_opt import pr100_registered_resident as resident
+    rows=json.loads(native.REGISTRY.read_text())['registrations']
+    row=next(r for r in rows if r.get('resident_module_sha256')==native.sha(resident.__file__))
+    old=next(r for r in rows if reference.digest(r)=='4824cd0daa6b9d322783679c8f143a6d604194f5939310843ea8d242c002c7dd')
+    assert row['qualification_status']=='qualified' and row['actual_validator_worker_attested'] is False
+    for key in ('runtime_sha256','observer_sha256','implementation_sha256','environment_manifest_sha256',
+                'bundle_manifest_sha256','weights','numpy','policy','cuda_plugin'):
+        assert row[key]==old[key]
+    proof=native.ROOT/row['qualification_report_file']
+    assert native.sha(proof)==row['qualification_report_sha256']
+    result=json.loads(proof.read_text())
+    assert result['completed']==result['draw_count']==result['fresh_predictions']==result['distinct_sequences']==16
+    assert result['authoritative'] is False and result['production_deployment'] is False
+    assert result['sealed_closure_unchanged'] is True and result['prediction_reuse'] is False
+    assert result['resident_module_sha256']==native.sha(resident.__file__)
+    assert result['cleanup']['remaining_descendants']==result['cleanup']['killed_descendants']==0
+    assert result['cleanup']['fixed_point_reached'] is True and result['child_exit_code']==0
+    groups=result['groups']
+    assert len(groups)==2 and groups[0]['four_worker_pids']==groups[1]['four_worker_pids']
+    assert len(set(groups[0]['four_worker_pids']))==4
+    contexts=[c for g in groups for d in g['draws'] for c in d['contexts']]
+    assert any(c['role']=='sidechain_repair' for c in contexts)
+    for context in contexts:
+        if context['role'] in ('minimize_energy','sidechain_repair'):
+            assert context['platform']=='CUDA'
+            assert {k:context['properties'][k] for k in ('Precision','DeviceIndex','DeterministicForces')}=={
+                'Precision':'mixed','DeviceIndex':'0','DeterministicForces':'true'}
 
 
 def test_old_runner_registration_cannot_launch_changed_runner_bytes():

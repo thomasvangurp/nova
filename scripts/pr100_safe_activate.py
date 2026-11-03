@@ -39,7 +39,8 @@ APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEA
                                     FORCE_ACTIVATION_RELEASE, RECOVERY_RELEASE,
                                     'ca091f95553ec4302c2221f703883bd35488795d',
                                     'bcac5ba7895886aca5e2671c6d574e197ae58048',
-                                    '3a26afe5f92e6fa9c368bb0b79eb2466bcca5728'})
+                                    '3a26afe5f92e6fa9c368bb0b79eb2466bcca5728',
+                                    '1d44712661a57a1b8e459824584bc6da646a59a4'})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -690,8 +691,53 @@ def recovery_required(sha, epoch, error, *, start_attempted):
             'scientific_ownership_must_be_checked_before_recovery': True}
 
 
+def registered_native_rollout(config, release, identity):
+    """Explicitly replace a CUDA resident implementation with identical science.
+
+    The row and its real qualification report must already ship in this release.
+    Only the selected registration changes; allocation and sealed runtime stay.
+    """
+    if identity is None:
+        return config
+    if not hash_value(identity):
+        raise ValueError('invalid_native_registration_identity')
+    release = Path(release)
+    rows = read(release / 'config/pr100_native_reference.json', {}).get('registrations', [])
+    by_identity = {digest(row): row for row in rows}
+    row = by_identity.get(identity, {})
+    module = release / 'nanobody_opt/pr100_registered_resident.py'
+    proof = release / row.get('qualification_report_file', '')
+    if (row.get('qualification_status') != 'qualified'
+            or row.get('actual_validator_worker_attested') is not False
+            or not module.is_file() or row.get('resident_module_sha256') != hashlib.sha256(module.read_bytes()).hexdigest()
+            or not proof.is_file() or not proof.resolve().is_relative_to(release.resolve())
+            or row.get('qualification_report_sha256') != hashlib.sha256(proof.read_bytes()).hexdigest()):
+        raise ValueError('native_registration_not_qualified_for_release')
+    pins = ('runtime_sha256', 'observer_sha256', 'implementation_sha256',
+            'environment_manifest_sha256', 'bundle_manifest_sha256', 'weights', 'numpy', 'policy', 'cuda_plugin')
+    value = copy.deepcopy(config)
+    selected = 0
+    for host in value.get('native_hosts', ['master']):
+        settings = value.get('native_worker_overrides', {}).get(host, {}).get(
+            'native_reference', value.get('worker', {}).get('native_reference', {}))
+        old = by_identity.get(settings.get('registration_sha256'), {})
+        if (settings.get('enabled') is not True or settings.get('resident') is not True
+                or old.get('policy', {}).get('final_refinement', {}).get('platform') != 'CUDA'):
+            continue
+        if any(key not in old or old[key] != row.get(key) for key in pins):
+            raise ValueError('native_registration_changes_scientific_runtime')
+        replacement = copy.deepcopy(settings)
+        replacement['registration_sha256'] = identity
+        value.setdefault('native_worker_overrides', {}).setdefault(host, {})['native_reference'] = replacement
+        selected += 1
+    if not selected:
+        raise ValueError('no_selected_cuda_resident_registration')
+    return value
+
+
 def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
             native_refill_hosts=(), missing_cell_donors=False, native_screen=None, recovery_rollout_receipt=None,
+            native_registration=None,
             clock_reader=current_clock,
             service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
@@ -708,6 +754,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
                                native_refill_hosts=native_refill_hosts, missing_cell_donors=missing_cell_donors,
                                native_screen=native_screen, force=force)
     proposal = recovery_rollout(proposal, recovery_rollout_receipt, sha)
+    proposal = registered_native_rollout(proposal, release, native_registration)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -790,6 +837,8 @@ def main(argv=None):
                         help='Enable bounded missing-cell donors with unchanged validation and unseeded controls')
     parser.add_argument('--recovery-rollout-receipt', type=Path,
                         help='Source-bound measured screen, annotated bank and novelty-qualified edit rollout')
+    parser.add_argument('--native-registration',
+                        help='Explicit qualified CUDA resident replacement with identical sealed science')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if args.native_screen is not None and args.interleave_confirmations:
@@ -821,6 +870,7 @@ def main(argv=None):
                                         native_refill_hosts=args.native_refill_host,
                                         missing_cell_donors=args.missing_cell_donors,
                                         native_screen=args.native_screen,
+                                        native_registration=args.native_registration,
                                         recovery_rollout_receipt=(read(args.recovery_rollout_receipt, {})
                                             if args.recovery_rollout_receipt else None),
                                         force=False)

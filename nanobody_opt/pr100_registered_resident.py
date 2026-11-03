@@ -157,8 +157,8 @@ def original_program_context(argv, cwd, bridge, *, preparation_threads, trace_pa
 def route_contexts(observer, mm, policy, *, temporary_directory):
     """Route before Observer.install(), so its genuine hook records actual devices.
 
-    The published minimize_energy creates the Context both for the initial main
-    minimizer and sidechain repair. Chirality work reuses that same Simulation.
+    Sidechain repair can create Contexts directly as well as through the main
+    minimizer. Chirality work reuses that same Simulation.
     No force field, integrator, hydrogen selection, or minimization call changes.
     """
     if policy['final_refinement'] == {'platform':'CPU','threads':1}:
@@ -176,9 +176,9 @@ def route_contexts(observer, mm, policy, *, temporary_directory):
     def routed(context, *args, **kwargs):
         stack = getattr(observer.local, 'stack', [])
         role = stack[-1][0] if stack else None
-        if role in ('missing_atoms', 'hydrogens', 'minimize_energy'):
+        if role in ('missing_atoms', 'hydrogens', 'minimize_energy', 'sidechain_repair'):
             require(not kwargs and len(args) in (2, 3, 4), 'unregistered_context_signature')
-            if role == 'minimize_energy':
+            if role in ('minimize_energy', 'sidechain_repair'):
                 args = (*args[:2], cuda, {'Precision': 'mixed', 'DeterministicForces': 'true',
                     'DeviceIndex': '0', 'TempDirectory': str(temporary_directory)})
             else:

@@ -15,6 +15,44 @@ HEARTBEAT = {**CLOCK, 'status': 'watching', 'updated_at_unix': 1000}
 STATE = {'challenge': {'epoch': 25964}, 'active': None, 'native_rows': ['preserved']}
 
 
+@pytest.mark.parametrize('fault', [None, 'unqualified', 'proof_changed', 'resident_changed',
+                                 'policy_changed', 'loader_changed', 'unknown', 'cpu_only'])
+def test_explicit_resident_upgrade_preserves_runtime_and_allocations(tmp_path, fault):
+    # Synthetic activation fixture; this is not scientific qualification evidence.
+    source = Path(__file__).resolve().parents[1]
+    old = next(r for r in a.read(source/'config/pr100_native_reference.json')['registrations']
+               if r['policy']['final_refinement']['platform'] == 'CUDA')
+    replacement = copy.deepcopy(old)
+    module = tmp_path/'nanobody_opt/pr100_registered_resident.py'
+    module.parent.mkdir();module.write_text('synthetic resident fixture')
+    proof = tmp_path/'config/proof.json';proof.parent.mkdir();proof.write_text('{"fixture":true}')
+    replacement.update(name='synthetic-replacement',
+        resident_module_sha256=hashlib.sha256(module.read_bytes()).hexdigest(),
+        qualification_report_file='config/proof.json',
+        qualification_report_sha256=hashlib.sha256(proof.read_bytes()).hexdigest())
+    if fault == 'unqualified':replacement['qualification_status']='research_unqualified'
+    if fault == 'proof_changed':proof.write_text('{}')
+    if fault == 'resident_changed':module.write_text('different bytes')
+    if fault == 'policy_changed':replacement['policy']['preparation_threads']=2
+    if fault == 'loader_changed':replacement['cuda_plugin']['loader']['nvrtc_sha256']='f'*64
+    a.atomic(tmp_path/'config/pr100_native_reference.json', {'registrations':[old,replacement]})
+    settings={'enabled':True,'resident':True,'registration_sha256':a.digest(old),
+              'workers_per_gpu':4,'gpus':[0,1],'resident_batch_draws':16}
+    config={'native_hosts':['master','slave'], 'worker':{},
+            'native_worker_overrides':{'master':{'native_reference':settings},'slave':{'cpu_slots':32}}}
+    if fault == 'cpu_only':settings['enabled']=False
+    original=copy.deepcopy(config)
+    identity='f'*64 if fault == 'unknown' else a.digest(replacement)
+    if fault:
+        with pytest.raises(ValueError):a.registered_native_rollout(config,tmp_path,identity)
+    else:
+        result=a.registered_native_rollout(config,tmp_path,identity)
+        expected=copy.deepcopy(config)
+        expected['native_worker_overrides']['master']['native_reference']['registration_sha256']=identity
+        assert result==expected
+    assert config==original
+
+
 @pytest.mark.parametrize('fault', [None, 'missing_cuda_registration', 'old_verifier'])
 def test_actual_submitter_must_accept_selected_cuda_registration(tmp_path, monkeypatch, fault):
     release = Path(__file__).resolve().parents[1]

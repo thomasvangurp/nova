@@ -90,6 +90,10 @@ def test_router_uses_current_observer_phase_and_preserves_other_contexts(tmp_pat
         for role in ('missing_atoms','hydrogens','minimize_energy','sidechain_repair'):
             with observer.phase(role):
                 if role=='sidechain_repair':
+                    # Published repair creates both explicit-CPU and implicit
+                    # platform Simulations without entering minimize_energy.
+                    Context('system','integrator','CPU',{'Threads':'1'})
+                    Context('system','integrator')
                     with observer.phase('minimize_energy'):Context('system','integrator','CPU',{'Threads':'1'})
                 else:Context('system','integrator')
     assert Context.__init__ is original

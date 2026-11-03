@@ -6,6 +6,12 @@ the original sealed scientific environment, and the main-CUDA policy. An enabled
 flag alone does not register or qualify a runtime. Existing CPU registrations
 and their receipt meanings remain intact.
 
+An implementation repair appends a new registration and qualification report.
+Safe activation selects it explicitly with `--native-registration <identity>`;
+the transition refuses changes to the sealed runtime, scientific sources,
+weights, policy, loader or allocation, and checks the installed Pi consumer
+before stopping the old controller.
+
 The native phase selects `RegisteredResidentAdapter`. Each allowed GPU has one
 ordinary cooperative lease and a bounded pool of `workers_per_gpu` independent
 scientific processes. Those processes retain their four original NBB models
@@ -15,8 +21,10 @@ PSH and A3D. There is no prediction cache, NN batching, PCA change or H-GPU path
 
 The existing Observer is installed afresh after resetting the original refine
 module globals. A scoped Context router underneath that Observer forces missing
-atoms and hydrogen preparation to CPU Threads1 and main `minimize_energy` to CUDA
-mixed precision with deterministic forces. Original systems, integrators,
+atoms and hydrogen preparation to CPU Threads1 and both `minimize_energy` and
+direct `sidechain_repair` Contexts to CUDA mixed precision with deterministic
+forces. Repair also creates Simulations outside `minimize_energy`; both its
+explicit-CPU and implicit-platform constructors must be routed. Original systems, integrators,
 restraints, tolerances, iteration limits, checks and fallback ordering are kept.
 Trace/structure/aggregation receipts use the current registered verifier.
 

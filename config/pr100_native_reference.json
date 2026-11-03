@@ -118,6 +118,48 @@
           "cpp_version": "8.5"
         }
       }
+    },
+    {
+      "name": "published-source-resident-cuda-prediction-cuda-refinement-prep1-loader126-sidechain-router",
+      "qualification_scope": "bounded_16_fresh_failed_cohort_direct_repair_context_conformance_four_workers_two_groups_unseeded_not_equivalence_or_external_worker_attestation",
+      "runtime_sha256": "944e788007f41acd930c45218d962b72ab41b55979f6f5921367cd089623097b",
+      "observer_sha256": "9806c6e5b9a346059c02477f687bdc6bd48bcf892a5f10413bfe8da45bcfaff5",
+      "implementation_sha256": "01cc1be696775171501a2f9eb1dac2ed8cdc9bb68102dc7b2606d81e498a3658",
+      "environment_manifest_sha256": "4e9316d4dd7db9dccb5d55e5cefeabf942cf1579ce100db28d132df2c4bf1875",
+      "bundle_manifest_sha256": "5987cd030870eefba1d88133840e7944fee9170f172e8c150608a5cfc761baf6",
+      "actual_validator_worker_attested": false,
+      "weights": {
+        "1": "2f8f398a95e2fd3fe38527415471a60346cb131864a1a4ef081e11816d74e995",
+        "2": "41c163511ad20d1aa67fbd50f64ced9a25381d0618847b16a19d5e14df73297e",
+        "3": "8de57b3f0b6b89acb0e87fc7b647522666dd90e86ed3138417cbcd785c982c4d",
+        "4": "96f3cfba8de00e4c833bc73efa821f6022ed65e951a4289c7e3b5409527964e0"
+      },
+      "numpy": "2.0.2",
+      "policy": {
+        "prediction": "auto_cuda",
+        "final_refinement": {
+          "platform": "CUDA",
+          "precision": "mixed",
+          "deterministic_forces": true
+        },
+        "preparation_threads": 1
+      },
+      "qualification_status": "qualified",
+      "qualification_report_sha256": "0fc84ddccec9483f952b017c8705b6322af9a15b385c6a6c9ca441dfe8c3e366",
+      "qualification_report_file": "config/pr100_sidechain_router_qualification.json",
+      "resident_module_sha256": "7e24774b054d416f5b77dbafdb25a605b5a14b6cdf2e97608257ac1c52dab1a4",
+      "cuda_plugin": {
+        "distribution": "OpenMM-CUDA-12",
+        "version": "8.5.0",
+        "wheel_sha256": "5e9b1054820b177366113d954fa2885837b31333ea2f6daa489da23148469173",
+        "manifest_sha256": "e3e4357e6e25936708ebebfbaf4b4fdaa36e0ded2b60c5fedecf5c192b776639",
+        "loader": {
+          "core_sha256": "2e6d893dab1ae7cc5fb259091828329ce772aa45bc2a379ff301693dd2f1c437",
+          "nvrtc_sha256": "e096758089294cd705e28588160818b2756b783f5599222f8fdf78377280d50c",
+          "torch_compiled_cuda": 12060,
+          "cpp_version": "8.5"
+        }
+      }
     }
   ]
 }
