@@ -130,6 +130,8 @@ TEST_FILES = (
     'tests/test_run_live_producer.py',
     'tests/test_submit_host_loop.py',
     'tests/test_prune_live_epochs.py',
+    'tests/test_bgen_shim.py',
+    'tests/test_pr100_recipe_prior.py',
     'nanobody_opt_v2/tests/test_flags.py',
     'nanobody_opt_v2/tests/test_replication.py',
     'nanobody_opt_v2/tests/test_compute_budget.py',
