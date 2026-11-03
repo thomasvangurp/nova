@@ -85,3 +85,67 @@ def test_a_broken_shim_never_breaks_the_interpreter(tmp_path):
     )
     assert done.returncode == 0, done.stderr
     assert "interpreter usable" in done.stdout
+
+
+def _load_shim_utils(monkeypatch, responses):
+    """Import the shim's utils with `requests.get` replaced by a scripted fake."""
+    import importlib.util
+    import requests
+
+    spec = importlib.util.spec_from_file_location(
+        "bgen_shim_utils_under_test", SHIM / "utils" / "__init__.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    class _Resp:
+        def __init__(self, status, text=""):
+            self.status_code, self.text = status, text
+
+    def fake_get(url, timeout=None):
+        calls.append(url)
+        item = responses[min(len(calls) - 1, len(responses) - 1)]
+        if isinstance(item, Exception):
+            raise item
+        return _Resp(*item)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    return module, calls
+
+
+def test_transient_uniprot_failures_are_retried_not_lost(monkeypatch):
+    """RETRY_SHORT_SHARDS root cause: one SSL EOF used to lose the sequence."""
+    import requests
+    module, calls = _load_shim_utils(monkeypatch, [
+        requests.exceptions.SSLError("UNEXPECTED_EOF_WHILE_READING"),
+        (503,),
+        (200, ">sp|X\nMKT\nLLA\n"),
+    ])
+    assert module.get_sequence_from_protein_code("X00000") == "MKTLLA"
+    assert len(calls) == 3
+
+
+def test_a_good_answer_is_cached_so_replicate_chunks_do_not_refetch(monkeypatch):
+    module, calls = _load_shim_utils(monkeypatch, [(200, ">sp|X\nMKTLLA\n")])
+    for _ in range(5):
+        assert module.get_sequence_from_protein_code("X00000", (1, 4)) == "KTL"
+    assert len(calls) == 1
+
+
+def test_a_definitive_answer_still_fails_closed_without_retrying(monkeypatch):
+    import pytest
+    module, calls = _load_shim_utils(monkeypatch, [(404,)])
+    with pytest.raises(RuntimeError, match="Refusing to guess"):
+        module.get_sequence_from_protein_code("NOPE")
+    assert len(calls) == 1
+
+
+def test_persistent_outage_still_raises_after_bounded_attempts(monkeypatch):
+    import pytest
+    import requests
+    module, calls = _load_shim_utils(
+        monkeypatch, [requests.exceptions.ConnectionError("dns")])
+    with pytest.raises(RuntimeError, match="unreachable"):
+        module.get_sequence_from_protein_code("X00000")
+    assert len(calls) == module._FETCH_ATTEMPTS
