@@ -6,6 +6,7 @@ All subprocess output is captured; only allowlisted operational status is emitte
 """
 from __future__ import annotations
 import argparse
+import ast
 import base64
 import copy
 import fcntl
@@ -665,14 +666,17 @@ class Service:
 
 
 def boundary(config, clock, now, *, heartbeat_max_age=30, novelty_migration=False,
-             protect_partial_native=False):
+             protect_partial_native=False, portable_native=None):
     root = Path(config['state_root'])
     state = read(root / str(clock['epoch']) / 'continuation.json', {})
     if protect_partial_native and state.get('pending_confirmation'):
         from nanobody_opt.pr100_live_controller import admissible, RESERVE_BLOCKS
-        # A changed adapter identity must not strand confirmations that can
-        # still finish this epoch. Expired evidence stays retained on disk.
-        if admissible({**clock, 'updated_at_unix': now}, clock['epoch'],
+        # Runtime/configuration transitions wait for usable confirmations. A
+        # source-only successor may retain exactly compatible idle checkpoints.
+        # Expired evidence stays retained on disk in either case.
+        compatible = (portable_native is not None
+                      and portable_native_successor(config, *portable_native, state=state))
+        if not compatible and admissible({**clock, 'updated_at_unix': now}, clock['epoch'],
                       reserve=config.get('reserve_blocks', RESERVE_BLOCKS), now=now):
             return False
     recoverable = novelty_migration and clean_pending_novelty_migration(config, clock, state)
@@ -749,6 +753,141 @@ CUDA_HOST_SOURCE_FILES = frozenset({
     'nanobody_opt/pr100_context_observer.py', 'nanobody_opt/pr100_validator_reference.py',
     'nanobody_opt/pr100_live_gpu.py', 'nanobody_opt/pr100_resources.py',
     'nanobody_opt/pr100_native_evidence_cache.py', 'config/pr100_validator_reference.json'})
+
+# These files decide measured native evidence, annotation, requirements and
+# novelty. A code-only proposal successor cannot silently replace any of them.
+PORTABLE_NATIVE_SOURCES = CUDA_HOST_SOURCE_FILES | NOVELTY_SOURCES | frozenset({
+    'nanobody_opt/rules.py', 'nanobody_opt/gates.py', 'nanobody_opt/hydrophobicity.py',
+    'nanobody_opt/pr100_filter.py', 'nanobody_opt/pr100_native_journal.py',
+    'nanobody_opt/pr100_live_selection.py', 'nanobody_opt/pr100_native_screen.py',
+    'utils/germline_identity.py', 'utils/aggrescan3d.py', 'config/nanobody_pr100.json',
+    'NOVA-nanobody-filter/metanano/services/developability_service.py',
+    'NOVA-nanobody-filter/metanano/filters/developability.py',
+    'NOVA-nanobody-filter/metanano/utils/tnp_wrapper.py',
+    'NOVA-nanobody-filter/metanano/utils/aggrescan3d_wrapper.py'})
+
+
+def portable_native_successor(current, proposed, release, *, state=None):
+    """A code-only successor may retain idle, same-registration confirmations.
+
+    This proves compatibility, never ownership. boundary() must still establish
+    active=None and repeat that proof under the stopped-controller lock. Missing
+    predecessor files or any changed scientific/configuration binding fail closed.
+    """
+    try:
+        def normalized(config):
+            value = copy.deepcopy(config)
+            source = value.pop('source_sha')
+            if not isinstance(source, str) or not re.fullmatch('[0-9a-f]{40}', source):
+                raise ValueError('invalid_portable_release')
+            value.pop('start_epoch', None)
+            for host in value['hosts'].values():
+                path = host['release']
+                if not isinstance(path, str) or not path.endswith('/' + source):
+                    raise ValueError('invalid_portable_host_release')
+                host['release'] = path[:-len(source)] + '<SOURCE>'
+            return value
+
+        if digest(normalized(current)) != digest(normalized(proposed)):
+            return False
+        release = Path(release)
+        if release.name != proposed['source_sha']:
+            return False
+        previous = release.parent / current['source_sha']
+
+        def file(root, name):
+            path = root / name
+            if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError('missing_portable_source')
+            return path.read_bytes()
+
+        for name in PORTABLE_NATIVE_SOURCES:
+            if file(previous, name) != file(release, name):
+                return False
+        # The worker shares generation and native entry points. Permit only
+        # proposal generation to change; pin imports, defaults and every native,
+        # annotation, novelty and resume implementation in the same module.
+        def native_worker(root):
+            tree = ast.parse(file(root, 'nanobody_opt/pr100_live_worker.py'))
+            generation = [node for node in tree.body
+                          if isinstance(node, ast.FunctionDef) and node.name == 'sequence_phase']
+            if len(generation) != 1:
+                raise ValueError('portable_generation_entry_missing')
+            tree.body.remove(generation[0])
+            return ast.dump(tree, include_attributes=False)
+        if native_worker(previous) != native_worker(release):
+            return False
+
+        hosts = current.get('native_hosts', ['master'])
+        if (not isinstance(hosts, list) or not hosts or len(set(hosts)) != len(hosts)
+                or set(hosts) - {'master', 'slave'}):
+            return False
+        old_rows = read(previous / 'config/pr100_native_reference.json', {}).get('registrations', [])
+        new_rows = read(release / 'config/pr100_native_reference.json', {}).get('registrations', [])
+        identities, by_host = set(), {}
+        for host in hosts:
+            settings = current.get('native_worker_overrides', {}).get(host, {}).get(
+                'native_reference', current.get('worker', {}).get('native_reference', {}))
+            identity = settings.get('registration_sha256')
+            identities.add(identity)
+            old = [row for row in old_rows if digest(row) == identity]
+            new = [row for row in new_rows if digest(row) == identity]
+            if (settings.get('enabled') is not True or settings.get('resident') is not True
+                    or not hash_value(identity) or len(old) != 1 or len(new) != 1
+                    or old != new):
+                return False
+            row = old[0]
+            by_host[host] = (settings, row)
+            if (row.get('qualification_status') != 'qualified'
+                    or row.get('actual_validator_worker_attested') is not False
+                    or row.get('policy', {}).get('final_refinement') != {
+                        'platform': 'CUDA', 'precision': 'mixed', 'deterministic_forces': True}):
+                return False
+            for name, key in (
+                    ('nanobody_opt/pr100_registered_resident.py', 'resident_module_sha256'),
+                    ('nanobody_opt/pr100_native_reference.py', 'implementation_sha256'),
+                    ('nanobody_opt/pr100_context_observer.py', 'observer_sha256'),
+                    (row.get('qualification_report_file', ''), 'qualification_report_sha256')):
+                expected = row.get(key)
+                if (not hash_value(expected) or not name or Path(name).is_absolute()
+                        or hashlib.sha256(file(previous, name)).hexdigest() != expected
+                        or hashlib.sha256(file(release, name)).hexdigest() != expected):
+                    return False
+            gpus = current.get('native_gpu_by_host', {}).get(host, current.get('native_gpu', []))
+            if (not isinstance(gpus, list) or not gpus or settings.get('gpus') != gpus
+                    or any(type(gpu) is not int or gpu < 0 for gpu in gpus)
+                    or len(set(gpus)) != len(gpus)):
+                return False
+            novelty = current['hosts'][host].get('novelty_runtime', {})
+            if (not isinstance(novelty, dict) or set(novelty) != set(NOVELTY_PATHS) | {'identity_sha256'}
+                    or any(novelty.get(key) != path for key, path in NOVELTY_PATHS.items())
+                    or not hash_value(novelty.get('identity_sha256'))):
+                return False
+        if len(identities) != 1:
+            return False
+        if state is not None:
+            from nanobody_opt import rules
+            from nanobody_opt.pr100_live_selection import fleet_policy_settings
+            requirements = json.loads(file(release, 'config/nanobody_pr100.json'))['nanobody_requirements']
+            for pending in state.get('pending_confirmation', []):
+                checkpoint = pending['native_resume']
+                host = checkpoint['execution_host']
+                settings, row = by_host[host]
+                expected = {'challenge_sha256': digest(state['challenge']), 'resume_eligible': True,
+                    'requirements_sha256': digest(requirements), 'filter_sha': rules.FILTER_SHA,
+                    'backend': 'native_reference', 'registration_sha256': settings['registration_sha256'],
+                    'runtime_identity_sha256': row['runtime_sha256'], 'policy_sha256': digest(row['policy']),
+                    'runtime_identity_status': 'registered_native_reference'}
+                effective = {**current.get('worker', {}), **current.get('native_worker_overrides', {}).get(host, {})}
+                if (checkpoint.get('schema') != 'pr100-native-confirmation-checkpoint-v1'
+                        or digest(checkpoint.get('identity')) != digest(expected)
+                        or checkpoint.get('sequence_hash') != rules.sequence_hash(pending['sequence'])
+                        or checkpoint.get('fleet_policy') != fleet_policy_settings(effective.get('native_fleet_policy'))
+                        or checkpoint.get('accelerated_screen') is not None):
+                    return False
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, SyntaxError):
+        return False
 
 
 def cuda_native_host_rollout(config, release, proof):
@@ -932,8 +1071,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     migration = (novelty_runtimes is not None and any(
         config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
         != runtime.get('identity_sha256') for host, runtime in novelty_runtimes.items()))
-    protect_partial = config.get('source_sha') != sha
-    if not boundary(config, clock, now(), novelty_migration=migration, protect_partial_native=protect_partial):
+    if not boundary(config, clock, now(), novelty_migration=migration):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     candidate = base / 'pr100-staging' / ('throughput-candidate-' + sha + '-' + mode + '.json')
     proposal = proposed_config(config, sha, clock['epoch'], mode, qualification, novelty_runtimes=novelty_runtimes,
@@ -943,6 +1081,13 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     proposal = recovery_rollout(proposal, recovery_rollout_receipt, sha)
     proposal = registered_native_rollout(proposal, release, native_registration)
     proposal = cuda_native_host_rollout(proposal, release, cuda_native_host_receipt)
+    changed_config = (digest({k: v for k, v in proposal.items() if k != 'start_epoch'}) !=
+                      digest({k: v for k, v in config.items() if k != 'start_epoch'}))
+    protect_partial = changed_config
+    portable = (proposal, release)
+    if not boundary(config, clock, now(), novelty_migration=migration,
+                    protect_partial_native=protect_partial, portable_native=portable):
+        return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -970,7 +1115,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     # Keep the short pause between attempts free of another slow chain RPC.
     # The fresh chain check under the lock below still precedes any install.
     if (path.read_bytes() != original or not boundary(config, clock, now(), novelty_migration=migration,
-                                                    protect_partial_native=protect_partial)):
+                                                    protect_partial_native=protect_partial, portable_native=portable)):
         return {'status': 'waiting_for_clean_attempt', 'epoch': clock['epoch']}
     # The prepared config must use the same current epoch as the final check.
     if proposal['start_epoch'] != clock['epoch']:
@@ -983,7 +1128,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
             fresh = clock_reader()
             raced = (path.read_bytes() != original or fresh['epoch'] != clock['epoch']
                      or not boundary(config, fresh, now(), heartbeat_max_age=90, novelty_migration=migration,
-                                     protect_partial_native=protect_partial))
+                                     protect_partial_native=protect_partial, portable_native=portable))
             if not raced:
                 # Do not rewrite continuation state or the publication artifact.
                 changed = True

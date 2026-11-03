@@ -960,6 +960,193 @@ def test_refill_adapter_cutover_preserves_live_partial_confirmations(deployment,
         assert events == [] and a.read(base / 'pr100-controller.json') == old
 
 
+@pytest.fixture
+def portable_cuda_deployment(deployment):
+    """Inert staged files test compatibility guards, not scientific qualification."""
+    base, release, unit, root, old = deployment
+    source = Path(__file__).resolve().parents[1]
+    previous = release.parent / old['source_sha']
+    files = a.PORTABLE_NATIVE_SOURCES | {
+        'nanobody_opt/pr100_live_worker.py', 'config/pr100_native_reference.json'}
+    for name in files:
+        origin = source / name
+        data = origin.read_bytes() if origin.is_file() else b'inert upstream source fixture\n'
+        for staged in (previous, release):
+            target = staged / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    rows = a.read(release / 'config/pr100_native_reference.json')['registrations']
+    module_hash = hashlib.sha256((release / 'nanobody_opt/pr100_registered_resident.py').read_bytes()).hexdigest()
+    row = next(row for row in rows if row.get('resident_module_sha256') == module_hash
+               and row['policy']['final_refinement']['platform'] == 'CUDA')
+    identity = a.digest(row)
+    for staged in (previous, release):
+        target = staged / row['qualification_report_file']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / row['qualification_report_file']).read_bytes())
+    old.update(native_hosts=['master', 'slave'], native_gpu_by_host={'master': [0, 1], 'slave': [0]},
+               native_worker_overrides={})
+    old['worker']['native_fleet_policy'] = {
+        'kind': 'pr100-observed-fleet-v1', 'minimum_smoothed_fraction': .4}
+    runtimes = {}
+    for host, gpus in old['native_gpu_by_host'].items():
+        old['native_worker_overrides'][host] = {
+            'workers': 32, 'max_workers': 32, 'cpu_slots': 32,
+            'native_reference': {'enabled': True, 'resident': True,
+                'registration_sha256': identity, 'gpus': gpus, 'workers_per_gpu': 4,
+                'resident_batch_draws': 8, 'environment': '/sealed/env', 'bundle': '/sealed/bundle'}}
+        runtimes[host] = {**a.NOVELTY_PATHS, 'identity_sha256': '7' * 64}
+        old['hosts'][host]['novelty_runtime'] = runtimes[host]
+    proposed = a.proposed_config(old, SHA, CLOCK['epoch'], 'preserve', {}, novelty_runtimes=runtimes)
+    from nanobody_opt import rules
+    state = copy.deepcopy(STATE)
+    requirements = a.read(release / 'config/nanobody_pr100.json')['nanobody_requirements']
+    resume = {'challenge_sha256': a.digest(state['challenge']), 'resume_eligible': True,
+        'requirements_sha256': a.digest(requirements), 'filter_sha': rules.FILTER_SHA,
+        'backend': 'native_reference', 'registration_sha256': identity,
+        'runtime_identity_sha256': row['runtime_sha256'], 'policy_sha256': a.digest(row['policy']),
+        'runtime_identity_status': 'registered_native_reference'}
+    state['pending_confirmation'] = [{'sequence': 'ACDEFGHIK', 'native_resume': {
+        'schema': 'pr100-native-confirmation-checkpoint-v1',
+        'sequence_hash': rules.sequence_hash('ACDEFGHIK'), 'identity': resume,
+        'fleet_policy': copy.deepcopy(old['worker']['native_fleet_policy']), 'execution_host': 'slave',
+        'measurements': [{'inert_fixture': True}], 'required_cpu_observations': 2}}]
+    a.atomic(base / 'pr100-controller.json', old)
+    a.atomic(root / str(CLOCK['epoch']) / 'continuation.json', state)
+    return base, release, unit, root, old, proposed, runtimes, state
+
+
+def test_portable_cuda_generation_successor_keeps_pending_state(portable_cuda_deployment):
+    base, release, unit, root, old, proposed, runtimes, state = portable_cuda_deployment
+    worker = release / 'nanobody_opt/pr100_live_worker.py'
+    worker.write_text(worker.read_text().replace('def sequence_phase(job, directory):\n',
+        'def sequence_phase(job, directory):\n    portable_generation_fixture = True\n'))
+    assert a.portable_native_successor(old, proposed, release, state=state)
+    checkpoint = root / str(CLOCK['epoch']) / 'continuation.json'
+    before, published = checkpoint.read_bytes(), (base / 'publication.json').read_bytes()
+    events = []
+    result = a.handoff(base, SHA, 'preserve', release, {}, novelty_runtimes=runtimes,
+        clock_reader=lambda: CLOCK, now=lambda: 1000, service_factory=service_factory(unit, events))
+    assert result['status'] == 'activated'
+    assert events == ['validate', 'stop', 'install', 'start', 'verify']
+    assert a.read(base / 'pr100-controller.json') == proposed
+    assert checkpoint.read_bytes() == before and (base / 'publication.json').read_bytes() == published
+
+
+@pytest.mark.parametrize('fault', ['registration', 'resident', 'cpu_backend', 'host_removed',
+    'cpu_slots', 'workers', 'gpus', 'batch', 'fleet_policy', 'native_tools', 'novelty_runtime',
+    'environment', 'preparation_threads', 'requirements_source', 'scientific_source',
+    'novelty_source', 'native_gate', 'missing_old_source', 'checkpoint_registration',
+    'checkpoint_policy', 'checkpoint_host', 'checkpoint_challenge', 'checkpoint_requirements',
+    'checkpoint_sequence', 'screen_checkpoint'])
+def test_portable_cuda_successor_fails_closed(portable_cuda_deployment, fault):
+    base, release, unit, root, old, proposed, runtimes, state = portable_cuda_deployment
+    native = proposed['native_worker_overrides']['slave']
+    settings = native['native_reference']
+    if fault == 'registration': settings['registration_sha256'] = 'f' * 64
+    if fault == 'resident': settings['resident'] = False
+    if fault == 'cpu_backend': settings['enabled'] = False
+    if fault == 'host_removed': proposed['native_hosts'] = ['master']
+    if fault == 'cpu_slots': native['cpu_slots'] += 1
+    if fault == 'workers': native['workers'] += 1
+    if fault == 'gpus': proposed['native_gpu_by_host']['slave'] = [1]
+    if fault == 'batch': settings['resident_batch_draws'] += 1
+    if fault == 'fleet_policy': proposed['worker']['native_fleet_policy']['minimum_smoothed_fraction'] = .5
+    if fault == 'native_tools': proposed['worker']['native_tools'] = '/other/tools'
+    if fault == 'novelty_runtime': proposed['hosts']['slave']['novelty_runtime']['identity_sha256'] = '8' * 64
+    if fault == 'environment': settings['environment'] = '/other/sealed/env'
+    if fault == 'preparation_threads': settings['preparation_threads'] = 2
+    source = {'requirements_source': 'config/nanobody_pr100.json',
+        'scientific_source': 'nanobody_opt/pr100_registered_resident.py',
+        'novelty_source': 'NOVA-nanobody-filter/metanano/utils/alignment.py'}.get(fault)
+    if source: (release / source).write_bytes(b'changed scientific bytes')
+    if fault == 'native_gate':
+        path = release / 'nanobody_opt/pr100_live_worker.py'
+        path.write_text(path.read_text().replace('def native_resume_identity(job, directory, requirements):\n',
+            'def native_resume_identity(job, directory, requirements):\n    changed_gate = True\n'))
+    if fault == 'missing_old_source':
+        (release.parent / old['source_sha'] / 'nanobody_opt/rules.py').unlink()
+    saved = state['pending_confirmation'][0]['native_resume']
+    if fault == 'checkpoint_registration': saved['identity']['registration_sha256'] = 'f' * 64
+    if fault == 'checkpoint_policy': saved['fleet_policy']['minimum_smoothed_fraction'] = .5
+    if fault == 'checkpoint_host': saved['execution_host'] = 'retired-host'
+    if fault == 'checkpoint_challenge': saved['identity']['challenge_sha256'] = 'f' * 64
+    if fault == 'checkpoint_requirements': saved['identity']['requirements_sha256'] = 'f' * 64
+    if fault == 'checkpoint_sequence': saved['sequence_hash'] = 'f' * 64
+    if fault == 'screen_checkpoint': saved['accelerated_screen'] = {'inert': True}
+    assert not a.portable_native_successor(old, proposed, release, state=state)
+
+
+@pytest.mark.parametrize('race', ['already_active', 'during_validation', 'after_stop', 'closure_during_validation',
+                                  'closure_after_stop', 'checkpoint_after_stop'])
+def test_portable_activation_rechecks_ownership_and_compatibility(portable_cuda_deployment, race):
+    base, release, unit, root, old, proposed, runtimes, state = portable_cuda_deployment
+    path = root / str(CLOCK['epoch']) / 'continuation.json'
+    def active():
+        changed = copy.deepcopy(state); changed['active'] = {'number': 4, 'phase': 'native'}
+        a.atomic(path, changed)
+    def closure(): (release / 'nanobody_opt/rules.py').write_bytes(b'changed requirements implementation')
+    def checkpoint():
+        changed = copy.deepcopy(state)
+        changed['pending_confirmation'][0]['native_resume']['identity']['registration_sha256'] = 'f' * 64
+        a.atomic(path, changed)
+    if race == 'already_active': active()
+    events = []
+    result = a.handoff(base, SHA, 'preserve', release, {}, novelty_runtimes=runtimes,
+        clock_reader=lambda: CLOCK, now=lambda: 1000,
+        service_factory=service_factory(unit, events,
+            validation=active if race == 'during_validation' else closure if race == 'closure_during_validation' else None,
+            stop=active if race == 'after_stop' else closure if race == 'closure_after_stop'
+                else checkpoint if race == 'checkpoint_after_stop' else None))
+    assert result['status'] == ('boundary_race_old_service_restarted' if race in ('after_stop', 'checkpoint_after_stop', 'closure_after_stop')
+                                else 'waiting_for_clean_attempt')
+    assert events == ([] if race == 'already_active' else ['validate', 'stop', 'start']
+                      if race in ('after_stop', 'checkpoint_after_stop', 'closure_after_stop') else ['validate'])
+    assert a.read(base / 'pr100-controller.json') == old
+
+
+@pytest.mark.parametrize('fault', ['disabled', 'nonresident', 'cpu_refinement', 'mixed_registrations',
+                                  'empty_gpus', 'missing_novelty'])
+def test_unchanged_nonportable_runtime_cannot_use_exception(portable_cuda_deployment, fault):
+    base, release, unit, root, old, proposed, runtimes, state = portable_cuda_deployment
+    for config in (old, proposed):
+        settings = config['native_worker_overrides']['slave']['native_reference']
+        if fault == 'disabled': settings['enabled'] = False
+        if fault == 'nonresident': settings['resident'] = False
+        if fault == 'empty_gpus':
+            settings['gpus'] = []; config['native_gpu_by_host']['slave'] = []
+        if fault == 'missing_novelty': config['hosts']['slave'].pop('novelty_runtime')
+    if fault in ('cpu_refinement', 'mixed_registrations'):
+        registry = a.read(release / 'config/pr100_native_reference.json')
+        selected = old['native_worker_overrides']['slave']['native_reference']['registration_sha256']
+        row = copy.deepcopy(next(row for row in registry['registrations'] if a.digest(row) == selected))
+        if fault == 'cpu_refinement': row['policy']['final_refinement'] = {'platform': 'CPU', 'threads': 1}
+        else: row['name'] += '-second-test-registration'
+        registry['registrations'].append(row)
+        for staged in (release, release.parent / old['source_sha']):
+            a.atomic(staged / 'config/pr100_native_reference.json', registry)
+        for config in (old, proposed):
+            config['native_worker_overrides']['slave']['native_reference']['registration_sha256'] = a.digest(row)
+    assert not a.portable_native_successor(old, proposed, release, state=state)
+
+
+def test_pending_same_release_registration_change_still_waits(portable_cuda_deployment, monkeypatch):
+    base, release, unit, root, old, proposed, runtimes, state = portable_cuda_deployment
+    old = copy.deepcopy(proposed)
+    a.atomic(base / 'pr100-controller.json', old)
+    def transition(value, *_):
+        value = copy.deepcopy(value)
+        value['native_worker_overrides']['slave']['native_reference']['registration_sha256'] = 'f' * 64
+        return value
+    monkeypatch.setattr(a, 'registered_native_rollout', transition)
+    events = []
+    result = a.handoff(base, SHA, 'preserve', release, {}, novelty_runtimes=runtimes,
+        native_registration='f' * 64, clock_reader=lambda: CLOCK, now=lambda: 1000,
+        service_factory=service_factory(unit, events))
+    assert result['status'] == 'waiting_for_clean_attempt' and events == []
+    assert a.read(base / 'pr100-controller.json') == old
+
+
 @pytest.mark.parametrize('feature', ['refill', 'donors'])
 @pytest.mark.parametrize('listed,staged', [(False, False), (True, False), (False, True), (True, True)])
 def test_rollout_requires_executed_and_staged_feature_suites(prerequisites, feature, listed, staged):

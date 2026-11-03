@@ -118,6 +118,33 @@ suite in both the passing shipping-CI test list and the hash-verified staged
 manifest. It changes only `worker.native_interleave_confirmations` and refuses
 the experimental accelerated-screen combination.
 
+A source-only generation successor may preserve pending confirmations before
+the cutoff when every selected native host already uses the same qualified
+resident CUDA registration. This exception requires identical configuration
+except application source, start epoch and the corresponding host release
+suffixes. GPU allocation, CPU slots, workers, batching, sealed runtime paths,
+fleet policy, novelty runtime and all other settings remain unchanged.
+
+The helper compares actual scientific source bytes in the predecessor and
+successor staged releases, including requirements, native evidence validation,
+the registered implementation and observer, annotation and novelty. It also
+compares the worker's complete Python syntax tree except `sequence_phase`, so a
+graft proposal change cannot silently alter native resume or acceptance code.
+Both copies must match the selected registration's implementation, observer,
+resident module and qualification report hashes. Each pending checkpoint must
+retain its execution host, challenge, requirements, registration, runtime and
+fleet-policy bindings. Missing old source files, an unregistered backend,
+different registrations between hosts, or an accelerated-screen checkpoint
+cannot use this exception.
+
+Compatibility never establishes ownership. The controller must still be at a
+clean between-attempt boundary, with no active owner or legacy uncertainty and
+a fresh watching heartbeat. Compatibility and checkpoint bindings are checked
+again before stopping and under the stopped-controller lock. Continuation and
+publication files remain untouched. CPU-to-GPU, registration replacements and
+configuration transitions retain the existing drain-or-cutoff behavior, even
+when the application SHA is unchanged. No CLI override is provided.
+
 Subprocess stdout/stderr is captured. Reports contain only operational status,
 release identifiers, counts and error classes. No credential values or raw
 authentication output are retained.
