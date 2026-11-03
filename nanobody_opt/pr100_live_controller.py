@@ -111,16 +111,30 @@ if r['operation']=='start':
 out={'running':not(d/'supervisor-receipt.json').exists()}
 if cache_result and cache_result.get('verified'):out['archive_cache_verified_sha256']=cache_result['verified']
 if not out['running']:
- out['receipt']=json.loads((d/'supervisor-receipt.json').read_text());out['files']={}
+ receipt_bytes=(d/'supervisor-receipt.json').read_bytes()
+ out['receipt']=json.loads(receipt_bytes);out['files']={};available={}
  for name in ('result.json','generation-history.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
   p=d/name
-  if p.is_file():out['files'][name]=base64.b64encode(p.read_bytes()).decode()
+  if p.is_file():available[name]=p
  report=d/'score/report.json'
  if report.is_file():
   for group in json.loads(report.read_text()).get('groups',[]):
    f=str(group.get('file',''))
    if group.get('valid') is True and re.fullmatch(r'gpu-[0-9]+/length[0-9]+/exact_all[.]json',f) and (d/'score'/f).is_file():
-    out['files']['score/'+f]=base64.b64encode((d/'score'/f).read_bytes()).decode()
+    available['score/'+f]=d/'score'/f
+ mode=r.get('artifact_mode')
+ if mode not in (None,'manifest','file'):raise ValueError('invalid artifact mode')
+ if mode is not None:
+  out['artifact_manifest']={name:{'size_bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for name,p in available.items()}
+  out['receipt_sha256']=hashlib.sha256(receipt_bytes).hexdigest()
+ if mode=='file':
+  selected=r.get('artifact_names')
+  if not isinstance(selected,list) or len(selected)!=1 or not isinstance(selected[0],str) or selected[0] not in available:raise ValueError('invalid artifact selection')
+ elif mode=='manifest':
+  if 'artifact_names' in r:raise ValueError('manifest cannot select artifacts')
+  selected=[]
+ else:selected=list(available)
+ for name in selected:out['files'][name]=base64.b64encode(available[name].read_bytes()).decode()
 else:
  for name in ('supervisor-stderr.log','transport-launch.log'):
   p=d/name
@@ -195,6 +209,51 @@ GZIP_REPLY_PREFIX = b'NOVA_PR100_GZIP_V1:'
 MAX_REPLY_BYTES = 256 * 1024 * 1024
 MAX_COMPRESSED_REPLY_BYTES = 64 * 1024 * 1024
 MAX_REPLY_DECODER_MEMORY = 64 * 1024 * 1024
+PHASE_ARTIFACTS = frozenset(('result.json', 'generation-history.json', 'worker-receipt.json',
+    'native-confirmations.json', 'score/report.json', 'score/scorer_settings.json'))
+
+
+def collect_terminal_artifacts(config, host, request, result, stop_at, chain,
+                               collection_seconds, transport):
+    """Collect original completed files separately under one existing reserve.
+
+    The short ownership probe never encodes the entire scientific history.
+    Each file keeps existing reply bounds; receipt and complete manifest must
+    remain identical across reads. No start or scientific work is requested.
+    """
+    manifest = result['artifact_manifest']
+    receipt_hash = result.get('receipt_sha256')
+    if not isinstance(manifest, dict) or not re.fullmatch('[0-9a-f]{64}', str(receipt_hash)):
+        raise ValueError('invalid terminal artifact manifest')
+    for name, entry in manifest.items():
+        if (not isinstance(name, str) or (name not in PHASE_ARTIFACTS and not re.fullmatch(
+                r'score/gpu-[0-9]+/length[0-9]+/exact_all[.]json', name))
+                or not isinstance(entry, dict) or set(entry) != {'size_bytes', 'sha256'}
+                or type(entry['size_bytes']) is not int or entry['size_bytes'] < 0
+                or 4 * ((entry['size_bytes'] + 2) // 3) > MAX_REPLY_BYTES - 1024 * 1024
+                or not re.fullmatch('[0-9a-f]{64}', str(entry['sha256']))):
+            raise ValueError('invalid terminal artifact entry')
+    deadline = min(stop_at + 15, time.time() + collection_seconds)
+    decoded = {}
+    for name, entry in manifest.items():
+        clock = clock_state(chain)
+        if not admissible(clock, request['clock']['epoch']) or time.time() >= deadline:
+            raise TimeoutError('terminal artifact collection cutoff')
+        selected = {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
+                    'transport_deadline_unix': deadline, 'artifact_mode': 'file',
+                    'artifact_names': [name]}
+        reply = transport(config, host, selected)
+        if time.time() > deadline:
+            raise TimeoutError('terminal artifact collection cutoff')
+        if (reply.get('running') is not False or reply.get('artifact_manifest') != manifest
+                or reply.get('receipt_sha256') != receipt_hash or reply.get('receipt') != result['receipt']
+                or not isinstance(reply.get('files'), dict) or set(reply['files']) != {name}):
+            raise ValueError('terminal artifact binding changed')
+        raw = base64.b64decode(reply['files'][name], validate=True)
+        if len(raw) != entry['size_bytes'] or hashlib.sha256(raw).hexdigest() != entry['sha256']:
+            raise ValueError('terminal artifact bytes mismatch')
+        decoded[name] = raw
+    return decoded
 
 
 def decode_transport_reply(raw):
@@ -493,8 +552,8 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
                         'created_at_unix': dispatch_started})
     transport_config = {**config, '_refresh_clock': lambda: clock_state(chain)} if transport is remote else config
     poll_deadline = stop_at + 15
+    collection_slack = max(30, request.get('collection_reserve_seconds', 0))
     if config.get('_bounded_phase_collection'):
-        collection_slack = max(30, request.get('collection_reserve_seconds', 0))
         poll_deadline = min(poll_deadline, request['spec']['wall_seconds'] + dispatch_started + collection_slack)
         if poll_deadline <= time.time():
             # The old wall budget elapsed. Probe its ownership once; never
@@ -502,6 +561,9 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
             poll_deadline = min(stop_at + 15, time.time() + 20)
             request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock}
         request['transport_deadline_unix'] = poll_deadline
+    # Terminal polls return receipt/manifest metadata only. In particular, an
+    # expired worker's 20-second ownership probe never encodes all its files.
+    request = {**request, 'artifact_mode': 'manifest'}
     heartbeat(clock)
     result = transport(transport_config, host, request)
     failures = 0
@@ -513,7 +575,7 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
             clock = clock_state(chain)
             heartbeat(clock)
             request = {'operation': 'poll', 'directory': request['directory'], 'clock': clock,
-                       'transport_deadline_unix': poll_deadline}
+                       'transport_deadline_unix': poll_deadline, 'artifact_mode': 'manifest'}
             result = transport(transport_config, host, request)
             failures = 0
         except TimeoutError:
@@ -535,7 +597,10 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
                               'elapsed_seconds': receipt.get('elapsed_seconds'),
                               'stderr_tail': sanitize(receipt.get('stderr_tail') or ''),
                               'tails': {k: sanitize(v) for k, v in (result.get('tails') or {}).items()}}
-    decoded = {k: base64.b64decode(v, validate=True) for k, v in result.get('files', {}).items()}
+    decoded = (collect_terminal_artifacts(transport_config, host, request, result, stop_at, chain,
+                                         collection_slack, transport)
+               if 'artifact_manifest' in result else
+               {k: base64.b64decode(v, validate=True) for k, v in result.get('files', {}).items()})
     for name, raw in decoded.items():
         output = local / phase / name
         output.parent.mkdir(parents=True, exist_ok=True)
