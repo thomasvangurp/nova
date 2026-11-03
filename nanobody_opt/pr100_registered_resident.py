@@ -16,6 +16,10 @@ from nanobody_opt import pr100_native_reference as native
 MODULE='nanobody_opt.pr100_registered_resident'
 ROOT=Path(__file__).resolve().parents[1]
 _process_lock=threading.Lock()
+# Preserve the existing ten-second response/cleanup reserve. Admission uses the
+# remaining original call deadline; startup and queueing never reset that clock.
+RESPONSE_RESERVE_SECONDS = 10
+MIN_DRAW_WINDOW_SECONDS = 10
 class AdapterError(RuntimeError):
     pass
 
@@ -465,8 +469,11 @@ def worker_main(request, channel):
         error_type = None
         try:
             batch = command['request']; tasks = command['indices']
-            require(1 <= len(tasks) <= 32 and len(set(tasks)) == len(tasks), 'invalid_worker_batch')
+            require(len(tasks) == 1, 'invalid_worker_batch')
             for index in tasks:
+                # A delayed, never-started request does not poison this model.
+                if command['deadline'] - time.monotonic() < MIN_DRAW_WINDOW_SECONDS:
+                    continue
                 pending.append(engine.draw(batch, index, deadline=command['deadline']))
                 completed_indices.append(index)
         except BaseException as error:
@@ -533,7 +540,7 @@ def serve(request):
             path = pending_commands[0]; batch = json.loads(path.read_text())
             require(set(batch) == {'request','deadline','batch_id'}, 'invalid_resident_command')
             value = batch['request']; sequences = value['sequences']
-            require(1 <= len(sequences) <= settings.get('resident_batch_draws',32) <= 32,
+            require(1 <= len(sequences) <= min(count, settings.get('resident_batch_draws',32)) <= 32,
                     'unbounded_resident_batch')
             require(value['settings'] == settings and value['gpu'] == request['gpu']
                 and value['source_sha'] == request['source_sha']
@@ -542,7 +549,16 @@ def serve(request):
             require(re.fullmatch('[0-9a-f]{32}', batch['batch_id']) is not None, 'invalid_batch_identity')
             allocation = [(p, list(range(i,len(sequences),count))) for i,p in enumerate(workers)]
             allocation = [(p,indices) for p,indices in allocation if indices]
-            work_deadline=min(deadline,batch['deadline']-10)
+            work_deadline=min(deadline,batch['deadline']-RESPONSE_RESERVE_SECONDS)
+            if work_deadline-time.monotonic() < MIN_DRAW_WINDOW_SECONDS:
+                # Queue/startup delay can consume a request's entire window.
+                # Refuse before any worker command or started marker, preserving
+                # the healthy resident pool for later independently admitted work.
+                native.atomic(root/'responses'/path.name, {'ok':True, 'admission_refused':True,
+                    'values':[{'inconclusive':True, 'native_started':False,
+                        'sequence_hash':hashlib.sha256(sequence.encode()).hexdigest()}
+                        for sequence in sequences]})
+                continue
             for process, indices in allocation:
                 require(process.poll() is None, 'resident_worker_not_alive')
                 process.stdin.write(json.dumps({**batch,'deadline':work_deadline,'indices':indices})+'\n');process.stdin.flush()
@@ -612,12 +628,12 @@ class RegisteredResidentAdapter(native.Adapter):
 
     @property
     def capacity(self):
-        # Queue slots are bounded separately from actual model processes. This
-        # lets a tranche amortize startup/end checks over multiple fresh draws.
-        return len(self.settings['gpus'])*self.settings.get('resident_batch_draws',32)
+        # One draw per model worker. A second queued draw on the same worker
+        # must not hide an earlier completion behind its own slow refinement.
+        return len(self.settings['gpus'])*self.settings['workers_per_gpu']
 
     def _batch_limit(self,state):
-        return min(self.settings.get('resident_batch_draws',32),
+        return min(self.settings['workers_per_gpu'], self.settings.get('resident_batch_draws',32),
                    max(1,math.ceil(len(state['queue'])/max(1,state['waiting_lanes']))))
 
     def _clean(self,session):
@@ -693,23 +709,35 @@ class RegisteredResidentAdapter(native.Adapter):
             '--job',str(root/'lease-job.json')],cwd=ROOT,
             env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(ROOT),'PYTHONDONTWRITEBYTECODE':'1'},
             stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        session = {'root':root,'process':process};self.sessions[gpu]=session;return session
+        session = {'root':root,'process':process,'deadline':request['deadline']}
+        self.sessions[gpu]=session;return session
 
     async def _launch(self,gpu,sequences,timeout):
         deadline = min(time.monotonic()+timeout,self.phase_deadline)
+        def refused():
+            return [native.failure('reference_admission_window_closed') for _ in sequences]
+        def usable():
+            return deadline-time.monotonic() >= RESPONSE_RESERVE_SECONDS+MIN_DRAW_WINDOW_SECONDS
+        if not usable():
+            return refused()
         prior = self.sessions.get(gpu)
         while prior is not None and (prior['root']/'RETIRING.json').exists() and prior['process'].poll() is None:
-            require(time.monotonic()<deadline,'resident_retirement_window_closed')
+            if not usable():
+                return refused()
             await asyncio.sleep(.025)
         session = self._start(gpu);root = session['root'];process = session['process']
+        deadline = min(deadline,session.get('deadline',self.phase_deadline))
         while not (root/'READY.json').exists():
             if process.poll() is not None:
                 if self._clean(session):return [native.failure('reference_gpu_unavailable') for _ in sequences]
                 return [native.failure('reference_profile_inconclusive',started=False) for _ in sequences]
-            if time.monotonic()>=deadline:
-                await asyncio.to_thread(self._stop_session,session)
-                return [native.failure('reference_profile_inconclusive',started=False) for _ in sequences]
+            if not usable():
+                # Keep the still-owned warming pool. No draw was submitted, so
+                # expiring this caller is not a reason to kill/reload models.
+                return refused()
             await asyncio.sleep(.025)
+        if not usable():
+            return refused()
         key = uuid.uuid4().hex;directory = root/('batch-'+key);directory.mkdir()
         request = {'settings':self.settings,'source_sha':self.source_sha,'sequences':sequences,
                    'gpu':gpu,'directory':str(directory),'timeout_seconds':max(1,deadline-time.monotonic())}
@@ -730,6 +758,11 @@ class RegisteredResidentAdapter(native.Adapter):
         value = json.loads(response.read_text());require(value.get('ok') is True,'resident_batch_failed')
         if process.poll() is not None:self._clean(session)
         values = value['values'];require(len(values)==len(sequences),'incomplete_resident_batch')
+        if value.get('admission_refused') is True:
+            require(all(measured == {'inconclusive':True, 'native_started':False,
+                'sequence_hash':hashlib.sha256(sequence.encode()).hexdigest()}
+                for sequence,measured in zip(sequences,values)), 'invalid_resident_refusal')
+            return refused()
         output = []
         for sequence,measured in zip(sequences,values):
             require(measured['sequence_hash']==hashlib.sha256(sequence.encode()).hexdigest(),

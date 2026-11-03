@@ -38,14 +38,15 @@ explicit-CPU and implicit-platform constructors must be routed. Original systems
 restraints, tolerances, iteration limits, checks and fallback ordering are kept.
 Trace/structure/aggregation receipts use the current registered verifier.
 
-`resident_batch_draws` defaults to 32 and is bounded from 1 through 32 per GPU.
-These are asynchronous queue slots, not model processes or CPU threads. Four
-GPUs with four model workers each use 16 actual processes and at most 16 executor
-workers while admitting up to 128 queued calls. The configured CPU allocation
-must cover those actual processes. Each scientific worker checks its complete
-model state at startup and tranche end; the coordinator checks the shared sealed
-sources/weights before committing authoritative results. No full model-state
-hash runs inside an individual draw.
+`resident_batch_draws` remains a configured ceiling from 1 through 32 per GPU.
+The deadline-admission successor caps each command at one draw per actual model
+worker, so four GPUs with four workers each admit at most 16 outstanding calls.
+A completed draw cannot wait behind a later slow refinement on the same worker.
+The configured CPU allocation still covers the actual processes and executor
+workers. Each scientific worker checks its complete model state at startup and
+command end; the coordinator checks the shared sealed sources/weights before
+committing authoritative results. The scientific prediction/refinement bodies,
+Observer, native reference verifier and registered policy remain unchanged.
 
 The same sealed Python interpreter runs directly with user-site imports disabled
 so the registered sidecar library paths survive; the legacy shell wrapper would
@@ -60,6 +61,19 @@ written only after the per-draw lease/deadline guard. Clean owner exit recovers
 committed measurements and distinguishes never-started inputs from attempts.
 Late/failed work is inconclusive, never a biological rejection. Poisoned pools
 retire; there is no automatic replay of their started draws.
+
+Queueing, waiting for an old owner to retire and cold model startup consume the
+original call budget. They never reset the current 90-second cap or extend the
+phase/lease deadline. Client, coordinator and worker recheck admission before a
+draw starts: at least ten seconds of scientific window must remain after the
+existing ten-second response/cleanup reserve. A never-submitted expired call
+does not stop or retire a healthy or warming pool. That session remains owned
+under its original lease and is closed by the normal phase lifecycle. Actually
+started failures and uncertain workers still retire with fixed-point cleanup.
+
+This successor changes the registered resident module's bytes. The historical
+registration is not updated to bless it. A replacement row and real execution
+canary are required before activation; lifecycle tests are not qualification.
 
 The native phase's `finally` closes every session and requires the ordinary lease
 owner's fixed-point descendant cleanup before novelty/publication handoff.

@@ -192,12 +192,13 @@ def test_model_checks_are_batch_boundary_not_each_draw(monkeypatch):
         def finish_batch(self,_request,pending,*,batch_id):
             calls.append(('postcheck',len(pending)));return [{'authoritative':False,'inert_test_only':True} for _ in pending]
     monkeypatch.setattr(resident,'Engine',Engine)
-    command={'request':{},'indices':[0,1,2],'deadline':1.,'batch_id':'a'*32}
-    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps(command)+'\n'+json.dumps(command)+'\n{"stop":true}\n'))
+    monkeypatch.setattr(resident.time,'monotonic',lambda:0.)
+    commands=[{'request':{},'indices':[i],'deadline':100.,'batch_id':'a'*32} for i in range(3)]
+    monkeypatch.setattr(sys,'stdin',io.StringIO(''.join(json.dumps(command)+'\n' for command in commands)+'{"stop":true}\n'))
     channel=io.StringIO();assert resident.worker_main({},channel)==0
-    assert calls==['startup',('fresh_draw',0),('fresh_draw',1),('fresh_draw',2),('postcheck',3),
-                  ('fresh_draw',0),('fresh_draw',1),('fresh_draw',2),('postcheck',3)]
-    assert len(channel.getvalue().splitlines())==3
+    assert calls==['startup',('fresh_draw',0),('postcheck',1),
+                  ('fresh_draw',1),('postcheck',1),('fresh_draw',2),('postcheck',1)]
+    assert len(channel.getvalue().splitlines())==4
 
 
 def test_failed_draw_retains_checked_prefix_and_marks_only_actual_attempts(monkeypatch,tmp_path):
@@ -210,12 +211,15 @@ def test_failed_draw_retains_checked_prefix_and_marks_only_actual_attempts(monke
         def finish_batch(self,_request,pending,*,batch_id):
             return [{'authoritative':False,'inert_test_only':True} for _ in pending]
     monkeypatch.setattr(resident,'Engine',Engine)
-    command={'request':{'directory':str(tmp_path)},'indices':[0,1,2],'deadline':1.,'batch_id':'a'*32}
-    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps(command)+'\n'))
+    monkeypatch.setattr(resident.time,'monotonic',lambda:0.)
+    commands=[{'request':{'directory':str(tmp_path)},'indices':[i],'deadline':100.,'batch_id':'a'*32}
+              for i in (0,1)]
+    monkeypatch.setattr(sys,'stdin',io.StringIO(''.join(json.dumps(command)+'\n' for command in commands)))
     channel=io.StringIO();assert resident.worker_main({},channel)==1
-    reply=json.loads(channel.getvalue().splitlines()[1])
-    assert reply['ok'] is False and reply['indices']==[0]
-    assert reply['attempted']==[0,1] and len(reply['values'])==1
+    checked,reply=[json.loads(line) for line in channel.getvalue().splitlines()[1:]]
+    assert checked['ok'] is True and checked['indices']==[0] and len(checked['values'])==1
+    assert reply['ok'] is False and reply['indices']==[]
+    assert reply['attempted']==[1] and reply['values']==[]
 
 
 def test_expired_draw_never_writes_started_marker(monkeypatch,tmp_path):
@@ -249,7 +253,7 @@ def test_actual_server_retains_checked_peers_after_late_retirement(monkeypatch,t
     from nanobody_opt import pr100_live_gpu
     root=tmp_path/'session';root.mkdir();(root/'commands').mkdir();(root/'responses').mkdir()
     directory=root/'batch';directory.mkdir();(directory/'1.started.json').write_text('{}')
-    settings={'registration_sha256':'a'*64,'workers_per_gpu':2,'resident_batch_draws':32}
+    settings={'registration_sha256':'a'*64,'workers_per_gpu':4,'resident_batch_draws':32}
     sequences=['A'*60,'G'*60,'C'*60,'D'*60]
     request={'settings':settings,'gpu':0,'source_sha':'a'*40,'directory':str(root),'deadline':1000.}
     batch={'settings':settings,'gpu':0,'source_sha':'a'*40,'directory':str(directory),'sequences':sequences}
@@ -274,7 +278,8 @@ def test_actual_server_retains_checked_peers_after_late_retirement(monkeypatch,t
                 'scientific_completed_monotonic':1001. if late_value and i==2 else 980.,
                 'scientific_deadline_monotonic':990.}}}}
             for i in (0,2)]
-        return {processes[0]:{'ok':True,'indices':[0,2],'values':values,'attempted':[0,2]}}
+        return {processes[0]:{'ok':True,'indices':[0],'values':[values[0]],'attempted':[0]},
+                processes[2]:{'ok':True,'indices':[2],'values':[values[1]],'attempted':[2]}}
     monkeypatch.setattr(pr100_live_gpu,'inherited_lease_fd',lambda _gpus:4)
     monkeypatch.setattr(resident.native,'registration',lambda _identity:{})
     monkeypatch.setattr(resident.native,'verify_files',lambda *_args,**_kwargs:checks.append('verified'))
@@ -379,8 +384,8 @@ def test_models_survive_multiple_request_groups_under_one_lease(monkeypatch,tmp_
         assert lease['env']['LD_LIBRARY_PATH']==':'.join(libraries)
         assert '/qualified/env/lib' not in lease['env']['LD_LIBRARY_PATH']
     assert lease['minimum_free_mib']==(20480 if cpu else 10240)
-    assert lease['ttl_seconds']<=300 and value.capacity==32
-    assert value._batch_limit({'queue':list(range(50)),'waiting_lanes':1})==32
+    assert lease['ttl_seconds']<=300 and value.capacity==4
+    assert value._batch_limit({'queue':list(range(50)),'waiting_lanes':1})==4
 
 
 def test_async_groups_keep_fresh_UUIDs_and_never_cache_predictions(monkeypatch,tmp_path):
@@ -459,6 +464,171 @@ def test_cancelled_registered_call_awaits_normal_owner_cleanup(monkeypatch,tmp_p
     asyncio.run(run())
     assert calls==[('wait',2),'terminate_owned_lease',('wait',12)]
     assert (root/'STOP').exists()
+
+
+def test_expired_hot_call_never_submits_or_retires_healthy_pool(monkeypatch,tmp_path):
+    value=adapter(tmp_path);clock=[100.];value.phase_deadline=1000.
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    root=tmp_path/'healthy';root.mkdir();(root/'READY.json').write_text('{}')
+    value.sessions={0:{'root':root,'process':NS(poll=lambda:None)}}
+    monkeypatch.setattr(value,'_start',lambda _gpu:pytest.fail('expired caller must not start/replace pool'))
+    values=asyncio.run(value._launch(0,['A'*60],19.))
+    assert values[0]['error_kind']=='reference_admission_window_closed'
+    assert values[0]['native_started'] is False
+    assert sorted(path.name for path in root.iterdir())==['READY.json']
+
+
+def test_cold_start_cost_never_resets_original_draw_deadline(monkeypatch,tmp_path):
+    value=adapter(tmp_path);clock=[0.];value.phase_deadline=300.
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    root=tmp_path/'pool';root.mkdir();(root/'commands').mkdir();(root/'responses').mkdir()
+    session={'root':root,'process':NS(poll=lambda:None),'deadline':250.};starts=[]
+    def start(_gpu):
+        starts.append(True);clock[0]=75.;(root/'READY.json').write_text('{}')
+        value.sessions[0]=session;return session
+    monkeypatch.setattr(value,'_start',start)
+    values=asyncio.run(value._launch(0,['A'*60],90.))
+    assert starts==[True] and values[0]['error_kind']=='reference_admission_window_closed'
+    assert values[0]['native_started'] is False and value.sessions[0] is session
+    assert not list((root/'commands').iterdir())
+    assert not (root/'STOP').exists() and not (root/'RETIRING.json').exists()
+
+
+def test_timed_out_warmup_keeps_same_owned_pool_for_fresh_work(monkeypatch,tmp_path):
+    value=adapter(tmp_path);clock=[0.];value.phase_deadline=300.
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    root=tmp_path/'warming';root.mkdir();(root/'commands').mkdir();(root/'responses').mkdir()
+    session={'root':root,'process':NS(poll=lambda:None),'deadline':250.};created=[];commands=[]
+    def start(_gpu):
+        if not value.sessions:created.append(True);value.sessions[0]=session
+        return value.sessions[0]
+    async def sleep(_seconds):clock[0]+=5.
+    monkeypatch.setattr(value,'_start',start)
+    monkeypatch.setattr(resident.asyncio,'sleep',sleep)
+    real_atomic=resident.native.atomic
+    def respond(path,command):
+        real_atomic(path,command);commands.append(command)
+        rows=[{'sequence_hash':hashlib.sha256(sequence.encode()).hexdigest(),'inert_test_only':True}
+              for sequence in command['request']['sequences']]
+        real_atomic(root/'responses'/path.name,{'ok':True,'values':rows})
+    monkeypatch.setattr(resident.native,'atomic',respond)
+    monkeypatch.setattr(resident.native,'authoritative_measurement',lambda row:row.get('inert_test_only') is True)
+    async def run():
+        refused=await value._launch(0,['A'*60],30.)
+        assert refused[0]['error_kind']=='reference_admission_window_closed' and not commands
+        assert clock[0]==15. and not (root/'STOP').exists()
+        clock[0]=25.;(root/'READY.json').write_text('{}')
+        accepted=await value._launch(0,['G'*60],90.)
+        assert accepted[0]['inert_test_only'] is True
+    asyncio.run(run())
+    assert created==[True] and len(commands)==1
+    assert commands[0]['request']['sequences']==['G'*60] and commands[0]['deadline']==115.
+    assert not (root/'RETIRING.json').exists() and not (root/'STOP').exists()
+
+
+def test_retiring_pool_wait_consumes_budget_without_restarting(monkeypatch,tmp_path):
+    value=adapter(tmp_path);clock=[0.];value.phase_deadline=300.
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    root=tmp_path/'retiring';root.mkdir();(root/'RETIRING.json').write_text('{}')
+    value.sessions[0]={'root':root,'process':NS(poll=lambda:None)}
+    async def sleep(_seconds):clock[0]+=5.
+    monkeypatch.setattr(resident.asyncio,'sleep',sleep)
+    monkeypatch.setattr(value,'_start',lambda _gpu:pytest.fail('previous owner is not cleaned'))
+    values=asyncio.run(value._launch(0,['A'*60],30.))
+    assert values[0]['native_started'] is False
+    assert values[0]['error_kind']=='reference_admission_window_closed' and clock[0]==15.
+    assert not (root/'STOP').exists()
+
+
+def test_worker_refuses_late_draw_without_poisoning_model(monkeypatch,tmp_path):
+    clock=[95.];draws=[]
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    class Engine:
+        def __init__(self,_request):pass
+        def draw(self,_request,index,*,deadline):draws.append(index);return {'inert':True}
+        def finish_batch(self,_request,pending,*,batch_id):return [{'inert':True} for _ in pending]
+    monkeypatch.setattr(resident,'Engine',Engine)
+    commands=[{'request':{'directory':str(tmp_path)},'indices':[i],'deadline':deadline,'batch_id':'a'*32}
+              for i,deadline in ((0,100.),(1,150.))]
+    monkeypatch.setattr(sys,'stdin',io.StringIO(''.join(json.dumps(command)+'\n' for command in commands)+'{"stop":true}\n'))
+    channel=io.StringIO();assert resident.worker_main({},channel)==0
+    refused,accepted=[json.loads(line) for line in channel.getvalue().splitlines()[1:]]
+    assert refused=={'ok':True,'indices':[],'values':[],'attempted':[],'error_type':None}
+    assert accepted['ok'] is True and accepted['indices']==[1] and draws==[1]
+    assert not list(tmp_path.iterdir())
+
+
+def test_worker_refuses_sequential_allocation_before_any_draw(monkeypatch,tmp_path):
+    class Engine:
+        def __init__(self,_request):pass
+        def draw(self,*_args,**_kwargs):pytest.fail('one worker cannot queue a later draw')
+    monkeypatch.setattr(resident,'Engine',Engine)
+    command={'request':{'directory':str(tmp_path)},'indices':[0,1],'deadline':100.,'batch_id':'a'*32}
+    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps(command)+'\n'))
+    channel=io.StringIO();assert resident.worker_main({},channel)==1
+    reply=json.loads(channel.getvalue().splitlines()[1])
+    assert reply['ok'] is False and reply['attempted']==[] and reply['error_type']=='AdapterError'
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('started',[False,True])
+def test_client_admission_refusal_cannot_hide_started_work(monkeypatch,tmp_path,started):
+    value=adapter(tmp_path);clock=[0.];value.phase_deadline=300.
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    root=tmp_path/'ready';root.mkdir();(root/'commands').mkdir();(root/'responses').mkdir()
+    (root/'READY.json').write_text('{}');session={'root':root,'process':NS(poll=lambda:None),'deadline':200.}
+    monkeypatch.setattr(value,'_start',lambda _gpu:session)
+    real_atomic=resident.native.atomic;commands=[]
+    def respond(path,command):
+        real_atomic(path,command);commands.append(command)
+        real_atomic(root/'responses'/path.name,{'ok':True,'admission_refused':True,'values':[
+            {'inconclusive':True,'native_started':started,
+             'sequence_hash':hashlib.sha256('A'.encode()*60).hexdigest()}]})
+    monkeypatch.setattr(resident.native,'atomic',respond)
+    if started:
+        with pytest.raises(resident.AdapterError,match='invalid_resident_refusal'):
+            asyncio.run(value._launch(0,['A'*60],90.))
+    else:
+        result=asyncio.run(value._launch(0,['A'*60],90.))
+        assert result[0]['error_kind']=='reference_admission_window_closed' and result[0]['native_started'] is False
+    assert len(commands)==1 and commands[0]['deadline']==90.
+
+
+@pytest.mark.parametrize('work_window',[-15.,0.,9.99])
+def test_server_refuses_expired_command_without_retirement(monkeypatch,tmp_path,work_window):
+    from nanobody_opt import pr100_live_gpu
+    root=tmp_path/'session';root.mkdir();(root/'commands').mkdir();(root/'responses').mkdir()
+    directory=root/'batch';directory.mkdir();clock=[900.];processes=[]
+    settings={'registration_sha256':'a'*64,'workers_per_gpu':2,'resident_batch_draws':16}
+    request={'settings':settings,'gpu':0,'source_sha':'a'*40,'directory':str(root),'deadline':1200.}
+    command={'request':{'settings':settings,'gpu':0,'source_sha':'a'*40,
+        'directory':str(directory),'sequences':['A'*60,'G'*60]},
+        'deadline':clock[0]+work_window+resident.RESPONSE_RESERVE_SECONDS,'batch_id':'a'*32}
+    (root/'commands'/('a'*32+'.json')).write_text(json.dumps(command))
+    class Process:
+        def __init__(self,*_args,**_kwargs):
+            self.stdout=io.StringIO('{"ready":true}\n');self.stdin=io.StringIO();self.done=False;processes.append(self)
+        def poll(self):return 0 if self.done else None
+        def wait(self,timeout):self.done=True;return 0
+        def terminate(self):self.done=True
+        @property
+        def pid(self):return 1000+processes.index(self)
+    real_atomic=resident.native.atomic
+    def atomic(path,value):
+        real_atomic(path,value)
+        if path.parent==root/'responses':(root/'STOP').write_text('{}')
+    monkeypatch.setattr(pr100_live_gpu,'inherited_lease_fd',lambda _gpus:4)
+    monkeypatch.setattr(resident.native,'registration',lambda _identity:{})
+    monkeypatch.setattr(resident.native,'verify_files',lambda *_args,**_kwargs:None)
+    monkeypatch.setattr(resident.native,'atomic',atomic)
+    monkeypatch.setattr(resident.subprocess,'Popen',Process)
+    monkeypatch.setattr(resident.time,'monotonic',lambda:clock[0])
+    assert resident.serve(request)==0
+    response=json.loads((root/'responses'/('a'*32+'.json')).read_text())
+    assert response['admission_refused'] is True
+    assert all(value['native_started'] is False and value['inconclusive'] is True for value in response['values'])
+    assert all(process.stdin.getvalue()=='{"stop":true}\n' and process.done for process in processes)
+    assert not (root/'RETIRING.json').exists() and not list(directory.iterdir())
 
 
 def test_original_program_context_cwd_failure_does_not_leak_process_lock(monkeypatch, tmp_path):
