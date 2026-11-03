@@ -279,6 +279,22 @@ def test_live_config_source_change_during_poll_does_not_relabel_qualification(ca
     assert not (case.directory / 'current.json').exists() and not (case.root / 'pending.json').exists()
 
 
+@pytest.mark.parametrize('heartbeat_age,expected', [(0, 'promoted'), (181, 'retained_previous')])
+def test_promotion_checks_heartbeat_after_slow_poll(case, monkeypatch, heartbeat_age, expected):
+    _, result = dispatch(case)
+    wall = [case.now + 1]
+    monkeypatch.setattr(feed.time, 'time', lambda: wall[0])
+    def poll(*args):
+        wall[0] += 39
+        bank.atomic(Path(case.config['state_root']) / 'heartbeat.json',
+                    {'epoch': 26030, 'updated_at_unix': wall[0] - heartbeat_age})
+        return {'running': False, 'result': result}
+    out = feed.tick(case.config, call=poll)
+    assert out['status'] == expected
+    if heartbeat_age:
+        assert out['reason'] == 'parent_clock_stale'
+
+
 def test_pointer_compare_and_swap_refuses_concurrent_replacement(case):
     pending, result = dispatch(case)
     bank.atomic(case.directory / 'current.json', {'independent_new_pointer': True})

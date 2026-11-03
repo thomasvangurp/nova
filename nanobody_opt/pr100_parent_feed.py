@@ -317,7 +317,8 @@ def promote(directory, pending, result, config, challenge):
 
 
 def tick(config, *, now=None, fetch=fetch_epoch, call=transport, config_provider=None):
-    now = time.time() if now is None else now
+    supplied_now = now
+    now = time.time() if supplied_now is None else supplied_now
     cfg = bank.settings(config)
     if cfg is None:
         return {'status': 'disabled'}
@@ -347,9 +348,12 @@ def tick(config, *, now=None, fetch=fetch_epoch, call=transport, config_provider
         try:
             config = config_provider() if config_provider is not None else config
             heartbeat = json.loads(bank.read(Path(config['state_root']) / 'heartbeat.json'))
+            # A remote poll can take forty seconds. Compare a freshly written
+            # heartbeat with the clock after that poll, not the tick's start.
+            checked_at = time.time() if supplied_now is None else supplied_now
             bank.require(type(heartbeat.get('epoch')) is int
                 and type(heartbeat.get('updated_at_unix')) in (int, float)
-                and -30 <= now - heartbeat['updated_at_unix'] <= 180, 'parent_clock_stale')
+                and -30 <= checked_at - heartbeat['updated_at_unix'] <= 180, 'parent_clock_stale')
             epoch = heartbeat['epoch']
             challenge = {'epoch': epoch, 'target': rules.target_for_epoch(epoch)}
             pointer = promote(directory, pending, result, config, challenge)
