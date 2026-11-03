@@ -1,0 +1,1485 @@
+{
+  "schema": "pr100-resident-deadline-science-qualification-v1",
+  "status": "complete",
+  "authoritative": false,
+  "production_deployment": false,
+  "diagnostic_only": true,
+  "completed": 16,
+  "draw_count": 16,
+  "fresh_predictions": 16,
+  "distinct_sequences": 16,
+  "scope": "Bounded unchanged-science conformance after deadline admission and one-draw-per-worker scheduling repair. Four persistent research Engine workers; two groups of eight fresh predictions. Not a production throughput qualification, population equivalence claim, or external validator-worker attestation.",
+  "physics_rng_resets": false,
+  "prediction_reuse": false,
+  "actual_validator_worker_attested": false,
+  "resident_module_sha256": "f1a6eaee5cb7723c41d56600b3ad5328899059ae3a7221600ebd713c28348fdd",
+  "sealed_closure_unchanged": true,
+  "released": true,
+  "child_exit_code": 0,
+  "cleanup": {
+    "remaining_descendants": 0,
+    "fixed_point_reached": true,
+    "freeze_scan_count": 3,
+    "killed_descendants": 0,
+    "worker_exitcodes": {
+      "2457736": 0
+    }
+  },
+  "elapsed_owner_seconds": 125.2203779714182,
+  "remote_directory": "/root/artifacts/tnp-deadline-diagnostic-1793727243243634721",
+  "model_state_checks": "All four workers verified unchanged model fingerprints after both groups.",
+  "loader_checks": "Each Engine checked the actually mapped core and NVRTC against unchanged registered hashes.",
+  "harness_sha256": "dcd62fdb19561da7c913b67b27e59cb5f57c043241342f5575e51b5d2dd5e078",
+  "collection_sha256": "e7760f47b87b1508226e0eff1f7e21c0134af698b061eaabc004444f987431be",
+  "artifact_sha256": {
+    "plan.json": "0b68a19e2464a3cfc54a2edf441b447cf2d17777b6a47c46b59f918cc03162ae",
+    "launch.json": "ac97ccdc575479f85ba9ab992573ca44c56c19dac8851ac0682f2bbea1cf7dc7",
+    "research-source-manifest.json": "b5582b346d6701ca519bc0fc0324d16decc33b667e80c351bb7c5c7df2f7195e",
+    "tnp_deadline_diagnostic.py": "dcd62fdb19561da7c913b67b27e59cb5f57c043241342f5575e51b5d2dd5e078",
+    "research-source/nanobody_opt/pr100_registered_resident.py": "f1a6eaee5cb7723c41d56600b3ad5328899059ae3a7221600ebd713c28348fdd",
+    "research-source/config/pr100_native_reference.json": "ea6042b8f02538c1b162522c98476b635cfc89e32b41698264f0ac15e2a7e28c",
+    "run/result.json": "3c23aaeb5c79180ce34fdc4195681382fe8f8e8e999d6ca7837de3e4f31c4cfe",
+    "run/lease.json": "ae048608d34cf820f4785d5581e8b48f68749027f9c5519c84611576a9793a60",
+    "run/owner-summary.json": "f037e169e5c0d5942b2aab560c9626f274f9600766b4ac4cac9bdede7e3db515",
+    "run/leased-plan.json": "74bd2b053fee83e57fb822d4d0d1ea58393784ab023cd66070b23c9e7d7a7009",
+    "run/worker-0/report.json": "4d13b08fb98a2ecd60f46f01915b04b6601dbbc17a2870a6f7f4655249867031",
+    "run/worker-1/report.json": "2193e06c6d8bf2f995965332f2883e2328b21a957001e7c2e9ce5b0dc44da504",
+    "run/worker-2/report.json": "cc43dfd71ddd52c5fcfb6e4b860b5c879a695c2425d6c884163ab989b3bdc822",
+    "run/worker-3/report.json": "31a8c27cee936bb0cc9f59699df89b8d5624a65788e301ff3d3430b63ab6c7fc"
+  },
+  "context_inventory": [
+    {
+      "role": "hydrogens",
+      "platform": "CPU",
+      "count": 50
+    },
+    {
+      "role": "minimize_energy",
+      "platform": "CUDA",
+      "count": 37
+    },
+    {
+      "role": "missing_atoms",
+      "platform": "CPU",
+      "count": 29
+    },
+    {
+      "role": "sidechain_repair",
+      "platform": "CUDA",
+      "count": 13
+    }
+  ],
+  "biological_numeric_gate_passes": 1,
+  "biological_failures_retained": true,
+  "groups": [
+    {
+      "group": 0,
+      "four_worker_pids": [
+        2458017,
+        2458018,
+        2458019,
+        2458020
+      ],
+      "draws": [
+        {
+          "sequence_hash": "ae3fc43bf86033f300709879a8cc5553c4043ddea3408d96e232305c23563dfb",
+          "elapsed_seconds": 18.458690679632127,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.6868818427668995,
+            "surface_hydrophobic_patches": 105.4038,
+            "positive_charge_patches": 1.4976,
+            "negative_charge_patches": 0.0495,
+            "a3d_average": "-0.6216274748523438",
+            "a3d_maximum": "2.1672602126034812"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "6f182fdd7d038e3e4aad4e87622112b60c2750a343f6d0c81acac68b6fdfa16a",
+          "elapsed_seconds": 10.316985178738832,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4869431671290798,
+            "surface_hydrophobic_patches": 100.9751,
+            "positive_charge_patches": 0.0,
+            "negative_charge_patches": 0.4414,
+            "a3d_average": "-0.6765998398675186",
+            "a3d_maximum": "1.5812710470237292"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "8a627813dce49bef74498bd4881eb9652af4c4dc96764f37a4f2e42253c9acbc",
+          "elapsed_seconds": 17.14761506393552,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4370325707248475,
+            "surface_hydrophobic_patches": 114.959,
+            "positive_charge_patches": 0.2379,
+            "negative_charge_patches": 0.159,
+            "a3d_average": "-0.7475740393674103",
+            "a3d_maximum": "1.709334830766218"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "7804543a5f8e8ec44c004fca7205a45e7c3587d4e23d02ce51d6ca860fd5edf1",
+          "elapsed_seconds": 10.821106245741248,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5117365515666634,
+            "surface_hydrophobic_patches": 122.3481,
+            "positive_charge_patches": 0.1599,
+            "negative_charge_patches": 0.036,
+            "a3d_average": "-0.5724689858792129",
+            "a3d_maximum": "2.355336376857084"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "28a894f7a23bdb06361c3db161f1a904acb2bf3adecceb7eb3a8b0a82a1673a5",
+          "elapsed_seconds": 17.586672126315534,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4923550202171352,
+            "surface_hydrophobic_patches": 94.3301,
+            "positive_charge_patches": 0.5979,
+            "negative_charge_patches": 0.2901,
+            "a3d_average": "-0.8256303531208821",
+            "a3d_maximum": "0.7599117341198174"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "0fbc62f823e7f937d812469c80f81e037cc783ce510214afe4c72556cc648c9a",
+          "elapsed_seconds": 9.215967326425016,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5636278475449883,
+            "surface_hydrophobic_patches": 92.6303,
+            "positive_charge_patches": 0.4796,
+            "negative_charge_patches": 0.3822,
+            "a3d_average": "-0.7922009720610957",
+            "a3d_maximum": "1.2305393379778455"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "26f956bf373762c122404009536d6f99c755198f906ef7b0f805a5def87e35d2",
+          "elapsed_seconds": 17.049481484107673,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.480359693808873,
+            "surface_hydrophobic_patches": 110.183,
+            "positive_charge_patches": 0.1978,
+            "negative_charge_patches": 0.1349,
+            "a3d_average": "-0.9015499504896798",
+            "a3d_maximum": "0.8032641079361251"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "93c583c4f2306914fc9e48dfd127e064f3bf4ed24f13bf223a609b54a926e23a",
+          "elapsed_seconds": 10.57463491614908,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5934475946842894,
+            "surface_hydrophobic_patches": 103.9779,
+            "positive_charge_patches": 1.182,
+            "negative_charge_patches": 0.2076,
+            "a3d_average": "-0.7734917456716118",
+            "a3d_maximum": "1.1906029751874112"
+          },
+          "numeric_gate_passed": false
+        }
+      ]
+    },
+    {
+      "group": 1,
+      "four_worker_pids": [
+        2458017,
+        2458018,
+        2458019,
+        2458020
+      ],
+      "draws": [
+        {
+          "sequence_hash": "373cc3a53f03ba06d56b44416015a9947dc09132e5ef98df9d920fc8567fe823",
+          "elapsed_seconds": 5.815206575207412,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5278745672710023,
+            "surface_hydrophobic_patches": 110.9521,
+            "positive_charge_patches": 0.4568,
+            "negative_charge_patches": 0.1889,
+            "a3d_average": "-0.7716287434964312",
+            "a3d_maximum": "1.1256990608867037"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "d7902f55d230b651cef73d042981b2655945d2c52eb0e406235697735cdf68fe",
+          "elapsed_seconds": 15.717366805300117,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4258149145811172,
+            "surface_hydrophobic_patches": 102.9979,
+            "positive_charge_patches": 0.2742,
+            "negative_charge_patches": 0.1361,
+            "a3d_average": "-0.7618740171507605",
+            "a3d_maximum": "2.14570108301692"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "dae194c002f96b23f711008de70811b1e63623526e6f4f7a1b552879a1a22372",
+          "elapsed_seconds": 5.60913313832134,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4632130712725528,
+            "surface_hydrophobic_patches": 113.2634,
+            "positive_charge_patches": 0.3211,
+            "negative_charge_patches": 2.0169,
+            "a3d_average": "-0.8916613500462625",
+            "a3d_maximum": "1.2327593896871503"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "636f8fb65763abb99b340bf97ae13154c607a89952e59da680ebb6c4a573c6d9",
+          "elapsed_seconds": 7.937617308460176,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5646848908518158,
+            "surface_hydrophobic_patches": 86.9274,
+            "positive_charge_patches": 0.0042,
+            "negative_charge_patches": 1.3828,
+            "a3d_average": "-0.8004353683759571",
+            "a3d_maximum": "1.0836363564260738"
+          },
+          "numeric_gate_passed": true
+        },
+        {
+          "sequence_hash": "949ee27f6b3629400b50a7ff8c2708930b3926d562f31128a1bb569dd7a112aa",
+          "elapsed_seconds": 7.650703841820359,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.5121444123820293,
+            "surface_hydrophobic_patches": 104.1857,
+            "positive_charge_patches": 0.7183,
+            "negative_charge_patches": 0.2085,
+            "a3d_average": "-0.7999669228690529",
+            "a3d_maximum": "1.1646028083636524"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "4519789bb485d2f34b7bb27dfd63a0eb89d2b41c62168e6200848decff438d49",
+          "elapsed_seconds": 12.73199325427413,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4826406610953118,
+            "surface_hydrophobic_patches": 92.2779,
+            "positive_charge_patches": 0.235,
+            "negative_charge_patches": 0.4401,
+            "a3d_average": "-0.8145802972493051",
+            "a3d_maximum": "1.2444031833968128"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "4c5ee81fb6db4d55627e55f4117c9e59fb7443e6c57850af684e21ae70d51632",
+          "elapsed_seconds": 8.361465975642204,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4982285814878769,
+            "surface_hydrophobic_patches": 118.2798,
+            "positive_charge_patches": 0.0,
+            "negative_charge_patches": 0.4853,
+            "a3d_average": "-0.7444049558304894",
+            "a3d_maximum": "2.090830152944073"
+          },
+          "numeric_gate_passed": false
+        },
+        {
+          "sequence_hash": "0221b0b51f2cfd19640cd94de6a5ac7aff73b1e1f5c1f0991fc19efd19c4e99b",
+          "elapsed_seconds": 7.991889379918575,
+          "trace_valid": true,
+          "fresh_predictions": 1,
+          "contexts": [
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "missing_atoms",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "sidechain_repair",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            },
+            {
+              "role": "hydrogens",
+              "platform": "CPU",
+              "properties": {
+                "DeterministicForces": "false",
+                "Threads": "1"
+              }
+            },
+            {
+              "role": "minimize_energy",
+              "platform": "CUDA",
+              "properties": {
+                "DeterministicForces": "true",
+                "DeviceIndex": "0",
+                "Precision": "mixed"
+              }
+            }
+          ],
+          "metrics": {
+            "total_cdr_length": 37,
+            "cdr3_length": 21,
+            "cdr3_compactness": 1.4863303260700864,
+            "surface_hydrophobic_patches": 112.3242,
+            "positive_charge_patches": 0.2328,
+            "negative_charge_patches": 1.497,
+            "a3d_average": "-0.9224800802670184",
+            "a3d_maximum": "0.9103601497659964"
+          },
+          "numeric_gate_passed": false
+        }
+      ]
+    }
+  ],
+  "limits": "Research Engine run used an explicitly unqualified descriptor. This bounded science report supports a new registration, but actual registered Adapter cold-expiry/warm-reuse qualification is still required before activation. Earlier registrations and evidence retain their original byte identities."
+}

@@ -182,7 +182,7 @@ def test_qualified_loader126_row_binds_actual_report_runtime_and_frozen_source()
         r['sha256'] for r in result['actual_maps']['libraries'] if 'libnvrtc.so.' in r['path'])
 
 
-def test_current_router_registration_binds_real_direct_repair_canary():
+def test_current_registration_binds_real_direct_repair_science_canary():
     from nanobody_opt import pr100_registered_resident as resident
     rows=json.loads(native.REGISTRY.read_text())['registrations']
     row=next(r for r in rows if r.get('resident_module_sha256')==native.sha(resident.__file__))
@@ -210,6 +210,27 @@ def test_current_router_registration_binds_real_direct_repair_canary():
             assert context['platform']=='CUDA'
             assert {k:context['properties'][k] for k in ('Precision','DeviceIndex','DeterministicForces')}=={
                 'Precision':'mixed','DeviceIndex':'0','DeterministicForces':'true'}
+
+
+def test_deadline_registration_preserves_router_history_and_reports_scope():
+    from nanobody_opt import pr100_registered_resident as resident
+    rows = json.loads(native.REGISTRY.read_text())['registrations']
+    original = next(row for row in rows if reference.digest(row) ==
+        'b1e7fc550b5ba229d749dedf25db0aac2dd3be69f230ffcb55dff01e9f7cd59e')
+    assert original['resident_module_sha256'] == '7e24774b054d416f5b77dbafdb25a605b5a14b6cdf2e97608257ac1c52dab1a4'
+    assert native.sha(native.ROOT / original['qualification_report_file']) == original['qualification_report_sha256']
+    current = next(row for row in rows if row.get('resident_module_sha256') == native.sha(resident.__file__))
+    for key in ('runtime_sha256', 'observer_sha256', 'implementation_sha256', 'environment_manifest_sha256',
+                'bundle_manifest_sha256', 'weights', 'numpy', 'policy', 'cuda_plugin'):
+        assert current[key] == original[key]
+    report = json.loads((native.ROOT / current['qualification_report_file']).read_text())
+    assert report['schema'] == 'pr100-resident-deadline-science-qualification-v1'
+    assert report['biological_numeric_gate_passes'] == 1
+    assert report['biological_failures_retained'] is True
+    assert 'not_throughput_equivalence' in current['qualification_scope']
+    assert sum(c['count'] for c in report['context_inventory']
+               if c['platform'] == 'CUDA' and c['role'] in ('minimize_energy', 'sidechain_repair')) == 50
+    assert len(report['artifact_sha256']) == 14
 
 
 def test_old_runner_registration_cannot_launch_changed_runner_bytes():
