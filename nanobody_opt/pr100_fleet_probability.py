@@ -113,11 +113,11 @@ def expected_valid_count(candidates):
 
 def from_measurements(measurements, *, minimum_smoothed_fraction=0.4):
     """Authenticate the registered native route before computing any recommendation."""
-    from nanobody_opt import pr100_native_reference as native
+    from nanobody_opt.pr100_native_evidence_cache import measurement_identity
     observations = []
     registration = None
     for value in measurements:
-        identity = native.measurement_identity(value)
+        identity = measurement_identity(value)
         if identity is None:
             raise ValueError('non_authoritative_measurement')
         if registration is None:

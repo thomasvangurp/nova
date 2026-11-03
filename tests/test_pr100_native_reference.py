@@ -18,11 +18,68 @@ def real_gate_observations():
     return json.loads(path.read_text())['observations']
 
 
-def test_real_registered_pass_reaches_selection_repeat_and_publication():
+def test_retained_native_history_authenticates_once_and_revalidates_after_json(monkeypatch):
+    from nanobody_opt import pr100_native_evidence_cache as cache
+    value = real_gate_observations()[0]['measurement']
+    original = native.authoritative_measurement
+    calls = []
+    def validate(value):
+        calls.append(True)
+        return original(value)
+    monkeypatch.setattr(native, 'authoritative_measurement', validate)
+    retained = cache.verified(value)
+    identity = native.measurement_identity(value)
+    before = len(calls)
+    for _ in range(20):
+        assert cache.authoritative_measurement(retained)
+        assert cache.measurement_identity(retained) == identity
+    assert len(calls) == before
+    replay = json.loads(json.dumps(retained))
+    assert type(replay) is dict and replay == value
+    assert cache.authoritative_measurement(replay)
+    assert len(calls) == before + 1
+
+
+@pytest.mark.parametrize('fault', ['metric', 'nested_receipt', 'registry', 'contract', 'container_type'])
+def test_retained_receipt_never_hides_mutation_or_changed_approval(tmp_path, monkeypatch, fault):
+    from nanobody_opt import pr100_native_evidence_cache as cache
+    value = cache.verified(real_gate_observations()[0]['measurement'])
+    if fault == 'metric':
+        value['surface_hydrophobic_patches'] += 1
+    elif fault == 'nested_receipt':
+        value['native_reference']['receipt']['observation']['passed'] = False
+    elif fault == 'registry':
+        registry = tmp_path / 'registry.json'
+        registry.write_text(json.dumps({'schema': 'pr100-native-reference-registry-v1',
+                                        'registrations': []}))
+        monkeypatch.setattr(native, 'REGISTRY', registry)
+    elif fault == 'container_type':
+        runtime = value['native_reference']['receipt']['runtime']
+        runtime['python_version'] = tuple(runtime['python_version'])
+    else:
+        original = reference.contract()
+        monkeypatch.setattr(reference, 'contract', lambda: {**original, 'changed': True})
+    assert not cache.authoritative_measurement(value)
+    assert cache.measurement_identity(value) is None
+
+
+def test_failed_native_receipt_cannot_receive_process_local_verification():
+    from nanobody_opt import pr100_native_evidence_cache as cache
+    value = real_gate_observations()[0]['measurement']
+    value['authoritative'] = False
+    with pytest.raises(ValueError, match='non_authoritative_measurement'):
+        cache.verified(value)
+
+
+@pytest.mark.parametrize('retained', [False, True])
+def test_real_registered_pass_reaches_selection_repeat_and_publication(retained):
     from nanobody_opt import rules, pr100_live_selection as selection
     from test_pr100 import EPOCH, evidence
     row = real_gate_observations()[0]
     sequence, value = row['sequence'], row['measurement']
+    if retained:
+        from nanobody_opt.pr100_native_evidence_cache import verified
+        value = verified(value)
     requirements = rules.pinned_config(EPOCH)['nanobody_requirements']
     policy = {'kind': 'pr100-observed-fleet-v1', 'minimum_smoothed_fraction': .4}
     assert 'passed' not in value['aggrescan3d']  # Exact upstream wrapper contract.
@@ -39,10 +96,14 @@ def test_real_registered_pass_reaches_selection_repeat_and_publication():
     rules.validate_evidence(item, sequence, item['challenge'], rules.pinned_config(EPOCH))
 
 
-def test_real_registered_failure_is_retained_for_bounded_rescue():
+@pytest.mark.parametrize('retained', [False, True])
+def test_real_registered_failure_is_retained_for_bounded_rescue(retained):
     from nanobody_opt import rules, pr100_live_selection as selection
     row = real_gate_observations()[1]
     sequence, value = row['sequence'], row['measurement']
+    if retained:
+        from nanobody_opt.pr100_native_evidence_cache import verified
+        value = verified(value)
     requirements = rules.pinned_config(26030)['nanobody_requirements']
     policy = {'kind': 'pr100-observed-fleet-v1', 'minimum_smoothed_fraction': .4}
     assert native.authoritative_measurement(value)
@@ -60,10 +121,14 @@ def test_real_registered_failure_is_retained_for_bounded_rescue():
 
 @pytest.mark.parametrize('change', ['unknown_registration', 'missing_receipt', 'changed_metric',
                                    'explicit_false', 'explicit_null', 'legacy_backend'])
-def test_missing_legacy_aggregation_flag_requires_authentic_registered_receipt(change):
+@pytest.mark.parametrize('retained', [False, True])
+def test_missing_legacy_aggregation_flag_requires_authentic_registered_receipt(change, retained):
     from nanobody_opt import rules
     row = real_gate_observations()[0]
     value = row['measurement']
+    if retained:
+        from nanobody_opt.pr100_native_evidence_cache import verified
+        value = verified(value)
     if change == 'unknown_registration': value['native_reference']['registration_sha256'] = '0' * 64
     elif change == 'missing_receipt': value['native_reference'].pop('receipt')
     elif change == 'changed_metric': value['aggrescan3d']['a3d_maximum'] = 0.

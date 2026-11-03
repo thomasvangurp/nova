@@ -246,7 +246,7 @@ def authoritative_cpu_measurement(value):
     """Legacy name; accept only legacy CPU or the explicitly registered native route."""
     if isinstance(value, dict) and value.get("evidence_backend") == "native_reference":
         try:
-            from nanobody_opt.pr100_native_reference import authoritative_measurement
+            from nanobody_opt.pr100_native_evidence_cache import authoritative_measurement
             return authoritative_measurement(value)
         except ImportError:
             return False

@@ -771,6 +771,7 @@ def terminal_rejection_reason(values, requirements, sequence, reason):
 def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=None, screen=None,
                  refill=None):
     from nanobody_opt import pr100_native_journal as journal_module
+    from nanobody_opt import pr100_native_evidence_cache as native_evidence
     reference_phase_started = clock() if job.get('native_reference', {}).get('enabled') is True else None
     incoming = json.loads((directory / 'input.json').read_text())
     if incoming['challenge'] != job['challenge']:
@@ -894,7 +895,7 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
 
     def checkpoint_measurements(values, sequence):
         if fleet_policy is not None:
-            if any(not pr100_native_reference.authoritative_measurement(value) for value in values):
+            if any(not native_evidence.authoritative_measurement(value) for value in values):
                 raise ValueError('non_authoritative_native_history')
             return list(values)  # Complete biological failures are never erased.
         kept = []
@@ -1018,7 +1019,9 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                                          repeats=repeats, margin=margin)['tier'] is not None)):
             raise ValueError('invalid native confirmation checkpoint')
         key = row['sequence']
-        measurements[key] = list(values); started.add(key); resumed_required[key] = required
+        measurements[key] = ([native_evidence.verified(value) for value in values]
+                             if fleet_policy is not None else list(values))
+        started.add(key); resumed_required[key] = required
         if fleet_policy is not None:
             confirmation_progress[key] = {**row, 'native_resume': {**saved, 'measurements': list(values)}}
         if saved.get('accelerated_screen') is not None:
@@ -1067,11 +1070,13 @@ def native_phase(job, directory, *, clock=time.monotonic, measure=None, novelty=
                 return
             if (fleet_policy is not None
                     and not isinstance(value, pr100_native_reference.Inconclusive)
-                    and not pr100_native_reference.authoritative_measurement(value)):
+                    and not native_evidence.authoritative_measurement(value)):
                 # Validate before marking completion. Adapter callbacks may
                 # report diagnostic errors; the final collection must still
                 # raise on an unauthenticated scientific result.
                 raise ValueError('unattested_native_result')
+            if fleet_policy is not None and not isinstance(value, pr100_native_reference.Inconclusive):
+                value = native_evidence.verified(value)
             completed_attempts.add(key)
             if fleet_policy is not None and isinstance(value, pr100_native_reference.Inconclusive):
                 inconclusive_sequences.add(key)
