@@ -3,6 +3,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import sys
 import pytest
 
 spec = importlib.util.spec_from_file_location('activation', Path(__file__).resolve().parents[1] / 'scripts/pr100_safe_activate.py')
@@ -11,6 +13,41 @@ SHA = 'd' * 40
 CLOCK = {'epoch': 25964, 'epoch_length': 361, 'block': 25964*361+100}
 HEARTBEAT = {**CLOCK, 'status': 'watching', 'updated_at_unix': 1000}
 STATE = {'challenge': {'epoch': 25964}, 'active': None, 'native_rows': ['preserved']}
+
+
+@pytest.mark.parametrize('fault', [None, 'missing_cuda_registration', 'old_verifier'])
+def test_actual_submitter_must_accept_selected_cuda_registration(tmp_path, monkeypatch, fault):
+    release = Path(__file__).resolve().parents[1]
+    consumer = tmp_path / 'consumer'
+    files = ('nanobody_opt/pr100_native_reference.py',
+             'nanobody_opt/pr100_validator_reference.py',
+             'config/pr100_validator_reference.json', 'config/pr100_native_reference.json')
+    for name in files:
+        target = consumer / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(release / name, target)
+    (consumer / 'nanobody_opt/__init__.py').write_text('')
+    registry_path = consumer / 'config/pr100_native_reference.json'
+    registry = a.read(registry_path)
+    row = next(r for r in registry['registrations']
+               if r['policy']['final_refinement']['platform'] == 'CUDA')
+    identity = a.digest(row)
+    config = {'native_hosts': ['master', 'slave'], 'worker': {},
+              'native_worker_overrides': {'master': {'native_reference': {
+                  'enabled': True, 'registration_sha256': identity}}}}
+    if fault == 'missing_cuda_registration':
+        registry['registrations'].remove(row)
+        a.atomic(registry_path, registry)
+    elif fault == 'old_verifier':
+        verifier = consumer / 'nanobody_opt/pr100_validator_reference.py'
+        verifier.write_text(verifier.read_text().replace(
+            "set(plugin) in (required, required | {'loader'})", 'set(plugin) == required'))
+    monkeypatch.setattr(a, 'PYTHON', sys.executable)
+    if fault:
+        with pytest.raises(ValueError, match='consumer_(native_registration_missing|reference_source_mismatch)'):
+            a.verify_consumer_reference(config, release, consumer)
+    else:
+        a.verify_consumer_reference(config, release, consumer)
 
 
 @pytest.mark.parametrize('change', ['active', 'missing_active', 'uncertain', 'epoch', 'stale', 'running'])

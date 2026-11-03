@@ -572,6 +572,49 @@ def command(args, *, cwd=None, timeout=30):
     return result.stdout
 
 
+def verify_consumer_reference(config, release, consumer_root):
+    """The independently installed submitter must accept the selected native rows.
+
+    Staging a controller release does not update /opt/nova-submit. Checking its
+    actual registry and verifier prevents publishing CUDA checkpoints that the
+    submitter will reject after the controller has already accepted them.
+    """
+    identities = set()
+    for host in config.get('native_hosts', ['master']):
+        settings = config.get('native_worker_overrides', {}).get(host, {}).get(
+            'native_reference', config.get('worker', {}).get('native_reference', {}))
+        if settings.get('enabled') is True:
+            identity = settings.get('registration_sha256')
+            if not hash_value(identity):
+                raise ValueError('consumer_registration_identity_missing')
+            identities.add(identity)
+    if not identities:
+        return
+    release, consumer_root = Path(release), Path(consumer_root)
+    required = ('nanobody_opt/pr100_native_reference.py',
+                'nanobody_opt/pr100_validator_reference.py',
+                'config/pr100_validator_reference.json')
+    for name in required:
+        source, installed = release / name, consumer_root / name
+        if (not source.is_file() or not installed.is_file()
+                or hashlib.sha256(source.read_bytes()).digest()
+                != hashlib.sha256(installed.read_bytes()).digest()):
+            raise ValueError('consumer_reference_source_mismatch')
+    source_registry = read(release / 'config/pr100_native_reference.json', {})
+    installed_registry = read(consumer_root / 'config/pr100_native_reference.json', {})
+    def registered(value):
+        return {digest(row) for row in value.get('registrations', [])}
+    if not identities <= registered(source_registry) & registered(installed_registry):
+        raise ValueError('consumer_native_registration_missing')
+    # Execute from the actual consumer installation, not the controller's
+    # already-imported modules. registration() also validates CUDA loader schema.
+    code = ('import json,sys;sys.path.insert(0,sys.argv[1]);'
+            'from nanobody_opt.pr100_native_reference import registration;'
+            '[registration(k) for k in json.loads(sys.argv[2])]')
+    command([PYTHON, '-B', '-c', code, str(consumer_root), json.dumps(sorted(identities))],
+            cwd=consumer_root)
+
+
 class ClockUnavailable(RuntimeError):
     pass
 
@@ -594,6 +637,7 @@ class Service:
     def validate(self, candidate):
         command([PYTHON, '-B', '-c', 'import json,sys;from nanobody_opt.pr100_live_controller import validate_config;'
                  'validate_config(json.load(open(sys.argv[1])))', str(candidate)], cwd=self.release)
+        verify_consumer_reference(read(candidate), self.release, Path('/opt/nova-submit'))
     def stop(self): command(['sudo', '-n', 'systemctl', 'stop', UNIT_NAME], timeout=120)
     def start(self): command(['sudo', '-n', 'systemctl', 'start', UNIT_NAME])
     def install(self, staged):
