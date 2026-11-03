@@ -115,3 +115,19 @@ def test_sequence_phase_rejects_hydrophobic_candidate_with_distinct_reason(
     result = worker.sequence_phase(job, directory)
     assert result['annotation_reasons'] == {'surface_hydrophobicity_screen': 1}
     assert result['candidates'] == [] and result['annotated_total'] == 0
+
+
+def test_max_charge_run_counts_consecutive_pos_and_neg_runs():
+    assert hydrophobicity.max_charge_run('AKRKRG') == (4, 0)     # K R K R in a row
+    assert hydrophobicity.max_charge_run('ADDEEG') == (0, 4)     # D D E E in a row
+    assert hydrophobicity.max_charge_run('KRGDE') == (2, 2)      # split by G
+    assert hydrophobicity.max_charge_run('G' * 10) == (0, 0)
+
+
+def test_charge_patch_screen_rejects_only_long_runs():
+    assert hydrophobicity.charge_patch_reason('AKRKRG') == hydrophobicity.CHARGE_PATCH_REASON
+    assert hydrophobicity.charge_patch_reason('ADDEEG') == hydrophobicity.CHARGE_PATCH_REASON
+    # A balanced de-novo-like run of two never trips the screen.
+    assert hydrophobicity.charge_patch_reason('AKRG') == ''
+    assert hydrophobicity.charge_patch_reason('AKRDEG') == ''
+    assert hydrophobicity.charge_patch_reason('AKRKRG', run_max=4) == ''

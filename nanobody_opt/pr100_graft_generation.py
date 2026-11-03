@@ -112,6 +112,18 @@ _NEGATIVE = ('D', 'E')
 _CHARGE_MOTIFS = (('KPR', 0.5), ('FKP', 0.5), ('DKT', 0.4), ('KTR', 0.4))
 _AROMATIC_AA = ('F', 'Y')
 _HYDRO_AA = ('M', 'V', 'I', 'L')
+_HIS_AA = ('H',)
+#: Fraction of the padding that is charged (K/R/D/E via the winner motifs),
+#: reduced from 0.40 to match the passing set's ~32% charged middle.
+_CHARGED_FRACTION = 0.35
+#: Non-charged fill mix, calibrated to the measured passing developability set
+#: (1256 profiles in ``q9-developability.sqlite``): polar/small, aromatic,
+#: histidine, then strong-hydrophobic M/V/I/L. The passing set carries ~5%
+#: M/V/I/L overall, while the old 10%-hydrophobic padding over-emitted them by
+#: ~40%; M/V/I/L are the dominant PSH drivers, so they are halved here and the
+#: freed weight goes to polar/small plus the histidine the winners use.
+_NEUTRAL_FILL = (('polar', 0.55), ('aromatic', 0.30), ('histidine', 0.10),
+                 ('hydrophobic', 0.05))
 
 
 def settings(job):
@@ -328,28 +340,33 @@ def _motif_fits(built, motif):
 def _fill_middle(prefix, middle_len, rng):
     """Fill to ``middle_len`` with a winner-proportioned residue mix.
 
-    The middle is not a monotone K/R-D/E run: roughly 40% charged, 30%
-    polar/small, 20% aromatic and 10% hydrophobic, matching the 131-epoch winner
-    middle composition. The charged part is sampled from the observed winner
-    charge motifs (KPR/FKP/DKT/KTR: charged K/R/D/E bundled with P/T/F) plus
-    bare K/R/D/E, and each unit is accepted only when it keeps the total (K+R)
-    and (D+E) counts within one of each other (the anchor already contributes
-    one positive and the tail one negative). Consecutive charged runs are capped
-    at two so the native developability charge-patch gates are not provoked, and
-    no residue of any class (charged, polar, aromatic, hydrophobic) repeats more
-    than twice in a row, counting the prefix.
+    The middle is not a monotone K/R-D/E run: roughly 35% charged, ~36%
+    polar/small, ~20% aromatic, ~6% histidine and ~3% strong-hydrophobic
+    M/V/I/L, calibrated to the measured passing developability composition
+    (see ``_NEUTRAL_FILL``). The charged part is sampled from the observed
+    winner charge motifs (KPR/FKP/DKT/KTR: charged K/R/D/E bundled with P/T/F)
+    plus bare K/R/D/E, and each unit is accepted only when it keeps the total
+    (K+R) and (D+E) counts within one of each other (the anchor already
+    contributes one positive and the tail one negative). Consecutive charged
+    runs are capped at two so the native developability charge-patch gates are
+    not provoked, and no residue of any class (charged, polar, aromatic,
+    histidine, hydrophobic) repeats more than twice in a row, counting the
+    prefix.
     """
     built = list(prefix)
     pos, neg = _charge(built)
     charge_run = 0
     while len(built) < middle_len:
         room = middle_len - len(built)
-        if charge_run >= 2 or rng.random() >= 0.40:
-            roll = rng.random()
-            if roll < 0.50:
+        if charge_run >= 2 or rng.random() >= _CHARGED_FRACTION:
+            kind = rng.choices([k for k, _w in _NEUTRAL_FILL],
+                               weights=[w for _k, w in _NEUTRAL_FILL])[0]
+            if kind == 'polar':
                 built.append(_pick(_SHORT_AA, built, rng))
-            elif roll < 0.83:
+            elif kind == 'aromatic':
                 built.append(_pick(_AROMATIC_AA, built, rng))
+            elif kind == 'histidine':
+                built.append(_pick(_HIS_AA, built, rng))
             else:
                 built.append(_pick(_HYDRO_AA, built, rng))
             charge_run = 0

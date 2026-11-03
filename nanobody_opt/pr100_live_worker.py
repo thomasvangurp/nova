@@ -220,6 +220,8 @@ def _sequence_annotation(sequence, requirements, expected, identity=None):
                                      sequence=sequence, epoch_challenge=expected)
     if not reason and not hydrophobicity.check(sequence)[1]:
         reason = hydrophobicity.REJECT_REASON
+    if not reason and hydrophobicity.charge_patch_reason(sequence):
+        reason = hydrophobicity.CHARGE_PATCH_REASON
     return annotation, reason
 
 

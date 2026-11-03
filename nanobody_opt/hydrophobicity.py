@@ -101,3 +101,43 @@ def reason(seq: str, *, cdr3_max: float | None = None) -> str:
     """Return ``REJECT_REASON`` when the screen rejects, else ``""`` (pass)."""
     _, passed = check(seq, cdr3_max=cdr3_max)
     return "" if passed else REJECT_REASON
+
+
+#: Cap on the longest consecutive run of positive (K/R) and negative (D/E)
+#: residues. The native gate rejects ``positive_charge_patches`` > 1.18 and
+#: ``negative_charge_patches`` > 1.88, which are 3D surface measures. A sequence
+#: run is only a coarse proxy, but the measured passing set never exceeds a run
+#: of 3 for either sign, so a longer run is a cheap, conservative reject. The
+#: de-novo recipe already caps charged runs at two, so this screen only fires on
+#: verbatim grafts or edits that concentrate charge.
+CHARGE_RUN_MAX = 3
+CHARGE_PATCH_REASON = "charge_patch_screen"
+
+
+def max_charge_run(seq: str) -> tuple[int, int]:
+    """Longest consecutive positive (K/R) and negative (D/E) run in ``seq``."""
+    pos = neg = best_pos = best_neg = 0
+    for residue in seq.strip().upper():
+        if residue in "KR":
+            pos += 1
+            neg = 0
+            best_pos = max(best_pos, pos)
+        elif residue in "DE":
+            neg += 1
+            pos = 0
+            best_neg = max(best_neg, neg)
+        else:
+            pos = neg = 0
+    return best_pos, best_neg
+
+
+def charge_patch_reason(seq: str, *, run_max: int = CHARGE_RUN_MAX) -> str:
+    """Return ``CHARGE_PATCH_REASON`` when a charged run exceeds ``run_max``.
+
+    Empty string (pass) otherwise. This complements :func:`check`: it is the one
+    developability dimension that a sequence-only screen can see, but it only
+    rejects the gross tail -- it does not predict the PSH gate, which is a 3D
+    structural property and is deliberately left to the native pipeline.
+    """
+    pos, neg = max_charge_run(seq)
+    return "" if pos <= run_max and neg <= run_max else CHARGE_PATCH_REASON
