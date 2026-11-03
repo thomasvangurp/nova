@@ -502,6 +502,7 @@ def run_worker(abnumber, monkeypatch, tmp_path):
     monkeypatch.setattr(gates, 'check_sequence', lambda *a: None)
     from nanobody_opt import hydrophobicity
     monkeypatch.setattr(hydrophobicity, 'check', lambda sequence: (None, True))
+    monkeypatch.setattr(hydrophobicity, 'charge_patch_reason', lambda sequence: '')
     path = tmp_path / 'bank.json'
     path.write_text(json.dumps({'rows': bank}))
     (tmp_path / 'archive.csv').write_text('sequence\nAAA\n')

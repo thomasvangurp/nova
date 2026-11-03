@@ -366,7 +366,10 @@ def _fill_middle(prefix, middle_len, rng):
             elif kind == 'aromatic':
                 built.append(_pick(_AROMATIC_AA, built, rng))
             elif kind == 'histidine':
-                built.append(_pick(_HIS_AA, built, rng))
+                # Histidine is a singleton pool: unlike the other classes it
+                # has no alternate residue when the previous two are H.
+                pool = _SHORT_AA if built[-2:] == ['H', 'H'] else _HIS_AA
+                built.append(_pick(pool, built, rng))
             else:
                 built.append(_pick(_HYDRO_AA, built, rng))
             charge_run = 0

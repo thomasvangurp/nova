@@ -38,7 +38,8 @@ APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEA
                                     TERMINAL_INVALIDATION_RELEASE, PRODUCTION_YIELD_RELEASE,
                                     FORCE_ACTIVATION_RELEASE, RECOVERY_RELEASE,
                                     'ca091f95553ec4302c2221f703883bd35488795d',
-                                    'bcac5ba7895886aca5e2671c6d574e197ae58048'})
+                                    'bcac5ba7895886aca5e2671c6d574e197ae58048',
+                                    '3a26afe5f92e6fa9c368bb0b79eb2466bcca5728'})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
