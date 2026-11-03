@@ -15,6 +15,7 @@ import io
 import json
 import math
 import os
+import pwd
 from pathlib import Path
 import re
 import subprocess
@@ -641,7 +642,11 @@ class Service:
     def __init__(self, release, config_path, backup, unit=UNIT):
         self.release, self.config_path, self.backup, self.unit = release, config_path, backup, unit
     def validate(self, candidate):
-        command([PYTHON, '-B', '-c', 'import json,sys;from nanobody_opt.pr100_live_controller import validate_config;'
+        # Validate with the same account as the rendered systemd service.
+        # Root successfully reading a private candidate proves nothing about
+        # the controller's ability to read it after installation.
+        prefix = [] if os.geteuid() == pwd.getpwnam('thomasg').pw_uid else ['sudo', '-n', '-u', 'thomasg']
+        command([*prefix, PYTHON, '-B', '-c', 'import json,sys;from nanobody_opt.pr100_live_controller import validate_config;'
                  'validate_config(json.load(open(sys.argv[1])))', str(candidate)], cwd=self.release)
         verify_consumer_reference(read(candidate), self.release, Path('/opt/nova-submit'))
     def stop(self): command(['sudo', '-n', 'systemctl', 'stop', UNIT_NAME], timeout=120)
@@ -922,6 +927,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
             clock_reader=current_clock,
             service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
+    original_stat = path.stat()
     clock = clock_reader()
     migration = (novelty_runtimes is not None and any(
         config.get('hosts', {}).get(host, {}).get('novelty_runtime', {}).get('identity_sha256')
@@ -949,7 +955,14 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
     backup = base / 'pr100-staging' / ('throughput-backup-' + sha + '-' + mode + '-' + str(time.time_ns()))
     backup.mkdir(parents=True, exist_ok=False)
     service = service_factory(release, path, backup)
-    atomic(candidate, proposal); service.validate(candidate)
+    atomic(candidate, proposal)
+    # A privileged launcher must not turn a service-readable configuration
+    # into a root-owned 0600 tempfile when that candidate replaces it.
+    candidate_stat = candidate.stat()
+    if (candidate_stat.st_uid, candidate_stat.st_gid) != (original_stat.st_uid, original_stat.st_gid):
+        os.chown(candidate, original_stat.st_uid, original_stat.st_gid)
+    os.chmod(candidate, original_stat.st_mode & 0o777)
+    service.validate(candidate)
     atomic(backup / 'config.json', original, raw=True)
     atomic(backup / 'controller.service', service.unit.read_bytes(), raw=True)
     staged_unit = backup / 'new-controller.service'; atomic(staged_unit, rendered_unit(release, path), raw=True)

@@ -177,6 +177,38 @@ def test_cli_passes_explicit_cuda_host_proof_to_guarded_handoff(deployment,monke
     assert calls==[proof]
 
 
+def test_activation_preserves_service_config_permissions_before_validation(deployment):
+    base,release,unit,root,_=deployment
+    path=base/'pr100-controller.json';path.chmod(0o640)
+    previous=path.stat();observed=[];events=[]
+    def validate():
+        candidate=base/'pr100-staging'/('throughput-candidate-'+SHA+'-master.json')
+        now=candidate.stat()
+        observed.append((now.st_uid,now.st_gid,now.st_mode&0o777))
+    result=a.handoff(base,SHA,'master',release,None,clock_reader=lambda:CLOCK,
+        now=lambda:1000,service_factory=service_factory(unit,events,validation=validate))
+    assert result['status']=='activated'
+    assert observed==[(previous.st_uid,previous.st_gid,0o640)]
+    current=path.stat()
+    assert (current.st_uid,current.st_gid,current.st_mode&0o777)==observed[0]
+
+
+@pytest.mark.parametrize('launcher_uid',[1000,0])
+def test_privileged_activation_validates_as_actual_service_user(tmp_path,monkeypatch,launcher_uid):
+    from types import SimpleNamespace
+    calls=[]
+    monkeypatch.setattr(a.os,'geteuid',lambda:launcher_uid)
+    monkeypatch.setattr(a.pwd,'getpwnam',lambda _:SimpleNamespace(pw_uid=1000))
+    monkeypatch.setattr(a,'command',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr(a,'verify_consumer_reference',lambda *args:None)
+    candidate=tmp_path/'config.json';a.atomic(candidate,{})
+    service=a.Service(tmp_path,candidate,None)
+    service.validate(candidate)
+    expected=[] if launcher_uid==1000 else ['sudo','-n','-u','thomasg']
+    assert calls[0][:len(expected)]==expected
+    assert calls[0][len(expected)]==a.PYTHON
+
+
 @pytest.mark.parametrize('fault', [None, 'missing_cuda_registration', 'old_verifier'])
 def test_actual_submitter_must_accept_selected_cuda_registration(tmp_path, monkeypatch, fault):
     release = Path(__file__).resolve().parents[1]
