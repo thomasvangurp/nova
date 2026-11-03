@@ -33,6 +33,7 @@ TEST_FILES = (
     # The whole Pi-owned live path: controller, supervisor, worker, GPU lease, selection
     # and the handoff diagnostics the publisher depends on.
     'tests/test_pr100_live_controller.py',
+    'tests/test_pr100_terminal_collection.py',
     'tests/test_pr100_continuation_lifecycle.py',
     'tests/test_pr100_epoch_continuation.py',
     'tests/test_pr100_fresh_native_budget.py',

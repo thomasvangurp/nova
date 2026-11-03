@@ -12,6 +12,7 @@ import pytest
 
 from nanobody_opt import pr100_live_controller as c
 from tests.test_pr100_continuation_lifecycle import Chain, config, invoke, terminal
+from tests.test_pr100_continuation_lifecycle import challenge
 
 
 def artifact_reply(blobs):
@@ -90,6 +91,23 @@ def test_terminal_collection_never_renews_its_reserve(tmp_path, monkeypatch):
                                      chain, 90, transport)
 
 
+@pytest.mark.parametrize('phase', ['sequence', 'score'])
+def test_non_native_collection_retains_existing_transport_timeout(tmp_path, monkeypatch, phase):
+    cfg, chain = config(tmp_path), Chain()
+    blobs = {'result.json': b'{"status":"complete"}'}
+    metadata = artifact_reply(blobs)
+    now = [time.time()]
+    monkeypatch.setattr(c.time, 'time', lambda: now[0])
+    def transport(_cfg, _host, request):
+        if request['artifact_mode'] == 'manifest':
+            return metadata
+        assert request['transport_deadline_unix'] - now[0] == pytest.approx(120)
+        now[0] += 40
+        return {**metadata, 'files': {'result.json': base64.b64encode(blobs['result.json']).decode()}}
+    assert c.run_phase(cfg, challenge(), phase, {'input.json': b'{}'}, now[0]+1000,
+                        chain, tmp_path, transport=transport) == blobs
+
+
 @pytest.mark.parametrize('change', ['bytes', 'receipt', 'manifest', 'selection'])
 def test_terminal_collection_rejects_changed_original_binding(change):
     chain = Chain()
@@ -149,6 +167,32 @@ def test_terminal_protocol_refuses_arbitrary_paths_or_multiple_files(tmp_path, n
     (tmp_path / 'supervisor-receipt.json').write_text(json.dumps(terminal()['receipt']))
     (tmp_path / 'result.json').write_text('{}')
     assert protocol(tmp_path, artifact_mode='file', artifact_names=names).returncode != 0
+
+
+@pytest.mark.parametrize('name', ['result.json', 'score/report.json', 'supervisor-receipt.json'])
+def test_terminal_protocol_refuses_symlink_outside_owned_directory(tmp_path, name):
+    owned = tmp_path / 'owned'
+    owned.mkdir()
+    (owned / 'supervisor-receipt.json').write_text(json.dumps(terminal()['receipt']))
+    outside = tmp_path / 'outside-science-fixture.json'
+    outside.write_text('{"never_read":"outside fixture"}')
+    link = owned / name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.unlink(missing_ok=True)
+    link.symlink_to(outside)
+    assert protocol(owned, artifact_mode='manifest').returncode != 0
+
+
+def test_terminal_protocol_refuses_score_group_symlink_outside_owned_directory(tmp_path):
+    owned = tmp_path / 'owned'
+    (owned / 'score/gpu-0/length128').mkdir(parents=True)
+    (owned / 'supervisor-receipt.json').write_text(json.dumps(terminal()['receipt']))
+    (owned / 'score/report.json').write_text(json.dumps({'groups': [
+        {'valid': True, 'file': 'gpu-0/length128/exact_all.json'}]}))
+    outside = tmp_path / 'outside-science-fixture.json'
+    outside.write_text('{}')
+    (owned / 'score/gpu-0/length128/exact_all.json').symlink_to(outside)
+    assert protocol(owned, artifact_mode='manifest').returncode != 0
 
 
 def test_terminal_collection_keeps_reply_bounds():

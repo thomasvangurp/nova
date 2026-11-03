@@ -111,17 +111,21 @@ if r['operation']=='start':
 out={'running':not(d/'supervisor-receipt.json').exists()}
 if cache_result and cache_result.get('verified'):out['archive_cache_verified_sha256']=cache_result['verified']
 if not out['running']:
- receipt_bytes=(d/'supervisor-receipt.json').read_bytes()
+ def confined(p):
+  if p.is_symlink() or not p.resolve().is_relative_to(d.resolve()):raise ValueError('artifact path escaped owned directory')
+  return p
+ receipt_bytes=confined(d/'supervisor-receipt.json').read_bytes()
  out['receipt']=json.loads(receipt_bytes);out['files']={};available={}
  for name in ('result.json','generation-history.json','worker-receipt.json','native-confirmations.json','score/report.json','score/scorer_settings.json'):
-  p=d/name
+  p=confined(d/name)
   if p.is_file():available[name]=p
- report=d/'score/report.json'
+ report=confined(d/'score/report.json')
  if report.is_file():
   for group in json.loads(report.read_text()).get('groups',[]):
    f=str(group.get('file',''))
-   if group.get('valid') is True and re.fullmatch(r'gpu-[0-9]+/length[0-9]+/exact_all[.]json',f) and (d/'score'/f).is_file():
-    available['score/'+f]=d/'score'/f
+   if group.get('valid') is True and re.fullmatch(r'gpu-[0-9]+/length[0-9]+/exact_all[.]json',f):
+    p=confined(d/'score'/f)
+    if p.is_file():available['score/'+f]=p
  mode=r.get('artifact_mode')
  if mode not in (None,'manifest','file'):raise ValueError('invalid artifact mode')
  if mode is not None:
@@ -552,7 +556,9 @@ def run_phase(config, challenge, phase, files, stop_at, chain, local,
                         'created_at_unix': dispatch_started})
     transport_config = {**config, '_refresh_clock': lambda: clock_state(chain)} if transport is remote else config
     poll_deadline = stop_at + 15
-    collection_slack = max(30, request.get('collection_reserve_seconds', 0))
+    collection_slack = (max(30, request.get('collection_reserve_seconds', 0))
+                        if config.get('_bounded_phase_collection') else
+                        config.get('transport_timeout_seconds', 120))
     if config.get('_bounded_phase_collection'):
         poll_deadline = min(poll_deadline, request['spec']['wall_seconds'] + dispatch_started + collection_slack)
         if poll_deadline <= time.time():
