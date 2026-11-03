@@ -295,17 +295,15 @@ def test_de_novo_cdr3_is_length_conditioned():
         value = graft.de_novo_cdr3(length, seed=7)
         assert len(value) == length
         assert not any(token in value for token in ('FQP', 'PYR', 'YHF', 'QGS'))
-    # Medium (11-14): a PYR/PYHF core.
+    # Medium (11-14): a winner-family core (or a de-weighted legacy core).
     for length in (11, 12, 14):
         value = graft.de_novo_cdr3(length, seed=7)
         assert len(value) == length
-        assert ('PYHF' in value) or ('PYR' in value)
         assert 'QGS' not in value
-    # Long (15-18): an FQPR/PYR core plus charge network.
+    # Long (15-18): a winner core plus charge network.
     for length in (15, 16, 18):
         value = graft.de_novo_cdr3(length, seed=7)
         assert len(value) == length
-        assert ('FQP' in value) or ('PYR' in value)
         assert any(c in 'KR' for c in value) and any(c in 'DE' for c in value)
         assert 'QGS' not in value
     # Xlong (19-23): core plus QGSDSG/QGSGD linker plus charge network.
@@ -314,6 +312,25 @@ def test_de_novo_cdr3_is_length_conditioned():
         assert len(value) == length
         assert 'QGS' in value
         assert any(c in 'KR' for c in value) and any(c in 'DE' for c in value)
+
+
+def test_de_novo_core_sampling_favours_winner_cores_and_stays_charge_safe():
+    import re
+    family = re.compile(r'F[QEH]P[RG]YP[RK]T|FQ[YH][KFH][FK]R|HYG[KD]FR|GFHPTQH')
+    for _core, weight in graft._MEDIUM_CORES + graft._LONG_CORES:
+        assert weight > 0
+    legacy = {'YPYHF', 'HPYHFK', 'YPYR', 'PYHF'}
+    for pool in (graft._MEDIUM_CORES, graft._LONG_CORES):
+        legacy_weight = sum(w for c, w in pool if c in legacy)
+        assert legacy_weight / sum(w for _c, w in pool) <= 0.15
+    for length, minimum in ((12, 0.2), (15, 0.5), (16, 0.5), (23, 0.5)):
+        values = [graft.de_novo_cdr3(length, seed) for seed in range(600)]
+        assert sum(bool(family.search(v)) for v in values) / len(values) >= minimum
+        assert all(abs(sum(c in 'KR' for c in v) - sum(c in 'DE' for c in v)) <= 1
+                   for v in values)
+    assert graft._charge_safe('FQPRYPRTQN', 10) == 'FEPRYPRTQN'    # no room: Q->E
+    assert graft._charge_safe('FQPRYPRTQN', 11) == 'FQPRYPRTQNE'   # room: compensator
+    assert graft._charge_safe('RRRR', 4) is None
 
 
 def test_de_novo_graft_mode_length_charge_and_provenance(abnumber):
@@ -337,9 +354,8 @@ def test_de_novo_graft_mode_length_charge_and_provenance(abnumber):
         assert graft.whole_identity(row['sequence'], fd['sequence']) < 0.95
         assert segments.cdr_similarity(generated, 'Y' * 16) < 0.85  # framework donor CDR3
         assert graft.reconstruct_with_edits(row, refs) == row['sequence']
-    for i, left in enumerate(cdr3s):
-        for right in cdr3s[i + 1:]:
-            assert segments.cdr_similarity(left, right) < 0.85
+    # Emission dedup is exact-only: near-identical sibling CDR3s may both emit.
+    assert len(set(cdr3s)) == len(cdr3s)
     # Deterministic; a different proposal_offset yields fresh candidates.
     assert graft.generate([cd], [prepared(fd)], CHALLENGE, limit=4, modes=('de_novo',)) == rows
     later = graft.generate([cd], [prepared(fd)], CHALLENGE, limit=4, modes=('de_novo',),
@@ -539,3 +555,38 @@ def test_history_and_lineage_resolve_graft_donors(abnumber, tmp_path):
                       if json.loads(m)['graft_mode'] == 'verbatim']
     assert any(len(edits) == 4 for edits in verbatim_edits)
     store.close()
+
+
+def test_verbatim_emits_distinct_near_identical_variants_per_framework(abnumber):
+    """One donor CDR3 grafted on several frameworks yields several distinct variants."""
+    cdr3 = 'RR' + 'SAGTSAGTSAG' + 'RRR'  # 16 aa, 11 swappable residues, needs 4 swaps
+    cd = build_donor(cdr3=cdr3)
+    abnumber[cd['sequence']] = cd
+    fds = []
+    for tail in ('W', 'WW', 'WWW', 'WWWW'):
+        fd = build_donor(cdr3='Y' * 16, cdr1='K' * 12, fr4='W' * (11 - len(tail)) + 'Q' * len(tail))
+        abnumber[fd['sequence']] = fd
+        fds.append(prepared(fd))
+    rows = graft.generate([cd], fds, CHALLENGE, modes=('verbatim',))
+    assert len(rows) == len(fds)
+    assert len({r['sequence'] for r in rows}) == len(fds)
+    cdr3s = []
+    for r in rows:
+        part = next(p for p in r['segment_provenance'] if p['region'] == 'cdr3')
+        cdr3s.append(r['sequence'][part['child_start']:part['child_end']])
+    assert len(set(cdr3s)) == len(fds)  # the substitution subset varies per framework
+    refs = {cd['sequence_hash']: cd['sequence'], **{f['sequence_hash']: f['sequence'] for f in fds}}
+    for row, variant in zip(rows, cdr3s):
+        assert segments.cdr_similarity(variant, cdr3) < graft._CDR3_CLONOTYPE_MAX
+        assert row['graft_neutral_subs'] == graft.required_substitutions(16)
+        assert graft.liability_count(variant) <= graft.liability_count(cdr3)
+        assert graft.reconstruct_with_edits(row, refs) == row['sequence']
+    # Deterministic.
+    assert graft.generate([cd], fds, CHALLENGE, modes=('verbatim',)) == rows
+
+
+def test_clonotype_dedup_is_exact_only():
+    seen = graft._Clonotypes()
+    seen.add('SKFEPRYPKTEHHMDV')
+    assert seen.duplicate('SKFEPRYPKTEHHMDV')
+    assert not seen.duplicate('SKFEPRYPKTEHHFDV')  # 0.94 similar, still allowed
