@@ -12,6 +12,16 @@ the transition refuses changes to the sealed runtime, scientific sources,
 weights, policy, loader or allocation, and checks the installed Pi consumer
 before stopping the old controller.
 
+Replacing the slave's full CPU profiler requires an explicit
+`--cuda-native-host-receipt <path>`. The receipt retains the actual requests,
+results and ordinary lease cleanup from concurrent device canaries on all four
+slave GPUs, and pins the unchanged scientific implementation. Activation keeps
+the existing 32 CPU slots, enables four resident workers per GPU, selects the
+queue depth that was actually tested, disables the old optional screen and
+uses the same observed-fleet policy as the master. GPU admission failure stays
+inconclusive; it does not call the full CPU profiler. Numbering, A3D and the
+qualified CPU1 preparation remain CPU work.
+
 The native phase selects `RegisteredResidentAdapter`. Each allowed GPU has one
 ordinary cooperative lease and a bounded pool of `workers_per_gpu` independent
 scientific processes. Those processes retain their four original NBB models

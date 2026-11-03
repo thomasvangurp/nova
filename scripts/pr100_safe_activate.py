@@ -6,9 +6,12 @@ All subprocess output is captured; only allowlisted operational status is emitte
 """
 from __future__ import annotations
 import argparse
+import base64
 import copy
 import fcntl
 import hashlib
+import gzip
+import io
 import json
 import math
 import os
@@ -40,7 +43,8 @@ APPROVED_PREDECESSORS = frozenset({OLD, THROUGHPUT_RELEASE, QUALIFIED_BOTH_RELEA
                                     'ca091f95553ec4302c2221f703883bd35488795d',
                                     'bcac5ba7895886aca5e2671c6d574e197ae58048',
                                     '3a26afe5f92e6fa9c368bb0b79eb2466bcca5728',
-                                    '1d44712661a57a1b8e459824584bc6da646a59a4'})
+                                    '1d44712661a57a1b8e459824584bc6da646a59a4',
+                                    'e6c2142b133612545fcd5cc70ee68a4dce4aac78'})
 BASE = Path('/home/thomasg')
 PYTHON = '/opt/nova-submit/.pixi/envs/default/bin/python'
 UNIT_NAME = 'nova-pr100-controller.service'
@@ -735,9 +739,186 @@ def registered_native_rollout(config, release, identity):
     return value
 
 
+CUDA_HOST_SOURCE_FILES = frozenset({
+    'nanobody_opt/pr100_registered_resident.py', 'nanobody_opt/pr100_native_reference.py',
+    'nanobody_opt/pr100_context_observer.py', 'nanobody_opt/pr100_validator_reference.py',
+    'nanobody_opt/pr100_live_gpu.py', 'nanobody_opt/pr100_resources.py',
+    'nanobody_opt/pr100_native_evidence_cache.py', 'config/pr100_validator_reference.json'})
+
+
+def cuda_native_host_rollout(config, release, proof):
+    """Enable the slave's registered GPU path only after real device canaries.
+
+    The unchanged scientific closure may be reused by a scheduling/generation
+    successor. Source IDs in the canaries retain their actual original meaning.
+    CPU slots remain bounded; an unavailable GPU never selects full CPU TNP.
+    """
+    if proof is None:
+        return config
+    def require(condition, reason='cuda_native_host_not_qualified'):
+        if not condition:
+            raise ValueError(reason)
+    require(isinstance(proof, dict) and proof.get('schema') == 'pr100-cuda-native-host-qualification-v1'
+        and proof.get('status') == 'complete' and proof.get('host') == 'slave'
+        and 'slave' in config.get('native_hosts', []))
+    gpus = proof.get('gpus')
+    require(gpus == [0, 1, 2, 3] and all(type(gpu) is int for gpu in gpus))
+    require(type(proof.get('workers_per_gpu')) is int and proof['workers_per_gpu'] == 4)
+    batch = proof.get('resident_batch_draws')
+    require(type(batch) is int and 1 <= batch <= 32)
+    release = Path(release)
+    pins = proof.get('source_files_sha256', {})
+    require(isinstance(pins, dict) and set(pins) == CUDA_HOST_SOURCE_FILES,
+            'cuda_native_host_source_pins_missing')
+    for name, expected in pins.items():
+        path = release / name
+        require(hash_value(expected) and path.is_file()
+            and hashlib.sha256(path.read_bytes()).hexdigest() == expected,
+            'cuda_native_host_source_changed')
+    overrides = config.get('native_worker_overrides', {})
+    master, slave = overrides.get('master', {}), overrides.get('slave', {})
+    settings = master.get('native_reference', config.get('worker', {}).get('native_reference', {}))
+    identity = proof.get('registration_sha256')
+    require(hash_value(identity) and settings.get('enabled') is True and settings.get('resident') is True
+        and settings.get('registration_sha256') == identity, 'cuda_native_host_registration_mismatch')
+    rows = read(release / 'config/pr100_native_reference.json', {}).get('registrations', [])
+    row = next((r for r in rows if digest(r) == identity), {})
+    require(row.get('qualification_status') == 'qualified'
+        and row.get('actual_validator_worker_attested') is False
+        and row.get('policy', {}).get('final_refinement') == {
+            'platform': 'CUDA', 'precision': 'mixed', 'deterministic_forces': True}
+        and row.get('policy', {}).get('preparation_threads') == 1)
+    require(row.get('resident_module_sha256') == pins['nanobody_opt/pr100_registered_resident.py']
+        and row.get('implementation_sha256') == pins['nanobody_opt/pr100_native_reference.py']
+        and row.get('observer_sha256') == pins['nanobody_opt/pr100_context_observer.py'])
+    registration_proof = release / row.get('qualification_report_file', '')
+    require(registration_proof.is_file() and registration_proof.resolve().is_relative_to(release.resolve())
+        and hashlib.sha256(registration_proof.read_bytes()).hexdigest() == row.get('qualification_report_sha256'))
+    cpu = slave.get('cpu_slots', config.get('worker', {}).get('cpu_slots'))
+    require(type(cpu) is int and cpu == proof.get('cpu_slots') and cpu == 32)
+    require(len(gpus) * proof['workers_per_gpu'] <= min(cpu,
+        slave.get('workers', config['worker'].get('workers', 0)),
+        slave.get('max_workers', config['worker'].get('max_workers', 0))))
+    canaries = proof.get('canaries', [])
+    require(isinstance(canaries, list) and len(canaries) == len(gpus)
+        and sorted(c.get('gpu', -1) for c in canaries) == gpus)
+    all_workers = set()
+    from nanobody_opt import pr100_native_reference as native
+    def projection_matches(projection, original):
+        if isinstance(projection, dict):
+            return isinstance(original, dict) and all(key in original and projection_matches(value, original[key])
+                for key, value in projection.items())
+        if isinstance(projection, list):
+            return isinstance(original, list) and len(projection) == len(original) and all(
+                projection_matches(left, right) for left, right in zip(projection, original))
+        return type(projection) is type(original) and projection == original
+    for canary in canaries:
+        result, manifest, request = (canary.get(key, {}) for key in ('result', 'manifest', 'request'))
+        require(manifest.get('schema') == 'pr100-integrated-resident-canary-manifest-v1'
+            and manifest.get('ok') is True and manifest.get('registration_sha256') == identity
+            and manifest.get('source_sha') == result.get('source_sha') == request.get('source_sha')
+            and re.fullmatch('[0-9a-f]{40}', str(manifest.get('source_sha'))) is not None)
+        digests = manifest.get('files_sha256', {})
+        require(set(digests) == {'request.json', 'result/result.json', 'result/measurements.json', 'leases'}
+            and all(hash_value(value) for value in digests.values()))
+        artifacts = canary.get('raw_artifacts', {})
+        require(set(artifacts) == {'request.json', 'result/result.json', 'leases'})
+        decoded = {}
+        for name, text in artifacts.items():
+            require(isinstance(text, str) and len(text.encode()) <= 2 * 1024 * 1024)
+            require(hashlib.sha256(text.encode()).hexdigest() == digests[name],
+                    'cuda_native_host_artifact_digest_mismatch')
+            decoded[name] = json.loads(text)
+        require(decoded['result/result.json'] == result and projection_matches(request, decoded['request.json'])
+            and projection_matches(canary.get('lease_summaries', []), decoded['leases']),
+            'cuda_native_host_artifact_projection_mismatch')
+        require(isinstance(decoded['leases'], list) and len(decoded['leases']) == 1
+            and decoded['leases'][0].get('gpu') == canary['gpu'])
+        requested = request.get('native_reference', {})
+        require(request.get('gpu') == canary['gpu'] and requested.get('gpus') == [canary['gpu']]
+            and requested.get('enabled') is True and requested.get('resident') is True
+            and requested.get('gpu_allowlist') == [canary['gpu']]
+            and requested.get('registration_sha256') == identity and requested.get('workers_per_gpu') == 4
+            and requested.get('resident_batch_draws') == batch
+            and all(requested.get(key) == settings.get(key) for key in
+                ('environment', 'bundle', 'cuda_plugin_root')))
+        require(result.get('final_refinement') == request.get('final_refinement')
+            == row['policy']['final_refinement'])
+        require(result.get('status') == 'complete' and result.get('complete_draws') == 16
+            and result.get('fresh_prediction_events') == result.get('unique_draw_ids') == 16
+            and result.get('same_four_worker_pids') is True and result.get('same_coordinator_session') is True
+            and result.get('distinct_batch_UUIDs') == 2 and result.get('errors') == [])
+        cleanup = result.get('cleanup', {})
+        require(cleanup.get('remaining_descendants') == 0 and cleanup.get('fixed_point_reached') is True)
+        groups = result.get('groups', [])
+        require(len(groups) == 2 and groups[0].get('worker_pids') == groups[1].get('worker_pids'))
+        workers = groups[0].get('worker_pids', [])
+        require(len(workers) == len(set(workers)) == 4 and not all_workers.intersection(workers))
+        all_workers.update(workers)
+        draw_ids = []
+        for group in groups:
+            require(group.get('profiles') == 8 and group.get('genuine_context_policy_verified') is True
+                and group.get('model_postchecks_passed') is True)
+            draw_ids.extend(group.get('draw_ids', []))
+        require(len(draw_ids) == len(set(draw_ids)) == 16)
+        require(canary.get('measurement_artifact_encoding') == 'base64-gzip-v1')
+        packed = canary.get('measurement_artifact_gzip')
+        require(isinstance(packed, str) and len(packed) <= 6 * 1024 * 1024)
+        compressed = base64.b64decode(packed, validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            raw_measurements = stream.read(4 * 1024 * 1024 + 1)
+        require(len(raw_measurements) <= 4 * 1024 * 1024
+            and len(raw_measurements) == canary.get('measurement_artifact_uncompressed_bytes')
+            and hashlib.sha256(raw_measurements).hexdigest() == digests['result/measurements.json'],
+            'cuda_native_host_measurement_digest_mismatch')
+        measurements = json.loads(raw_measurements).get('measurements', [])
+        require(len(measurements) == 16)
+        observed_ids, inventory = set(), {}
+        for value in measurements:
+            binding = value.get('native_reference', {})
+            receipt = binding.get('receipt', {})
+            require(binding.get('registration_sha256') == identity
+                and receipt.get('source_sha') == manifest['source_sha']
+                and native.authoritative_measurement(value), 'cuda_native_host_measurement_invalid')
+            observed_ids.add(receipt['request']['draw_id'])
+            for event in receipt['trace']:
+                if event.get('event') != 'context_created':
+                    continue
+                role, platform = event.get('role'), event.get('platform')
+                if role in ('minimize_energy', 'sidechain_repair'):
+                    require(platform == 'CUDA', 'cuda_native_host_repair_not_cuda')
+                elif role in ('missing_atoms', 'hydrogens'):
+                    require(platform == 'CPU', 'cuda_native_host_preparation_changed')
+                key = (role, platform)
+                inventory[key] = inventory.get(key, 0) + 1
+        require(observed_ids == set(draw_ids) and inventory.get(('sidechain_repair', 'CUDA'), 0) > 0)
+        reported_inventory = {(item.get('role'), item.get('platform')): item.get('count')
+            for item in canary.get('context_inventory', [])}
+        require(reported_inventory == inventory, 'cuda_native_host_context_inventory_mismatch')
+        leases = canary.get('lease_summaries', [])
+        require(isinstance(leases, list) and len(leases) == 1)
+        require(all(lease.get('status') == 'process_finished' and lease.get('released') is True
+            and lease.get('child_exit_code') == 0 and lease.get('cleanup', {}).get('remaining_descendants') == 0
+            and lease.get('cleanup', {}).get('fixed_point_reached') is True for lease in leases))
+    fleet = master.get('native_fleet_policy', config['worker'].get('native_fleet_policy'))
+    from nanobody_opt.pr100_live_selection import fleet_policy_settings
+    fleet = fleet_policy_settings(fleet)
+    require(slave.get('native_interleave_confirmations', config['worker'].get(
+        'native_interleave_confirmations')) is True, 'cuda_native_refill_requires_interleaving')
+    value = copy.deepcopy(config)
+    replacement = value.setdefault('native_worker_overrides', {}).setdefault('slave', {})
+    replacement['native_reference'] = {**settings, 'gpus': list(gpus),
+        'workers_per_gpu': proof['workers_per_gpu'], 'resident_batch_draws': batch}
+    replacement['native_screen'] = {'enabled': False}
+    replacement['native_fleet_policy'] = fleet
+    value.setdefault('native_gpu_by_host', {})['slave'] = list(gpus)
+    return value
+
+
 def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, interleave_confirmations=False,
             native_refill_hosts=(), missing_cell_donors=False, native_screen=None, recovery_rollout_receipt=None,
             native_registration=None,
+            cuda_native_host_receipt=None,
             clock_reader=current_clock,
             service_factory=Service, now=time.time, force=False):
     path = base / 'pr100-controller.json'; original = path.read_bytes(); config = json.loads(original)
@@ -755,6 +936,7 @@ def handoff(base, sha, mode, release, qualification, *, novelty_runtimes=None, i
                                native_screen=native_screen, force=force)
     proposal = recovery_rollout(proposal, recovery_rollout_receipt, sha)
     proposal = registered_native_rollout(proposal, release, native_registration)
+    proposal = cuda_native_host_rollout(proposal, release, cuda_native_host_receipt)
     if ({k: v for k, v in proposal.items() if k != 'start_epoch'} ==
             {k: v for k, v in config.items() if k != 'start_epoch'}
             and config.get('start_epoch', clock['epoch'] + 1) <= clock['epoch']):
@@ -839,6 +1021,8 @@ def main(argv=None):
                         help='Source-bound measured screen, annotated bank and novelty-qualified edit rollout')
     parser.add_argument('--native-registration',
                         help='Explicit qualified CUDA resident replacement with identical sealed science')
+    parser.add_argument('--cuda-native-host-receipt', type=Path,
+                        help='Real all-device qualification for replacing slave full CPU TNP with registered CUDA')
     parser.add_argument('--wait-seconds', type=int, default=5400)
     args = parser.parse_args(argv)
     if args.native_screen is not None and args.interleave_confirmations:
@@ -871,6 +1055,8 @@ def main(argv=None):
                                         missing_cell_donors=args.missing_cell_donors,
                                         native_screen=args.native_screen,
                                         native_registration=args.native_registration,
+                                        cuda_native_host_receipt=(read(args.cuda_native_host_receipt, {})
+                                            if args.cuda_native_host_receipt else None),
                                         recovery_rollout_receipt=(read(args.recovery_rollout_receipt, {})
                                             if args.recovery_rollout_receipt else None),
                                         force=False)

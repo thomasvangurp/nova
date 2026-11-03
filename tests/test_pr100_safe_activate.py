@@ -53,6 +53,130 @@ def test_explicit_resident_upgrade_preserves_runtime_and_allocations(tmp_path, f
     assert config==original
 
 
+@pytest.fixture
+def cuda_slave_rollout(tmp_path,monkeypatch):
+    """Synthetic proof exercises the guard; real canaries are separate artifacts."""
+    source=Path(__file__).resolve().parents[1]
+    files=set(a.CUDA_HOST_SOURCE_FILES)|{'config/pr100_native_reference.json'}
+    for name in files:
+        target=tmp_path/name;target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(source/name,target)
+    rows=a.read(tmp_path/'config/pr100_native_reference.json')['registrations']
+    resident_hash=hashlib.sha256((tmp_path/'nanobody_opt/pr100_registered_resident.py').read_bytes()).hexdigest()
+    row=next(r for r in rows if r.get('resident_module_sha256')==resident_hash)
+    proof_file=tmp_path/row['qualification_report_file']
+    shutil.copy2(source/row['qualification_report_file'],proof_file)
+    identity=a.digest(row)
+    settings={'enabled':True,'resident':True,'registration_sha256':identity,
+        'gpus':list(range(8)),'workers_per_gpu':4,'resident_batch_draws':16,
+        'environment':'/sealed/env','bundle':'/sealed/bundle','cuda_plugin_root':'/sealed/plugin'}
+    config={'native_hosts':['master','slave'],'worker':{'native_interleave_confirmations':True},
+        'native_gpu_by_host':{'master':list(range(8)),'slave':[]},
+        'native_worker_overrides':{
+            'master':{'cpu_slots':48,'workers':32,'max_workers':32,'native_reference':settings,
+                      'native_fleet_policy':{'kind':'pr100-observed-fleet-v1','minimum_smoothed_fraction':.4}},
+            'slave':{'cpu_slots':32,'workers':32,'max_workers':32,'native_work_conserving':True,
+                     'native_screen':{'enabled':False,'backend':'resident_cpu'}}}}
+    proof={'schema':'pr100-cuda-native-host-qualification-v1','host':'slave','status':'complete',
+        'gpus':[0,1,2,3],'workers_per_gpu':4,'resident_batch_draws':8,'cpu_slots':32,
+        'registration_sha256':identity,'source_files_sha256':{
+            name:hashlib.sha256((tmp_path/name).read_bytes()).hexdigest() for name in a.CUDA_HOST_SOURCE_FILES},
+        'canaries':[]}
+    from nanobody_opt import pr100_native_reference as native
+    monkeypatch.setattr(native,'authoritative_measurement',lambda value:value.get('synthetic_valid') is True)
+    for gpu in range(4):
+        groups=[{'profiles':8,'worker_pids':[100+gpu*4+i for i in range(4)],
+            'genuine_context_policy_verified':True,'model_postchecks_passed':True,
+            'draw_ids':[f'/synthetic/gpu-{gpu}/group-{group}/{i}' for i in range(8)]} for group in range(2)]
+        result={'status':'complete','source_sha':'e'*40,'complete_draws':16,
+            'fresh_prediction_events':16,'unique_draw_ids':16,'same_four_worker_pids':True,
+            'same_coordinator_session':True,'distinct_batch_UUIDs':2,'errors':[],
+            'cleanup':{'remaining_descendants':0,'fixed_point_reached':True},'groups':groups,
+            'final_refinement':row['policy']['final_refinement']}
+        request={'source_sha':'e'*40,'gpu':gpu,'final_refinement':row['policy']['final_refinement'],
+            'native_reference':{**settings,'gpus':[gpu],'gpu_allowlist':[gpu],'resident_batch_draws':8}}
+        manifest={'schema':'pr100-integrated-resident-canary-manifest-v1','ok':True,
+            'source_sha':'e'*40,'registration_sha256':identity,'files_sha256':{k:'a'*64 for k in
+                ('request.json','result/result.json','result/measurements.json','leases')}}
+        canary={'gpu':gpu,'request':request,'result':result,'manifest':manifest,
+            'lease_summaries':[{'gpu':gpu,'status':'process_finished','released':True,'child_exit_code':0,
+                'cleanup':{'remaining_descendants':0,'fixed_point_reached':True}}]}
+        canary['raw_artifacts']={'request.json':json.dumps(request),'result/result.json':json.dumps(result),
+            'leases':json.dumps(canary['lease_summaries'])}
+        for name,text in canary['raw_artifacts'].items():manifest['files_sha256'][name]=hashlib.sha256(text.encode()).hexdigest()
+        measurements={'measurements':[{'synthetic_valid':True,'native_reference':{
+            'registration_sha256':identity,'receipt':{'source_sha':'e'*40,'request':{'draw_id':draw},
+                'trace':[{'event':'context_created','role':'sidechain_repair','platform':'CUDA'}]}}}
+            for group in groups for draw in group['draw_ids']]}
+        raw=json.dumps(measurements).encode()
+        canary.update(measurement_artifact_gzip=a.base64.b64encode(a.gzip.compress(raw)).decode(),
+            measurement_artifact_uncompressed_bytes=len(raw),measurement_artifact_encoding='base64-gzip-v1',
+            context_inventory=[{'role':'sidechain_repair','platform':'CUDA','count':16}])
+        manifest['files_sha256']['result/measurements.json']=hashlib.sha256(raw).hexdigest()
+        proof['canaries'].append(canary)
+    return config,proof,tmp_path
+
+
+def test_qualified_all_device_rollout_uses_gpu_without_expanding_cpu_allocation(cuda_slave_rollout):
+    config,proof,release=cuda_slave_rollout;before=copy.deepcopy(config)
+    result=a.cuda_native_host_rollout(config,release,proof)
+    slave=result['native_worker_overrides']['slave']
+    assert result['native_gpu_by_host']['slave']==[0,1,2,3]
+    assert slave['cpu_slots']==slave['workers']==slave['max_workers']==32
+    assert slave['native_reference']['enabled'] is True and slave['native_reference']['resident'] is True
+    assert slave['native_reference']['gpus']==[0,1,2,3]
+    assert slave['native_reference']['workers_per_gpu']==4
+    assert slave['native_reference']['resident_batch_draws']==8
+    assert slave['native_screen']=={'enabled':False}
+    assert slave['native_fleet_policy']==before['native_worker_overrides']['master']['native_fleet_policy']
+    assert result['native_worker_overrides']['master']==before['native_worker_overrides']['master']
+    assert config==before
+
+
+@pytest.mark.parametrize('fault',['missing_gpu','source_changed','registration','incomplete','dirty',
+    'retired_error','different_models','duplicate_draw','untested_queue','expanded_cpu','disabled_reference',
+    'digest_changed','inventory_changed','invalid_scientific_measurement'])
+def test_gpu_host_rollout_refuses_incomplete_or_changed_qualification(cuda_slave_rollout,fault):
+    config,proof,release=cuda_slave_rollout;canary=proof['canaries'][0]
+    if fault=='missing_gpu':proof['canaries'].pop()
+    if fault=='source_changed':(release/'nanobody_opt/pr100_registered_resident.py').write_text('changed')
+    if fault=='registration':proof['registration_sha256']='f'*64
+    if fault=='incomplete':canary['result']['complete_draws']=15
+    if fault=='dirty':canary['lease_summaries'][0]['cleanup']['remaining_descendants']=1
+    if fault=='retired_error':canary['result']['errors']=[{'error_type':'RuntimeError'}]
+    if fault=='different_models':canary['result']['groups'][1]['worker_pids']=[1,2,3,4]
+    if fault=='duplicate_draw':canary['result']['groups'][1]['draw_ids']=canary['result']['groups'][0]['draw_ids']
+    if fault=='untested_queue':proof['resident_batch_draws']=16
+    if fault=='expanded_cpu':proof['cpu_slots']=64
+    if fault=='disabled_reference':canary['request']['native_reference']['enabled']=False
+    if fault=='digest_changed':canary['manifest']['files_sha256']['leases']='f'*64
+    if fault=='inventory_changed':canary['context_inventory'][0]['count']=15
+    if fault=='invalid_scientific_measurement':
+        packed=a.base64.b64decode(canary['measurement_artifact_gzip'])
+        raw=a.gzip.decompress(packed);values=json.loads(raw)
+        values['measurements'][0]['synthetic_valid']=False
+        raw=json.dumps(values).encode()
+        canary['measurement_artifact_gzip']=a.base64.b64encode(a.gzip.compress(raw)).decode()
+        canary['measurement_artifact_uncompressed_bytes']=len(raw)
+        canary['manifest']['files_sha256']['result/measurements.json']=hashlib.sha256(raw).hexdigest()
+    with pytest.raises(ValueError):a.cuda_native_host_rollout(config,release,proof)
+
+
+def test_cli_passes_explicit_cuda_host_proof_to_guarded_handoff(deployment,monkeypatch):
+    base,*_=deployment;stage=base/'stage.json';stage.write_text('{}')
+    receipt=base/'cuda-host.json';proof={'schema':'synthetic-cuda-host-fixture'};a.atomic(receipt,proof)
+    monkeypatch.setattr(a,'BASE',base)
+    monkeypatch.setattr(a,'verify_prerequisites',lambda *args,**kwargs:None)
+    monkeypatch.setattr(a,'verify_novelty_qualification',lambda *args,**kwargs:{})
+    calls=[]
+    def handoff(*args,**kwargs):
+        calls.append(kwargs['cuda_native_host_receipt']);return {'status':'activated'}
+    monkeypatch.setattr(a,'handoff',handoff)
+    assert a.main([SHA,'preserve','--staging-receipt',str(stage),
+        '--novelty-qualification-receipt',str(stage),'--cuda-native-host-receipt',str(receipt)])==0
+    assert calls==[proof]
+
+
 @pytest.mark.parametrize('fault', [None, 'missing_cuda_registration', 'old_verifier'])
 def test_actual_submitter_must_accept_selected_cuda_registration(tmp_path, monkeypatch, fault):
     release = Path(__file__).resolve().parents[1]
